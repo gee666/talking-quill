@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject, type ReactNode } from 'react';
 import type { Settings } from '../../../shared/schemas/settings';
-import { EmptyState, Input, Status, Toast } from '../../design';
+import { EmptyState, Icon, Input, Status, Toast, type IconName } from '../../design';
 import { SmartProcessingSection } from '../SmartProcessingSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { GeneralSection } from '../settings/GeneralSection';
@@ -13,6 +13,16 @@ interface Notice {
   readonly tone: 'success' | 'error';
   readonly message: string;
 }
+const SECTION_ICONS: Record<string, IconName> = {
+  General: 'general',
+  'Dictation profiles': 'profiles',
+  Recording: 'recording',
+  'Transcription model': 'model',
+  'Privacy & data': 'privacy',
+  'Smart processing': 'smart',
+  'Voice Commands': 'commands',
+  'Custom Vocabulary': 'vocabulary',
+};
 export function SettingsScreen({
   headingRef,
   settings,
@@ -27,6 +37,7 @@ export function SettingsScreen({
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState('General');
   const latestSettings = useRef(settings);
   useEffect(() => {
     latestSettings.current = settings;
@@ -112,8 +123,9 @@ export function SettingsScreen({
     const index = normalizeSearch(`${title} ${keywords}`);
     return queryTokens.every((token) => index.includes(token));
   });
+  const active = visible.find((section) => section.title === selected) ?? visible[0];
   return (
-    <div className="screen">
+    <div className="screen screen--settings">
       <header className="screen__header">
         <div>
           <p className="eyebrow">Settings</p>
@@ -126,32 +138,46 @@ export function SettingsScreen({
           {saving ? 'Saving' : notice?.tone === 'error' ? 'Save failed' : 'Saved locally'}
         </Status>
       </header>
-      <Input
-        type="search"
-        label="Search settings"
-        value={query}
-        placeholder="Try microphone, model, language, or privacy"
-        onChange={(event) => setQuery(event.currentTarget.value)}
-        hint={`${String(visible.length)} section${visible.length === 1 ? '' : 's'} shown`}
-      />
       <p className="sr-only" role="status" aria-live="polite">
         {visible.length === 0
           ? 'No matching settings.'
           : `${String(visible.length)} settings sections shown.`}
       </p>
-      <div className="settings-results">
-        {visible.length === 0 ? (
-          <EmptyState
-            title="No matching settings"
-            description="Try a broader word or clear the search."
+      <div className="settings-layout">
+        <div className="settings-rail">
+          <Input
+            type="search"
+            label="Search settings"
+            value={query}
+            placeholder="Search…"
+            onChange={(event) => setQuery(event.currentTarget.value)}
           />
-        ) : (
-          visible.map(({ title, node }) => (
-            <section key={title} aria-label={title}>
-              {node}
+          <nav aria-label="Settings sections">
+            {visible.map(({ title }) => (
+              <button
+                key={title}
+                className="nav-item"
+                aria-current={active?.title === title ? 'page' : undefined}
+                onClick={() => setSelected(title)}
+              >
+                <Icon name={SECTION_ICONS[title] ?? 'general'} />
+                <span>{title}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div className="settings-panel">
+          {active === undefined ? (
+            <EmptyState
+              title="No matching settings"
+              description="Try a broader word or clear the search."
+            />
+          ) : (
+            <section key={active.title} aria-label={active.title}>
+              {active.node}
             </section>
-          ))
-        )}
+          )}
+        </div>
       </div>
       {notice ? (
         <Toast tone={notice.tone} message={notice.message} onDismiss={() => setNotice(null)} />

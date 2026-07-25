@@ -375,6 +375,7 @@ describe('Welcome, Info, and settings completion', () => {
         onSettingsSaved={vi.fn()}
       />,
     );
+    await user.click(screen.getByRole('button', { name: 'Privacy & data' }));
     const logging = screen.getByRole('checkbox', { name: 'Diagnostic logging' });
     expect(logging).not.toBeChecked();
     await user.click(logging);

@@ -40,12 +40,12 @@ export function Card({
       }}
     >
       {title === undefined ? null : (
-        <header>
+        <header className="me-card__header">
           <h2 className="me-card__heading">{title}</h2>
           {description === undefined ? null : <p className="me-card__description">{description}</p>}
         </header>
       )}
-      {children}
+      <div className="me-card__body">{children}</div>
     </div>
   );
 }

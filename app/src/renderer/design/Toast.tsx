@@ -1,4 +1,5 @@
 import { Button } from './Button';
+import { Icon } from './Icon';
 
 export interface ToastProps {
   readonly tone?: 'info' | 'success' | 'warning' | 'error';
@@ -17,7 +18,7 @@ export function Toast({ tone = 'info', message, onDismiss }: ToastProps) {
       <p className="me-toast__message">{message}</p>
       {onDismiss === undefined ? null : (
         <Button variant="quiet" aria-label="Dismiss notification" onClick={onDismiss}>
-          ×
+          <Icon name="close" size={12} />
         </Button>
       )}
     </div>

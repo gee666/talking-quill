@@ -6,8 +6,6 @@ export interface StatusProps {
   readonly live?: boolean;
 }
 
-const icons = { neutral: '●', info: 'i', success: '✓', warning: '!', error: '×' } as const;
-
 export function Status({ tone = 'neutral', children, live = false }: StatusProps) {
   return (
     <span
@@ -15,9 +13,7 @@ export function Status({ tone = 'neutral', children, live = false }: StatusProps
       role={live ? 'status' : undefined}
       aria-live={live ? 'polite' : undefined}
     >
-      <span className="me-status__icon" aria-hidden="true">
-        {icons[tone]}
-      </span>
+      <span className="me-status__icon" aria-hidden="true" />
       <span>{children}</span>
     </span>
   );

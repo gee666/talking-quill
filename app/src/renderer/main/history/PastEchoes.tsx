@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HistoryCursor, HistoryListItem } from '../../../shared/schemas/history';
-import { Button, Card, Dialog, EmptyState, Toast } from '../../design';
+import { Button, Card, Dialog, EmptyState, Icon, Toast } from '../../design';
 
 export function PastEchoes() {
   const [items, setItems] = useState<readonly HistoryListItem[]>([]);
@@ -103,7 +103,9 @@ export function PastEchoes() {
         </div>
       )}
       {loading ? (
-        <p aria-live="polite">Loading Past Echoes…</p>
+        <p className="body-copy" aria-live="polite">
+          Loading Past Echoes…
+        </p>
       ) : error !== null && items.length === 0 ? (
         <EmptyState title="Unable to load Past Echoes" description={error} />
       ) : items.length === 0 ? (
@@ -163,9 +165,11 @@ export function PastEchoes() {
         </ol>
       )}
       {cursor === null || loading ? null : (
-        <Button variant="secondary" busy={busy} onClick={() => void load(cursor)}>
-          Load more
-        </Button>
+        <div className="history-more">
+          <Button variant="secondary" busy={busy} onClick={() => void load(cursor)}>
+            Load more
+          </Button>
+        </div>
       )}
       {error === null || items.length === 0 ? null : (
         <Toast tone="error" message={error} onDismiss={() => setError(null)} />
@@ -229,7 +233,7 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
     <div className="history-entry__screenshot" aria-label="Screenshot attachment">
       {objectUrl === null ? (
         <>
-          <span aria-hidden="true">▧</span>
+          <Icon name="profiles" />
           {item.hasScreenshot ? 'Screenshot unavailable' : 'No screenshot retained'}
         </>
       ) : (

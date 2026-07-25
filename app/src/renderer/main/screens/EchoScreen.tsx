@@ -143,7 +143,11 @@ export function EchoScreen({
         >
           <label className="try-echo">
             <span>Dictation test area</span>
-            <textarea rows={5} placeholder="Your inserted dictation will appear here…" />
+            <textarea
+              className="me-field__control"
+              rows={3}
+              placeholder="Your inserted dictation will appear here…"
+            />
           </label>
           <p className="body-copy">
             Release quickly for Quick Dictation; hold for 600 ms for Extended Dictation. Press
@@ -152,18 +156,20 @@ export function EchoScreen({
           </p>
         </Card>
         <Card title="Current readiness" description={copy.readiness}>
-          <div className="readiness-row">
-            <span>Desktop shell and local settings</span>
-            <Status tone="success">Available</Status>
-          </div>
-          <div className="readiness-row">
-            <span>Native keyboard and insertion helper</span>
-            <Status tone={helper.tone}>{helper.label}</Status>
-          </div>
-          <p className="body-copy">{helperReadinessDetail(state)}</p>
-          <div className="readiness-row">
-            <span>Local transcription model</span>
-            <Status tone={status.tone}>{status.label}</Status>
+          <div className="group readiness-group">
+            <div className="readiness-row">
+              <span>Desktop shell and local settings</span>
+              <Status tone="success">Available</Status>
+            </div>
+            <div className="readiness-row">
+              <span>Native keyboard and insertion helper</span>
+              <Status tone={helper.tone}>{helper.label}</Status>
+            </div>
+            <p className="body-copy readiness-note">{helperReadinessDetail(state)}</p>
+            <div className="readiness-row">
+              <span>Local transcription model</span>
+              <Status tone={status.tone}>{status.label}</Status>
+            </div>
           </div>
         </Card>
         <PastEchoes />

@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState, type CSSPropertie
 import { createRoot } from 'react-dom/client';
 import type { EchoSessionSnapshot } from '../../shared/schemas/echo-session';
 import '../design/global.css';
-import { Button, Status } from '../design';
+import { applyTheme, Button, resolveInitialTheme, Status } from '../design';
 import './widget.css';
 import { isWidgetPointerCancelable, piFallbackLabel } from './fallback-label';
 
@@ -31,6 +31,13 @@ export function WidgetShell() {
     // Main may independently reset native hit testing when hiding/restoring the widget, so each
     // forwarded pointer observation must resynchronize rather than relying on renderer-only state.
     void window.talkingQuillWidget.setInteractive(next);
+  }, []);
+  useEffect(() => {
+    // The widget is a separate renderer window, so it mirrors the main window's stored theme.
+    const sync = () => applyTheme(resolveInitialTheme());
+    sync();
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
   }, []);
   useEffect(() => {
     const update = () => setViewport({ width: window.innerWidth, height: window.innerHeight });

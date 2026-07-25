@@ -22,7 +22,7 @@ export function Select({
   const hintId = hint === undefined ? undefined : `${controlId}-hint`;
   const errorId = error === undefined ? undefined : `${controlId}-error`;
   return (
-    <div className="me-field">
+    <div className="me-field me-field--row">
       <label className="me-field__label" htmlFor={controlId}>
         {label}
         {required ? (

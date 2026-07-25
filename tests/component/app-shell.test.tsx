@@ -514,8 +514,9 @@ describe('main application shell', () => {
     await waitFor(() =>
       expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked(),
     );
-    expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('Q');
     expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
+    await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
+    expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('Q');
   });
 
   it('does not overwrite a newer settings event with an older failed-save reload', async () => {
@@ -540,6 +541,7 @@ describe('main application shell', () => {
       settings: structuredClone(DEFAULT_SETTINGS),
     });
 
+    await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
     await waitFor(() =>
       expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('X'),
     );

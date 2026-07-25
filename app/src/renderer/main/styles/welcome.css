@@ -1,0 +1,260 @@
+/* Welcome wizard and model setup. */
+
+/* ================================================================= Welcome */
+.welcome {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  max-width: 720px;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) 0;
+  margin: 0 auto;
+}
+
+/* --------------------------------------------------------------- Brand row */
+.welcome__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.welcome__brand-logo {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.welcome__brand-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.welcome__brand-wordmark {
+  color: var(--color-brand);
+  font-family: var(--font-display);
+  font-size: var(--fs-brand);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.005em;
+}
+.welcome__brand-tagline {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.02em;
+}
+
+/* ------------------------------------------------------------------ Header */
+.welcome__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding-bottom: var(--space-2);
+}
+.welcome__title {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--fs-xl);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.welcome__header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+}
+.welcome__counter {
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------- Progress strip */
+.welcome__progress {
+  /* Hairline-thin strip: no token exists below 4px, so the thickness is named here. */
+  --welcome-strip-thickness: 3px;
+
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0 0 var(--space-4);
+  margin: 0;
+  list-style: none;
+}
+.welcome__progress > li {
+  position: relative;
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.welcome__progress-marker {
+  display: block;
+  height: var(--welcome-strip-thickness);
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+  transition: background-color var(--transition-fast);
+}
+.welcome__progress > li[data-state='complete'] .welcome__progress-marker {
+  background: var(--color-success);
+}
+.welcome__progress > li[data-state='current'] .welcome__progress-marker {
+  background: var(--color-accent);
+}
+/* Every step name stays available to assistive technology; only the current
+   step is shown, so the strip keeps a single quiet caption. */
+.welcome__progress-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+.welcome__progress > li[data-state='current'] .welcome__progress-label {
+  top: calc(var(--welcome-strip-thickness) + var(--space-1));
+  left: 0;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  line-height: 1.2;
+}
+.welcome__progress > li:last-child[data-state='current'] .welcome__progress-label {
+  right: 0;
+  left: auto;
+}
+
+/* ----------------------------------------------------------------- Content */
+.welcome__content {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  min-height: 0;
+  flex: 1 1 auto;
+  /* Bleed back into the screen padding so focus rings are never clipped. */
+  padding: var(--space-1);
+  margin: calc(var(--space-1) * -1);
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.welcome__content > * {
+  min-width: 0;
+}
+.welcome__content p:not([class]) {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+.welcome__content ul:not([class]) {
+  display: grid;
+  gap: var(--space-1);
+  padding-inline-start: var(--space-4);
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+
+/* ------------------------------------------------------------- Action bar */
+.welcome__actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.welcome__actions > .me-button:first-child {
+  margin-inline-end: auto;
+}
+
+/* ============================================================== Model setup */
+.model-setup {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.model-setup > .me-field {
+  max-width: 420px;
+}
+.model-setup__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--row-height);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+}
+.model-setup__identity {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.model-setup__name {
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.model-setup__size {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.model-setup__state {
+  display: flex;
+  align-items: center;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.model-setup__state .me-button {
+  min-height: var(--control-height-sm);
+}
+.model-setup__checking {
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+.model-setup__row--progress {
+  display: block;
+  padding-block: var(--space-2);
+}
+.model-setup__detail {
+  padding: var(--space-2) var(--space-3);
+}
+
+/* ========================================================== Shortcut setup */
+.shortcut-setup {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+.shortcut-setup__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+@media (max-width: 900px) {
+  .welcome {
+    padding: var(--space-3) var(--space-4) 0;
+  }
+  .shortcut-setup {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .model-setup__row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

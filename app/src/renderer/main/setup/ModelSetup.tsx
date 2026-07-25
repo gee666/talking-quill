@@ -3,6 +3,20 @@ import type { ModelStatus } from '../../../shared/schemas/transcription';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Button, Progress, Select, Status, Toast } from '../../design';
 
+type WhisperModelId = Settings['transcription']['modelId'];
+
+const MODEL_ENTRIES = {
+  'onnx-community/whisper-large-v3-turbo': {
+    name: 'Whisper Large v3 Turbo (Recommended)',
+    size: 'about 1.09 GB',
+  },
+  'Xenova/whisper-small': { name: 'Whisper Small (Lower quality)', size: 'about 250 MB' },
+} as const satisfies Record<WhisperModelId, { readonly name: string; readonly size: string }>;
+
+function modelOptionLabel(id: WhisperModelId): string {
+  return `${MODEL_ENTRIES[id].name} — ${MODEL_ENTRIES[id].size}`;
+}
+
 export function ModelSetup({
   settings,
   onSettingsSaved,
@@ -69,6 +83,8 @@ export function ModelSetup({
   };
 
   const visibleStatus = status?.modelId === modelId ? status : null;
+  const entry = MODEL_ENTRIES[modelId];
+  const detail = visibleStatus?.detail ?? null;
   const state = visibleStatus?.state ?? 'checking';
   const action =
     state === 'downloading'
@@ -102,7 +118,7 @@ export function ModelSetup({
           void window.talkingQuill.settings
             .update({
               transcription: {
-                modelId: event.currentTarget.value as Settings['transcription']['modelId'],
+                modelId: event.currentTarget.value as WhisperModelId,
               },
             })
             .then(onSettingsSaved)
@@ -110,74 +126,88 @@ export function ModelSetup({
         }}
       >
         <option value="onnx-community/whisper-large-v3-turbo">
-          Whisper Large v3 Turbo (Recommended) — about 1.09 GB
+          {modelOptionLabel('onnx-community/whisper-large-v3-turbo')}
         </option>
-        <option value="Xenova/whisper-small">Whisper Small (Lower quality) — about 250 MB</option>
+        <option value="Xenova/whisper-small">{modelOptionLabel('Xenova/whisper-small')}</option>
       </Select>
-      {visibleStatus === null ? (
-        <p role="status">Checking model…</p>
-      ) : (
-        <>
-          <Progress
-            label="Model files"
-            value={visibleStatus.downloadedBytes}
-            max={visibleStatus.totalBytes}
-            disabled={state === 'missing'}
-          />
-          <Status
-            tone={
-              state === 'ready'
-                ? 'success'
-                : state === 'corrupt' || state === 'error'
-                  ? 'error'
-                  : state === 'offline'
-                    ? 'warning'
-                    : 'info'
-            }
-            live
-          >
-            {modelStateLabel(visibleStatus)}
-          </Status>
-          {visibleStatus.detail === null ? null : (
-            <p className="body-copy">{visibleStatus.detail}</p>
-          )}
-        </>
-      )}
-      <div className="provider-actions">
-        {action === null ? null : (
-          <Button busy={busy} onClick={() => void perform(action.run)}>
-            {action.label}
-          </Button>
+      <div className="group">
+        <div className="model-setup__row">
+          <span className="model-setup__identity">
+            <span className="model-setup__name">{entry.name}</span>
+            <span className="model-setup__size">{entry.size}</span>
+          </span>
+          <div className="model-setup__state">
+            {visibleStatus === null ? (
+              <p role="status" className="model-setup__checking">
+                Checking model…
+              </p>
+            ) : (
+              <Status
+                tone={
+                  state === 'ready'
+                    ? 'success'
+                    : state === 'corrupt' || state === 'error'
+                      ? 'error'
+                      : state === 'offline'
+                        ? 'warning'
+                        : 'info'
+                }
+                live
+              >
+                {modelStateLabel(visibleStatus)}
+              </Status>
+            )}
+            <div className="provider-actions">
+              {action === null ? null : (
+                <Button busy={busy} onClick={() => void perform(action.run)}>
+                  {action.label}
+                </Button>
+              )}
+              {state === 'downloading' ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => void perform(() => window.talkingQuill.models.cancel(modelId))}
+                >
+                  Cancel download
+                </Button>
+              ) : state === 'verifying' || state === 'installing' ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => void perform(() => window.talkingQuill.models.pause(modelId))}
+                >
+                  Pause model setup
+                </Button>
+              ) : null}
+              {state === 'ready' ? (
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() =>
+                    void window.talkingQuill.models
+                      .delete(modelId)
+                      .then((result) => setStatus(result.status))
+                      .catch(() =>
+                        setError('The model is currently in use or could not be deleted.'),
+                      )
+                  }
+                >
+                  Delete model
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        {visibleStatus === null ? null : (
+          <div className="model-setup__row model-setup__row--progress">
+            <Progress
+              label="Model files"
+              value={visibleStatus.downloadedBytes}
+              max={visibleStatus.totalBytes}
+              disabled={state === 'missing'}
+            />
+          </div>
         )}
-        {state === 'downloading' ? (
-          <Button
-            variant="secondary"
-            onClick={() => void perform(() => window.talkingQuill.models.cancel(modelId))}
-          >
-            Cancel download
-          </Button>
-        ) : state === 'verifying' || state === 'installing' ? (
-          <Button
-            variant="secondary"
-            onClick={() => void perform(() => window.talkingQuill.models.pause(modelId))}
-          >
-            Pause model setup
-          </Button>
-        ) : null}
-        {state === 'ready' ? (
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() =>
-              void window.talkingQuill.models
-                .delete(modelId)
-                .then((result) => setStatus(result.status))
-                .catch(() => setError('The model is currently in use or could not be deleted.'))
-            }
-          >
-            Delete model
-          </Button>
-        ) : null}
+        {detail === null ? null : <p className="body-copy model-setup__detail">{detail}</p>}
       </div>
       {error === null ? null : (
         <Toast tone="error" message={error} onDismiss={() => setError(null)} />
