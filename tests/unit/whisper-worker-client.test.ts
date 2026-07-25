@@ -53,14 +53,20 @@ class FakeWorker extends EventEmitter {
   }
 
   replyAcknowledged(
-    operation: 'session-open' | 'session-push' | 'unload' | 'memory-pressure',
+    operation: 'session-open' | 'session-push' | 'session-cancel' | 'unload' | 'memory-pressure',
   ): void {
     this.replyToLatest({ type: 'acknowledged', operation }, operation);
   }
 
   replyAcknowledgementFor(
     requestType: string,
-    operation: 'session-open' | 'session-push' | 'unload' | 'memory-pressure' | 'shutdown',
+    operation:
+      | 'session-open'
+      | 'session-push'
+      | 'session-cancel'
+      | 'unload'
+      | 'memory-pressure'
+      | 'shutdown',
   ): void {
     this.replyToLatest({ type: 'acknowledged', operation }, requestType);
   }
@@ -74,6 +80,18 @@ class FakeWorker extends EventEmitter {
         durationMs: 1,
         pipeline: { loadCount: 1, reused: true, loadDurationMs: 1 },
       },
+    });
+  }
+
+  replyFailure(requestType: string, code: 'INFERENCE_FAILED', message: string): void {
+    const requests = this.messages.map((request) => WhisperWorkerRequestSchema.parse(request));
+    const request = [...requests].reverse().find((candidate) => candidate.type === requestType);
+    if (request === undefined) throw new Error('No matching worker request');
+    this.emit('message', {
+      version: 1,
+      requestId: request.requestId,
+      ok: false,
+      error: { code, message },
     });
   }
 
@@ -141,6 +159,24 @@ describe('WhisperWorkerClient', () => {
     await client.close();
   });
 
+  it('copies caller-owned PCM before asynchronous transcription work', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const pcm = Float32Array.from([0.1, 0.2]);
+    const expected = [...pcm];
+    const transcription = client.transcribe(pcm, options, new AbortController().signal);
+    pcm.fill(9);
+
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('transcribe'));
+    const request = WhisperWorkerRequestSchema.parse(workers[0]?.messages.at(-1));
+    if (request.type !== 'transcribe') throw new Error('Expected transcription request');
+    expect(request.pcm).not.toBe(pcm.buffer);
+    expect([...new Float32Array(request.pcm)]).toEqual(expected);
+    workers[0]?.replyTranscription('copied');
+    await transcription;
+    await client.close();
+  });
+
   it('waits for the actual exit on cancellation and then starts a fresh generation', async () => {
     const workers: FakeWorker[] = [];
     const client = createClient(workers, false);
@@ -167,6 +203,142 @@ describe('WhisperWorkerClient', () => {
     await expect(next).resolves.toMatchObject({ text: 'healthy' });
     const replacementWorker = workers[1];
     if (replacementWorker !== undefined) replacementWorker.autoExitOnKill = true;
+    await client.close();
+  });
+
+  it('cancels an idle session in-band and keeps the warm worker generation', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const opening = client.startSession(options);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-open'));
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+
+    const cancellation = session.cancel();
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-cancel'));
+    expect(workers[0]?.killed).toBe(false);
+    workers[0]?.replyAcknowledged('session-cancel');
+    await cancellation;
+
+    const transcription = client.transcribe(
+      new Float32Array([0.2]),
+      options,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('transcribe'));
+    expect(workers).toHaveLength(1);
+    workers[0]?.replyTranscription('warm');
+    await expect(transcription).resolves.toMatchObject({ text: 'warm' });
+    await client.close();
+  });
+
+  it('keeps only one streaming push in IPC flight at a time', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const opening = client.startSession(options);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-open'));
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+
+    const first = session.push(new Float32Array([0.1]));
+    const second = session.push(new Float32Array([0.2]));
+    await vi.waitFor(() => expect(requestCount(workers[0], 'session-push')).toBe(1));
+    workers[0]?.replyAcknowledged('session-push');
+    await first;
+    await vi.waitFor(() => expect(requestCount(workers[0], 'session-push')).toBe(2));
+    workers[0]?.replyAcknowledged('session-push');
+    await second;
+
+    const cancellation = session.cancel();
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-cancel'));
+    workers[0]?.replyAcknowledged('session-cancel');
+    await cancellation;
+    await client.close();
+  });
+
+  it('copies queued PCM before returning control to its caller', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const opening = client.startSession(options);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-open'));
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+
+    const first = session.push(new Float32Array([0.1]));
+    await vi.waitFor(() => expect(requestCount(workers[0], 'session-push')).toBe(1));
+    const queuedPcm = Float32Array.from([0.2, 0.3]);
+    const second = session.push(queuedPcm);
+    queuedPcm.fill(9);
+
+    workers[0]?.replyAcknowledged('session-push');
+    await first;
+    await vi.waitFor(() => expect(requestCount(workers[0], 'session-push')).toBe(2));
+    const queuedRequest = WhisperWorkerRequestSchema.parse(workers[0]?.messages.at(-1));
+    if (queuedRequest.type !== 'session-push') throw new Error('Expected queued push request');
+    expect([...new Float32Array(queuedRequest.pcm)]).toEqual([...Float32Array.from([0.2, 0.3])]);
+    workers[0]?.replyAcknowledged('session-push');
+    await second;
+
+    const cancellation = session.cancel();
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-cancel'));
+    workers[0]?.replyAcknowledged('session-cancel');
+    await cancellation;
+    await client.close();
+  });
+
+  it('latches the first push failure, rejects queued work, and cancels the session', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const opening = client.startSession(options);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-open'));
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+
+    const capture = (operation: Promise<unknown>) =>
+      operation.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    const first = capture(session.push(new Float32Array([0.1])));
+    const queued = capture(session.push(new Float32Array([0.2])));
+    await vi.waitFor(() => expect(requestCount(workers[0], 'session-push')).toBe(1));
+    workers[0]?.replyFailure('session-push', 'INFERENCE_FAILED', 'first push failed');
+
+    const firstError = await first;
+    expect(firstError).toMatchObject({ code: 'INFERENCE_FAILED', message: 'first push failed' });
+    await expect(queued).resolves.toBe(firstError);
+    expect(requestCount(workers[0], 'session-push')).toBe(1);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('session-cancel'));
+
+    await expect(capture(session.push(new Float32Array([0.3])))).resolves.toBe(firstError);
+    await expect(capture(session.finish())).resolves.toBe(firstError);
+    workers[0]?.replyAcknowledged('session-cancel');
+    await session.cancel();
+    await client.close();
+  });
+
+  it('falls back to process termination when in-band cancellation is unresponsive', async () => {
+    vi.useFakeTimers();
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers, false);
+    const opening = client.startSession(options);
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    expect(latestRequestType(workers[0])).toBe('session-open');
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+
+    let settled = false;
+    const cancellation = session.cancel().then(() => {
+      settled = true;
+    });
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    expect(latestRequestType(workers[0])).toBe('session-cancel');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(workers[0]?.killed).toBe(true);
+    expect(settled).toBe(false);
+    workers[0]?.exit(1);
+    await cancellation;
+    expect(settled).toBe(true);
     await client.close();
   });
 
@@ -347,4 +519,11 @@ function latestRequestType(worker: FakeWorker | undefined): string | undefined {
   if (worker === undefined) return undefined;
   const message = worker.messages.at(-1);
   return message === undefined ? undefined : WhisperWorkerRequestSchema.parse(message).type;
+}
+
+function requestCount(worker: FakeWorker | undefined, type: string): number {
+  return (
+    worker?.messages.filter((message) => WhisperWorkerRequestSchema.parse(message).type === type)
+      .length ?? 0
+  );
 }

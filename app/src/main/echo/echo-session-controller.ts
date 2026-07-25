@@ -62,6 +62,9 @@ import {
 const EXTENDED_PUSH_SAMPLES = 160_000;
 const MAX_EXTENDED_BUFFERED_SAMPLES = EXTENDED_PUSH_SAMPLES * 2;
 const INSERTION_CONTROLLER_TIMEOUT_MS = 5_000;
+const MODEL_USE_SETTLE_TIMEOUT_MS = 1_000;
+const STREAM_CANCEL_TIMEOUT_MS = 1_000;
+const FIRST_AUDIO_TIMEOUT_MS = 1_000;
 
 export type EchoHelperPort = Pick<
   HelperClient,
@@ -108,6 +111,7 @@ export class EchoSessionController {
   readonly #smart: SmartTranscriptProcessor | null;
   readonly #commands: VoiceCommandMatcherPort | null;
   readonly #sound: () => void;
+  #appPreferences: Settings['app'];
   readonly #isModelReady: () => boolean;
   readonly #acquireModelUse: (
     modelId: WhisperModelId,
@@ -120,6 +124,7 @@ export class EchoSessionController {
   #state: EchoSessionState = IDLE_ECHO_SESSION;
   #abort: AbortController | null = null;
   #captureId: string | null = null;
+  #captureStopping = false;
   #pcmChunks: Float32Array[] = [];
   #totalSamples = 0;
   #streamedSamples = 0;
@@ -134,6 +139,7 @@ export class EchoSessionController {
   #effectTail: Promise<void> = Promise.resolve();
   #holdTimer: ReturnType<typeof setTimeout> | null = null;
   #capTimer: ReturnType<typeof setTimeout> | null = null;
+  #audioStartTimer: ReturnType<typeof setTimeout> | null = null;
   #resetTimer: ReturnType<typeof setTimeout> | null = null;
   #silence: SilencePolicy | null = null;
   #pendingSilenceSubmit = false;
@@ -148,6 +154,7 @@ export class EchoSessionController {
   #helperCaptureRunning = false;
   #helperCaptureTail: Promise<void> = Promise.resolve();
   #captureOffGuaranteed = true;
+  #teardownComplete = true;
   #activationTest: ActivationTestState = IDLE_ACTIVATION_TEST;
   #activationTestOwner: number | null = null;
   #removeActivationTestOwner: (() => void) | null = null;
@@ -156,6 +163,7 @@ export class EchoSessionController {
   #activationTestPressedAt: number | null = null;
   #historyWrittenSessionId: string | null = null;
   #sessionHistoryAllowed = false;
+  #sessionSettings: Readonly<Settings> | null = null;
   #sessionProfile: Readonly<DictationProfile> | null = null;
   #sessionProviderId: string | null = null;
   #sessionModelId: string | null = null;
@@ -184,6 +192,7 @@ export class EchoSessionController {
     ) => Promise<EchoModelUseGrant>;
   }) {
     this.#settings = options.settings;
+    this.#appPreferences = this.#settings.get().app;
     this.#recording = options.recording;
     this.#whisper = options.whisper;
     this.#helper = options.helper;
@@ -216,6 +225,7 @@ export class EchoSessionController {
       }
     });
     this.#removeSettings = this.#settings.subscribe((next) => {
+      this.#appPreferences = next.app;
       this.#queueActivationSync();
       // Privacy grants are frozen at session start. Revocation applies immediately; enabling
       // history while a session is active affects only a future session.
@@ -498,6 +508,7 @@ export class EchoSessionController {
             return;
           }
           const processingMode = profile.processingMode;
+          this.#sessionSettings = settings;
           this.#sessionProfile = deepFreezeProfile(profile);
           this.#dispatch({
             type: 'shortcut-down',
@@ -511,6 +522,13 @@ export class EchoSessionController {
           this.#state.phase === 'recordingExtended'
         ) {
           this.#dispatch({ type: 'submit', source: 'shortcut' });
+        } else {
+          // Every activation down arms native Esc/Enter capture. Active phases which do not own
+          // this new shortcut must explicitly disarm it instead of waiting for terminal reset.
+          void this.#setHelperCaptureDesired(
+            isCapturePhase(this.#state.phase),
+            this.#captureGeneration,
+          );
         }
       } else this.#dispatch({ type: 'shortcut-up', now: Date.now() });
       return;
@@ -575,6 +593,11 @@ export class EchoSessionController {
     const previous = this.#state;
     const transition = reduceEchoSession(previous, event);
     if (transition.state === previous && transition.effects.length === 0) return;
+    if (transition.state.phase === 'error' && previous.phase !== 'error') {
+      // Failure effects are serialized behind the operation that failed. Abort that operation so
+      // a non-cooperative worker promise cannot trap terminal teardown behind the effect tail.
+      this.#abort?.abort();
+    }
     if (transition.state.phase === 'transcribing' && this.#captureId === null) {
       this.#abort?.abort();
       this.#abort = new AbortController();
@@ -590,6 +613,8 @@ export class EchoSessionController {
     if (previous.phase === 'idle' && next.phase === 'arming') {
       this.#captureGeneration += 1;
       this.#abort = new AbortController();
+      this.#captureStopping = false;
+      this.#teardownComplete = false;
       this.#pcmChunks = [];
       this.#totalSamples = 0;
       this.#streamedSamples = 0;
@@ -601,12 +626,13 @@ export class EchoSessionController {
       this.#streamFailure = null;
       this.#modelUse = null;
       this.#historyWrittenSessionId = null;
-      this.#sessionHistoryAllowed = this.#settings.get().privacy.historyEnabled;
+      const sessionSettings = this.#sessionSettings ?? this.#settings.get();
+      this.#sessionSettings = sessionSettings;
+      this.#sessionHistoryAllowed = sessionSettings.privacy.historyEnabled;
       this.#sessionVoiceCommand = null;
       this.#sessionScreenshotFilename = null;
       this.#smartSession?.cleanup();
       this.#smartSession = null;
-      const sessionSettings = this.#settings.get();
       const selectedProviderId = sessionSettings.smartProcessing.selectedProviderId;
       this.#sessionProviderId = selectedProviderId;
       this.#sessionModelId =
@@ -642,7 +668,7 @@ export class EchoSessionController {
       this.#pendingSilenceSubmit = false;
       this.#silence = new SilencePolicy({
         mode: 'quick',
-        preset: this.#settings.get().recording.silencePreset,
+        preset: sessionSettings.recording.silencePreset,
       });
       this.#holdTimer = setTimeout(
         () => this.#dispatch({ type: 'hold-elapsed', now: Date.now() }),
@@ -693,7 +719,10 @@ export class EchoSessionController {
           }
           return;
         }
-        if (!terminal) this.#dispatch({ type: 'fail', message: publicSessionError(error) });
+        if (!terminal) {
+          this.#abort?.abort();
+          this.#dispatch({ type: 'fail', message: publicSessionError(error) });
+        }
       }
     };
     this.#effectTail = this.#effectTail.then(operation, operation);
@@ -704,11 +733,13 @@ export class EchoSessionController {
       const signal = this.#operationSignal();
       const generation = this.#captureGeneration;
       if (signal.aborted || !isCapturePhase(this.#state.phase)) return;
-      await raceWithAbort(this.#modelUseOpening, signal);
-      if (!isCapturePhase(this.#state.phase)) return;
-      // The native helper arms Esc/Enter capture before publishing activation.down. Confirm that
-      // state through RPC before opening the microphone, so no accepted session has a key gap.
-      await raceWithAbort(this.#setHelperCaptureDesired(true, generation), signal);
+      // The widget renderer is preloaded. Show its truthful arming state before any device, model,
+      // or helper round trip so the global shortcut always receives immediate visual feedback.
+      this.#windows.showWidget(this.#appPreferences.widgetSize, null);
+      // Model readiness and native key-capture confirmation are independent. Start both gates
+      // immediately so a cold model lease does not add its latency to the helper round trip.
+      const helperCaptureOpening = this.#setHelperCaptureDesired(true, generation);
+      await raceWithAbort(Promise.all([this.#modelUseOpening, helperCaptureOpening]), signal);
       if (!isCapturePhase(this.#state.phase)) return;
       const capturePromise = this.#recording.startDictation({
         onFrame: (samples, rms) => this.#onFrame(samples, rms),
@@ -725,10 +756,22 @@ export class EchoSessionController {
       const capture = await raceWithAbort(capturePromise, signal);
       if (!this.#captureStillCurrent(signal)) return;
       this.#captureId = capture.captureId;
-      const frontApp = await raceWithAbort(this.#helper.getFrontApp(), signal).catch(() => null);
-      if (!this.#captureStillCurrent(signal)) return;
-      this.#windows.showWidget(this.#settings.get().app.widgetSize, frontApp?.windowBounds ?? null);
+      if (!this.#state.audioReady) {
+        this.#audioStartTimer = setTimeout(() => {
+          this.#audioStartTimer = null;
+          if (generation !== this.#captureGeneration || this.#state.audioReady) return;
+          if (!isCapturePhase(this.#state.phase)) return;
+          this.#abort?.abort();
+          this.#dispatch({ type: 'fail', message: 'The microphone did not provide audio.' });
+        }, FIRST_AUDIO_TIMEOUT_MS);
+        this.#audioStartTimer.unref();
+      }
+
+      // Audio and UI feedback follow confirmed microphone activation without entering the
+      // helper's serial foreground-app path. Emit them before the reducer boundary so an early
+      // first frame plus pending submit cannot suppress activation feedback.
       this.#playSound();
+      this.#dispatch({ type: 'capture-started' });
       return;
     }
     if (effect.type === 'begin-extended-transcription') {
@@ -817,22 +860,23 @@ export class EchoSessionController {
   }
 
   #onFrame(samples: Float32Array, rms: number): void {
-    if (
-      this.#state.phase !== 'arming' &&
-      this.#state.phase !== 'recordingQuick' &&
-      this.#state.phase !== 'recordingExtended'
-    )
-      return;
+    const draining = this.#state.phase === 'transcribing' && this.#captureStopping;
+    if (!isCapturePhase(this.#state.phase) && !draining) return;
     const copy = Float32Array.from(samples);
     this.#pcmChunks.push(copy);
     this.#totalSamples += copy.length;
+    if (this.#audioStartTimer !== null) {
+      clearTimeout(this.#audioStartTimer);
+      this.#audioStartTimer = null;
+    }
+    if (!this.#state.audioReady) this.#dispatch({ type: 'audio-started' });
     const elapsedMs = Math.round((this.#totalSamples / 16_000) * 1_000);
     const now = Date.now();
     if (now - this.#lastLevelAt >= ECHO_LEVEL_EVENT_INTERVAL_MS) {
       this.#lastLevelAt = now;
       this.#dispatch({ type: 'level', rms, elapsedMs });
     }
-    if (this.#silence !== null) {
+    if (!draining && this.#silence !== null) {
       const decision = this.#silence.observe({ rms, durationMs: PCM_FRAME_DURATION_MS, elapsedMs });
       if (decision !== null) {
         if (this.#state.phase === 'recordingQuick') {
@@ -856,22 +900,34 @@ export class EchoSessionController {
   }
 
   async #ensureExtendedStream(): Promise<WhisperStreamingSession> {
+    const signal = this.#operationSignal();
     if (this.#stream !== null) return this.#stream;
-    if (this.#streamOpening !== null) return this.#streamOpening;
-    const settings = this.#settings.get().transcription;
-    const opening = this.#whisper.startSession(
+    if (this.#streamOpening !== null) return raceWithAbort(this.#streamOpening, signal);
+    const settings = (this.#sessionSettings ?? this.#settings.get()).transcription;
+    const generation = this.#captureGeneration;
+    const startup = this.#whisper.startSession(
       {
         modelId: settings.modelId,
         sampleRate: 16_000,
         ...(settings.language === null ? {} : { language: settings.language }),
       },
-      this.#abort?.signal,
+      signal,
     );
-    this.#streamOpening = opening;
-    try {
-      const stream = await opening;
+    const opening = startup.then((stream) => {
+      if (generation !== this.#captureGeneration || signal.aborted) {
+        void stream.cancel().catch(() => undefined);
+        throw abortOperationError();
+      }
+      // Claim the stream before waking abort-bound waiters. If abort wins that race, teardown can
+      // still find and cancel this stream; a later non-cooperative startup cancels itself above.
       this.#stream = stream;
       return stream;
+    });
+    // Teardown may abandon this promise after aborting it. Keep a late worker rejection observed.
+    void opening.catch(() => undefined);
+    this.#streamOpening = opening;
+    try {
+      return await raceWithAbort(opening, signal);
     } finally {
       if (this.#streamOpening === opening) this.#streamOpening = null;
     }
@@ -916,7 +972,7 @@ export class EchoSessionController {
   }
 
   async #transcribe(): Promise<string> {
-    const settings = this.#settings.get().transcription;
+    const settings = (this.#sessionSettings ?? this.#settings.get()).transcription;
     if (this.#state.dictationMode === 'extended') {
       await this.#ensureExtendedStream();
       while (this.#streamedSamples < this.#totalSamples || this.#streamPushPending) {
@@ -947,8 +1003,17 @@ export class EchoSessionController {
   async #stopCapture(generation = this.#captureGeneration): Promise<void> {
     const captureId = this.#captureId;
     this.#captureId = null;
-    await this.#recording.stopDictation(captureId ?? undefined);
+    this.#captureStopping = captureId !== null;
+    let stopError: unknown = null;
+    try {
+      await this.#recording.stopDictation(captureId ?? undefined);
+    } catch (error: unknown) {
+      stopError = error;
+    } finally {
+      this.#captureStopping = false;
+    }
     await this.#setHelperCaptureDesired(false, generation);
+    if (stopError !== null) throw normalizeOperationError(stopError, 'Microphone stop failed');
   }
 
   async #teardown(): Promise<void> {
@@ -961,13 +1026,29 @@ export class EchoSessionController {
       captureError = error;
     } finally {
       const opening = this.#streamOpening;
-      const stream = this.#stream ?? (await opening?.catch(() => null)) ?? null;
+      const stream =
+        this.#stream ??
+        (opening === null
+          ? null
+          : await withSoftTimeout(
+              opening.catch(() => null),
+              STREAM_CANCEL_TIMEOUT_MS,
+              null,
+            ));
       this.#stream = null;
       this.#streamOpening = null;
       if (stream !== null && this.#state.phase !== 'completed') {
-        await stream.cancel().catch(() => undefined);
+        await withSoftTimeout(
+          stream.cancel().catch(() => undefined),
+          STREAM_CANCEL_TIMEOUT_MS,
+          undefined,
+        );
       }
-      await this.#modelUseOpening.catch(() => undefined);
+      await withSoftTimeout(
+        this.#modelUseOpening.catch(() => undefined),
+        MODEL_USE_SETTLE_TIMEOUT_MS,
+        undefined,
+      );
       this.#modelUse?.release();
       this.#modelUse = null;
       this.#modelUseOpening = Promise.resolve();
@@ -982,6 +1063,8 @@ export class EchoSessionController {
         this.#smartSession?.cleanup();
         this.#sessionScreenshotFilename = null;
       }
+      this.#teardownComplete = true;
+      this.#scheduleTerminalReset();
     }
     if (captureError !== null)
       throw normalizeOperationError(captureError, 'Capture teardown failed');
@@ -1130,6 +1213,12 @@ export class EchoSessionController {
           const revision = this.#helperCaptureRevision;
           try {
             await this.#helper.setSessionCapture(desired);
+            if (revision !== this.#helperCaptureRevision) {
+              // A later native activation may have re-armed capture while this acknowledgement
+              // was in flight. Keep the applied state unknown and reconcile the newer revision.
+              this.#helperCaptureApplied = null;
+              continue;
+            }
             this.#helperCaptureApplied = desired;
             if (!desired) {
               this.#captureOffGuaranteed = true;
@@ -1141,6 +1230,10 @@ export class EchoSessionController {
             if (desired) throw normalizeOperationError(error, 'Helper capture could not start');
             try {
               await this.#helper.resetSessionCapture();
+              if (revision !== this.#helperCaptureRevision) {
+                this.#helperCaptureApplied = null;
+                continue;
+              }
               this.#helperCaptureApplied = false;
               this.#captureOffGuaranteed = true;
               this.#scheduleTerminalReset();
@@ -1162,6 +1255,7 @@ export class EchoSessionController {
     if (
       this.#disposed ||
       !this.#captureOffGuaranteed ||
+      !this.#teardownComplete ||
       !isTerminalPhase(this.#state.phase) ||
       this.#resetTimer !== null
     ) {
@@ -1169,6 +1263,14 @@ export class EchoSessionController {
     }
     this.#resetTimer = setTimeout(() => {
       this.#resetTimer = null;
+      if (
+        !this.#captureOffGuaranteed ||
+        !this.#teardownComplete ||
+        !isTerminalPhase(this.#state.phase)
+      ) {
+        this.#scheduleTerminalReset();
+        return;
+      }
       this.#windows.hideWidget();
       this.#dispatch({ type: 'reset' });
     }, ECHO_TERMINAL_DISPLAY_MS);
@@ -1184,7 +1286,7 @@ export class EchoSessionController {
   }
 
   #playSound(): void {
-    if (!this.#settings.get().app.soundsEnabled) return;
+    if (!this.#appPreferences.soundsEnabled) return;
     try {
       this.#sound();
     } catch {
@@ -1237,6 +1339,8 @@ export class EchoSessionController {
     this.#clearHoldTimer();
     if (this.#capTimer !== null) clearTimeout(this.#capTimer);
     this.#capTimer = null;
+    if (this.#audioStartTimer !== null) clearTimeout(this.#audioStartTimer);
+    this.#audioStartTimer = null;
   }
 }
 
@@ -1373,6 +1477,27 @@ function abortOperationError(): Error {
 function publicSessionError(error: unknown): string {
   void error;
   return 'Dictation could not be completed.';
+}
+
+function withSoftTimeout<Value>(
+  operation: Promise<Value>,
+  timeoutMs: number,
+  fallback: Value,
+): Promise<Value> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    timer.unref();
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
 }
 
 function withDeadline<Value>(operation: Promise<Value>, timeoutMs: number): Promise<Value> {

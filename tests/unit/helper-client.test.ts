@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HelperClient } from '../../app/src/main/helper/helper-client';
+import { encodeHelperFrame, HelperFrameDecoder } from '../../app/src/main/helper/framing';
 
 const fixture = resolve('tests/fixtures/fake-helper.mjs');
 const clients: HelperClient[] = [];
@@ -32,6 +34,111 @@ async function waitFor(predicate: () => boolean, timeoutMilliseconds = 4_000): P
     if (Date.now() >= deadline) throw new Error('Timed out waiting for helper state');
     await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
+}
+
+function createControlledClient(): {
+  client: HelperClient;
+  writes: Buffer[];
+  blockNextWrite: () => void;
+  emitDrain: () => void;
+  emitStdout: (chunk: Buffer) => void;
+  endStdout: () => void;
+  emitChildError: () => void;
+  close: () => void;
+  kill: ReturnType<typeof vi.fn>;
+} {
+  const stdin = new EventEmitter() as EventEmitter & {
+    destroyed: boolean;
+    writable: boolean;
+    write: (frame: Buffer, callback?: (error?: Error | null) => void) => boolean;
+  };
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  stdin.destroyed = false;
+  stdin.writable = true;
+  const writes: Buffer[] = [];
+  const decoder = new HelperFrameDecoder();
+  let blockNext = false;
+  const kill = vi.fn(() => true);
+
+  stdin.write = (frame: Buffer): boolean => {
+    writes.push(Buffer.from(frame));
+    for (const payload of decoder.push(frame)) {
+      const request = JSON.parse(payload.toString('utf8')) as { id: number; method: string };
+      if (request.method === 'initialize') {
+        queueMicrotask(() => {
+          stdout.emit(
+            'data',
+            encodeHelperFrame({
+              jsonrpc: '2.0',
+              id: request.id,
+              result: {
+                protocolVersion: 2,
+                helperVersion: '1.0.0',
+                platform: process.platform === 'win32' ? 'windows' : 'macos',
+                architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',
+                defaultActivationKey: 'Z',
+                hookStatus: 'ready',
+                permissions: {
+                  accessibility: 'not_applicable',
+                  inputMonitoring: 'not_applicable',
+                  eventPost: 'not_applicable',
+                },
+              },
+            }),
+          );
+        });
+      }
+    }
+    if (!blockNext) return true;
+    blockNext = false;
+    return false;
+  };
+
+  const processEmitter = new EventEmitter() as EventEmitter & {
+    stdin: typeof stdin;
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: ReturnType<typeof vi.fn>;
+  };
+  processEmitter.stdin = stdin;
+  processEmitter.stdout = stdout;
+  processEmitter.stderr = stderr;
+  processEmitter.exitCode = null;
+  processEmitter.signalCode = null;
+  processEmitter.kill = kill;
+  const child = processEmitter as unknown as ChildProcessWithoutNullStreams;
+
+  const platform = process.platform === 'win32' ? 'win32' : 'darwin';
+  const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const client = new HelperClient({
+    executablePath: process.execPath,
+    expectedHelperVersion: '1.0.0',
+    platform,
+    architecture,
+    spawnHelper: () => child,
+  });
+  clients.push(client);
+
+  return {
+    client,
+    writes,
+    blockNextWrite: () => {
+      blockNext = true;
+    },
+    emitDrain: () => stdin.emit('drain'),
+    emitStdout: (chunk) => stdout.emit('data', chunk),
+    endStdout: () => stdout.emit('end'),
+    emitChildError: () => processEmitter.emit('error', new Error('child failed')),
+    close: () => {
+      stdin.writable = false;
+      processEmitter.exitCode = 1;
+      processEmitter.emit('close', 1, null);
+    },
+    kill,
+  };
 }
 
 describe('supervised native HelperClient', () => {
@@ -68,6 +175,14 @@ describe('supervised native HelperClient', () => {
     expect(client.readiness).toMatchObject({ status: 'stopped', reason: 'shutdown' });
   });
 
+  it('uses the protocol default without a redundant startup configuration round trip', async () => {
+    const client = createClient('reject-default-config');
+    await client.start();
+
+    expect(client.readiness.status).toBe('ready');
+    await expect(client.ping()).resolves.toMatchObject({ ok: true });
+  });
+
   it('preserves the irreversible commit when abort precedes a delayed acknowledgement', async () => {
     const client = createClient('paste-delay');
     await client.start();
@@ -80,6 +195,19 @@ describe('supervised native HelperClient', () => {
     await expect(client.ping()).resolves.toMatchObject({ ok: true });
   });
 
+  it('keeps transport healthy when a paste commit observer throws', async () => {
+    const client = createClient('normal');
+    await client.start();
+
+    await expect(
+      client.injectPaste(undefined, () => {
+        throw new Error('application observer failed');
+      }),
+    ).resolves.toEqual({ submitted: true });
+    await expect(client.ping()).resolves.toMatchObject({ ok: true });
+    expect(client.readiness.status).toBe('ready');
+  });
+
   it('reports pre-dispatch abort as uncommitted when the helper rejects dispatch', async () => {
     const client = createClient('paste-before-dispatch');
     await client.start();
@@ -90,6 +218,100 @@ describe('supervised native HelperClient', () => {
     await expect(paste).resolves.toMatchObject({ submitted: false });
     expect(committed).not.toHaveBeenCalled();
   });
+
+  it('closes writes synchronously and never pumps queued work after compromised output', async () => {
+    const controlled = createControlledClient();
+    await controlled.client.start();
+    controlled.blockNextWrite();
+    const first = controlled.client.request('ping', {}, 1_000);
+    const second = controlled.client.request('ping', {}, 1_000);
+    const firstRejection = first.catch((error: unknown) => error);
+    const secondRejection = second.catch((error: unknown) => error);
+    const writesBeforeFailure = controlled.writes.length;
+
+    controlled.emitStdout(Buffer.from([0, 0, 0, 1, 0x7b]));
+
+    await expect(controlled.client.ping()).rejects.toMatchObject({ code: 'not-running' });
+    controlled.emitDrain();
+    expect(controlled.writes).toHaveLength(writesBeforeFailure);
+    expect(await firstRejection).toMatchObject({ code: 'transport-error' });
+    expect(await secondRejection).toMatchObject({ code: 'transport-error' });
+    expect(controlled.kill).toHaveBeenCalledOnce();
+    controlled.close();
+    await controlled.client.stop();
+  });
+
+  it('removes a pre-dispatch abort from the backpressured queue', async () => {
+    const controlled = createControlledClient();
+    await controlled.client.start();
+    controlled.blockNextWrite();
+    const first = controlled.client.request('ping', {}, 1_000);
+    const firstRejection = first.catch((error: unknown) => error);
+    const controller = new AbortController();
+    const committed = vi.fn();
+    const paste = controlled.client.injectPaste(controller.signal, committed);
+    const writesBeforeAbort = controlled.writes.length;
+
+    controller.abort();
+
+    await expect(paste).rejects.toMatchObject({ name: 'AbortError' });
+    controlled.emitDrain();
+    expect(controlled.writes).toHaveLength(writesBeforeAbort);
+    expect(committed).not.toHaveBeenCalled();
+    controlled.emitStdout(Buffer.from([0, 0, 0, 1, 0x7b]));
+    expect(await firstRejection).toMatchObject({ code: 'transport-error' });
+    controlled.close();
+    await controlled.client.stop();
+  });
+
+  it('uses one absolute enqueue-to-response deadline across backpressure', async () => {
+    const controlled = createControlledClient();
+    await controlled.client.start();
+    vi.useFakeTimers();
+    try {
+      controlled.blockNextWrite();
+      const first = controlled.client.request('ping', {}, 1_000);
+      const firstRejection = first.catch((error: unknown) => error);
+      const queued = controlled.client.request('ping', {}, 100);
+      const queuedRejection = queued.catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(90);
+      controlled.emitDrain();
+      await vi.advanceTimersByTimeAsync(11);
+
+      expect(await queuedRejection).toMatchObject({ code: 'request-timeout' });
+      expect(await firstRejection).toMatchObject({ code: 'transport-error' });
+      expect(controlled.kill).toHaveBeenCalledOnce();
+      controlled.close();
+      await controlled.client.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['clean stdout EOF', 'truncated stdout', 'child error'] as const)(
+    'terminates and closes writes on %s before process close',
+    async (failure) => {
+      const controlled = createControlledClient();
+      await controlled.client.start();
+      const writesBeforeFailure = controlled.writes.length;
+
+      if (failure === 'truncated stdout') {
+        controlled.emitStdout(Buffer.from([0, 0]));
+        controlled.endStdout();
+      } else if (failure === 'clean stdout EOF') {
+        controlled.endStdout();
+      } else {
+        controlled.emitChildError();
+      }
+
+      await expect(controlled.client.ping()).rejects.toMatchObject({ code: 'not-running' });
+      expect(controlled.writes).toHaveLength(writesBeforeFailure);
+      expect(controlled.kill).toHaveBeenCalledOnce();
+      controlled.close();
+      await controlled.client.stop();
+    },
+  );
 
   it('restores activation configuration, but not session capture, after restart', async () => {
     let launches = 0;

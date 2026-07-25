@@ -253,7 +253,59 @@ describe('capture MessagePort contracts', () => {
       expect.objectContaining({ type: 'stream:frame', captureId, samples }),
     );
     expect(port.postMessage.mock.lastCall).toHaveLength(1);
+    const posted = port.postMessage.mock.lastCall?.[0] as { readonly samples?: Float32Array };
+    expect(posted.samples).toBe(samples);
     expect(samples.byteLength).toBe(1_280);
+    controller.close();
+  });
+
+  it('forwards the engine flush frame before acknowledging stream stop', async () => {
+    const port = new FakeCapturePort();
+    const samples = Float32Array.from([0.25, -0.25]);
+    const stop = vi.fn<() => Promise<void>>();
+    const engine = {
+      start: vi.fn(() =>
+        Promise.resolve({
+          activeMicrophoneId: 'default',
+          preferredUnavailable: false,
+          sampleRate: 16_000,
+          channelCount: 1,
+        }),
+      ),
+      stop,
+      activate: vi.fn(() => Promise.resolve()),
+      listDevices: vi.fn(() => Promise.resolve([])),
+      disposeImmediately: vi.fn(),
+    } as unknown as CaptureEngine;
+    const controller = new CapturePortController(port as unknown as MessagePort, engine);
+    stop.mockImplementation(() => {
+      controller.notifyFrame(samples, 0.25);
+      return Promise.resolve();
+    });
+    const captureId = randomUUID();
+    port.emit({
+      type: 'stream:start',
+      requestId: randomUUID(),
+      captureId,
+      preferredMicrophoneId: null,
+    });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:started', captureId }),
+      ),
+    );
+
+    port.emit({ type: 'stream:stop', requestId: randomUUID(), captureId });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:stopped', captureId }),
+      ),
+    );
+    const stopMessages = port.postMessage.mock.calls
+      .map(([message]) => message as CapturePortMessage)
+      .filter((message) => message.type === 'stream:frame' || message.type === 'stream:stopped');
+    expect(stopMessages.map((message) => message.type)).toEqual(['stream:frame', 'stream:stopped']);
+    expect(stopMessages[0]).toMatchObject({ samples });
     controller.close();
   });
 

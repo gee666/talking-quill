@@ -24,10 +24,15 @@ export async function verifyModelFiles(
   model: ModelManifestEntry,
 ): Promise<void> {
   const root = await verifyModelRoot(cacheDirectory, model);
+  const files: { readonly path: string; readonly metadata: Stats; readonly sha256: string }[] = [];
   for (const file of model.files) {
     const path = join(root, ...file.path.split('/'));
     const metadata = await safeModelLstat(path);
-    if (metadata.size !== file.size || (await secureSha256(path, metadata)) !== file.sha256) {
+    if (metadata.size !== file.size) throw new WorkerModelVerificationError('MODEL_CORRUPT');
+    files.push({ path, metadata, sha256: file.sha256 });
+  }
+  for (const file of files) {
+    if ((await secureSha256(file.path, file.metadata)) !== file.sha256) {
       throw new WorkerModelVerificationError('MODEL_CORRUPT');
     }
   }

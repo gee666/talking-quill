@@ -38,9 +38,13 @@ function handle(request) {
     return;
   }
   if (method === 'activation.configure') {
+    if (scenario === 'reject-default-config' && !configured && params.enabled === false) {
+      process.exit(26);
+    }
     const expectedEnabled = scenario === 'expect-enabled';
     const expectedKey = expectedEnabled ? 'Q' : null;
     if (
+      scenario === 'expect-enabled' &&
       !configured &&
       (params.enabled !== expectedEnabled ||
         !Array.isArray(params.bindings) ||

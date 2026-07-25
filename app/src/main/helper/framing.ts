@@ -11,35 +11,50 @@ export class HelperFramingError extends Error {
 }
 
 export class HelperFrameDecoder {
-  #pending = Buffer.alloc(0);
+  readonly #prefix = Buffer.allocUnsafe(LENGTH_PREFIX_BYTES);
+  #prefixBytes = 0;
+  #payload: Buffer | null = null;
+  #payloadBytes = 0;
 
   push(chunk: Buffer): readonly Buffer[] {
-    if (chunk.length === 0) return [];
-    this.#pending =
-      this.#pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.#pending, chunk]);
-
     const frames: Buffer[] = [];
     let offset = 0;
-    while (this.#pending.length - offset >= LENGTH_PREFIX_BYTES) {
-      const length = this.#pending.readUInt32BE(offset);
-      if (length === 0 || length > HELPER_MAX_FRAME_BYTES) {
-        throw new HelperFramingError(`Invalid helper frame length: ${String(length)}`);
-      }
-      const frameEnd = offset + LENGTH_PREFIX_BYTES + length;
-      if (this.#pending.length < frameEnd) break;
-      frames.push(Buffer.from(this.#pending.subarray(offset + LENGTH_PREFIX_BYTES, frameEnd)));
-      offset = frameEnd;
-    }
+    while (offset < chunk.length) {
+      if (this.#payload === null) {
+        const prefixBytes = Math.min(
+          LENGTH_PREFIX_BYTES - this.#prefixBytes,
+          chunk.length - offset,
+        );
+        chunk.copy(this.#prefix, this.#prefixBytes, offset, offset + prefixBytes);
+        this.#prefixBytes += prefixBytes;
+        offset += prefixBytes;
+        if (this.#prefixBytes !== LENGTH_PREFIX_BYTES) continue;
 
-    this.#pending = offset === 0 ? this.#pending : Buffer.from(this.#pending.subarray(offset));
-    if (this.#pending.length > HELPER_MAX_FRAME_BYTES + LENGTH_PREFIX_BYTES) {
-      throw new HelperFramingError('Helper frame buffer exceeded its bounded payload size');
+        const length = this.#prefix.readUInt32BE(0);
+        if (length === 0 || length > HELPER_MAX_FRAME_BYTES) {
+          throw new HelperFramingError(`Invalid helper frame length: ${String(length)}`);
+        }
+        this.#payload = Buffer.allocUnsafe(length);
+        this.#payloadBytes = 0;
+      }
+
+      const payload = this.#payload;
+      const payloadBytes = Math.min(payload.length - this.#payloadBytes, chunk.length - offset);
+      chunk.copy(payload, this.#payloadBytes, offset, offset + payloadBytes);
+      this.#payloadBytes += payloadBytes;
+      offset += payloadBytes;
+      if (this.#payloadBytes === payload.length) {
+        frames.push(payload);
+        this.#prefixBytes = 0;
+        this.#payload = null;
+        this.#payloadBytes = 0;
+      }
     }
     return frames;
   }
 
   finish(): void {
-    if (this.#pending.length !== 0) {
+    if (this.#prefixBytes !== 0 || this.#payload !== null) {
       throw new HelperFramingError('Helper stdout ended with a truncated frame');
     }
   }

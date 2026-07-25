@@ -326,6 +326,16 @@ describe('CaptureEngine', () => {
     expect(mapCaptureError(error)).toBe(code);
   });
 
+  it('skips worklet flush latency when a prepared capture was never connected', async () => {
+    const track = new FakeTrack('prepared');
+    const test = harness({ getUserMedia: () => Promise.resolve(stream(track)) });
+    await test.engine.start(null);
+    await test.engine.stop();
+    expect(test.port.postMessage).not.toHaveBeenCalled();
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(test.contextClose).toHaveBeenCalledOnce();
+  });
+
   it('forwards the final flushed partial PCM frame before stopping and tears down every resource', async () => {
     const track = new FakeTrack('default');
     const test = harness({ getUserMedia: () => Promise.resolve(stream(track)) });

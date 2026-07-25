@@ -65,8 +65,11 @@
 //! - `paste.inject`
 //!   - Params: `{}`.
 //!   - Result: `{"submitted":boolean}` on success, or
-//!     `{"submitted":false,"reason":PASTE_FAILURE}` on failure. On macOS,
-//!     active Secure Event Input returns `"secure_input"` and posts no event.
+//!     `{"submitted":false,"reason":PASTE_FAILURE}` on failure. Before native
+//!     dispatch the stdout writer must acquire a dedicated delivery. A submitted
+//!     paste emits `paste.committed` with the request ID immediately before its
+//!     matching response as one non-interleaved batch. On macOS, active Secure
+//!     Event Input returns `"secure_input"` and posts no event.
 //! - `front_app.get`
 //!   - Params: `{}`.
 //!   - Result: `{"processName":string,"windowTitle":string}`. Native strings

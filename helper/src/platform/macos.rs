@@ -519,6 +519,10 @@ unsafe extern "C" fn event_tap_callback(
         apply_tap_recovery(context, TapRecoveryEvent::Activity);
         // SAFETY: Core Graphics guarantees the event for this callback.
         let key_code = unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
+        let key = map_key_code(key_code);
+        if key == PhysicalKey::Other {
+            return false;
+        }
         let repeat =
             unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) != 0 };
         let marker = unsafe { CGEventGetIntegerValueField(event, K_CG_EVENT_SOURCE_USER_DATA) };
@@ -527,7 +531,7 @@ unsafe extern "C" fn event_tap_callback(
         // activation. Modifier flag-change events are not in the tap mask and
         // remain untouched; only the configured letter sequence may be swallowed.
         let input = KeyInput {
-            key: map_key_code(key_code),
+            key,
             phase,
             alt: flags & K_CG_EVENT_FLAG_MASK_ALTERNATE != 0,
             shift: flags & K_CG_EVENT_FLAG_MASK_SHIFT != 0,

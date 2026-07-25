@@ -23,6 +23,20 @@ describe('native helper framing', () => {
     expect(() => decoder.finish()).not.toThrow();
   });
 
+  it('decodes a maximum-size frame fragmented one byte at a time', () => {
+    const payload = Buffer.alloc(HELPER_MAX_FRAME_BYTES, 0x61);
+    const framed = Buffer.allocUnsafe(payload.length + 4);
+    framed.writeUInt32BE(payload.length, 0);
+    payload.copy(framed, 4);
+    const decoder = new HelperFrameDecoder();
+    const frames: Buffer[] = [];
+
+    for (const byte of framed) frames.push(...decoder.push(Buffer.of(byte)));
+
+    expect(frames).toEqual([payload]);
+    expect(() => decoder.finish()).not.toThrow();
+  });
+
   it('rejects zero, oversized, truncated, and invalid UTF-8 frames', () => {
     const zero = Buffer.alloc(4);
     expect(() => new HelperFrameDecoder().push(zero)).toThrow('Invalid helper frame length');

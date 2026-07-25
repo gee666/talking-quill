@@ -56,9 +56,41 @@ export class BedrockProvider implements SmartProvider {
     signal: AbortSignal,
   ): Promise<readonly ModelInfo[]> {
     this.#validate(invocation);
-    const models = await this.#listFoundationModels(invocation, signal);
-    models.push(...(await this.#listInferenceProfiles(invocation, signal)));
-    return freezeModels(models);
+    const controller = new AbortController();
+    const operationSignal = AbortSignal.any([signal, controller.signal]);
+    const cancelSiblingOnFailure = async <Value>(operation: Promise<Value>): Promise<Value> => {
+      try {
+        return await operation;
+      } catch (error: unknown) {
+        controller.abort(error);
+        throw error;
+      }
+    };
+    const foundations = cancelSiblingOnFailure(
+      this.#listFoundationModels(invocation, operationSignal),
+    );
+    // Fetch the independent catalog families concurrently. Profile capability mapping waits for
+    // foundation metadata, preserving authoritative vision derivation without serial latency.
+    const profiles = cancelSiblingOnFailure(
+      this.#listInferenceProfiles(
+        invocation,
+        operationSignal,
+        foundations.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+    );
+    try {
+      const [models, inferenceProfiles] = await Promise.all([foundations, profiles]);
+      models.push(...inferenceProfiles);
+      return freezeModels(models);
+    } catch (error: unknown) {
+      // Do not return while a sibling request can continue pagination or mutate capability state.
+      await Promise.allSettled([foundations, profiles]);
+      if (error instanceof Error) throw error;
+      throw new ProviderError('UNAVAILABLE');
+    }
   }
 
   capabilities(config: ProviderConfig, modelId: string): VisionCapability {
@@ -124,6 +156,7 @@ export class BedrockProvider implements SmartProvider {
   async #listInferenceProfiles(
     invocation: ProviderInvocationConfig,
     signal: AbortSignal,
+    foundationMetadataReady: Promise<void>,
   ): Promise<ModelInfo[]> {
     const profiles: ModelInfo[] = [];
     let nextToken: string | null = null;
@@ -136,6 +169,7 @@ export class BedrockProvider implements SmartProvider {
         body.inferenceProfileSummaries.length > 2_000
       )
         throw new ProviderError('INVALID_RESPONSE');
+      await foundationMetadataReady;
       for (const item of body.inferenceProfileSummaries) {
         const summary = record(item);
         if (summary.status !== undefined && summary.status !== 'ACTIVE') continue;

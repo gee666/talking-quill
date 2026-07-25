@@ -28,6 +28,11 @@ interface ActiveDictation extends DictationCapture {
   readonly callbacks: DictationCaptureCallbacks;
 }
 
+interface StopInFlight {
+  readonly captureId: string;
+  readonly promise: Promise<boolean>;
+}
+
 export class RecordingService {
   readonly #capture: CaptureWindowClient;
   readonly #settings: SettingsStore;
@@ -39,14 +44,19 @@ export class RecordingService {
   #captureWebContents: WebContents | null = null;
   #activeCaptureId: string | null = null;
   #dictation: ActiveDictation | null = null;
+  #drainingDictation: ActiveDictation | null = null;
+  #stopInFlight: StopInFlight | null = null;
   #ownerWebContents: WebContents | null = null;
   #devices: readonly MicrophoneDevice[] = [];
+  #lastPublishedDeviceSnapshot: MicrophoneDeviceList | null = null;
   #state: MicrophoneTestState;
   #lastLevelEventAt = 0;
   #testObservedRms = 0;
   #testSampleCount = 0;
   #operation: Promise<void> = Promise.resolve();
   #operationGeneration = 0;
+  #deviceRefreshGeneration = 0;
+  #authorizedDeviceRefreshCaptureId: string | null = null;
   #disposed = false;
   #onMicrophoneUnavailable: (() => void) | null = null;
 
@@ -70,12 +80,17 @@ export class RecordingService {
           }
         : { status: 'idle', permission: permissionState };
     this.#removeFrameListener = capture.onFrame((frame) => {
-      if (frame.captureId !== this.#activeCaptureId) return;
-      if (this.#dictation?.captureId === frame.captureId) {
-        this.#dictation.callbacks.onFrame(frame.samples, frame.rms);
+      const dictation =
+        this.#dictation?.captureId === frame.captureId
+          ? this.#dictation
+          : this.#drainingDictation?.captureId === frame.captureId
+            ? this.#drainingDictation
+            : null;
+      if (dictation !== null) {
+        dictation.callbacks.onFrame(frame.samples, frame.rms);
         return;
       }
-      if (this.#state.status !== 'active') return;
+      if (frame.captureId !== this.#activeCaptureId || this.#state.status !== 'active') return;
       this.#testObservedRms = Math.max(this.#testObservedRms, frame.rms);
       this.#testSampleCount += frame.samples.length;
       const now = Date.now();
@@ -87,15 +102,17 @@ export class RecordingService {
       });
     });
     this.#removeDeviceListener = capture.onDevicesChanged((devices) => {
+      if (this.#disposed || this.#authorizedDeviceRefreshCaptureId !== null) return;
       // Empty enumeration may mean Electron policy withheld device metadata after the short-lived
       // explicit authorization ended. Preserve names; an active track ending still reports loss.
       if (devices.length === 0 && this.#devices.length > 0) return;
+      ++this.#deviceRefreshGeneration;
       this.#devices = devices;
       const preferred = this.#settings.get().recording.preferredMicrophoneId;
       if (preferred !== null && !devices.some((device) => device.deviceId === preferred)) {
         this.#onMicrophoneUnavailable?.();
       }
-      this.#events.send('recording:devices-changed', this.#deviceSnapshot());
+      this.#publishDeviceSnapshot();
     });
     this.#removeStopListener = capture.onUnexpectedStop((captureId) => {
       if (captureId !== this.#activeCaptureId) return;
@@ -122,6 +139,8 @@ export class RecordingService {
   }
 
   attachCapture(webContents: WebContents): void {
+    ++this.#deviceRefreshGeneration;
+    this.#authorizedDeviceRefreshCaptureId = null;
     this.#captureWebContents = webContents;
     this.#capture.attach(webContents);
   }
@@ -193,9 +212,6 @@ export class RecordingService {
       );
       try {
         const started = await this.#capture.start(preferredMicrophoneId, captureId);
-        this.#permission.authorizeEnumeration(captureWebContents.id, captureId);
-        await this.#refreshDevices();
-        this.#permission.seal(captureId);
         if (
           operationGeneration !== this.#operationGeneration ||
           !this.#hasOwner(ownerWebContents.id)
@@ -203,7 +219,11 @@ export class RecordingService {
           await this.#stopActive();
           return;
         }
-        await this.#capture.activate(captureId);
+        await this.#activateWithDeviceRefresh(
+          captureWebContents.id,
+          captureId,
+          operationGeneration,
+        );
         if (
           operationGeneration !== this.#operationGeneration ||
           !this.#hasOwner(ownerWebContents.id)
@@ -261,9 +281,6 @@ export class RecordingService {
       );
       try {
         const started = await this.#capture.start(preferredMicrophoneId, captureId);
-        this.#permission.authorizeEnumeration(captureWebContents.id, captureId);
-        await this.#refreshDevices();
-        this.#permission.seal(captureId);
         if (operationGeneration !== this.#operationGeneration) {
           await this.#stopActive();
           return;
@@ -274,7 +291,11 @@ export class RecordingService {
           callbacks,
         };
         this.#dictation = dictation;
-        await this.#capture.activate(captureId);
+        await this.#activateWithDeviceRefresh(
+          captureWebContents.id,
+          captureId,
+          operationGeneration,
+        );
         if (operationGeneration !== this.#operationGeneration) {
           await this.#stopActive();
           return;
@@ -300,7 +321,13 @@ export class RecordingService {
   }
 
   async stopDictation(captureId?: string): Promise<void> {
-    if (captureId !== undefined && this.#dictation?.captureId !== captureId) return;
+    if (
+      captureId !== undefined &&
+      this.#dictation?.captureId !== captureId &&
+      this.#drainingDictation?.captureId !== captureId
+    ) {
+      return;
+    }
     ++this.#operationGeneration;
     await this.#stopActive();
   }
@@ -330,6 +357,7 @@ export class RecordingService {
     if (this.#disposed) return;
     this.#disposed = true;
     ++this.#operationGeneration;
+    ++this.#deviceRefreshGeneration;
     const stopping = this.#stopActive();
     await this.#enqueue(async () => {
       await stopping;
@@ -342,27 +370,80 @@ export class RecordingService {
     this.#capture.dispose();
   }
 
-  async #refreshDevices(): Promise<void> {
-    if (this.#captureWebContents === null || this.#disposed) return;
+  async #activateWithDeviceRefresh(
+    webContentsId: number,
+    captureId: string,
+    operationGeneration: number,
+  ): Promise<void> {
+    this.#permission.seal(captureId);
+    await this.#capture.activate(captureId);
+    if (
+      this.#disposed ||
+      operationGeneration !== this.#operationGeneration ||
+      captureId !== this.#activeCaptureId
+    ) {
+      return;
+    }
+    this.#permission.authorizeEnumeration(webContentsId, captureId);
+    this.#authorizedDeviceRefreshCaptureId = captureId;
+    void this.#refreshDevices({ captureId, operationGeneration }).finally(() => {
+      if (this.#authorizedDeviceRefreshCaptureId === captureId) {
+        this.#authorizedDeviceRefreshCaptureId = null;
+      }
+      this.#permission.seal(captureId);
+    });
+  }
+
+  async #refreshDevices(
+    guard?: Readonly<{ captureId: string; operationGeneration: number }>,
+  ): Promise<void> {
+    const captureWebContents = this.#captureWebContents;
+    if (captureWebContents === null || this.#disposed) return;
+    const refreshGeneration = ++this.#deviceRefreshGeneration;
     try {
       const devices = await this.#capture.listDevices();
+      if (
+        this.#captureWebContents !== captureWebContents ||
+        refreshGeneration !== this.#deviceRefreshGeneration ||
+        (guard !== undefined &&
+          (guard.operationGeneration !== this.#operationGeneration ||
+            guard.captureId !== this.#activeCaptureId))
+      ) {
+        return;
+      }
       // Chromium returns an anonymous/empty list when enumeration has no active permission check.
       // Keep the last authorized snapshot; real hot-plug notifications still replace it directly.
       if (devices.length > 0 || this.#devices.length === 0) this.#devices = devices;
-      this.#events.send('recording:devices-changed', this.#deviceSnapshot());
+      this.#publishDeviceSnapshot();
     } catch {
       // A background refresh must not erase the last explicitly authorized device snapshot.
     }
   }
 
-  async #stopActive(): Promise<boolean> {
+  #stopActive(): Promise<boolean> {
+    const inFlight = this.#stopInFlight;
+    if (inFlight !== null) return inFlight.promise;
     const captureId = this.#activeCaptureId;
+    const dictation = this.#dictation;
     this.#dictation = null;
     this.#clearOwner();
-    if (captureId === null) return true;
+    if (captureId === null) return Promise.resolve(true);
     this.#activeCaptureId = null;
+    if (dictation?.captureId === captureId) this.#drainingDictation = dictation;
     this.#permission.release(captureId);
 
+    const promise = this.#stopCapture(captureId);
+    const stop = { captureId, promise };
+    this.#stopInFlight = stop;
+    const clearStop = () => {
+      if (this.#stopInFlight === stop) this.#stopInFlight = null;
+      if (this.#drainingDictation?.captureId === captureId) this.#drainingDictation = null;
+    };
+    void promise.then(clearStop, clearStop);
+    return promise;
+  }
+
+  async #stopCapture(captureId: string): Promise<boolean> {
     let resolveTimeout!: (value: false) => void;
     const timeout = new Promise<false>((resolve) => {
       resolveTimeout = resolve;
@@ -383,13 +464,23 @@ export class RecordingService {
   }
 
   #forceCaptureReset(captureId: string): void {
-    this.#capture.reset();
+    try {
+      this.#capture.reset();
+    } catch {
+      // Continue clearing local ownership even if the failed transport cannot be reset cleanly.
+    }
     const captureWebContents = this.#captureWebContents;
     this.#captureWebContents = null;
     if (captureWebContents !== null && !captureWebContents.isDestroyed()) {
-      captureWebContents.reload();
+      try {
+        captureWebContents.reload();
+      } catch {
+        // The capture renderer may disappear between the destruction check and reload.
+      }
     }
-    if (this.#activeCaptureId === captureId) this.#activeCaptureId = null;
+    this.#activeCaptureId = null;
+    this.#dictation = null;
+    this.#drainingDictation = null;
     this.#clearOwner();
     this.#permission.release(captureId);
     this.#setState({
@@ -409,6 +500,13 @@ export class RecordingService {
         this.#devices.some((device) => device.deviceId === preferredMicrophoneId),
       permission: this.#permission.getStatus(),
     };
+  }
+
+  #publishDeviceSnapshot(): void {
+    const snapshot = this.#deviceSnapshot();
+    if (deviceSnapshotsEqual(this.#lastPublishedDeviceSnapshot, snapshot)) return;
+    this.#lastPublishedDeviceSnapshot = snapshot;
+    this.#events.send('recording:devices-changed', snapshot);
   }
 
   #hasOwner(ownerId: number): boolean {
@@ -497,4 +595,26 @@ export class RecordingService {
     this.#operation = next.catch(() => undefined);
     await next;
   }
+}
+
+function deviceSnapshotsEqual(
+  first: MicrophoneDeviceList | null,
+  second: MicrophoneDeviceList,
+): boolean {
+  if (
+    first?.preferredMicrophoneId !== second.preferredMicrophoneId ||
+    first.preferredAvailable !== second.preferredAvailable ||
+    first.permission !== second.permission ||
+    first.devices.length !== second.devices.length
+  ) {
+    return false;
+  }
+  return first.devices.every((device, index) => {
+    const other = second.devices[index];
+    return (
+      device.deviceId === other?.deviceId &&
+      device.label === other.label &&
+      device.isDefault === other.isDefault
+    );
+  });
 }

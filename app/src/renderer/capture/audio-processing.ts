@@ -1,6 +1,9 @@
 import { PCM_FRAME_SAMPLES, PCM_SAMPLE_RATE } from '../../shared/constants/audio';
 
 const FILTER_HALF_TAPS = 16;
+const FILTER_TAPS = FILTER_HALF_TAPS * 2;
+const MAX_PRECOMPUTED_PHASES = 2_048;
+const BUFFER_COMPACTION_THRESHOLD = 4_096;
 const CUTOFF_GUARD = 0.94;
 
 export interface ProcessedAudioFrame {
@@ -13,6 +16,7 @@ export class StreamingPcmProcessor {
   readonly #onFrame: (frame: ProcessedAudioFrame) => void;
   #frame = new Float32Array(PCM_FRAME_SAMPLES);
   #frameOffset = 0;
+  #frameSumSquares = 0;
 
   constructor(inputSampleRate: number, onFrame: (frame: ProcessedAudioFrame) => void) {
     this.#resampler = new StreamingResampler(inputSampleRate, PCM_SAMPLE_RATE);
@@ -20,8 +24,9 @@ export class StreamingPcmProcessor {
   }
 
   process(channels: readonly Float32Array[]): void {
-    if (channels.length === 0) return;
-    this.#append(this.#resampler.process(downmixChannels(channels)));
+    const input = channels.length === 1 ? channels[0] : downmixChannels(channels);
+    if (input === undefined || input.length === 0) return;
+    this.#append(this.#resampler.process(input));
   }
 
   flush(): void {
@@ -31,7 +36,9 @@ export class StreamingPcmProcessor {
 
   #append(samples: Float32Array): void {
     for (const sample of samples) {
-      this.#frame[this.#frameOffset] = sample;
+      const safe = sanitizeSample(sample);
+      this.#frame[this.#frameOffset] = safe;
+      this.#frameSumSquares += safe * safe;
       this.#frameOffset += 1;
       if (this.#frameOffset === PCM_FRAME_SAMPLES) this.#emitFrame();
     }
@@ -43,9 +50,11 @@ export class StreamingPcmProcessor {
       this.#frameOffset === this.#frame.length
         ? this.#frame
         : this.#frame.slice(0, this.#frameOffset);
-    this.#onFrame({ samples, rms: calculateRms(samples) });
+    const rms = Math.min(1, Math.sqrt(this.#frameSumSquares / this.#frameOffset));
+    this.#onFrame({ samples, rms });
     this.#frame = new Float32Array(PCM_FRAME_SAMPLES);
     this.#frameOffset = 0;
+    this.#frameSumSquares = 0;
   }
 }
 
@@ -54,7 +63,9 @@ export class StreamingResampler {
   readonly #outputRate: number;
   readonly #step: number;
   readonly #cutoff: number;
+  readonly #phaseWeights: readonly Float64Array[] | null;
   #buffer: number[];
+  #bufferHead = 0;
   #bufferStart = -FILTER_HALF_TAPS;
   #actualInputCount = 0;
   #outputCount = 0;
@@ -73,6 +84,7 @@ export class StreamingResampler {
     this.#outputRate = outputRate;
     this.#step = inputRate / outputRate;
     this.#cutoff = Math.min(1, outputRate / inputRate) * CUTOFF_GUARD;
+    this.#phaseWeights = createPhaseWeights(inputRate, outputRate, this.#cutoff);
     this.#buffer = Array.from({ length: FILTER_HALF_TAPS }, () => 0);
   }
 
@@ -91,57 +103,61 @@ export class StreamingResampler {
   }
 
   #drain(flushing: boolean): Float32Array {
-    const output: number[] = [];
     const targetOutputCount = Math.floor(
       (this.#actualInputCount * this.#outputRate) / this.#inputRate,
     );
-    const bufferEnd = this.#bufferStart + this.#buffer.length;
-    while (this.#outputCount < targetOutputCount) {
-      const position = this.#outputCount * this.#step;
-      const center = Math.floor(position);
-      const lastRequired = center + FILTER_HALF_TAPS;
-      if (!flushing && lastRequired >= bufferEnd) break;
-      output.push(this.#interpolate(position));
+    const bufferEnd = this.#bufferStart + this.#buffer.length - this.#bufferHead;
+    let producible = targetOutputCount - this.#outputCount;
+    if (!flushing) {
+      producible = 0;
+      while (
+        this.#outputCount + producible < targetOutputCount &&
+        this.#centerForOutput(this.#outputCount + producible) + FILTER_HALF_TAPS < bufferEnd
+      ) {
+        producible += 1;
+      }
+    }
+    const output = new Float32Array(producible);
+    for (let outputOffset = 0; outputOffset < output.length; outputOffset += 1) {
+      output[outputOffset] = this.#interpolate(this.#centerForOutput(this.#outputCount));
       this.#outputCount += 1;
     }
     this.#trimBuffer();
-    return Float32Array.from(output);
+    return output;
   }
 
-  #interpolate(position: number): number {
-    const center = Math.floor(position);
+  #centerForOutput(outputIndex: number): number {
+    return this.#phaseWeights === null
+      ? Math.floor(outputIndex * this.#step)
+      : Math.floor((outputIndex * this.#inputRate) / this.#outputRate);
+  }
+
+  #interpolate(center: number): number {
+    const phaseWeights = this.#phaseWeights;
+    const weights =
+      phaseWeights?.[this.#outputCount % phaseWeights.length] ??
+      createFilterWeights(this.#outputCount * this.#step - center, this.#cutoff);
     let weighted = 0;
-    let weightSum = 0;
-    for (
-      let sourceIndex = center - FILTER_HALF_TAPS + 1;
-      sourceIndex <= center + FILTER_HALF_TAPS;
-      sourceIndex += 1
-    ) {
-      const distance = position - sourceIndex;
-      const normalizedDistance = distance / FILTER_HALF_TAPS;
-      const window =
-        Math.abs(normalizedDistance) >= 1 ? 0 : 0.5 * (1 + Math.cos(Math.PI * normalizedDistance));
-      const sincArgument = this.#cutoff * distance;
-      const sinc =
-        Math.abs(sincArgument) < 1e-8
-          ? 1
-          : Math.sin(Math.PI * sincArgument) / (Math.PI * sincArgument);
-      const weight = this.#cutoff * sinc * window;
-      const bufferIndex = sourceIndex - this.#bufferStart;
-      const sample = this.#buffer[bufferIndex] ?? 0;
-      weighted += sample * weight;
-      weightSum += weight;
+    const firstSourceIndex = center - FILTER_HALF_TAPS + 1;
+    for (let tap = 0; tap < FILTER_TAPS; tap += 1) {
+      const sourceIndex = firstSourceIndex + tap;
+      const bufferIndex = this.#bufferHead + sourceIndex - this.#bufferStart;
+      weighted += (this.#buffer[bufferIndex] ?? 0) * (weights[tap] ?? 0);
     }
-    return sanitizeSample(weightSum === 0 ? 0 : weighted / weightSum);
+    return sanitizeSample(weighted);
   }
 
   #trimBuffer(): void {
-    const nextPosition = this.#outputCount * this.#step;
-    const retainFrom = Math.floor(nextPosition) - FILTER_HALF_TAPS;
+    const retainFrom = this.#centerForOutput(this.#outputCount) - FILTER_HALF_TAPS;
     const removeCount = Math.max(0, retainFrom - this.#bufferStart);
     if (removeCount === 0) return;
-    this.#buffer.splice(0, Math.min(removeCount, this.#buffer.length));
-    this.#bufferStart += removeCount;
+    const removed = Math.min(removeCount, this.#buffer.length - this.#bufferHead);
+    this.#bufferHead += removed;
+    this.#bufferStart += removed;
+    if (this.#bufferHead >= BUFFER_COMPACTION_THRESHOLD) {
+      this.#buffer = this.#buffer.slice(this.#bufferHead);
+      this.#bufferHead = 0;
+    }
   }
 }
 
@@ -165,6 +181,58 @@ export function calculateRms(samples: Float32Array): number {
     sumSquares += safe * safe;
   }
   return Math.min(1, Math.sqrt(sumSquares / samples.length));
+}
+
+function createPhaseWeights(
+  inputRate: number,
+  outputRate: number,
+  cutoff: number,
+): readonly Float64Array[] | null {
+  if (!Number.isSafeInteger(inputRate) || !Number.isSafeInteger(outputRate)) return null;
+  const divisor = greatestCommonDivisor(inputRate, outputRate);
+  const phaseCount = outputRate / divisor;
+  if (phaseCount > MAX_PRECOMPUTED_PHASES) return null;
+  const inputPhaseStep = inputRate / divisor;
+  return Array.from({ length: phaseCount }, (_value, phase) =>
+    createFilterWeights(((phase * inputPhaseStep) % phaseCount) / phaseCount, cutoff),
+  );
+}
+
+function createFilterWeights(fractionalPosition: number, cutoff: number): Float64Array {
+  const weights = new Float64Array(FILTER_TAPS);
+  let weightSum = 0;
+  for (let tap = 0; tap < FILTER_TAPS; tap += 1) {
+    const relativeSourceIndex = tap - FILTER_HALF_TAPS + 1;
+    const distance = fractionalPosition - relativeSourceIndex;
+    const normalizedDistance = distance / FILTER_HALF_TAPS;
+    const window =
+      Math.abs(normalizedDistance) >= 1 ? 0 : 0.5 * (1 + Math.cos(Math.PI * normalizedDistance));
+    const sincArgument = cutoff * distance;
+    const sinc =
+      Math.abs(sincArgument) < 1e-8
+        ? 1
+        : Math.sin(Math.PI * sincArgument) / (Math.PI * sincArgument);
+    const weight = cutoff * sinc * window;
+    weights[tap] = weight;
+    weightSum += weight;
+  }
+  if (weightSum !== 0) {
+    for (let tap = 0; tap < weights.length; tap += 1) {
+      weights[tap] = (weights[tap] ?? 0) / weightSum;
+    }
+  }
+  return weights;
+}
+
+function greatestCommonDivisor(first: number, second: number): number {
+  let left = first;
+  let right = second;
+  while (right !== 0) {
+    const remainder = left % right;
+    left = right;
+    right = remainder;
+  }
+  return left;
 }
 
 function sanitizeSample(sample: number): number {

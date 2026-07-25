@@ -278,7 +278,7 @@ export class CaptureEngine {
     const active = this.#active;
     if (active === null) return;
     active.teardownPromise ??= (async () => {
-      if (flush) await this.#flush(active);
+      if (flush && active.connected) await this.#flush(active);
       if (this.#active === active) this.#active = null;
       await this.#releaseActive(active);
     })();

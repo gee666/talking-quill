@@ -24,6 +24,31 @@ describe('Whisper runtime', () => {
     await runtime.shutdown();
   });
 
+  it('verifies once on cold load, re-verifies warm checks, and skips warm inference hashing', async () => {
+    const pipeline = vi.fn(() => Promise.resolve({ text: 'ok' })) as unknown as WhisperPipeline;
+    const verify = vi.fn(() => Promise.resolve());
+    const factory = vi.fn(() => Promise.resolve(pipeline));
+    const runtime = new WhisperRuntime({ cacheDirectory: 'models', revisions, factory, verify });
+
+    await runtime.checkModel('Xenova/whisper-small');
+    await runtime.checkModel('Xenova/whisper-small');
+    await runtime.transcribe(new Float32Array([0.1]), options);
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(factory).toHaveBeenCalledOnce();
+    await runtime.shutdown();
+
+    const coldVerify = vi.fn(() => Promise.resolve());
+    const coldRuntime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory: () => Promise.resolve(pipeline),
+      verify: coldVerify,
+    });
+    await coldRuntime.transcribe(new Float32Array([0.1]), options);
+    expect(coldVerify).toHaveBeenCalledOnce();
+    await coldRuntime.shutdown();
+  });
+
   it('keeps one warm pipeline and supplies transformers left/right stride chunking', async () => {
     const calls: Readonly<Record<string, unknown>>[] = [];
     let loads = 0;
@@ -110,6 +135,34 @@ describe('Whisper runtime', () => {
     expect(result.text).not.toContain('duplicate-overlap');
   });
 
+  it('snapshots public pushes and reuses one inference-window scratch buffer', async () => {
+    const windows: Float32Array[] = [];
+    const starts: number[] = [];
+    const pipeline = ((pcm: Float32Array) => {
+      windows.push(pcm);
+      starts.push(pcm[0] ?? 0);
+      return Promise.resolve(timestampOutput([]));
+    }) as WhisperPipeline;
+    const runtime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory: () => Promise.resolve(pipeline),
+    });
+    runtime.openSession('owned', options);
+    const first = new Float32Array(10 * 16_000).fill(0.1);
+    await runtime.pushSession('owned', first);
+    first.fill(0.9);
+    for (const value of [0.2, 0.3, 0.4, 0.5]) {
+      await runtime.pushSession('owned', new Float32Array(10 * 16_000).fill(value));
+    }
+    expect(starts[0]).toBeCloseTo(0.1);
+    expect(starts[1]).toBeCloseTo(0.3);
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toBe(windows[1]);
+    runtime.cancelSession('owned');
+    await runtime.shutdown();
+  });
+
   it('enforces cumulative duration and bounded push payloads', async () => {
     const pipeline = (() => Promise.resolve(timestampOutput([]))) as WhisperPipeline;
     const runtime = new WhisperRuntime({
@@ -171,6 +224,37 @@ describe('Whisper runtime', () => {
     await second.unload('onnx-community/whisper-large-v3-turbo');
     await vi.advanceTimersByTimeAsync(5 * 60 * 1_000);
     expect(dispose).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for pipeline disposal before loading a replacement', async () => {
+    let resolveDispose: (() => void) | null = null;
+    const dispose = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDispose = resolve;
+        }),
+    );
+    let loads = 0;
+    const factory = vi.fn(() => {
+      loads += 1;
+      const inference = (() => Promise.resolve({ text: 'ok' })) as WhisperPipeline;
+      return Promise.resolve(loads === 1 ? Object.assign(inference, { dispose }) : inference);
+    });
+    const runtime = new WhisperRuntime({ cacheDirectory: 'models', revisions, factory });
+    await runtime.transcribe(new Float32Array([0.1]), options);
+
+    const unloading = runtime.unload();
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    const reloading = runtime.transcribe(new Float32Array([0.2]), options);
+    await Promise.resolve();
+    expect(factory).toHaveBeenCalledOnce();
+    const finishDispose = resolveDispose as (() => void) | null;
+    if (finishDispose === null) throw new Error('Disposal resolver was not installed');
+    finishDispose();
+    await unloading;
+    await expect(reloading).resolves.toMatchObject({ text: 'ok' });
+    expect(factory).toHaveBeenCalledTimes(2);
+    await runtime.shutdown();
   });
 
   it('defensively accepts nullable segment timestamp edges', () => {

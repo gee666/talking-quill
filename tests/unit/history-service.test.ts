@@ -169,6 +169,53 @@ describe('HistoryService', () => {
     test.store.close();
   });
 
+  it('yields before startup enumeration and reports aborted physical cleanup as pending', async () => {
+    const list = vi.fn((directory: string) => readdirSync(directory, { withFileTypes: true }));
+    const files: HistoryScreenshotFiles = {
+      list,
+      remove: (path) => rmSync(path, { force: true }),
+      isRegularFile: (path) => lstatSync(path).isFile(),
+    };
+    const test = await fixture({ files });
+    writeFileSync(join(test.screenshotsDirectory, 'orphan.jpg'), 'orphan');
+
+    const pending = test.service.pruneAtStartupDeferred(1);
+    expect(list).not.toHaveBeenCalled();
+    await expect(pending).resolves.toMatchObject({ screenshotCleanup: 'complete' });
+    expect(list).toHaveBeenCalledOnce();
+
+    writeFileSync(join(test.screenshotsDirectory, 'cancelled-orphan.jpg'), 'orphan');
+    const controller = new AbortController();
+    controller.abort();
+    await expect(test.service.pruneAtStartupDeferred(1, controller.signal)).resolves.toEqual({
+      deletedCount: 0,
+      screenshotCleanup: 'pending',
+    });
+    expect(existsSync(join(test.screenshotsDirectory, 'cancelled-orphan.jpg'))).toBe(true);
+    test.store.close();
+  });
+
+  it('skips retention queries and screenshot scans for unlimited history records', async () => {
+    const test = await fixture({ retention: null });
+    const prune = vi.spyOn(test.store, 'deleteOlderThanWithScreenshots');
+    const retained = vi.spyOn(test.store, 'listRetainedScreenshotFilenames');
+    const all = vi.spyOn(test.store, 'listScreenshotFilenames');
+
+    expect(
+      test.service.record({
+        kind: 'raw-completed',
+        dictationMode: 'quick',
+        processingMode: 'raw',
+        rawText: 'retained without cleanup scans',
+      }),
+    ).toBe(true);
+
+    expect(prune).not.toHaveBeenCalled();
+    expect(retained).not.toHaveBeenCalled();
+    expect(all).not.toHaveBeenCalled();
+    test.store.close();
+  });
+
   it('removes screenshot files on individual, bulk, and retention deletion', async () => {
     const test = await fixture({ retention: 7 });
     const day = 24 * 60 * 60 * 1_000;
@@ -373,7 +420,7 @@ describe('HistoryService', () => {
     test.send.mockImplementation(() => {
       throw new Error('renderer gone');
     });
-    vi.spyOn(test.store, 'listScreenshotFilenames').mockImplementationOnce(() => {
+    vi.spyOn(test.store, 'deleteOlderThanWithScreenshots').mockImplementationOnce(() => {
       throw new Error('cleanup unavailable');
     });
     expect(

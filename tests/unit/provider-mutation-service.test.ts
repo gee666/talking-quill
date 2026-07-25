@@ -298,6 +298,46 @@ describe('ProviderMutationService credential binding', () => {
     expect(test.records.size).toBe(0);
   });
 
+  it('activates valid epochs before one bulk startup credential reconciliation', async () => {
+    const calls: string[] = [];
+    const reconcileAll = vi.fn(() => {
+      calls.push('reconcile');
+      return Promise.resolve();
+    });
+    const mutations = new ProviderMutationService(
+      {
+        get: (providerId) => (providerId === 'generic-openai' ? endpointA : { providerId }),
+        credentialEpoch: () => 3,
+        save: () => Promise.resolve(structuredClone(DEFAULT_SETTINGS)),
+        advanceCredentialEpoch: () => Promise.resolve(structuredClone(DEFAULT_SETTINGS)),
+      },
+      {
+        set: vi.fn(),
+        status: vi.fn(),
+        retainOnly: vi.fn(),
+        purgeProvider: vi.fn(),
+        unconfiguredStatus: vi.fn(),
+        activateEpoch: (providerId, epoch) => calls.push(`activate:${providerId}:${String(epoch)}`),
+        reconcileAll,
+      },
+      {
+        credentialBinding: (config) => {
+          if (config.providerId !== 'generic-openai') throw new Error('incomplete draft');
+          return 'A';
+        },
+        credentialPolicy: () => 'required',
+      },
+    );
+
+    await mutations.reconcileAll();
+
+    expect(reconcileAll).toHaveBeenCalledOnce();
+    expect(reconcileAll).toHaveBeenCalledWith([
+      { providerId: 'generic-openai', endpointBinding: 'A', credentialEpoch: 3 },
+    ]);
+    expect(calls).toEqual(['activate:generic-openai:3', 'reconcile']);
+  });
+
   it('globally serializes provider config commits', async () => {
     const test = harness();
     const first = test.mutations.saveConfig(endpointB);

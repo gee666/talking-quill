@@ -13,6 +13,8 @@ const setEnabled = vi.fn<MainApi['app']['setEnabled']>();
 const getBootstrap = vi.fn<MainApi['app']['getBootstrap']>();
 const updateSettings = vi.fn<MainApi['settings']['update']>();
 const toggleMaximize = vi.fn<MainApi['windowControls']['toggleMaximize']>();
+const setWelcomeStep = vi.fn<MainApi['welcome']['setStep']>();
+const completeWelcome = vi.fn<MainApi['welcome']['complete']>();
 const startActivationTest = vi.fn<MainApi['activationTest']['start']>();
 const stopActivationTest = vi.fn<MainApi['activationTest']['stop']>();
 let activationTestListener: Parameters<MainApi['activationTest']['onChanged']>[0] | null = null;
@@ -34,22 +36,8 @@ const BINDING_TOKEN = '11111111-1111-4111-8111-111111111111';
 
 const api: MainApi = {
   welcome: {
-    setStep: (step) =>
-      Promise.resolve({
-        completedAt: null,
-        lastStep: step,
-        microphoneTested: false,
-        activationTested: false,
-        reopened: false,
-      }),
-    complete: () =>
-      Promise.resolve({
-        completedAt: 1,
-        lastStep: 6,
-        microphoneTested: true,
-        activationTested: true,
-        reopened: false,
-      }),
+    setStep: setWelcomeStep,
+    complete: completeWelcome,
   },
   info: {
     status: () =>
@@ -301,6 +289,13 @@ beforeEach(() => {
           patch.privacy?.diagnosticLoggingEnabled ??
           DEFAULT_SETTINGS.privacy.diagnosticLoggingEnabled,
       },
+      welcome: {
+        ...structuredClone(DEFAULT_SETTINGS.welcome),
+        completedAt: 1,
+        lastStep: 6,
+        microphoneTested: true,
+        activationTested: true,
+      },
     };
     return Promise.resolve(settings);
   });
@@ -328,6 +323,24 @@ beforeEach(() => {
   settingsListener = null;
   toggleMaximize.mockReset();
   toggleMaximize.mockResolvedValue(true);
+  setWelcomeStep.mockReset();
+  setWelcomeStep.mockImplementation((step) =>
+    Promise.resolve({
+      completedAt: null,
+      lastStep: step,
+      microphoneTested: false,
+      activationTested: false,
+      reopened: false,
+    }),
+  );
+  completeWelcome.mockReset();
+  completeWelcome.mockResolvedValue({
+    completedAt: 1,
+    lastStep: 6,
+    microphoneTested: true,
+    activationTested: true,
+    reopened: false,
+  });
   maximizeListener = null;
   Object.defineProperty(window, 'talkingQuill', { configurable: true, value: api });
 });
@@ -349,7 +362,14 @@ function renderShell(status: AppStatus = 'needs-setup', modelReady = status === 
         state: { enabled: true, status, modelReady, helper: readyHelper },
         settings: {
           ...structuredClone(DEFAULT_SETTINGS),
-          welcome: { completedAt: 1, lastStep: 6, microphoneTested: true, activationTested: true },
+          welcome: {
+            ...structuredClone(DEFAULT_SETTINGS.welcome),
+            completedAt: 1,
+            lastStep: 6,
+            microphoneTested: true,
+            activationTested: true,
+            revision: 4,
+          },
         },
       }}
     />,
@@ -357,6 +377,53 @@ function renderShell(status: AppStatus = 'needs-setup', modelReady = status === 
 }
 
 describe('main application shell', () => {
+  it('transitions from Welcome with the authoritative completion state', async () => {
+    const initialWelcome = {
+      ...structuredClone(DEFAULT_SETTINGS.welcome),
+      lastStep: 6 as const,
+    };
+    const completed = {
+      ...initialWelcome,
+      completedAt: 4_321,
+      revision: 9,
+      reopened: false,
+    };
+    completeWelcome.mockResolvedValueOnce(completed);
+    const user = userEvent.setup();
+    render(
+      <AppShell
+        bootstrap={{
+          appVersion: '1.2.3',
+          platform: 'win32',
+          state: { enabled: true, status: 'ready', modelReady: true, helper: readyHelper },
+          settings: { ...structuredClone(DEFAULT_SETTINGS), welcome: initialWelcome },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Start using Talking Quill' }));
+
+    expect(completeWelcome).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Talking Quill is ready' }),
+    ).toHaveFocus();
+  });
+
+  it('ignores stale Welcome snapshots and accepts a newer authoritative rollback', async () => {
+    renderShell('ready');
+    const stale = structuredClone(DEFAULT_SETTINGS);
+    stale.welcome.lastStep = 3;
+    stale.welcome.revision = 3;
+
+    act(() => settingsListener?.(stale));
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Talking Quill is ready' })).toBeVisible();
+    const rolledBack = structuredClone(stale);
+    rolledBack.welcome.revision = 5;
+    act(() => settingsListener?.(rolledBack));
+    expect(await screen.findByRole('heading', { name: 'Local model' })).toHaveFocus();
+  });
+
   it('offers only Echo, Settings, and Info with keyboard navigation and truthful content', async () => {
     const user = userEvent.setup();
     renderShell();
@@ -364,12 +431,12 @@ describe('main application shell', () => {
     const settingsButton = screen.getByRole('button', { name: 'Settings' });
     settingsButton.focus();
     await user.keyboard('{Enter}');
-    expect(screen.getByRole('heading', { name: 'General settings' })).toHaveFocus();
+    expect(await screen.findByRole('heading', { name: 'General settings' })).toHaveFocus();
     expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked();
     const infoButton = screen.getByRole('button', { name: 'Info' });
     infoButton.focus();
     await user.keyboard('{Enter}');
-    expect(screen.getByRole('heading', { name: 'About Talking Quill' })).toHaveFocus();
+    expect(await screen.findByRole('heading', { name: 'About Talking Quill' })).toHaveFocus();
     expect(screen.getByText(/no account required/i)).toBeVisible();
     const reopen = screen.getByRole('button', { name: 'Reopen Welcome' });
     await user.click(reopen);
@@ -429,7 +496,7 @@ describe('main application shell', () => {
     const user = userEvent.setup();
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(screen.getByRole('button', { name: 'Test activation shortcut' }));
+    await user.click(await screen.findByRole('button', { name: 'Test activation shortcut' }));
     expect(startActivationTest).toHaveBeenCalledOnce();
     expect(screen.getByText('Waiting for shortcut')).toBeVisible();
 
@@ -485,7 +552,7 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    const enabled = screen.getByRole('checkbox', { name: 'Enable Talking Quill' });
+    const enabled = await screen.findByRole('checkbox', { name: 'Enable Talking Quill' });
     await user.click(enabled);
     await waitFor(() => expect(enabled).toBeChecked());
     expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
@@ -498,6 +565,8 @@ describe('main application shell', () => {
     if (authoritativeGeneral === undefined) throw new Error('Default General profile is missing');
     authoritativeGeneral.activationKey = 'Q';
     authoritative.app.closeToTray = true;
+    authoritative.welcome.completedAt = 1;
+    authoritative.welcome.lastStep = 6;
     getBootstrap.mockResolvedValueOnce({
       appVersion: '1.2.3',
       platform: 'win32',
@@ -509,7 +578,7 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    await user.click(screen.getByRole('checkbox', { name: 'Close to tray' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'Close to tray' }));
 
     await waitFor(() =>
       expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked(),
@@ -525,13 +594,15 @@ describe('main application shell', () => {
     const user = userEvent.setup();
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Close to tray' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'Close to tray' }));
     await vi.waitFor(() => expect(getBootstrap).toHaveBeenCalledOnce());
 
     const newer = structuredClone(DEFAULT_SETTINGS);
     const newerGeneral = newer.dictationProfiles[0];
     if (newerGeneral === undefined) throw new Error('Default General profile is missing');
     newerGeneral.activationKey = 'X';
+    newer.welcome.completedAt = 1;
+    newer.welcome.lastStep = 6;
     act(() => settingsListener?.(newer));
     reload.resolve({
       appVersion: '1.2.3',
@@ -551,7 +622,7 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    const closeToTray = screen.getByRole('checkbox', { name: 'Close to tray' });
+    const closeToTray = await screen.findByRole('checkbox', { name: 'Close to tray' });
     await user.click(closeToTray);
     await waitFor(() => expect(closeToTray).toBeChecked());
     expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');

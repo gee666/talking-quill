@@ -139,6 +139,9 @@ describe('RecordingService ownership', () => {
     const starting = test.service.startTest(owner as unknown as Electron.WebContents);
     await vi.waitFor(() => expect(test.capture.activate).toHaveBeenCalledOnce());
     const captureId = test.capture.activate.mock.calls[0]?.[0] ?? '';
+    expect(test.capture.listDevices).not.toHaveBeenCalled();
+    expect(test.permission.allowsCheck(permissionRequest)).toBe(false);
+    expect(test.permission.allowsRequest(permissionRequest)).toBe(false);
     test.capture.frameListener?.({
       captureId,
       sequence: 0,
@@ -163,7 +166,29 @@ describe('RecordingService ownership', () => {
     ).toEqual([['recording:test-level', expect.objectContaining({ rms: 0.4 })]]);
     await test.service.shutdown();
   });
-  it('enumerates after acquisition and seals authorization before publishing active', async () => {
+  it('makes a microphone test active while authorized device enumeration is still pending', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const owner = new FakeOwner();
+    const enumeration = deferred<MicrophoneDevice[]>();
+    test.capture.listDevices.mockReturnValueOnce(enumeration.promise);
+
+    await expect(
+      test.service.startTest(owner as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'active' });
+    expect(test.capture.activate).toHaveBeenCalledOnce();
+    expect(test.permission.allowsCheck(permissionRequest)).toBe(true);
+    expect(test.permission.allowsRequest(permissionRequest)).toBe(false);
+
+    enumeration.resolve([{ deviceId: 'studio', label: 'Studio', isDefault: false }]);
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(false));
+    expect(test.events.send).toHaveBeenCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({ devices: [expect.objectContaining({ deviceId: 'studio' })] }),
+    );
+    await test.service.shutdown();
+  });
+
+  it('enumerates after acquisition and seals authorization after enumeration', async () => {
     const test = harness({ preferredMicrophoneId: 'studio' });
     const owner = new FakeOwner();
     await expect(
@@ -202,6 +227,29 @@ describe('RecordingService ownership', () => {
     expect(test.capture.reset).toHaveBeenCalledOnce();
     expect(test.captureWebContents.reload).toHaveBeenCalledOnce();
     expect(test.permission.allowsCheck(permissionRequest)).toBe(false);
+    await test.service.shutdown();
+  });
+
+  it('clears stop coalescing even when forced transport reset cleanup throws', async () => {
+    const test = harness();
+    const owner = new FakeOwner();
+    const state = await test.service.startTest(owner as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    test.capture.stop.mockRejectedValueOnce(new Error('capture renderer unresponsive'));
+    test.capture.reset.mockImplementationOnce(() => {
+      throw new Error('port already gone');
+    });
+    test.captureWebContents.reload.mockImplementationOnce(() => {
+      throw new Error('renderer already gone');
+    });
+
+    await expect(test.service.stopTest(owner.id)).resolves.toMatchObject({ status: 'unavailable' });
+    const replacement = { id: 8, isDestroyed: () => false, reload: vi.fn() };
+    test.service.attachCapture(replacement as unknown as Electron.WebContents);
+    await expect(
+      test.service.startTest(owner as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'active' });
+    expect(test.capture.start).toHaveBeenCalledTimes(2);
     await test.service.shutdown();
   });
 
@@ -335,6 +383,154 @@ describe('RecordingService ownership', () => {
     test.capture.listDevices.mockResolvedValueOnce([]);
 
     await expect(test.service.getDevices()).resolves.toMatchObject({ devices: [bluetooth] });
+    await test.service.shutdown();
+  });
+
+  it('suppresses unchanged device snapshots after the initial publication', async () => {
+    const test = harness();
+    await test.service.getDevices();
+    const initialEvents = test.events.send.mock.calls.filter(
+      ([channel]) => channel === 'recording:devices-changed',
+    ).length;
+    await test.service.getDevices();
+    expect(
+      test.events.send.mock.calls.filter(([channel]) => channel === 'recording:devices-changed'),
+    ).toHaveLength(initialEvents);
+    await test.service.shutdown();
+  });
+
+  it('makes dictation usable while authorized device enumeration is still pending', async () => {
+    const test = harness();
+    const enumeration = deferred<MicrophoneDevice[]>();
+    test.capture.listDevices.mockReturnValueOnce(enumeration.promise);
+    const onFrame = vi.fn();
+
+    const dictation = await test.service.startDictation({
+      onFrame,
+      onUnexpectedStop: vi.fn(),
+    });
+    expect(test.capture.activate).toHaveBeenCalledWith(dictation.captureId);
+    expect(test.permission.allowsCheck(permissionRequest)).toBe(true);
+    const samples = new Float32Array(320).fill(0.25);
+    test.capture.frameListener?.({
+      captureId: dictation.captureId,
+      sequence: 0,
+      samples,
+      rms: 0.25,
+    });
+    expect(onFrame).toHaveBeenCalledWith(samples, 0.25);
+
+    enumeration.resolve([{ deviceId: 'default', label: 'Default', isDefault: true }]);
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(false));
+    await test.service.shutdown();
+  });
+
+  it('ignores stale ancillary device results without sealing the current lease', async () => {
+    const test = harness();
+    const firstEnumeration = deferred<MicrophoneDevice[]>();
+    const secondEnumeration = deferred<MicrophoneDevice[]>();
+    test.capture.listDevices
+      .mockReturnValueOnce(firstEnumeration.promise)
+      .mockReturnValueOnce(secondEnumeration.promise);
+    const firstOnFrame = vi.fn();
+    const first = await test.service.startDictation({
+      onFrame: firstOnFrame,
+      onUnexpectedStop: vi.fn(),
+    });
+    await test.service.stopDictation(first.captureId);
+    const secondOnFrame = vi.fn();
+    const second = await test.service.startDictation({
+      onFrame: secondOnFrame,
+      onUnexpectedStop: vi.fn(),
+    });
+
+    test.capture.frameListener?.({
+      captureId: first.captureId,
+      sequence: 0,
+      samples: new Float32Array(320),
+      rms: 0.1,
+    });
+    expect(firstOnFrame).not.toHaveBeenCalled();
+    expect(secondOnFrame).not.toHaveBeenCalled();
+    test.capture.deviceListener?.([
+      { deviceId: 'stale-event', label: 'Stale event', isDefault: false },
+    ]);
+    expect(test.events.send).not.toHaveBeenCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({
+        devices: [expect.objectContaining({ deviceId: 'stale-event' })],
+      }),
+    );
+
+    firstEnumeration.resolve([
+      { deviceId: 'stale-device', label: 'Stale device', isDefault: false },
+    ]);
+    await firstEnumeration.promise;
+    await Promise.resolve();
+    expect(test.permission.allowsCheck(permissionRequest)).toBe(true);
+    expect(test.events.send).not.toHaveBeenCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({
+        devices: [expect.objectContaining({ deviceId: 'stale-device' })],
+      }),
+    );
+
+    secondEnumeration.resolve([
+      { deviceId: 'current-device', label: 'Current device', isDefault: false },
+    ]);
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(false));
+    expect(test.events.send).toHaveBeenCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({
+        devices: [expect.objectContaining({ deviceId: 'current-device' })],
+      }),
+    );
+    await test.service.stopDictation(second.captureId);
+    await test.service.shutdown();
+  });
+
+  it('seals ancillary enumeration authorization when enumeration fails', async () => {
+    const test = harness();
+    test.capture.listDevices.mockRejectedValueOnce(new Error('enumeration failed'));
+
+    await expect(
+      test.service.startTest(new FakeOwner() as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'active' });
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(false));
+    await test.service.shutdown();
+  });
+
+  it('routes final dictation PCM until stop acknowledgement and coalesces stop callers', async () => {
+    const test = harness();
+    const onFrame = vi.fn();
+    const dictation = await test.service.startDictation({
+      onFrame,
+      onUnexpectedStop: vi.fn(),
+    });
+    const stopped = deferred<undefined>();
+    test.capture.stop.mockReturnValueOnce(stopped.promise);
+
+    const firstStop = test.service.stopDictation(dictation.captureId);
+    const secondStop = test.service.stopDictation(dictation.captureId);
+    await vi.waitFor(() => expect(test.capture.stop).toHaveBeenCalledOnce());
+    const finalSamples = Float32Array.from([0.25, -0.25]);
+    test.capture.frameListener?.({
+      captureId: dictation.captureId,
+      sequence: 0,
+      samples: finalSamples,
+      rms: 0.25,
+    });
+    expect(onFrame).toHaveBeenCalledWith(finalSamples, 0.25);
+
+    stopped.resolve(undefined);
+    await Promise.all([firstStop, secondStop]);
+    test.capture.frameListener?.({
+      captureId: dictation.captureId,
+      sequence: 1,
+      samples: new Float32Array([0.5]),
+      rms: 0.5,
+    });
+    expect(onFrame).toHaveBeenCalledOnce();
     await test.service.shutdown();
   });
 

@@ -198,14 +198,25 @@ describe('native provider resilience contract', () => {
   it.each(cases.filter(({ id }) => id !== 'azure'))(
     '$id bounds malformed or endless pagination',
     async ({ id, config }) => {
-      const server = await startMockProviderServer((_request, response) =>
-        sendJson(response, paginatedModelList(id)),
+      const server = await startMockProviderServer((request, response) =>
+        sendJson(
+          response,
+          id === 'bedrock' && request.url.startsWith('/inference-profiles')
+            ? {
+                inferenceProfileSummaries: [{ inferenceProfileId: 'profile', status: 'ACTIVE' }],
+                nextToken: 'same-token',
+              }
+            : paginatedModelList(id),
+        ),
       );
       servers.push(server);
       await expect(
         serviceFor(id, server.origin).listModels(config, AbortSignal.timeout(5_000)),
       ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
-      expect(server.requests).toHaveLength(20);
+      // Bedrock fetches foundation metadata and inference profiles concurrently. The profile
+      // branch waits after its first page for foundation capabilities, then is cancelled when the
+      // foundation branch reaches the shared pagination bound.
+      expect(server.requests).toHaveLength(id === 'bedrock' ? 21 : 20);
     },
   );
 });

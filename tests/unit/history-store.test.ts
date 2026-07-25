@@ -82,6 +82,47 @@ describe('HistoryStore', () => {
     migrated.close();
   });
 
+  it('migrates legacy rows in batches larger than the startup batch size', async () => {
+    const directory = await createTestDirectory('history-legacy-batches');
+    directories.push(directory);
+    const path = join(directory, 'history.db');
+    const initial = new HistoryStore(path);
+    for (let index = 0; index < 300; index += 1) {
+      initial.create(historyInput(index, `legacy-${String(index)}`));
+    }
+    initial.close();
+    const legacy = new Database(path);
+    legacy.pragma('user_version = 1');
+    legacy.close();
+
+    const migrated = new HistoryStore(path);
+    migrated.close();
+    const inspected = new Database(path, { readonly: true });
+    expect(inspected.pragma('user_version', { simple: true })).toBe(2);
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM history').get()).toEqual({
+      count: 300,
+    });
+    inspected.close();
+  });
+
+  it('returns only expired screenshot candidates and queries retained references narrowly', async () => {
+    const directory = await createTestDirectory('history-retention-screenshots');
+    directories.push(directory);
+    const store = new HistoryStore(join(directory, 'history.db'));
+    store.create({ ...historyInput(1, 'old'), screenshotFilename: 'shared.jpg' });
+    store.create({ ...historyInput(3, 'retained'), screenshotFilename: 'shared.jpg' });
+    store.create({ ...historyInput(1, 'old-without-screenshot'), screenshotFilename: null });
+
+    expect(store.deleteOlderThanWithScreenshots(2)).toEqual({
+      deletedCount: 2,
+      screenshotFilenames: ['shared.jpg'],
+    });
+    expect([...store.listRetainedScreenshotFilenames(['shared.jpg', 'missing.jpg'])]).toEqual([
+      'shared.jpg',
+    ]);
+    store.close();
+  });
+
   it('updates only supplied fields, supports explicit null, and validates the full result', async () => {
     const directory = await createTestDirectory('history-update');
     directories.push(directory);

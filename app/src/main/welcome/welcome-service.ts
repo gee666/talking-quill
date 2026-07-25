@@ -12,6 +12,7 @@ import {
 } from '../../shared/schemas/dictation-profiles';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { SettingsStore } from '../persistence/settings-store';
+import type { SettingsPatch } from '../../shared/schemas/settings';
 
 const USABLE_RMS_THRESHOLD = 0.005;
 const MIN_OBSERVED_SAMPLES = 1_600;
@@ -41,6 +42,8 @@ export class WelcomeService {
   readonly #now: () => number;
   #operation: Promise<unknown> = Promise.resolve();
   #invalidationGeneration = 0;
+  #stepUpdateController: AbortController | null = null;
+  #completionUpdateController: AbortController | null = null;
 
   constructor(
     settings: SettingsStore,
@@ -57,94 +60,145 @@ export class WelcomeService {
   }
 
   async invalidateMicrophoneBinding(): Promise<void> {
-    this.#invalidationGeneration += 1;
-    await this.#serialize(async () => {
-      if (this.#settings.get().welcome.completedAt !== null) return;
-      await this.#settings.update({
-        welcome: {
-          microphoneTested: false,
-          microphoneEvidence: null,
-          completedAt: null,
-          lastStep: Math.min(this.#settings.get().welcome.lastStep, 2) as WelcomeStep,
-          revision: (this.#settings.get().welcome.revision ?? 0) + 1,
-        },
-      });
+    await this.#invalidate(2, {
+      microphoneTested: false,
+      microphoneEvidence: null,
     });
   }
 
   async invalidateModelSelection(): Promise<void> {
-    this.#invalidationGeneration += 1;
-    await this.#serialize(async () => {
-      if (this.#settings.get().welcome.completedAt !== null) return;
-      await this.#settings.update({
-        welcome: {
-          modelEvidence: null,
-          completedAt: null,
-          lastStep: Math.min(this.#settings.get().welcome.lastStep, 3) as WelcomeStep,
-          revision: (this.#settings.get().welcome.revision ?? 0) + 1,
-        },
-      });
-    });
+    await this.#invalidate(3, { modelEvidence: null });
   }
 
   async invalidateActivationBinding(): Promise<void> {
-    this.#invalidationGeneration += 1;
-    await this.#serialize(async () => {
-      if (this.#settings.get().welcome.completedAt !== null) return;
-      await this.#settings.update({
-        welcome: {
-          activationTested: false,
-          activationEvidence: null,
-          completedAt: null,
-          lastStep: Math.min(this.#settings.get().welcome.lastStep, 4) as WelcomeStep,
-          revision: (this.#settings.get().welcome.revision ?? 0) + 1,
-        },
-      });
+    await this.#invalidate(4, {
+      activationTested: false,
+      activationEvidence: null,
     });
   }
 
   setStep(step: WelcomeStep): Promise<WelcomeState> {
     return this.#serialize(async () => {
       const parsed = WelcomeStepSchema.parse(step);
-      const current = this.#settings.get().welcome.lastStep;
+      const currentWelcome = this.#settings.get().welcome;
+      const current = currentWelcome.lastStep;
+      if (parsed === current) return this.state();
       if (parsed > current + 1) throw prerequisiteError('Complete each setup step in order.');
-      if (parsed > current) await this.#assertLeaving(current);
-      await this.#settings.update({
-        welcome: {
-          lastStep: parsed,
-          revision: (this.#settings.get().welcome.revision ?? 0) + 1,
-        },
-      });
-      return this.state();
+
+      const revision = currentWelcome.revision ?? 0;
+      const invalidationGeneration = this.#invalidationGeneration;
+      const evidence = parsed > current ? await this.#evidenceForLeaving(current) : {};
+      if (
+        (this.#settings.get().welcome.revision ?? 0) !== revision ||
+        this.#invalidationGeneration !== invalidationGeneration
+      ) {
+        throw setupChangedError();
+      }
+
+      const updateController = new AbortController();
+      this.#stepUpdateController = updateController;
+      try {
+        try {
+          await this.#settings.update(
+            {
+              welcome: {
+                ...evidence,
+                lastStep: parsed,
+                revision: revision + 1,
+              },
+            },
+            updateController.signal,
+          );
+        } catch (cause: unknown) {
+          if (updateController.signal.aborted) throw setupChangedError();
+          throw cause;
+        }
+        if (this.#invalidationGeneration !== invalidationGeneration) {
+          throw setupChangedError();
+        }
+        return this.state();
+      } finally {
+        if (this.#stepUpdateController === updateController) {
+          this.#stepUpdateController = null;
+        }
+      }
     });
   }
 
   complete(): Promise<WelcomeState> {
     const invalidationGeneration = this.#invalidationGeneration;
     return this.#serialize(async () => {
-      const revision = this.#settings.get().welcome.revision ?? 0;
-      await this.#assertAll();
-      // Re-read immediately before committing. Any readiness/binding invalidation wins.
-      if (
-        (this.#settings.get().welcome.revision ?? 0) !== revision ||
-        this.#invalidationGeneration !== invalidationGeneration
-      ) {
-        throw prerequisiteError(
-          'Setup changed while it was being verified. Check the steps again.',
-        );
+      const currentWelcome = this.#settings.get().welcome;
+      if (currentWelcome.completedAt !== null) return this.state();
+      if (currentWelcome.lastStep !== 6) {
+        throw prerequisiteError('Complete every Welcome step before finishing setup.');
       }
-      await this.#settings.update({
-        welcome: {
-          lastStep: 6,
-          completedAt: Math.max(0, Math.floor(this.#now())),
-          revision: revision + 1,
-        },
-      });
-      return this.state();
+
+      const revision = currentWelcome.revision ?? 0;
+      const updateController = new AbortController();
+      this.#completionUpdateController = updateController;
+      try {
+        await this.#assertAll();
+        if (
+          (this.#settings.get().welcome.revision ?? 0) !== revision ||
+          this.#invalidationGeneration !== invalidationGeneration
+        ) {
+          throw setupChangedError();
+        }
+        try {
+          await this.#settings.update(
+            {
+              welcome: {
+                lastStep: 6,
+                completedAt: Math.max(0, Math.floor(this.#now())),
+                revision: revision + 1,
+              },
+            },
+            updateController.signal,
+          );
+        } catch (cause: unknown) {
+          if (updateController.signal.aborted) throw setupChangedError();
+          throw cause;
+        }
+        if (this.#invalidationGeneration !== invalidationGeneration) {
+          throw setupChangedError();
+        }
+        return this.state();
+      } finally {
+        if (this.#completionUpdateController === updateController) {
+          this.#completionUpdateController = null;
+        }
+      }
     });
   }
 
-  async #assertLeaving(step: WelcomeStep): Promise<void> {
+  async #invalidate(
+    lastValidStep: WelcomeStep,
+    patch: NonNullable<SettingsPatch['welcome']>,
+  ): Promise<void> {
+    this.#invalidationGeneration += 1;
+    const shouldInvalidate =
+      this.#settings.get().welcome.completedAt === null ||
+      this.#completionUpdateController !== null;
+    if (shouldInvalidate) {
+      this.#stepUpdateController?.abort();
+      this.#completionUpdateController?.abort();
+    }
+    await this.#serialize(async () => {
+      if (!shouldInvalidate) return;
+      const current = this.#settings.get().welcome;
+      await this.#settings.update({
+        welcome: {
+          ...patch,
+          completedAt: null,
+          lastStep: Math.min(current.lastStep, lastValidStep) as WelcomeStep,
+          revision: (current.revision ?? 0) + 1,
+        },
+      });
+    });
+  }
+
+  async #evidenceForLeaving(step: WelcomeStep): Promise<NonNullable<SettingsPatch['welcome']>> {
     if (step === 2) {
       const observation = this.#prerequisites.microphoneObservation?.() ?? null;
       if (
@@ -155,16 +209,14 @@ export class WelcomeService {
       ) {
         throw prerequisiteError('Speak during the microphone test before continuing.');
       }
-      await this.#settings.update({
-        welcome: {
-          microphoneTested: true,
-          microphoneEvidence: {
-            ...observation,
-            usableThreshold: USABLE_RMS_THRESHOLD,
-            observedAt: Math.max(0, Math.floor(this.#now())),
-          },
+      return {
+        microphoneTested: true,
+        microphoneEvidence: {
+          ...observation,
+          usableThreshold: USABLE_RMS_THRESHOLD,
+          observedAt: Math.max(0, Math.floor(this.#now())),
         },
-      });
+      };
     }
     if (step === 3) {
       if (!(await this.#prerequisites.modelReady())) {
@@ -175,16 +227,14 @@ export class WelcomeService {
       if (manifestRevision === undefined) {
         throw prerequisiteError('The selected model manifest could not be verified.');
       }
-      await this.#settings.update({
-        welcome: {
-          modelEvidence: {
-            modelId,
-            manifestRevision,
-            verified: true,
-            verifiedAt: Math.max(0, Math.floor(this.#now())),
-          },
+      return {
+        modelEvidence: {
+          modelId,
+          manifestRevision,
+          verified: true,
+          verifiedAt: Math.max(0, Math.floor(this.#now())),
         },
-      });
+      };
     }
     if (step === 4) {
       if (!this.#prerequisites.helperReady()) {
@@ -206,21 +256,20 @@ export class WelcomeService {
       if (testedProfile === undefined) {
         throw prerequisiteError('The tested activation profile has changed. Test it again.');
       }
-      await this.#settings.update({
-        welcome: {
-          activationTested: true,
-          activationEvidence: {
-            profileId: testedProfile.id,
-            activationKey: testedProfile.activationKey,
-            shift: testedProfile.shift,
-            enabled: true,
-            helperProtocol: HELPER_PROTOCOL_VERSION,
-            readinessGeneration: this.#prerequisites.helperReadinessGeneration?.() ?? 0,
-            observedAt: Math.max(0, Math.floor(this.#now())),
-          },
+      return {
+        activationTested: true,
+        activationEvidence: {
+          profileId: testedProfile.id,
+          activationKey: testedProfile.activationKey,
+          shift: testedProfile.shift,
+          enabled: true,
+          helperProtocol: HELPER_PROTOCOL_VERSION,
+          readinessGeneration: this.#prerequisites.helperReadinessGeneration?.() ?? 0,
+          observedAt: Math.max(0, Math.floor(this.#now())),
         },
-      });
+      };
     }
+    return {};
   }
 
   async #assertAll(): Promise<void> {
@@ -277,6 +326,10 @@ export class WelcomeService {
     );
     return result;
   }
+}
+
+function setupChangedError(): PublicAppError {
+  return prerequisiteError('Setup changed while it was being verified. Check the steps again.');
 }
 
 function prerequisiteError(message: string): PublicAppError {

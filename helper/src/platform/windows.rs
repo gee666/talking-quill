@@ -1376,20 +1376,47 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             WM_KEYUP | WM_SYSKEYUP => KeyPhase::Up,
             _ => return None,
         };
-        let key = map_virtual_key(native.vkCode);
         let injected = native.flags & LLKHF_INJECTED != 0 || native.dwExtraInfo == INJECTED_MARKER;
-        // Modifier events map to Other and always pass through. These sampled
-        // values never authorize a low-level-hook activation down; WM_HOTKEY
-        // separately validates Ctrl/AltGr/Windows-key exclusions.
-        let alt = native.flags & LLKHF_ALTDOWN != 0 || key_is_down(VK_MENU);
+        if injected {
+            return None;
+        }
+        let key = map_virtual_key(native.vkCode);
+        if key == PhysicalKey::Other {
+            if matches!(native.vkCode as u16, VK_SHIFT | VK_LSHIFT | VK_RSHIFT) {
+                let mut keyboard = match context.keyboard.try_lock() {
+                    Ok(keyboard) => keyboard,
+                    Err(_) => {
+                        context.state.hook_status.store(
+                            hook_status_to_u8(HookStatus::Unavailable),
+                            Ordering::Release,
+                        );
+                        context.terminal.trigger(TerminalReason::ReducerPoisoned);
+                        return None;
+                    }
+                };
+                keyboard.shift.observe(native.vkCode as u16, phase);
+            }
+            return None;
+        }
+
+        // Native modifier queries are only relevant to activation letters.
+        // Enter and Escape capture depends solely on the active session gate.
+        let (alt, disallowed_modifiers) = if matches!(key, PhysicalKey::Letter(_)) {
+            (
+                native.flags & LLKHF_ALTDOWN != 0 || key_is_down(VK_MENU),
+                activation_disallowed_modifiers(key_is_down),
+            )
+        } else {
+            (false, false)
+        };
         let mut input = KeyInput {
             key,
             phase,
             alt,
             shift: false,
-            disallowed_modifiers: activation_disallowed_modifiers(key_is_down),
+            disallowed_modifiers,
             repeat: false,
-            injected,
+            injected: false,
         };
 
         {
@@ -1404,18 +1431,14 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                     return None;
                 }
             };
-            if !injected {
-                keyboard.shift.observe(native.vkCode as u16, phase);
-                input.shift = keyboard.shift.is_down();
-                input.repeat = keyboard.physical.observe(key, phase);
-            }
+            input.shift = keyboard.shift.is_down();
+            input.repeat = keyboard.physical.observe(key, phase);
         }
 
         // Record only a fresh, exact registered chord. The low-level down is
         // deliberately passed: RegisterHotKey performs the OS suppression and
         // WM_HOTKEY remains the reducer's establishment point.
         if context.gate.is_open()
-            && !injected
             && phase == KeyPhase::Down
             && let PhysicalKey::Letter(letter) = key
         {
@@ -1444,8 +1467,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
         // An up may run before its posted WM_HOTKEY is dispatched. Drain first
         // so accepted downs are always reduced before their balancing ups.
         let mut candidate_up = CandidateUpAction::Pass;
-        if !injected
-            && phase == KeyPhase::Up
+        if phase == KeyPhase::Up
             && let PhysicalKey::Letter(letter) = key
         {
             drain_queued_hotkey_messages(context);

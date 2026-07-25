@@ -36,7 +36,7 @@ import {
 } from '../../shared/schemas/transcription';
 import type { EgressObserver } from '../security/egress-audit';
 import { ModelManagerError, WhisperClientError } from './errors';
-import { inspectFile, sameVerifiedIdentity, sha256File } from './model-integrity';
+import { inspectFile, sameVerifiedIdentity } from './model-integrity';
 import { ModelAccessCoordinator } from './model-access-coordinator';
 import { MODEL_MANIFEST } from './model-manifest';
 
@@ -106,7 +106,6 @@ export class ModelManager {
   #afterInstallValidation:
     ((modelId: WhisperModelId, signal: AbortSignal) => Promise<void>) | null = null;
   #active: ActiveDownload | null = null;
-  #mutationTail: Promise<void> = Promise.resolve();
   #shuttingDown = false;
 
   constructor(options: ModelManagerOptions) {
@@ -221,12 +220,12 @@ export class ModelManager {
     };
     if (signal?.aborted === true) onExternalAbort();
     else signal?.addEventListener('abort', onExternalAbort, { once: true });
-    const settled = this.#withModelMutation(modelId, () =>
-      this.#exclusive(() => this.#download(modelId, active)),
-    ).finally(() => {
-      signal?.removeEventListener('abort', onExternalAbort);
-      if (this.#active === active) this.#active = null;
-    });
+    const settled = this.#withModelMutation(modelId, () => this.#download(modelId, active)).finally(
+      () => {
+        signal?.removeEventListener('abort', onExternalAbort);
+        if (this.#active === active) this.#active = null;
+      },
+    );
     Object.defineProperty(active, 'settled', { value: settled });
     this.#active = active;
     return settled;
@@ -246,15 +245,13 @@ export class ModelManager {
       return this.status(modelId);
     }
     await this.#abortActive(modelId, 'cancelled');
-    await this.#withModelMutation(modelId, () =>
-      this.#exclusive(async () => {
-        await rm(this.#temporaryModelDirectory(this.#getModel(modelId)), {
-          recursive: true,
-          force: true,
-        });
-        this.#states.delete(modelId);
-      }),
-    );
+    await this.#withModelMutation(modelId, async () => {
+      await rm(this.#temporaryModelDirectory(this.#getModel(modelId)), {
+        recursive: true,
+        force: true,
+      });
+      this.#states.delete(modelId);
+    });
     return this.status(modelId);
   }
 
@@ -266,7 +263,9 @@ export class ModelManager {
   async delete(modelId: WhisperModelId): Promise<ModelStatus> {
     await this.#abortActive(modelId, 'cancelled');
     await this.#withModelMutation(modelId, () => this.#deleteFiles(modelId));
-    return this.status(modelId);
+    const status = await this.status(modelId);
+    this.#emit(this.#getModel(modelId), status.state, null, status.downloadedBytes);
+    return status;
   }
 
   async deleteIfIdle(modelId: WhisperModelId): Promise<ModelDeleteResult> {
@@ -287,7 +286,9 @@ export class ModelManager {
         lease.release();
       }
     }
-    return { outcome: 'deleted', status: await this.status(modelId) };
+    const status = await this.status(modelId);
+    this.#emit(model, status.state, null, status.downloadedBytes);
+    return { outcome: 'deleted', status };
   }
 
   async shutdown(): Promise<void> {
@@ -320,56 +321,88 @@ export class ModelManager {
       const stagedDirectory = this.#temporaryModelDirectory(model);
       await ensureSafeDirectory(this.#temporaryDirectory, stagedDirectory);
       const staged = await this.#inspectStagedModel(model, active.controller.signal, true);
-      const partialBytes = await this.#partialBytes(model);
-      const remaining = Math.max(0, model.totalBytes - staged.validBytes - partialBytes);
-      const headroom = Math.max(
-        MODEL_DOWNLOAD_MINIMUM_HEADROOM_BYTES,
-        Math.ceil(remaining * MODEL_DOWNLOAD_HEADROOM_RATIO),
-      );
-      if (
-        remaining > 0 &&
-        (await this.#availableBytes(this.#modelsDirectory)) < remaining + headroom
-      ) {
-        throw new ModelManagerError('DISK_SPACE', 'Not enough disk space to download this model.');
-      }
-
-      let completed = 0;
-      for (const file of model.files) {
-        active.controller.signal.throwIfAborted();
-        const stagedTarget = this.#stagedTargetPath(model, file);
-        if (
-          (
-            await this.#inspectFile(
-              stagedTarget,
-              file.size,
-              file.sha256,
-              true,
-              active.controller.signal,
-            )
-          ).valid
-        ) {
-          await rm(this.#partPath(model, file), { force: true });
-          completed += file.size;
-          this.#emit(model, 'downloading', file, completed, file.size);
-          continue;
-        }
-        await rm(stagedTarget, { force: true });
-        completed = await this.#downloadFile(model, file, completed, active);
-      }
-      active.state = 'verifying';
-      this.#emit(model, 'verifying', null, model.totalBytes);
-      const verified = await this.#inspectStagedModel(model, active.controller.signal, true);
-      if (!verified.valid) {
-        throw new ModelManagerError(
-          'CORRUPT',
-          'Downloaded staged model failed verification.',
-          true,
+      let verified = staged;
+      const completeStagingStillCurrent =
+        staged.valid &&
+        (await this.#identityStillCurrent(
+          model,
+          staged.identities,
+          stagedDirectory,
+          this.#temporaryDirectory,
+        ));
+      if (!completeStagingStillCurrent) {
+        const partialBytes = await this.#partialBytes(model);
+        const remaining = Math.max(0, model.totalBytes - staged.validBytes - partialBytes);
+        const headroom = Math.max(
+          MODEL_DOWNLOAD_MINIMUM_HEADROOM_BYTES,
+          Math.ceil(remaining * MODEL_DOWNLOAD_HEADROOM_RATIO),
         );
+        if (
+          remaining > 0 &&
+          (await this.#availableBytes(this.#modelsDirectory)) < remaining + headroom
+        ) {
+          throw new ModelManagerError(
+            'DISK_SPACE',
+            'Not enough disk space to download this model.',
+          );
+        }
+
+        let completed = 0;
+        for (const file of model.files) {
+          active.controller.signal.throwIfAborted();
+          const stagedTarget = this.#stagedTargetPath(model, file);
+          if (
+            (
+              await this.#inspectFile(
+                stagedTarget,
+                file.size,
+                file.sha256,
+                true,
+                active.controller.signal,
+              )
+            ).valid
+          ) {
+            await rm(this.#partPath(model, file), { force: true });
+            completed += file.size;
+            this.#emit(model, 'downloading', file, completed, file.size);
+            continue;
+          }
+          await rm(stagedTarget, { force: true });
+          completed = await this.#downloadFile(model, file, completed, active);
+        }
+        active.state = 'verifying';
+        this.#emit(model, 'verifying', null, model.totalBytes);
+        verified = await this.#inspectStagedModel(model, active.controller.signal, true);
+        if (!verified.valid) {
+          throw new ModelManagerError(
+            'CORRUPT',
+            'Downloaded staged model failed verification.',
+            true,
+          );
+        }
+      } else {
+        active.state = 'verifying';
+        this.#emit(model, 'verifying', null, model.totalBytes);
       }
+      await this.#prepareStagedPublication(model, verified.identities);
       active.controller.signal.throwIfAborted();
       active.state = 'installing';
       this.#emit(model, 'installing', null, model.totalBytes);
-      await publishRevisionDirectory(stagedDirectory, this.#modelDirectory(model), this.#rename);
+      const installedDirectory = this.#modelDirectory(model);
+      await publishRevisionDirectory(stagedDirectory, installedDirectory, this.#rename);
+      try {
+        await this.#assertOnlyManifestEntries(model, installedDirectory);
+      } catch (error: unknown) {
+        await rm(installedDirectory, { recursive: true, force: true });
+        throw error;
+      }
+      if (!(await this.#identityStillCurrent(model, verified.identities))) {
+        throw new ModelManagerError(
+          'CORRUPT',
+          'Published model identity changed during installation.',
+          true,
+        );
+      }
       await this.#afterInstallValidation?.(model.id, active.controller.signal);
       active.controller.signal.throwIfAborted();
       await this.#commitVerification(model, verified.identities);
@@ -422,16 +455,25 @@ export class ModelManager {
     const part = this.#partPath(model, file);
     await ensureSafeDirectory(this.#temporaryDirectory, dirname(part));
     let offset = await safeRegularFileSize(part);
+    let verifiedPartIdentity: Omit<VerifiedModelFileIdentity, 'path'> | null = null;
     if (offset > file.size) {
       await rm(part, { force: true });
       offset = 0;
     }
-    if (
-      offset === file.size &&
-      (await sha256File(part, active.controller.signal)) !== file.sha256
-    ) {
-      await rm(part, { force: true });
-      offset = 0;
+    if (offset === file.size) {
+      const inspection = await this.#inspectFile(
+        part,
+        file.size,
+        file.sha256,
+        true,
+        active.controller.signal,
+      );
+      if (inspection.valid && inspection.identity !== null) {
+        verifiedPartIdentity = inspection.identity;
+      } else {
+        await rm(part, { force: true });
+        offset = 0;
+      }
     }
     if (offset < file.size) {
       const headers = {
@@ -443,11 +485,13 @@ export class ModelManager {
       if (offset > 0 && response.status === 416 && validUnsatisfiedRange(response, file.size)) {
         await cancelResponseBody(response);
         const currentSize = await safeRegularFileSize(part);
-        if (
-          currentSize === file.size &&
-          (await sha256File(part, active.controller.signal)) === file.sha256
-        ) {
+        const inspection =
+          currentSize === file.size
+            ? await this.#inspectFile(part, file.size, file.sha256, true, active.controller.signal)
+            : null;
+        if (inspection?.valid === true && inspection.identity !== null) {
           offset = file.size;
+          verifiedPartIdentity = inspection.identity;
           completedByConcurrentWriter = true;
         } else {
           throw new ModelManagerError(
@@ -505,9 +549,23 @@ export class ModelManager {
         }
       }
     }
-    if ((await sha256File(part, active.controller.signal)) !== file.sha256) {
+    if (verifiedPartIdentity === null) {
+      const inspection = await this.#inspectFile(
+        part,
+        file.size,
+        file.sha256,
+        true,
+        active.controller.signal,
+      );
+      if (!inspection.valid || inspection.identity === null) {
+        await rm(part, { force: true });
+        throw new ModelManagerError('CORRUPT', `Checksum failed for ${file.path}.`, true);
+      }
+      verifiedPartIdentity = inspection.identity;
+    }
+    if (!(await verifiedIdentityStillCurrent(part, verifiedPartIdentity))) {
       await rm(part, { force: true });
-      throw new ModelManagerError('CORRUPT', `Checksum failed for ${file.path}.`, true);
+      throw new ModelManagerError('CORRUPT', `Verified file changed for ${file.path}.`, true);
     }
     const target = this.#stagedTargetPath(model, file);
     await ensureSafeDirectory(this.#temporaryDirectory, dirname(target));
@@ -886,7 +944,9 @@ export class ModelManager {
       const value: unknown = JSON.parse(text);
       if (typeof value !== 'object' || value === null) return { present: true, identity: null };
       const record = value as Readonly<Record<string, unknown>>;
-      const files = VerifiedModelFileIdentitySchema.array().length(7).safeParse(record.files);
+      const files = VerifiedModelFileIdentitySchema.array()
+        .length(model.files.length)
+        .safeParse(record.files);
       if (
         record.schemaVersion !== 1 ||
         record.revision !== model.revision ||
@@ -905,17 +965,20 @@ export class ModelManager {
   async #identityStillCurrent(
     model: ModelManifestEntry,
     identities: readonly VerifiedModelFileIdentity[],
+    directory = this.#modelDirectory(model),
+    managedRoot = this.#modelsDirectory,
   ): Promise<boolean> {
     for (const expected of identities) {
       const file = model.files.find((candidate) => candidate.path === expected.path);
       if (file?.size !== expected.size) return false;
+      const target = join(directory, ...file.path.split('/'));
       try {
-        await ensureSafeDirectory(this.#modelsDirectory, dirname(this.#targetPath(model, file)));
+        await assertSafeExistingDirectoryChain(managedRoot, dirname(target));
       } catch {
         return false;
       }
       try {
-        const metadata = await lstat(this.#targetPath(model, file));
+        const metadata = await lstat(target);
         if (
           !metadata.isFile() ||
           metadata.isSymbolicLink() ||
@@ -930,15 +993,78 @@ export class ModelManager {
     return true;
   }
 
-  #deleteFiles(modelId: WhisperModelId): Promise<void> {
-    return this.#exclusive(async () => {
-      const model = this.#getModel(modelId);
-      await Promise.all([
-        rm(this.#modelDirectory(model), { recursive: true, force: true }),
-        rm(this.#temporaryModelDirectory(model), { recursive: true, force: true }),
-      ]);
-      this.#states.delete(modelId);
-    });
+  async #prepareStagedPublication(
+    model: ModelManifestEntry,
+    identities: readonly VerifiedModelFileIdentity[],
+  ): Promise<void> {
+    await Promise.all(model.files.map((file) => rm(this.#partPath(model, file), { force: true })));
+    await this.#assertOnlyManifestEntries(model);
+    if (
+      !(await this.#identityStillCurrent(
+        model,
+        identities,
+        this.#temporaryModelDirectory(model),
+        this.#temporaryDirectory,
+      ))
+    ) {
+      throw new ModelManagerError('CORRUPT', 'Verified staging changed before publication.', true);
+    }
+  }
+
+  async #assertOnlyManifestEntries(
+    model: ModelManifestEntry,
+    rootDirectory = this.#temporaryModelDirectory(model),
+  ): Promise<void> {
+    const expectedFiles = new Set(model.files.map((file) => file.path));
+    const expectedDirectories = new Set<string>();
+    for (const file of model.files) {
+      const segments = file.path.split('/');
+      for (let index = 1; index < segments.length; index += 1) {
+        expectedDirectories.add(segments.slice(0, index).join('/'));
+      }
+    }
+
+    const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const relativePath =
+          relativeDirectory === '' ? entry.name : `${relativeDirectory}/${entry.name}`;
+        if (expectedFiles.has(relativePath)) {
+          if (!entry.isFile() || entry.isSymbolicLink()) {
+            throw new ModelManagerError(
+              'CORRUPT',
+              'Model staging contains an invalid manifest entry.',
+              true,
+            );
+          }
+          continue;
+        }
+        if (
+          expectedDirectories.has(relativePath) &&
+          entry.isDirectory() &&
+          !entry.isSymbolicLink()
+        ) {
+          await visit(join(directory, entry.name), relativePath);
+          continue;
+        }
+        throw new ModelManagerError(
+          'CORRUPT',
+          `Model staging contains unexpected entry: ${relativePath}.`,
+          true,
+        );
+      }
+    };
+
+    await visit(rootDirectory, '');
+  }
+
+  async #deleteFiles(modelId: WhisperModelId): Promise<void> {
+    const model = this.#getModel(modelId);
+    await Promise.all([
+      rm(this.#modelDirectory(model), { recursive: true, force: true }),
+      rm(this.#temporaryModelDirectory(model), { recursive: true, force: true }),
+    ]);
+    this.#states.delete(modelId);
   }
 
   async #abortActive(modelId: WhisperModelId, intent: DownloadIntent): Promise<void> {
@@ -975,26 +1101,20 @@ export class ModelManager {
     return recovery;
   }
 
-  #recoverModelArtifacts(model: ModelManifestEntry): Promise<void> {
-    return this.#exclusive(async () => {
-      const target = this.#modelDirectory(model);
-      await ensureSafeDirectory(this.#modelsDirectory, dirname(target));
-      await recoverRevisionDirectory(target);
-      await ensureSafeDirectory(
-        this.#temporaryDirectory,
-        dirname(this.#temporaryModelDirectory(model)),
-      );
-    });
+  async #recoverModelArtifacts(model: ModelManifestEntry): Promise<void> {
+    const target = this.#modelDirectory(model);
+    await ensureSafeDirectory(this.#modelsDirectory, dirname(target));
+    await recoverRevisionDirectory(target);
+    await ensureSafeDirectory(
+      this.#temporaryDirectory,
+      dirname(this.#temporaryModelDirectory(model)),
+    );
   }
 
   #getModel(modelId: WhisperModelId): ModelManifestEntry {
     const model = this.#manifest.models.find((candidate) => candidate.id === modelId);
     if (model === undefined) throw new Error(`Unsupported Whisper model: ${modelId}`);
     return model;
-  }
-
-  #targetPath(model: ModelManifestEntry, file: ModelManifestFile): string {
-    return join(this.#modelDirectory(model), ...file.path.split('/'));
   }
 
   #stagedTargetPath(model: ModelManifestEntry, file: ModelManifestFile): string {
@@ -1033,23 +1153,6 @@ export class ModelManager {
       },
     });
     for (const listener of this.#listeners) listener(event);
-  }
-
-  async #exclusive<Value>(operation: () => Promise<Value>): Promise<Value> {
-    const previous = this.#mutationTail;
-    let release: () => void = () => undefined;
-    const current = new Promise<void>((resolveRelease) => {
-      release = resolveRelease;
-    });
-    const queued = previous.then(() => current);
-    this.#mutationTail = queued;
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#mutationTail === queued) this.#mutationTail = Promise.resolve();
-    }
   }
 }
 
@@ -1133,6 +1236,20 @@ async function safeRegularFileSize(path: string): Promise<number> {
   } catch (error: unknown) {
     if (hasCode(error, 'ENOENT')) return 0;
     throw error;
+  }
+}
+
+async function verifiedIdentityStillCurrent(
+  path: string,
+  expected: Omit<VerifiedModelFileIdentity, 'path'>,
+): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    return (
+      metadata.isFile() && !metadata.isSymbolicLink() && sameVerifiedIdentity(expected, metadata)
+    );
+  } catch {
+    return false;
   }
 }
 

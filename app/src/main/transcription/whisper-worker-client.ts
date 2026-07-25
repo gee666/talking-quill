@@ -2,7 +2,7 @@ import { utilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { kill as forceKillProcess } from 'node:process';
 import { join } from 'node:path';
-import { WHISPER_PROTOCOL_VERSION } from '../../shared/constants/whisper';
+import { WHISPER_MAX_SAMPLES, WHISPER_PROTOCOL_VERSION } from '../../shared/constants/whisper';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import {
   TranscriptionOptionsSchema,
@@ -25,6 +25,7 @@ const HEALTH_TIMEOUT_MS = 5_000;
 const MODEL_CHECK_TIMEOUT_MS = 120_000;
 const STABILITY_RESET_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 1_000;
+const SESSION_CANCEL_TIMEOUT_MS = 1_000;
 const FORCE_KILL_AFTER_MS = 1_500;
 const FORCE_KILL_RETRY_MS = 1_500;
 
@@ -116,6 +117,7 @@ export class WhisperWorkerClient {
     signal: AbortSignal,
   ): Promise<TranscriptionResult> {
     const validated = TranscriptionOptionsSchema.parse(options);
+    const buffer = copyPcm(pcm);
     const use = await this.#acquireReadyModel(validated.modelId, signal);
     try {
       const result = await this.#request(
@@ -123,7 +125,7 @@ export class WhisperWorkerClient {
           version: WHISPER_PROTOCOL_VERSION,
           requestId,
           type: 'transcribe',
-          pcm: copyPcm(pcm),
+          pcm: buffer,
           options: validated,
         }),
         signal,
@@ -158,6 +160,12 @@ export class WhisperWorkerClient {
       assertAcknowledged(opened, 'session-open');
       const sessionGeneration = this.#generation;
       let closed = false;
+      let activePushes = 0;
+      let totalSamples = 0;
+      let pushTail = Promise.resolve();
+      let pushFailed = false;
+      let firstPushError: unknown;
+      let failureCancellation: Promise<void> | null = null;
       const releaseUse = once(() => use.release());
       this.#registerSessionLease(sessionGeneration, releaseUse);
       const closeSession = () => {
@@ -166,32 +174,103 @@ export class WhisperWorkerClient {
         this.#unregisterSessionLease(sessionGeneration, releaseUse);
         return true;
       };
+      const cancelWorkerSession = async () => {
+        if (this.#generation !== sessionGeneration || this.#process === null) return;
+        const timeoutController = new AbortController();
+        const timeout = setTimeout(
+          () => timeoutController.abort('session cancellation timeout'),
+          SESSION_CANCEL_TIMEOUT_MS,
+        );
+        timeout.unref();
+        try {
+          const cancelled = await this.#request(
+            (requestId) => ({
+              version: WHISPER_PROTOCOL_VERSION,
+              requestId,
+              type: 'session-cancel',
+              sessionId,
+            }),
+            timeoutController.signal,
+            false,
+            sessionGeneration,
+          );
+          assertAcknowledged(cancelled, 'session-cancel');
+        } catch {
+          await this.#beginTermination(
+            sessionGeneration,
+            'cancel',
+            new WhisperClientError('CANCELLED', 'Streaming transcription was cancelled.'),
+            false,
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
+      };
+      const latchPushFailure = (error: unknown) => {
+        if (pushFailed) return;
+        pushFailed = true;
+        firstPushError = error;
+        closeSession();
+        failureCancellation = cancelWorkerSession().finally(releaseUse);
+      };
+      const throwIfPushFailed = () => {
+        if (pushFailed) throw firstPushError;
+      };
       return {
         id: sessionId,
         push: async (pcm, pushSignal) => {
+          throwIfPushFailed();
           if (closed) throw new WhisperClientError('CANCELLED', 'Streaming session is closed.');
           if (this.#generation !== sessionGeneration || this.#process === null) {
             closeSession();
             releaseUse();
             throw new WhisperClientError('WORKER_CRASHED', 'Streaming worker generation changed.');
           }
-          const pushed = await this.#request(
-            (requestId) => ({
-              version: WHISPER_PROTOCOL_VERSION,
-              requestId,
-              type: 'session-push',
-              sessionId,
-              pcm: copyPcm(pcm),
-            }),
-            pushSignal,
-          );
-          assertAcknowledged(pushed, 'session-push');
+          if (totalSamples + pcm.length > WHISPER_MAX_SAMPLES) {
+            throw new WhisperClientError('INVALID_AUDIO', 'PCM exceeds maximum session duration.');
+          }
+          totalSamples += pcm.length;
+          activePushes += 1;
+          const buffer = copyPcm(pcm);
+          const pushing = pushTail.then(async () => {
+            throwIfPushFailed();
+            try {
+              const pushed = await this.#request(
+                (requestId) => ({
+                  version: WHISPER_PROTOCOL_VERSION,
+                  requestId,
+                  type: 'session-push',
+                  sessionId,
+                  pcm: buffer,
+                }),
+                pushSignal,
+                false,
+                sessionGeneration,
+              );
+              assertAcknowledged(pushed, 'session-push');
+            } catch (error: unknown) {
+              latchPushFailure(error);
+              throw firstPushError;
+            }
+          });
+          pushTail = pushing.catch(() => undefined);
+          try {
+            await pushing;
+          } catch (error: unknown) {
+            totalSamples -= pcm.length;
+            throw error;
+          } finally {
+            activePushes -= 1;
+          }
         },
         finish: async (finishSignal) => {
+          throwIfPushFailed();
           if (!closeSession()) {
             throw new WhisperClientError('CANCELLED', 'Streaming session is closed.');
           }
           try {
+            await pushTail;
+            throwIfPushFailed();
             if (this.#generation !== sessionGeneration || this.#process === null) {
               throw new WhisperClientError(
                 'WORKER_CRASHED',
@@ -206,6 +285,8 @@ export class WhisperWorkerClient {
                 sessionId,
               }),
               finishSignal,
+              false,
+              sessionGeneration,
             );
             if (result.type !== 'transcription') {
               throw new WhisperClientError('PROTOCOL_ERROR', 'Worker returned the wrong response.');
@@ -216,14 +297,22 @@ export class WhisperWorkerClient {
           }
         },
         cancel: async () => {
+          if (failureCancellation !== null) {
+            await failureCancellation;
+            return;
+          }
           if (!closeSession()) return;
           try {
-            await this.#beginTermination(
-              sessionGeneration,
-              'cancel',
-              new WhisperClientError('CANCELLED', 'Streaming transcription was cancelled.'),
-              false,
-            );
+            if (activePushes > 0) {
+              await this.#beginTermination(
+                sessionGeneration,
+                'cancel',
+                new WhisperClientError('CANCELLED', 'Streaming transcription was cancelled.'),
+                false,
+              );
+              return;
+            }
+            await cancelWorkerSession();
           } finally {
             releaseUse();
           }
@@ -364,6 +453,7 @@ export class WhisperWorkerClient {
     create: (requestId: string) => WhisperWorkerRequest,
     signal?: AbortSignal,
     allowClosing = false,
+    expectedGeneration?: number,
   ): Promise<WhisperWorkerResult> {
     await this.#waitForTermination();
     if (this.#closing && !allowClosing) {
@@ -371,6 +461,12 @@ export class WhisperWorkerClient {
     }
     if (signal?.aborted === true) {
       throw new WhisperClientError('CANCELLED', 'Transcription was cancelled.');
+    }
+    if (
+      expectedGeneration !== undefined &&
+      (this.#generation !== expectedGeneration || this.#process === null)
+    ) {
+      throw new WhisperClientError('WORKER_CRASHED', 'Streaming worker generation changed.');
     }
     let process: WorkerProcess;
     try {

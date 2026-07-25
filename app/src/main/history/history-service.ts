@@ -81,9 +81,9 @@ export class HistoryService {
   }
 
   pruneAtStartup(): HistoryRetentionResult {
-    const deletedCount = this.#pruneExpired();
+    const retention = this.#pruneExpired();
     return {
-      deletedCount,
+      deletedCount: retention.deletedCount,
       screenshotCleanup: cleanupStatus(this.#scavengeOrphanedScreenshots()),
     };
   }
@@ -94,20 +94,33 @@ export class HistoryService {
   ): Promise<HistoryRetentionResult> {
     if (!Number.isSafeInteger(batchSize) || batchSize < 1)
       throw new Error('History cleanup batch size is invalid');
-    const deletedCount = this.#pruneExpired();
+    const retention = this.#pruneExpired();
+    // Logical retention is authoritative, but filesystem enumeration is ancillary. Always yield
+    // once before potentially walking a large screenshot directory after the renderer appears.
+    await new Promise<void>((resolveWait) => setImmediate(resolveWait));
+    if (isAborted(signal)) {
+      return { deletedCount: retention.deletedCount, screenshotCleanup: 'pending' };
+    }
     const cleanup = this.#scavengeCandidates();
     for (let index = 0; index < cleanup.entries.length; index += batchSize) {
-      if (signal?.aborted === true) break;
+      if (isAborted(signal)) {
+        cleanup.tally.unattested = true;
+        break;
+      }
       for (const entry of cleanup.entries.slice(index, index + batchSize)) {
-        recordCleanup(cleanup.tally, this.#removeScreenshot(entry.name));
+        recordCleanup(cleanup.tally, this.#removeScavengedEntry(entry.name));
       }
       await new Promise<void>((resolveWait) => setImmediate(resolveWait));
     }
-    return { deletedCount, screenshotCleanup: cleanupStatus(cleanup.tally) };
+    return {
+      deletedCount: retention.deletedCount,
+      screenshotCleanup: cleanupStatus(cleanup.tally),
+    };
   }
 
   record(outcome: SessionHistoryRecord): boolean {
-    if (!this.#settings.get().privacy.historyEnabled) return false;
+    const privacy = this.#settings.get().privacy;
+    if (!privacy.historyEnabled) return false;
     const mapped = mapSessionHistoryOutcome({ ...outcome, createdAt: this.#now() });
     const filename = mapped.screenshotFilename;
     if (filename === null) {
@@ -123,9 +136,8 @@ export class HistoryService {
     // The row is authoritative from this point. Retention cleanup and renderer notification are
     // ancillary and must not cause the controller to disown a successfully committed row.
     try {
-      const before = this.#store.listScreenshotFilenames();
-      this.#pruneExpired();
-      this.#removeUnreferencedScreenshots(before);
+      const retention = this.#pruneExpired(privacy.historyRetentionDays);
+      this.#removeUnreferencedScreenshots(retention.screenshotFilenames);
     } catch {
       // Startup pruning/scavenging retries ancillary cleanup.
     }
@@ -193,16 +205,21 @@ export class HistoryService {
     return { copied: true };
   }
 
-  #pruneExpired(): number {
-    const days = this.#settings.get().privacy.historyRetentionDays;
-    return days === null ? 0 : this.#store.deleteOlderThan(this.#now() - days * DAY_MS);
+  #pruneExpired(retentionDays = this.#settings.get().privacy.historyRetentionDays): {
+    readonly deletedCount: number;
+    readonly screenshotFilenames: readonly string[];
+  } {
+    return retentionDays === null
+      ? { deletedCount: 0, screenshotFilenames: [] }
+      : this.#store.deleteOlderThanWithScreenshots(this.#now() - retentionDays * DAY_MS);
   }
 
   #removeUnreferencedScreenshots(candidates: readonly string[]): CleanupTally {
     const tally = mutableCleanup();
     if (candidates.length === 0) return tally;
-    const retained = new Set(this.#store.listScreenshotFilenames());
-    for (const filename of new Set(candidates)) {
+    const unique = [...new Set(candidates)];
+    const retained = this.#store.listRetainedScreenshotFilenames(unique);
+    for (const filename of unique) {
       if (!retained.has(filename)) recordCleanup(tally, this.#removeScreenshot(filename));
     }
     return tally;
@@ -211,7 +228,7 @@ export class HistoryService {
   #scavengeOrphanedScreenshots(): CleanupTally {
     const cleanup = this.#scavengeCandidates();
     for (const entry of cleanup.entries) {
-      recordCleanup(cleanup.tally, this.#removeScreenshot(entry.name));
+      recordCleanup(cleanup.tally, this.#removeScavengedEntry(entry.name));
     }
     return cleanup.tally;
   }
@@ -247,6 +264,17 @@ export class HistoryService {
     } catch {
       // The database deletion is authoritative. File cleanup is retried by app-owned screenshot
       // scavenging at the next startup or Delete All operation.
+      return false;
+    }
+  }
+
+  #removeScavengedEntry(filename: string): boolean {
+    try {
+      // Every orphan is already an enumerated directory entry. Removing only that entry avoids
+      // duplicate work and synthetic "*.thumb.thumb.jpg" probes for thumbnail entries.
+      this.#files.remove(join(this.#screenshotsDirectory, filename));
+      return true;
+    } catch {
       return false;
     }
   }
@@ -294,6 +322,10 @@ function cleanupStatus(tally: CleanupTally): HistoryCleanupStatus {
   const failed = tally.attempted - tally.succeeded;
   if (!tally.unattested && failed === 0) return 'complete';
   return tally.succeeded > 0 ? 'partial' : 'pending';
+}
+
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 function readVerifiedJpegThumbnail(

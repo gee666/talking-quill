@@ -235,6 +235,92 @@ describe('CredentialVault', () => {
     expect(() => vault.status('openai')).toThrow(VaultUnavailableError);
   });
 
+  it('does not quarantine a valid vault when reconciliation persistence fails', async () => {
+    const path = await vaultPath();
+    const source = JSON.stringify({
+      schemaVersion: 1,
+      records: {
+        valid: {
+          encrypted: Buffer.from('valid-ciphertext').toString('base64'),
+          updatedAt: 1,
+        },
+        legacy: {
+          encrypted: Buffer.from('legacy-ciphertext').toString('base64'),
+          updatedAt: 2,
+        },
+      },
+    });
+    await writeFile(path, source, 'utf8');
+    const vault = new CredentialVault(
+      path,
+      {
+        isEncryptionAvailable: () => true,
+        encryptString: (plainText) => Buffer.from(plainText),
+        decryptString: (encrypted) =>
+          encrypted.toString() === 'valid-ciphertext' ? 'valid-secret' : '',
+      },
+      { writeJson: () => Promise.reject(new Error('disk full')) },
+    );
+
+    await expect(vault.initialize()).rejects.toThrow('disk full');
+
+    expect(await readFile(path, 'utf8')).toBe(source);
+    expect((await readdir(dirname(path))).some((name) => name.endsWith('.invalid'))).toBe(false);
+  });
+
+  it('reconciles multiple provider prefixes with one atomic vault rewrite', async () => {
+    const writes: unknown[] = [];
+    const vault = new CredentialVault(await vaultPath(), new FakeSafeStorage(), {
+      writeJson: (_path, value) => {
+        writes.push(value);
+        return Promise.resolve();
+      },
+    });
+    await vault.initialize();
+    await vault.set('p.openai.old', 'openai-old-secret');
+    await vault.set('p.openai.current', 'openai-current-secret');
+    await vault.set('p.anthropic.old', 'anthropic-old-secret');
+    await vault.set('provider.openai.credential', 'legacy-openai-secret');
+    await vault.set('provider.openai.credential.archive', 'separate-archive-secret');
+    writes.length = 0;
+
+    await vault.reconcileRecords({
+      prefixes: ['p.openai.', 'p.anthropic.'],
+      exactIds: ['provider.openai.credential'],
+      retainedIds: ['p.openai.current'],
+    });
+
+    expect(writes).toHaveLength(1);
+    expect(vault.status('p.openai.current').configured).toBe(true);
+    expect(vault.status('p.openai.old').configured).toBe(false);
+    expect(vault.status('p.anthropic.old').configured).toBe(false);
+    expect(vault.status('provider.openai.credential').configured).toBe(false);
+    expect(vault.status('provider.openai.credential.archive').configured).toBe(true);
+  });
+
+  it('enforces record capacity for prefix replacement without corrupting the next startup', async () => {
+    const path = await vaultPath();
+    const encrypted = Buffer.from('encrypted:dmFsaWQtc2VjcmV0').toString('base64');
+    const records = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [
+        `credential-${String(index).padStart(2, '0')}`,
+        { encrypted, updatedAt: 1 },
+      ]),
+    );
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, records }), 'utf8');
+    const vault = new CredentialVault(path, new FakeSafeStorage());
+    await vault.initialize();
+
+    await expect(
+      vault.replaceByPrefixes(['unmatched.'], 'additional', 'additional-secret'),
+    ).rejects.toBeInstanceOf(VaultUnavailableError);
+
+    const restarted = new CredentialVault(path, new FakeSafeStorage());
+    await restarted.initialize();
+    expect(restarted.status('credential-00').configured).toBe(true);
+    expect(restarted.status('additional').configured).toBe(false);
+  });
+
   it('preserves malformed vault data and remains faulted', async () => {
     const path = await vaultPath();
     await writeFile(path, '{broken', 'utf8');

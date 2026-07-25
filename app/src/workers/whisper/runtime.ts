@@ -26,6 +26,12 @@ export type WhisperPipelineFactory = (
   cacheDirectory: string,
 ) => Promise<WhisperPipeline>;
 
+export type WhisperModelVerifier = (
+  modelId: WhisperModelId,
+  revision: string,
+  cacheDirectory: string,
+) => Promise<void>;
+
 interface LoadedPipeline {
   readonly modelId: WhisperModelId;
   readonly value: WhisperPipeline;
@@ -46,6 +52,7 @@ interface StreamingState {
   totalSamples: number;
   processedWindows: number;
   pipelineMetadata: PipelineReuseMetadata | null;
+  windowScratch: Float32Array | null;
 }
 
 interface TimestampedChunk {
@@ -57,10 +64,12 @@ export class WhisperRuntime {
   readonly #cacheDirectory: string;
   readonly #revisions: Readonly<Record<WhisperModelId, string>>;
   readonly #factory: WhisperPipelineFactory;
+  readonly #verify: WhisperModelVerifier;
   readonly #sessions = new Map<string, StreamingState>();
   readonly #idleWaiters = new Set<() => void>();
   readonly #idleUnloadMs: number;
   #pipeline: Promise<LoadedPipeline> | null = null;
+  #disposal: Promise<void> | null = null;
   #idleTimer: ReturnType<typeof setTimeout> | null = null;
   #busy = 0;
   #pipelineLoadCount = 0;
@@ -70,16 +79,22 @@ export class WhisperRuntime {
     readonly cacheDirectory: string;
     readonly revisions: Readonly<Record<WhisperModelId, string>>;
     readonly factory: WhisperPipelineFactory;
+    readonly verify?: WhisperModelVerifier;
     readonly idleUnloadMs?: number;
   }) {
     this.#cacheDirectory = options.cacheDirectory;
     this.#revisions = options.revisions;
     this.#factory = options.factory;
+    this.#verify = options.verify ?? (() => Promise.resolve());
     this.#idleUnloadMs = options.idleUnloadMs ?? WHISPER_IDLE_UNLOAD_MS;
   }
 
   async checkModel(modelId: WhisperModelId): Promise<void> {
-    await this.#withPipeline(modelId, () => Promise.resolve());
+    await this.#withPipeline(modelId, (_pipeline, reused) =>
+      reused
+        ? this.#verify(modelId, this.#revisions[modelId], this.#cacheDirectory)
+        : Promise.resolve(),
+    );
   }
 
   async transcribe(pcm: Float32Array, options: TranscriptionOptions): Promise<TranscriptionResult> {
@@ -106,21 +121,32 @@ export class WhisperRuntime {
       totalSamples: 0,
       processedWindows: 0,
       pipelineMetadata: null,
+      windowScratch: null,
     });
   }
 
-  async pushSession(sessionId: string, pcm: Float32Array): Promise<void> {
+  pushSession(sessionId: string, pcm: Float32Array): Promise<void> {
+    return this.#pushSession(sessionId, pcm, false);
+  }
+
+  pushOwnedSession(sessionId: string, pcm: Float32Array): Promise<void> {
+    return this.#pushSession(sessionId, pcm, true);
+  }
+
+  async #pushSession(sessionId: string, pcm: Float32Array, takeOwnership: boolean): Promise<void> {
     validatePcm(pcm, WHISPER_MAX_PUSH_SAMPLES);
     const state = this.#getSession(sessionId);
     if (state.totalSamples + pcm.length > WHISPER_MAX_SAMPLES) {
       throw new Error('PCM exceeds maximum session duration.');
     }
     state.totalSamples += pcm.length;
-    state.audio.append(pcm);
+    state.audio.append(pcm, takeOwnership);
     const windowSamples = WHISPER_SAMPLE_RATE * WHISPER_CHUNK_SECONDS;
     const hopSamples = WHISPER_SAMPLE_RATE * WHISPER_HOP_SECONDS;
     while (state.audio.length >= windowSamples) {
-      const window = state.audio.peek(windowSamples);
+      const window = state.windowScratch ?? new Float32Array(windowSamples);
+      state.windowScratch = window;
+      state.audio.copyTo(window);
       const call = await this.#withPipeline(state.options.modelId, (pipeline) =>
         pipeline(window, streamingArguments(state.options)),
       );
@@ -170,22 +196,32 @@ export class WhisperRuntime {
   }
 
   async unload(modelId?: WhisperModelId): Promise<void> {
-    if (this.#busy > 0) await new Promise<void>((resolve) => this.#idleWaiters.add(resolve));
-    const loaded = this.#pipeline;
-    if (loaded === null) return;
-    const resolved = await loaded.catch(() => null);
-    if (resolved === null) {
+    for (;;) {
+      if (this.#busy > 0) {
+        await new Promise<void>((resolve) => this.#idleWaiters.add(resolve));
+        continue;
+      }
+      const loaded = this.#pipeline;
+      if (loaded === null) {
+        if (this.#disposal !== null) await this.#disposal;
+        return;
+      }
+      const resolved = await loaded.catch(() => null);
+      if (this.#busy > 0 || this.#pipeline !== loaded) continue;
+      if (resolved === null) {
+        this.#pipeline = null;
+        return;
+      }
+      if (modelId !== undefined && resolved.modelId !== modelId) {
+        this.#armIdleUnload();
+        return;
+      }
+      if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
+      this.#idleTimer = null;
       this.#pipeline = null;
+      await this.#disposePipeline(resolved.value);
       return;
     }
-    if (modelId !== undefined && resolved.modelId !== modelId) {
-      this.#armIdleUnload();
-      return;
-    }
-    if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
-    this.#idleTimer = null;
-    this.#pipeline = null;
-    await resolved.value.dispose?.();
   }
 
   async memoryPressure(): Promise<void> {
@@ -203,7 +239,7 @@ export class WhisperRuntime {
 
   async #withPipeline<Result>(
     modelId: WhisperModelId,
-    operation: (pipeline: WhisperPipeline) => Promise<Result>,
+    operation: (pipeline: WhisperPipeline, reused: boolean) => Promise<Result>,
   ): Promise<PipelineCall<Result>> {
     this.#busy += 1;
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
@@ -211,7 +247,7 @@ export class WhisperRuntime {
     try {
       const loaded = await this.#load(modelId);
       return {
-        value: await operation(loaded.pipeline.value),
+        value: await operation(loaded.pipeline.value, loaded.reused),
         metadata: {
           loadCount: loaded.pipeline.loadCount,
           reused: loaded.reused,
@@ -225,7 +261,7 @@ export class WhisperRuntime {
         this.#idleWaiters.clear();
         if (this.#memoryPressurePending) {
           this.#memoryPressurePending = false;
-          void this.unload();
+          void this.unload().catch(() => undefined);
         } else {
           this.#armIdleUnload();
         }
@@ -236,15 +272,19 @@ export class WhisperRuntime {
   async #load(
     modelId: WhisperModelId,
   ): Promise<{ readonly pipeline: LoadedPipeline; readonly reused: boolean }> {
-    const current = this.#pipeline === null ? null : await this.#pipeline.catch(() => null);
+    if (this.#disposal !== null) await this.#disposal;
+    const currentPromise = this.#pipeline;
+    const current = currentPromise === null ? null : await currentPromise.catch(() => null);
     if (current?.modelId === modelId) return { pipeline: current, reused: true };
     if (current !== null) {
-      this.#pipeline = null;
-      await current.value.dispose?.();
+      if (this.#pipeline === currentPromise) this.#pipeline = null;
+      await this.#disposePipeline(current.value);
     }
+    const revision = this.#revisions[modelId];
     const loadStartedAt = performance.now();
-    const loading = this.#factory(modelId, this.#revisions[modelId], this.#cacheDirectory).then(
-      (value) => {
+    const loading = this.#verify(modelId, revision, this.#cacheDirectory)
+      .then(() => this.#factory(modelId, revision, this.#cacheDirectory))
+      .then((value) => {
         this.#pipelineLoadCount += 1;
         return {
           modelId,
@@ -252,8 +292,7 @@ export class WhisperRuntime {
           loadCount: this.#pipelineLoadCount,
           loadDurationMs: performance.now() - loadStartedAt,
         };
-      },
-    );
+      });
     this.#pipeline = loading;
     try {
       return { pipeline: await loading, reused: false };
@@ -263,10 +302,26 @@ export class WhisperRuntime {
     }
   }
 
+  async #disposePipeline(pipeline: WhisperPipeline): Promise<void> {
+    if (this.#disposal !== null) await this.#disposal;
+    const disposal = Promise.resolve()
+      .then(() => pipeline.dispose?.())
+      .then(() => undefined);
+    this.#disposal = disposal;
+    try {
+      await disposal;
+    } finally {
+      if (this.#disposal === disposal) this.#disposal = null;
+    }
+  }
+
   #armIdleUnload(): void {
     if (this.#busy > 0 || this.#pipeline === null) return;
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
-    this.#idleTimer = setTimeout(() => void this.unload(), this.#idleUnloadMs);
+    this.#idleTimer = setTimeout(
+      () => void this.unload().catch(() => undefined),
+      this.#idleUnloadMs,
+    );
     this.#idleTimer.unref();
   }
 
@@ -295,7 +350,8 @@ export function selectCentralTranscript(
 }
 
 class PcmQueue {
-  readonly #chunks: Float32Array[] = [];
+  readonly #chunks: (Float32Array | null)[] = [];
+  #headChunk = 0;
   #headOffset = 0;
   #length = 0;
 
@@ -303,53 +359,57 @@ class PcmQueue {
     return this.#length;
   }
 
-  append(pcm: Float32Array): void {
-    const copy = new Float32Array(pcm.length);
-    copy.set(pcm);
-    this.#chunks.push(copy);
-    this.#length += copy.length;
+  append(pcm: Float32Array, takeOwnership: boolean): void {
+    const chunk = takeOwnership ? pcm : pcm.slice();
+    this.#chunks.push(chunk);
+    this.#length += chunk.length;
   }
 
-  peek(samples: number): Float32Array {
-    if (samples > this.#length) throw new Error('PCM queue underflow.');
-    const output = new Float32Array(samples);
+  copyTo(output: Float32Array): void {
+    if (output.length > this.#length) throw new Error('PCM queue underflow.');
     let outputOffset = 0;
-    let chunkIndex = 0;
+    let chunkIndex = this.#headChunk;
     let sourceOffset = this.#headOffset;
-    while (outputOffset < samples) {
+    while (outputOffset < output.length) {
       const chunk = this.#chunks[chunkIndex];
-      if (chunk === undefined) throw new Error('PCM queue is inconsistent.');
-      const count = Math.min(chunk.length - sourceOffset, samples - outputOffset);
+      if (chunk === undefined || chunk === null) throw new Error('PCM queue is inconsistent.');
+      const count = Math.min(chunk.length - sourceOffset, output.length - outputOffset);
       output.set(chunk.subarray(sourceOffset, sourceOffset + count), outputOffset);
       outputOffset += count;
       chunkIndex += 1;
       sourceOffset = 0;
     }
-    return output;
   }
 
   discard(samples: number): void {
     if (samples > this.#length) throw new Error('PCM queue underflow.');
     let remaining = samples;
     while (remaining > 0) {
-      const head = this.#chunks[0];
-      if (head === undefined) throw new Error('PCM queue is inconsistent.');
+      const head = this.#chunks[this.#headChunk];
+      if (head === undefined || head === null) throw new Error('PCM queue is inconsistent.');
       const available = head.length - this.#headOffset;
       if (remaining < available) {
         this.#headOffset += remaining;
         remaining = 0;
       } else {
         remaining -= available;
-        this.#chunks.shift();
+        this.#chunks[this.#headChunk] = null;
+        this.#headChunk += 1;
         this.#headOffset = 0;
       }
     }
     this.#length -= samples;
+    if (this.#headChunk >= 1_024 && this.#headChunk * 2 >= this.#chunks.length) {
+      this.#chunks.splice(0, this.#headChunk);
+      this.#headChunk = 0;
+    }
   }
 
   takeAll(): Float32Array {
-    const output = this.peek(this.#length);
+    const output = new Float32Array(this.#length);
+    this.copyTo(output);
     this.#chunks.length = 0;
+    this.#headChunk = 0;
     this.#headOffset = 0;
     this.#length = 0;
     return output;

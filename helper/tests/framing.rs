@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read};
 
-use talking_quill_helper::framing::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
 use proptest::prelude::*;
+use talking_quill_helper::framing::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
 
 struct ChunkedReader {
     inner: Cursor<Vec<u8>>,

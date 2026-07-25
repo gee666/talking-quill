@@ -1,15 +1,19 @@
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- the constrained setup region must receive PageDown/End keyboard focus */
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AppState } from '../../../shared/schemas/app-state';
 import { GENERAL_PROFILE_ID } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
-import type { WelcomeStep } from '../../../shared/schemas/welcome';
+import type { WelcomeState, WelcomeStep } from '../../../shared/schemas/welcome';
 import { Button, Card, Status } from '../../design';
-import { SmartProcessingSection } from '../SmartProcessingSection';
 import { GeneralSection } from '../settings/GeneralSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { ModelSetup } from '../setup/ModelSetup';
 import { GeneralShortcutSetup } from './GeneralShortcutSetup';
+
+const SmartProcessingSection = lazy(async () => {
+  const module = await import('../SmartProcessingSection');
+  return { default: module.SmartProcessingSection };
+});
 
 const STEP_NAMES = [
   'Welcome',
@@ -34,15 +38,28 @@ export function WelcomeWizard({
   readonly platform: string;
   readonly reopened: boolean;
   readonly onSettingsSaved: (settings: Settings) => void;
-  readonly onComplete: () => void;
+  readonly onComplete: (state: WelcomeState) => void;
   readonly onClose: () => void;
 }) {
-  const [step, setStep] = useState<WelcomeStep>(settings.welcome.lastStep);
+  const authoritativeRevision = settings.welcome.revision ?? 0;
+  const [optimisticStep, setOptimisticStep] = useState(() => ({
+    step: settings.welcome.lastStep,
+    source: settings.welcome,
+  }));
+  const step =
+    optimisticStep.source === settings.welcome
+      ? optimisticStep.step
+      : settings.welcome.lastStep;
   const [saving, setSaving] = useState(false);
+  const [showSmartProcessing, setShowSmartProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contentScrollable, setContentScrollable] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const content = useRef<HTMLElement>(null);
+  const latestWelcomeRevision = useRef(settings.welcome.revision ?? 0);
+  useLayoutEffect(() => {
+    latestWelcomeRevision.current = authoritativeRevision;
+  }, [authoritativeRevision]);
   useEffect(() => heading.current?.focus(), [step]);
   useEffect(() => {
     const element = content.current;
@@ -60,8 +77,10 @@ export function WelcomeWizard({
     setSaving(true);
     setError(null);
     try {
-      await window.talkingQuill.welcome.setStep(next);
-      setStep(next);
+      const saved = await window.talkingQuill.welcome.setStep(next);
+      if ((saved.revision ?? 0) >= latestWelcomeRevision.current) {
+        setOptimisticStep({ step: saved.lastStep, source: settings.welcome });
+      }
     } catch (cause: unknown) {
       setError(actionableMessage(cause, 'Welcome progress could not be saved.'));
     } finally {
@@ -76,8 +95,10 @@ export function WelcomeWizard({
         processingMode: 'raw',
       });
       onSettingsSaved(saved);
-      await window.talkingQuill.welcome.setStep(6);
-      setStep(6);
+      const welcome = await window.talkingQuill.welcome.setStep(6);
+      if ((welcome.revision ?? 0) >= latestWelcomeRevision.current) {
+        setOptimisticStep({ step: welcome.lastStep, source: settings.welcome });
+      }
     } catch (cause: unknown) {
       setError(actionableMessage(cause, 'Raw processing preference could not be saved.'));
     } finally {
@@ -88,8 +109,8 @@ export function WelcomeWizard({
     setSaving(true);
     setError(null);
     try {
-      await window.talkingQuill.welcome.complete();
-      onComplete();
+      const welcome = await window.talkingQuill.welcome.complete();
+      onComplete(welcome);
     } catch (cause: unknown) {
       setError(actionableMessage(cause, 'Setup completion could not be saved.'));
     } finally {
@@ -135,6 +156,8 @@ export function WelcomeWizard({
         ref={content}
         className="welcome__content"
         aria-label={`${STEP_NAMES[step - 1] ?? 'Welcome'} setup controls`}
+        aria-busy={saving}
+        inert={saving ? true : undefined}
         tabIndex={contentScrollable ? 0 : undefined}
       >
         {renderStep(step)}
@@ -265,7 +288,15 @@ export function WelcomeWizard({
               option; cloud providers may charge your account.
             </p>
           </Card>
-          <SmartProcessingSection settings={settings} onSettingsSaved={onSettingsSaved} />
+          {showSmartProcessing ? (
+            <Suspense fallback={<p aria-live="polite">Loading Smart processing…</p>}>
+              <SmartProcessingSection settings={settings} onSettingsSaved={onSettingsSaved} />
+            </Suspense>
+          ) : (
+            <Button variant="secondary" onClick={() => setShowSmartProcessing(true)}>
+              Configure Smart processing
+            </Button>
+          )}
         </>
       );
     return (

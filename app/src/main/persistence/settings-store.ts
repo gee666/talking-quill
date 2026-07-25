@@ -16,7 +16,7 @@ export type SettingsListener = (settings: Settings) => void;
 export interface SettingsStoreIo {
   readonly read: (path: string) => Promise<string | null>;
   readonly write: (path: string, value: unknown) => Promise<void>;
-  readonly preserveInvalid: (path: string) => Promise<string | null>;
+  readonly preserveInvalid: (path: string, previouslyReadSource?: string) => Promise<string | null>;
 }
 
 export interface SettingsStoreOptions {
@@ -91,7 +91,7 @@ export class SettingsStore {
     try {
       parsed = JSON.parse(source) as unknown;
     } catch {
-      await this.#recoverCorruptSettings('parse');
+      await this.#recoverCorruptSettings('parse', source);
       return;
     }
 
@@ -108,13 +108,13 @@ export class SettingsStore {
     try {
       migrated = this.#migrate(parsed);
     } catch {
-      await this.#recoverCorruptSettings('migration');
+      await this.#recoverCorruptSettings('migration', source);
       return;
     }
 
     const validated = SettingsSchema.safeParse(migrated);
     if (!validated.success) {
-      await this.#recoverCorruptSettings('schema');
+      await this.#recoverCorruptSettings('schema', source);
       return;
     }
 
@@ -216,10 +216,13 @@ export class SettingsStore {
     }
   }
 
-  async #recoverCorruptSettings(reason: 'parse' | 'schema' | 'migration'): Promise<void> {
+  async #recoverCorruptSettings(
+    reason: 'parse' | 'schema' | 'migration',
+    source: string,
+  ): Promise<void> {
     let preservedAt: string | null;
     try {
-      preservedAt = await this.#io.preserveInvalid(this.#path);
+      preservedAt = await this.#io.preserveInvalid(this.#path, source);
     } catch (error: unknown) {
       this.#setIoDiagnostic('preserve-invalid');
       throw error;

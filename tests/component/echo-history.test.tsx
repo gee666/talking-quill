@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
@@ -26,6 +26,7 @@ const list = vi.fn<MainApi['history']['list']>();
 const remove = vi.fn<MainApi['history']['delete']>();
 const removeAll = vi.fn<MainApi['history']['deleteAll']>();
 const copy = vi.fn<MainApi['history']['copy']>();
+const thumbnail = vi.fn<MainApi['history']['thumbnail']>();
 let changed: ((revision: number) => void) | null = null;
 
 beforeEach(() => {
@@ -41,6 +42,8 @@ beforeEach(() => {
   });
   copy.mockReset();
   copy.mockResolvedValue();
+  thumbnail.mockReset();
+  thumbnail.mockResolvedValue(null);
   changed = null;
   Object.defineProperty(window, 'talkingQuill', {
     configurable: true,
@@ -50,6 +53,7 @@ beforeEach(() => {
         delete: remove,
         deleteAll: removeAll,
         copy,
+        thumbnail,
         onChanged: (listener: (revision: number) => void) => {
           changed = listener;
           return () => {
@@ -60,9 +64,65 @@ beforeEach(() => {
     },
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe('Past Echoes', () => {
+  it('subscribes immediately and defers its initial IPC until the renderer is idle', async () => {
+    let runIdle!: IdleRequestCallback;
+    const requestIdleCallback = vi.fn((callback: IdleRequestCallback) => {
+      runIdle = callback;
+      return 1;
+    });
+    vi.stubGlobal('requestIdleCallback', requestIdleCallback);
+    vi.stubGlobal('cancelIdleCallback', vi.fn());
+
+    render(<PastEchoes />);
+
+    expect(changed).not.toBeNull();
+    expect(list).not.toHaveBeenCalled();
+    act(() => runIdle({ didTimeout: false, timeRemaining: () => 50 }));
+    expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it('loads screenshot thumbnails only when their entries approach the viewport', async () => {
+    let intersectionCallback!: IntersectionObserverCallback;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          intersectionCallback = callback;
+        }
+        observe = observe;
+        disconnect = disconnect;
+      },
+    );
+    list.mockResolvedValueOnce({
+      items: [{ ...item, hasScreenshot: true }],
+      nextCursor: null,
+      revision: 0,
+    });
+
+    render(<PastEchoes />);
+    expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
+    expect(observe).toHaveBeenCalledOnce();
+    expect(thumbnail).not.toHaveBeenCalled();
+
+    act(() => {
+      const entries = [{ isIntersecting: true } as IntersectionObserverEntry];
+      intersectionCallback(entries, {} as IntersectionObserver);
+      intersectionCallback(entries, {} as IntersectionObserver);
+    });
+    await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(item.id));
+    expect(thumbnail).toHaveBeenCalledOnce();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
   it('loads, copies, deletes, and refreshes after a change event', async () => {
     const user = userEvent.setup();
     render(<PastEchoes />);

@@ -352,6 +352,41 @@ describe('native cloud provider contracts', () => {
     );
   });
 
+  it('cancels Bedrock sibling catalog pagination before returning a branch failure', async () => {
+    let foundationRequests = 0;
+    const server = await startMockProviderServer((request, response) => {
+      if (request.url.startsWith('/foundation-models')) {
+        foundationRequests += 1;
+        setTimeout(() => {
+          if (!response.destroyed) {
+            sendJson(response, { modelSummaries: [], nextToken: 'another-page' });
+          }
+        }, 100);
+        return;
+      }
+      if (request.url.startsWith('/inference-profiles')) {
+        sendJson(response, { inferenceProfileSummaries: 'malformed' });
+        return;
+      }
+      sendJson(response, {}, 404);
+    });
+    servers.push(server);
+    const service = new ProviderService(
+      new ProviderRegistry({ endpointOverrides: { bedrock: server.origin } }),
+      { getCredential: () => awsCredential },
+    );
+
+    await expect(
+      service.listModels(
+        { providerId: 'bedrock', region: 'us-west-2', modelId: 'profile-id' },
+        AbortSignal.timeout(2_000),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(foundationRequests).toBe(1);
+  });
+
   it('rejects malformed Bedrock inference-profile ARN aliases', async () => {
     const server = await startMockProviderServer((request, response) => {
       if (request.url.startsWith('/foundation-models')) {

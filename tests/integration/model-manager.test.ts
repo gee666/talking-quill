@@ -14,6 +14,7 @@ import {
 } from '../../app/src/main/transcription/errors';
 import {
   ModelManifestSchema,
+  type ModelManifest,
   type ModelManifestFile,
 } from '../../app/src/shared/schemas/model-manifest';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
@@ -341,6 +342,206 @@ describe('ModelManager', () => {
     );
   });
 
+  it('hashes a complete staged revision only once per file before atomic publication', async () => {
+    const root = await createTestDirectory('model-complete-staging');
+    roots.push(root);
+    const directory = join(root, 'models', '.tmp', 'Xenova', 'whisper-small', smallRevision);
+    for (const file of files) {
+      const target = join(directory, ...file.path.split('/'));
+      await mkdir(join(target, '..'), { recursive: true });
+      await writeFile(target, bodies.get(file.path) ?? new Uint8Array());
+    }
+    const first = files[0];
+    if (first === undefined) throw new Error('Fixture missing');
+    await writeFile(join(directory, `${first.path}.part`), 'stale partial data');
+    let hashes = 0;
+    let fetched = false;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      availableBytes: () => Promise.resolve(0),
+      fetch: () => {
+        fetched = true;
+        return Promise.reject(new Error('complete staging must not fetch'));
+      },
+      inspectFile: async (...arguments_) => {
+        const result = await inspectFile(...arguments_);
+        if (arguments_[3] && result.exists) hashes += 1;
+        return result;
+      },
+    });
+
+    await expect(manager.download('Xenova/whisper-small')).resolves.toMatchObject({
+      state: 'ready',
+    });
+    expect(hashes).toBe(files.length);
+    expect(fetched).toBe(false);
+    await expect(
+      readFile(
+        join(root, 'models', 'Xenova', 'whisper-small', smallRevision, `${first.path}.part`),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects unexpected entries in complete staging before directory publication', async () => {
+    const root = await createTestDirectory('model-complete-staging-extra');
+    roots.push(root);
+    const stagedDirectory = join(root, 'models', '.tmp', 'Xenova', 'whisper-small', smallRevision);
+    for (const file of files) {
+      const target = join(stagedDirectory, ...file.path.split('/'));
+      await mkdir(join(target, '..'), { recursive: true });
+      await writeFile(target, bodies.get(file.path) ?? new Uint8Array());
+    }
+    await writeFile(join(stagedDirectory, 'unexpected.bin'), 'not in the manifest');
+    let fetched = false;
+    let published = false;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      availableBytes: () => Promise.resolve(0),
+      fetch: () => {
+        fetched = true;
+        return Promise.reject(new Error('complete staging must not fetch'));
+      },
+      rename: async (source, destination) => {
+        if (source === stagedDirectory) published = true;
+        await rename(source, destination);
+      },
+    });
+
+    await expect(manager.download('Xenova/whisper-small')).rejects.toMatchObject({
+      code: 'CORRUPT',
+      repairable: true,
+    });
+    expect(fetched).toBe(false);
+    expect(published).toBe(false);
+    await expect(
+      readFile(join(root, 'models', 'Xenova', 'whisper-small', smallRevision, 'unexpected.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fails closed when an unexpected staged entry appears during directory publication', async () => {
+    const root = await createTestDirectory('model-publication-extra-race');
+    roots.push(root);
+    const stagedDirectory = join(root, 'models', '.tmp', 'Xenova', 'whisper-small', smallRevision);
+    for (const file of files) {
+      const target = join(stagedDirectory, ...file.path.split('/'));
+      await mkdir(join(target, '..'), { recursive: true });
+      await writeFile(target, bodies.get(file.path) ?? new Uint8Array());
+    }
+    let fetched = false;
+    let changed = false;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      availableBytes: () => Promise.resolve(0),
+      fetch: () => {
+        fetched = true;
+        return Promise.reject(new Error('complete staging must not fetch'));
+      },
+      rename: async (source, destination) => {
+        if (source === stagedDirectory && !changed) {
+          changed = true;
+          await writeFile(join(stagedDirectory, 'unexpected.bin'), 'publication race');
+        }
+        await rename(source, destination);
+      },
+    });
+
+    await expect(manager.download('Xenova/whisper-small')).rejects.toMatchObject({
+      code: 'CORRUPT',
+      repairable: true,
+    });
+    expect(fetched).toBe(false);
+    await expect(
+      readFile(join(root, 'models', 'Xenova', 'whisper-small', smallRevision, 'unexpected.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fails closed when verified staging changes during directory publication', async () => {
+    const root = await createTestDirectory('model-publication-identity-race');
+    roots.push(root);
+    const stagedDirectory = join(root, 'models', '.tmp', 'Xenova', 'whisper-small', smallRevision);
+    for (const file of files) {
+      const target = join(stagedDirectory, ...file.path.split('/'));
+      await mkdir(join(target, '..'), { recursive: true });
+      await writeFile(target, bodies.get(file.path) ?? new Uint8Array());
+    }
+    const first = files[0];
+    if (first === undefined) throw new Error('Fixture missing');
+    let changed = false;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      availableBytes: () => Promise.resolve(0),
+      rename: async (source, destination) => {
+        if (source === stagedDirectory && !changed) {
+          changed = true;
+          await writeFile(join(stagedDirectory, first.path), Buffer.alloc(first.size, 0x78));
+        }
+        await rename(source, destination);
+      },
+    });
+
+    await expect(manager.download('Xenova/whisper-small')).rejects.toMatchObject({
+      code: 'CORRUPT',
+    });
+    await expect(
+      readFile(
+        join(
+          root,
+          'models',
+          'Xenova',
+          'whisper-small',
+          smallRevision,
+          '.talking-quill-complete.json',
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('accepts completion markers for manifests with a non-production file count', async () => {
+    const root = await createTestDirectory('model-dynamic-marker-count');
+    roots.push(root);
+    const file = files[0];
+    if (file === undefined) throw new Error('Fixture missing');
+    const singleFileManifest = {
+      schemaVersion: 1,
+      transformersVersion: '3.8.1',
+      models: [
+        {
+          id: 'Xenova/whisper-small',
+          revision: smallRevision,
+          dtype: 'q8',
+          totalBytes: file.size,
+          files: [file],
+        },
+      ],
+    } as unknown as ModelManifest;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest: singleFileManifest,
+      availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
+      fetch: () => Promise.resolve(new Response(bodies.get(file.path))),
+      validateRequestUrl: () => true,
+    });
+    await manager.download('Xenova/whisper-small');
+
+    const restarted = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest: singleFileManifest,
+    });
+    await expect(restarted.status('Xenova/whisper-small')).resolves.toMatchObject({
+      state: 'ready',
+    });
+  });
+
   it('keeps normal readiness metadata-only while explicit verification checksums', async () => {
     const root = await createTestDirectory('model-verification-cache');
     roots.push(root);
@@ -646,6 +847,50 @@ describe('ModelManager', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('allows mutation of one model while another model download is waiting on the network', async () => {
+    const root = await createTestDirectory('model-independent-mutations');
+    roots.push(root);
+    let fetchStarted = false;
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
+      validateRequestUrl: () => true,
+      fetch: (_input, init) => {
+        fetchStarted = true;
+        return Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => controller.error(new Error('cancelled')),
+                  { once: true },
+                );
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+    const downloading = manager.download('Xenova/whisper-small');
+    await waitForCondition(() => fetchStarted);
+
+    await expect(
+      Promise.race([
+        manager.deleteIfIdle('onnx-community/whisper-large-v3-turbo'),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('unrelated model mutation was blocked')), 250),
+        ),
+      ]),
+    ).resolves.toMatchObject({ outcome: 'deleted' });
+
+    await manager.cancel('Xenova/whisper-small');
+    await expect(downloading).resolves.toMatchObject({ state: 'missing' });
   });
 
   it('recovers interrupted replacement backups and removes stale replaced artifacts', async () => {

@@ -320,15 +320,26 @@ export class TalkingQuillApplication {
       });
       this.#whisper = whisper;
       cleanup.add('whisper-worker', () => whisper.close());
-      models.setBeforeMutation((modelId) => whisper.unload(modelId));
+      const runtimeValidatedModels = new Set<string>();
+      const runtimeValidationTasks = new Map<string, Promise<boolean>>();
+      const runtimeValidationKey = (modelId: Parameters<ModelManager['manifestRevision']>[0]) =>
+        `${modelId}\u0000${models.manifestRevision(modelId)}`;
+      models.setBeforeMutation(async (modelId) => {
+        runtimeValidatedModels.delete(runtimeValidationKey(modelId));
+        await whisper.unload(modelId);
+      });
       models.setAfterInstallValidation(async (modelId, signal) => {
         await whisper.checkWorkerModel(modelId, signal);
+        runtimeValidatedModels.add(runtimeValidationKey(modelId));
       });
       let stateTarget: AppStateService | null = null;
       let echoTarget: EchoSessionController | null = null;
       let welcomeTarget: WelcomeService | null = null;
       const removeModelEvents = models.subscribe((progress) => {
         events.send('model:progress', progress);
+        if (progress.state !== 'ready') {
+          runtimeValidatedModels.delete(runtimeValidationKey(progress.modelId));
+        }
         const selectedModelId = settings.get().transcription.modelId;
         applySelectedModelProgress(progress, selectedModelId, stateTarget, echoTarget);
         if (
@@ -477,9 +488,28 @@ export class TalkingQuillApplication {
           task6Composition?.welcome.microphone
             ? { boundDeviceId: 'source-e2e-microphone', observedRms: 0.2, sampleCount: 3_200 }
             : recording.microphoneTestObservation(),
-        modelReady: async () =>
-          task6Composition?.welcome.model ??
-          (await models.status(settings.get().transcription.modelId, true)).state === 'ready',
+        modelReady: async () => {
+          if (task6Composition !== null) return task6Composition.welcome.model;
+          const modelId = settings.get().transcription.modelId;
+          const key = runtimeValidationKey(modelId);
+          const metadata = await models.status(modelId);
+          if (metadata.state !== 'ready') {
+            runtimeValidatedModels.delete(key);
+            return false;
+          }
+          if (runtimeValidatedModels.has(key)) return true;
+          const existing = runtimeValidationTasks.get(key);
+          if (existing !== undefined) return existing;
+          const validation = models
+            .status(modelId, true)
+            .then((status) => {
+              if (status.state === 'ready') runtimeValidatedModels.add(key);
+              return status.state === 'ready';
+            })
+            .finally(() => runtimeValidationTasks.delete(key));
+          runtimeValidationTasks.set(key, validation);
+          return validation;
+        },
         modelRevision: (modelId) => models.manifestRevision(modelId),
         helperReady: () =>
           task6Composition?.welcome.helper ?? state.getState().helper.status === 'ready',
@@ -511,7 +541,6 @@ export class TalkingQuillApplication {
       });
       const removeEchoState = echo.subscribe((snapshot) => state.setSession(snapshot));
       this.#ownRuntimeDisposer(cleanup, 'echo-state', removeEchoState);
-      echo.initialize();
       if (task6Composition !== null) {
         task6Composition.bind(echo);
         const testDriverSymbol = Symbol.for('talking-quill:task6-test-driver');
@@ -548,7 +577,12 @@ export class TalkingQuillApplication {
       });
       this.#tray = tray;
       cleanup.add('tray', () => tray.destroy());
-      const removeTraySettings = settings.subscribe(() => tray.refresh());
+      let trayEnabled = settings.get().app.enabled;
+      const removeTraySettings = settings.subscribe((next) => {
+        if (next.app.enabled === trayEnabled) return;
+        trayEnabled = next.app.enabled;
+        tray.refresh();
+      });
       this.#ownRuntimeDisposer(cleanup, 'tray-settings', removeTraySettings);
 
       const packagedMediaReadyRoles = new Set<'capture' | 'widget'>();
@@ -607,9 +641,15 @@ export class TalkingQuillApplication {
 
       await windows.createAll();
       this.#assertStartupActive();
+      // Native activation remains disabled until every eager renderer has loaded, so a startup
+      // shortcut cannot begin a session whose preloaded widget or capture surface is unavailable.
+      echo.initialize();
       // Cleanup that can enumerate thousands of files starts only after the first usable renderer
       // is shown, and yields between bounded batches so it cannot monopolize the main thread.
-      await Promise.all([
+      // Maintenance is best-effort once the usable surfaces are live. A locked stale artifact must
+      // not tear down an otherwise healthy app; cancellation is still observed by the lifecycle
+      // check immediately afterward.
+      await Promise.allSettled([
         scavengeSessionArtifacts(paths.sessionTemporary, 64, this.#startupAbort.signal),
         historyService.pruneAtStartupDeferred(64, this.#startupAbort.signal),
       ]);

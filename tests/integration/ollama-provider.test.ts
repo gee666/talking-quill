@@ -101,6 +101,82 @@ describe('native Ollama provider', () => {
     });
   });
 
+  it('fetches model details with bounded concurrency while preserving discovery order', async () => {
+    const names = Array.from({ length: 12 }, (_, index) => `model-${String(index)}`);
+    let active = 0;
+    let maximumActive = 0;
+    const server = await startMockProviderServer((request, response) => {
+      if (request.url === '/api/tags') {
+        sendJson(response, { models: names.map((name) => ({ name })) });
+        return;
+      }
+      if (request.url === '/api/show') {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        setTimeout(() => {
+          active -= 1;
+          sendJson(response, { capabilities: ['completion'], model_info: {} });
+        }, 20);
+        return;
+      }
+      sendJson(response, {}, 404);
+    });
+    servers.push(server);
+    const provider = new OllamaProvider(new PinnedJsonTransport(), {
+      endpointOverride: server.origin,
+    });
+
+    const models = await provider.listModels(
+      { config: { providerId: 'ollama', baseUrl: server.origin }, credential: null },
+      AbortSignal.timeout(2_000),
+    );
+
+    expect(maximumActive).toBeGreaterThan(1);
+    expect(maximumActive).toBeLessThanOrEqual(4);
+    expect(models.map(({ id }) => id)).toEqual(names);
+  });
+
+  it('aborts and drains peer detail requests before returning the first failure', async () => {
+    const names = Array.from({ length: 8 }, (_, index) => `failing-${String(index)}`);
+    const requested: string[] = [];
+    const server = await startMockProviderServer((request, response) => {
+      if (request.url === '/api/tags') {
+        sendJson(response, { models: names.map((name) => ({ name })) });
+        return;
+      }
+      if (request.url === '/api/show') {
+        const name = String(readBody(request.body).model);
+        requested.push(name);
+        if (name === names[0]) {
+          sendJson(response, { capabilities: 'malformed' });
+        } else {
+          setTimeout(() => {
+            if (!response.destroyed) {
+              sendJson(response, { capabilities: ['completion'], model_info: {} });
+            }
+          }, 100);
+        }
+        return;
+      }
+      sendJson(response, {}, 404);
+    });
+    servers.push(server);
+    const provider = new OllamaProvider(new PinnedJsonTransport(), {
+      endpointOverride: server.origin,
+    });
+
+    await expect(
+      provider.listModels(
+        { config: { providerId: 'ollama', baseUrl: server.origin }, credential: null },
+        AbortSignal.timeout(2_000),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(requested.length).toBeLessThanOrEqual(4);
+    expect(requested.every((name) => names.slice(0, 4).includes(name))).toBe(true);
+  });
+
   it('probes cold model metadata and rejects a vision-named model declared non-vision', async () => {
     let showCalls = 0;
     const server = await startMockProviderServer((request, response) => {

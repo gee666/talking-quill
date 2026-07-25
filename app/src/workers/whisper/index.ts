@@ -37,12 +37,14 @@ async function startWorker(): Promise<void> {
     cacheDirectory,
     revisions,
     ...(idleUnloadMs === undefined ? {} : { idleUnloadMs }),
-    factory: async (modelId, revision, cache) => {
+    verify: async (modelId, revision, cache) => {
       const model = models.get(modelId);
       if (model?.revision !== revision) {
         throw new WorkerModelVerificationError('MODEL_CORRUPT');
       }
       await verifyModelFiles(cache, model);
+    },
+    factory: async (modelId, revision, cache) => {
       const loaded: unknown = await pipeline('automatic-speech-recognition', modelId, {
         cache_dir: cache,
         revision,
@@ -63,9 +65,7 @@ async function startWorker(): Promise<void> {
   process.parentPort.on('message', (event) => {
     const raw: unknown = event.data;
     queue = queue
-      .then(() =>
-        handleRaw(raw, runtime, models, cacheDirectory, pressureTimer, networkGuard.probeCompleted),
-      )
+      .then(() => handleRaw(raw, runtime, models, pressureTimer, networkGuard.probeCompleted))
       .catch(() => undefined);
   });
 
@@ -87,7 +87,6 @@ async function handleRaw(
   raw: unknown,
   runtime: WhisperRuntime,
   models: ReadonlyMap<string, ReturnType<typeof ModelManifestSchema.parse>['models'][number]>,
-  cacheDirectory: string,
   pressureTimer: ReturnType<typeof setInterval>,
   networkProbeCompleted: boolean,
 ): Promise<void> {
@@ -98,14 +97,7 @@ async function handleRaw(
   }
   const request = parsed.data;
   try {
-    const response = await execute(
-      request,
-      runtime,
-      models,
-      cacheDirectory,
-      pressureTimer,
-      networkProbeCompleted,
-    );
+    const response = await execute(request, runtime, models, pressureTimer, networkProbeCompleted);
     process.parentPort.postMessage(WhisperWorkerResponseSchema.parse(response));
     if (request.type === 'shutdown') setImmediate(() => process.exit(0));
   } catch (error: unknown) {
@@ -118,7 +110,6 @@ async function execute(
   request: WhisperWorkerRequest,
   runtime: WhisperRuntime,
   models: ReadonlyMap<string, ReturnType<typeof ModelManifestSchema.parse>['models'][number]>,
-  cacheDirectory: string,
   pressureTimer: ReturnType<typeof setInterval>,
   networkProbeCompleted: boolean,
 ): Promise<WhisperWorkerResponse> {
@@ -136,7 +127,7 @@ async function execute(
       runtime.openSession(request.sessionId, request.options);
       return { ...base, result: { type: 'acknowledged', operation: 'session-open' } };
     case 'session-push':
-      await runtime.pushSession(request.sessionId, new Float32Array(request.pcm));
+      await runtime.pushOwnedSession(request.sessionId, new Float32Array(request.pcm));
       return { ...base, result: { type: 'acknowledged', operation: 'session-push' } };
     case 'session-finish':
       return {
@@ -157,7 +148,6 @@ async function execute(
     case 'model-check': {
       const model = models.get(request.modelId);
       if (model === undefined) throw new WorkerModelVerificationError('MODEL_CORRUPT');
-      await verifyModelFiles(cacheDirectory, model);
       await runtime.checkModel(request.modelId);
       return { ...base, result: { type: 'model-ready' } };
     }

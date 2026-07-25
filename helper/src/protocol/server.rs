@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, bounded};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{PROTOCOL_VERSION, messages::*};
 use crate::{
+    CriticalDelivery,
     keyboard::{ActivationBindings, ActivationKey},
     platform::{CallbackGate, Platform, PlatformError, TerminalReason, TerminalSignal},
 };
@@ -93,9 +94,12 @@ impl HandleOutcome {
     }
 }
 
+const CRITICAL_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(250);
+
 pub struct Server<P: Platform> {
     platform: P,
     outbound: Sender<Outbound>,
+    critical_outbound: Sender<CriticalDelivery>,
     gate: Arc<CallbackGate>,
     terminal: Arc<TerminalSignal>,
     initialized: bool,
@@ -103,15 +107,20 @@ pub struct Server<P: Platform> {
 }
 
 impl<P: Platform> Server<P> {
+    /// Creates a server whose critical receiver must accept complete paste
+    /// batches and serialize each batch without interleaving ordinary output.
+    #[doc(hidden)]
     pub fn new(
         platform: P,
         outbound: Sender<Outbound>,
+        critical_outbound: Sender<CriticalDelivery>,
         gate: Arc<CallbackGate>,
         terminal: Arc<TerminalSignal>,
     ) -> Self {
         Self {
             platform,
             outbound,
+            critical_outbound,
             gate,
             terminal,
             initialized: false,
@@ -209,19 +218,24 @@ impl<P: Platform> Server<P> {
                 if let Err(keep_running) = self.empty_params(&request) {
                     return HandleOutcome::from_keep_running(keep_running);
                 }
+                // Reserve the complete writer delivery before crossing the native boundary.
+                // Queue pressure can reject a paste, but can never accept and then discard it.
+                let reservation = match self.reserve_paste_delivery() {
+                    Some(reservation) => reservation,
+                    None => return HandleOutcome::Stop,
+                };
                 let result = self.platform.inject_paste();
                 if result.submitted {
-                    // Publish the irreversible native boundary before the ordinary RPC response.
-                    // Electron must not turn an already-dispatched paste into cancellation merely
-                    // because acknowledgement delivery is delayed or lost.
-                    if !self.send(Outbound::PasteCommitted(request.id.clone())) {
-                        return HandleOutcome::Stop;
-                    }
                     // Stop session-key capture before the success response can reach Electron so
                     // restoration-phase Esc/Enter pass through.
                     let _ = self.platform.set_session_capture(false);
                 }
-                self.send_success(request.id, result)
+                let mut batch = Vec::with_capacity(2);
+                if result.submitted {
+                    batch.push(Outbound::PasteCommitted(request.id.clone()));
+                }
+                batch.push(success_outbound(request.id, result));
+                self.complete_paste_delivery(reservation, batch)
             }
             "front_app.get" => {
                 if let Err(keep_running) = self.empty_params(&request) {
@@ -341,14 +355,52 @@ impl<P: Platform> Server<P> {
         self.send(Outbound::Response(RpcResponse::error(Some(id), error)))
     }
 
+    fn reserve_paste_delivery(&self) -> Option<Sender<Vec<Outbound>>> {
+        let (acquired_tx, acquired_rx) = bounded(1);
+        let (completion_tx, completion_rx) = bounded(1);
+        if self
+            .critical_outbound
+            .try_send(CriticalDelivery::new(acquired_tx, completion_rx))
+            .is_err()
+            || acquired_rx
+                .recv_timeout(CRITICAL_ACQUISITION_TIMEOUT)
+                .is_err()
+        {
+            self.terminal
+                .trigger(TerminalReason::OutboundQueueUnavailable);
+            return None;
+        }
+        if self.terminal.is_triggered() {
+            return None;
+        }
+        Some(completion_tx)
+    }
+
+    fn complete_paste_delivery(
+        &self,
+        completion: Sender<Vec<Outbound>>,
+        batch: Vec<Outbound>,
+    ) -> bool {
+        if completion.send(batch).is_ok() {
+            true
+        } else {
+            self.terminal.trigger(TerminalReason::StdoutDisconnected);
+            false
+        }
+    }
+
     fn send(&self, outbound: Outbound) -> bool {
+        self.send_to(&self.outbound, outbound)
+    }
+
+    fn send_to(&self, sender: &Sender<Outbound>, outbound: Outbound) -> bool {
         // Final guard for every server-produced message. Oversized success
         // results have already been replaced; never recurse if even a fallback
         // or future message violates the bound.
         if encode_outbound(&outbound).is_err() {
             return true;
         }
-        if self.outbound.try_send(outbound).is_ok() {
+        if sender.try_send(outbound).is_ok() {
             true
         } else {
             self.terminal

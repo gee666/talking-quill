@@ -241,6 +241,22 @@ describe('SettingsStore', () => {
     }
   });
 
+  it('passes the startup read to corruption preservation without a second source read', async () => {
+    const source = '{broken-settings';
+    const read = vi.fn<SettingsStoreIo['read']>().mockResolvedValue(source);
+    const preserveInvalid = vi
+      .fn<SettingsStoreIo['preserveInvalid']>()
+      .mockResolvedValue('settings.invalid');
+    const store = new SettingsStore('settings.json', {
+      io: { read, write: () => Promise.resolve(), preserveInvalid },
+    });
+
+    await store.initialize();
+
+    expect(read).toHaveBeenCalledOnce();
+    expect(preserveInvalid).toHaveBeenCalledWith('settings.json', source);
+  });
+
   it('runs explicit migration hooks before validation', async () => {
     const path = await testPath();
     await writeFile(path, JSON.stringify({ schemaVersion: 0, active: false }), 'utf8');

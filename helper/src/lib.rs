@@ -24,6 +24,7 @@ use crate::{
 };
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const CRITICAL_OUTBOUND_QUEUE_CAPACITY: usize = 1;
 const INPUT_QUEUE_CAPACITY: usize = 8;
 const CLEAN_WRITER_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -56,6 +57,31 @@ enum CoordinatorOutcome {
     Terminal(TerminalReason),
 }
 
+/// A slot reserved before an irreversible paste operation. The writer owns the
+/// slot before native dispatch begins, then receives commit and response as one
+/// ordered batch.
+#[doc(hidden)]
+pub struct CriticalDelivery {
+    acquired: Sender<()>,
+    completion: Receiver<Vec<Outbound>>,
+}
+
+impl CriticalDelivery {
+    pub(crate) const fn new(acquired: Sender<()>, completion: Receiver<Vec<Outbound>>) -> Self {
+        Self {
+            acquired,
+            completion,
+        }
+    }
+
+    /// Acquires this writer reservation and returns its complete ordered batch.
+    #[doc(hidden)]
+    pub fn accept(self) -> Option<Vec<Outbound>> {
+        self.acquired.send(()).ok()?;
+        self.completion.recv().ok()
+    }
+}
+
 /// Runs the helper until stdin closes, framing fails, stdout fails, an accepted
 /// `shutdown` arrives, or a native callback reports a terminal failure.
 ///
@@ -69,6 +95,7 @@ pub fn run() -> Result<(), RunError> {
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(OUTBOUND_QUEUE_CAPACITY);
+    let (critical_tx, critical_rx) = bounded(CRITICAL_OUTBOUND_QUEUE_CAPACITY);
 
     let writer_terminal = Arc::clone(&terminal);
     let (writer_done_tx, writer_done_rx) = bounded(1);
@@ -77,7 +104,7 @@ pub fn run() -> Result<(), RunError> {
         .spawn(move || {
             let panic_terminal = Arc::clone(&writer_terminal);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                writer_loop(outbound_rx, writer_terminal)
+                writer_loop(critical_rx, outbound_rx, writer_terminal)
             }))
             .unwrap_or_else(|_| {
                 panic_terminal.trigger(TerminalReason::StdoutDisconnected);
@@ -98,6 +125,7 @@ pub fn run() -> Result<(), RunError> {
         Ok(platform) => platform,
         Err(error) => {
             gate.close();
+            drop(critical_tx);
             drop(outbound_tx);
             let _ = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT);
             return Err(RunError::Platform(error));
@@ -106,9 +134,11 @@ pub fn run() -> Result<(), RunError> {
     let mut server = Server::new(
         platform,
         outbound_tx.clone(),
+        critical_tx.clone(),
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
+    drop(critical_tx);
     drop(outbound_tx);
 
     let (input_tx, input_rx) = bounded(INPUT_QUEUE_CAPACITY);
@@ -131,12 +161,9 @@ pub fn run() -> Result<(), RunError> {
     server.shutdown();
     drop(server);
 
-    let flush_timeout = if matches!(outcome, CoordinatorOutcome::Terminal(_)) {
-        Duration::ZERO
-    } else {
-        CLEAN_WRITER_FLUSH_TIMEOUT
-    };
-    let writer_result = wait_for_writer(writer, &writer_done_rx, flush_timeout)?;
+    // Accepted critical batches receive the same bounded flush window on
+    // terminal exits; dropping them immediately can hide a committed paste.
+    let writer_result = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT)?;
 
     if let Some(Err(error)) = writer_result {
         return Err(RunError::Writer(error));
@@ -152,8 +179,10 @@ pub fn run() -> Result<(), RunError> {
 
 /// In-memory production coordinator used by framing/property integration tests.
 /// It shares the exact stdin decoder, coordinator, server, outbound encoder, and frame writer.
+/// `output` must be an in-memory/nonblocking writer; unlike `run`, this test
+/// adapter joins its scoped writer directly so it cannot safely detach a borrow.
 #[doc(hidden)]
-pub fn run_framed_stream<P: Platform, R: Read, W: Write>(
+pub fn run_framed_stream<P: Platform, R: Read, W: Write + Send>(
     platform: P,
     input: R,
     mut output: W,
@@ -162,19 +191,33 @@ pub fn run_framed_stream<P: Platform, R: Read, W: Write>(
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(OUTBOUND_QUEUE_CAPACITY);
+    let (critical_tx, critical_rx) = bounded(CRITICAL_OUTBOUND_QUEUE_CAPACITY);
     let mut server = Server::new(
         platform,
         outbound_tx.clone(),
+        critical_tx.clone(),
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
+    drop(critical_tx);
     drop(outbound_tx);
     let (input_tx, input_rx) = unbounded();
     stdin_loop(input, input_tx);
-    let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
-    server.shutdown();
-    drop(server);
-    write_messages(outbound_rx, terminal, &mut output).map_err(RunError::Writer)?;
+    let writer_terminal = Arc::clone(&terminal);
+    let (outcome, writer_result) = thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            write_prioritized_messages(critical_rx, outbound_rx, writer_terminal, &mut output)
+        });
+        let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
+        server.shutdown();
+        drop(server);
+        let writer_result = writer
+            .join()
+            .map_err(|_| RunError::WriterThread)
+            .and_then(|result| result.map_err(RunError::Writer));
+        (outcome, writer_result)
+    });
+    writer_result?;
     match outcome {
         CoordinatorOutcome::Clean => Ok(()),
         CoordinatorOutcome::Framing(error) => Err(RunError::Framing(error)),
@@ -260,40 +303,141 @@ fn stdin_loop<R: Read>(mut input: R, sender: Sender<InputMessage>) {
 }
 
 fn writer_loop(
+    critical: Receiver<CriticalDelivery>,
     outbound: Receiver<Outbound>,
     terminal: Arc<TerminalSignal>,
 ) -> Result<(), FrameError> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    write_messages(outbound, terminal, &mut stdout)
+    write_prioritized_messages(critical, outbound, terminal, &mut stdout)
 }
 
+#[cfg(test)]
 fn write_messages<W: Write>(
     outbound: Receiver<Outbound>,
     terminal: Arc<TerminalSignal>,
     writer: &mut W,
 ) -> Result<(), FrameError> {
-    while let Ok(message) = outbound.recv() {
+    let (critical_tx, critical_rx) = bounded(1);
+    drop(critical_tx);
+    write_prioritized_messages(critical_rx, outbound, terminal, writer)
+}
+
+fn write_prioritized_messages<W: Write>(
+    critical: Receiver<CriticalDelivery>,
+    outbound: Receiver<Outbound>,
+    terminal: Arc<TerminalSignal>,
+    writer: &mut W,
+) -> Result<(), FrameError> {
+    let mut critical_open = true;
+    let mut outbound_open = true;
+    while critical_open || outbound_open {
+        // Terminal failures stop ordinary output, but accepted critical
+        // deliveries remain an obligation until their sender closes.
         if terminal.is_triggered() {
+            if terminal.reason() == Some(TerminalReason::StdoutDisconnected) {
+                return Ok(());
+            }
+            outbound_open = false;
+        }
+
+        if critical_open {
+            match critical.try_recv() {
+                Ok(delivery) => {
+                    write_critical_delivery(delivery, &terminal, writer)?;
+                    continue;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => critical_open = false,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+        }
+
+        let item = match (critical_open, outbound_open) {
+            (true, true) => crossbeam_channel::select_biased! {
+                recv(critical) -> delivery => match delivery {
+                    Ok(delivery) => Some(EitherOutbound::Critical(delivery)),
+                    Err(_) => {
+                        critical_open = false;
+                        None
+                    }
+                },
+                recv(outbound) -> message => match message {
+                    Ok(message) => Some(EitherOutbound::Ordinary(message)),
+                    Err(_) => {
+                        outbound_open = false;
+                        None
+                    }
+                },
+            },
+            (true, false) => match critical.recv() {
+                Ok(delivery) => Some(EitherOutbound::Critical(delivery)),
+                Err(_) => {
+                    critical_open = false;
+                    None
+                }
+            },
+            (false, true) => match outbound.recv() {
+                Ok(message) => Some(EitherOutbound::Ordinary(message)),
+                Err(_) => {
+                    outbound_open = false;
+                    None
+                }
+            },
+            (false, false) => None,
+        };
+        match item {
+            Some(EitherOutbound::Critical(delivery)) => {
+                write_critical_delivery(delivery, &terminal, writer)?;
+            }
+            Some(EitherOutbound::Ordinary(message)) if !terminal.is_triggered() => {
+                write_message(message, &terminal, writer)?;
+            }
+            Some(EitherOutbound::Ordinary(_)) | None => {}
+        }
+    }
+    Ok(())
+}
+
+enum EitherOutbound {
+    Critical(CriticalDelivery),
+    Ordinary(Outbound),
+}
+
+fn write_critical_delivery<W: Write>(
+    delivery: CriticalDelivery,
+    terminal: &TerminalSignal,
+    writer: &mut W,
+) -> Result<(), FrameError> {
+    let Some(batch) = delivery.accept() else {
+        return Ok(());
+    };
+    for message in batch {
+        write_message(message, terminal, writer)?;
+    }
+    Ok(())
+}
+
+fn write_message<W: Write>(
+    message: Outbound,
+    terminal: &TerminalSignal,
+    writer: &mut W,
+) -> Result<(), FrameError> {
+    let payload = match encode_outbound(&message) {
+        Ok(payload) => payload,
+        Err(OutboundEncodingError::FrameTooLarge(_)) => {
+            // The complete JSON value was rejected before any stdout write.
+            // Drop unexpected oversized notifications fail-open; request
+            // results are replaced with a bounded error before enqueue.
             return Ok(());
         }
-        let payload = match encode_outbound(&message) {
-            Ok(payload) => payload,
-            Err(OutboundEncodingError::FrameTooLarge(_)) => {
-                // The complete JSON value was rejected before any stdout write.
-                // Drop unexpected oversized notifications fail-open; request
-                // results are replaced with a bounded error before enqueue.
-                continue;
-            }
-            Err(OutboundEncodingError::Serialization(error)) => {
-                terminal.trigger(TerminalReason::StdoutDisconnected);
-                return Err(FrameError::Io(io::Error::other(error)));
-            }
-        };
-        if let Err(error) = write_frame(writer, &payload) {
+        Err(OutboundEncodingError::Serialization(error)) => {
             terminal.trigger(TerminalReason::StdoutDisconnected);
-            return Err(error);
+            return Err(FrameError::Io(io::Error::other(error)));
         }
+    };
+    if let Err(error) = write_frame(writer, &payload) {
+        terminal.trigger(TerminalReason::StdoutDisconnected);
+        return Err(error);
     }
     Ok(())
 }
@@ -361,6 +505,49 @@ mod tests {
             terminal_rx.try_recv(),
             Ok(TerminalReason::StdoutDisconnected)
         );
+    }
+
+    #[test]
+    fn terminal_failure_drains_an_accepted_critical_batch_before_ordinary_output() {
+        let gate = Arc::new(CallbackGate::new());
+        let (terminal_tx, _terminal_rx) = bounded(1);
+        let terminal = Arc::new(TerminalSignal::new(gate, terminal_tx));
+        let (critical_tx, critical_rx) = bounded(1);
+        let (acquired_tx, _acquired_rx) = bounded(1);
+        let (completion_tx, completion_rx) = bounded(1);
+        let (outbound_tx, outbound_rx) = bounded(1);
+        outbound_tx
+            .send(Outbound::Event(HelperEvent::Activation {
+                key: ActivationKey::A,
+                phase: EventPhase::Down,
+                shift: false,
+            }))
+            .unwrap();
+        critical_tx
+            .send(CriticalDelivery::new(acquired_tx, completion_rx))
+            .unwrap();
+        completion_tx
+            .send(vec![
+                Outbound::PasteCommitted(crate::protocol::RequestId::Number(7)),
+                Outbound::PasteCommitted(crate::protocol::RequestId::Number(8)),
+            ])
+            .unwrap();
+        terminal.trigger(TerminalReason::OutboundQueueUnavailable);
+        drop(completion_tx);
+        drop(critical_tx);
+        drop(outbound_tx);
+
+        let mut output = Vec::new();
+        write_prioritized_messages(critical_rx, outbound_rx, terminal, &mut output).unwrap();
+        let mut framed = io::Cursor::new(output);
+        let first = read_frame(&mut framed).unwrap().unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first["method"], "paste.committed");
+        let second = read_frame(&mut framed).unwrap().unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(second["method"], "paste.committed");
+        assert_eq!(second["params"]["requestId"], 8);
+        assert!(read_frame(&mut framed).unwrap().is_none());
     }
 
     #[test]

@@ -50,11 +50,11 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 1 });
-await request('activation.configure', { enabled: false, key: 'Z' });
+const initialized = await request('initialize', { protocolVersion: 2 });
+await request('activation.configure', { enabled: false, bindings: [] });
 await request('session.set_capture', { active: false });
 const activationRegistration = await registerAvailableActivation();
-await request('activation.configure', { enabled: false, key: activationRegistration.key });
+await request('activation.configure', { enabled: false, bindings: [] });
 const safeReport = {
   initialized,
   activationRegistration,
@@ -66,7 +66,7 @@ console.log(JSON.stringify(safeReport, null, 2));
 
 if (interactive) await runInteractive();
 await request('session.set_capture', { active: false }).catch(() => undefined);
-await request('activation.configure', { enabled: false, key: 'Z' }).catch(() => undefined);
+await request('activation.configure', { enabled: false, bindings: [] }).catch(() => undefined);
 await request('shutdown', {});
 await childExit;
 
@@ -74,7 +74,14 @@ async function registerAvailableActivation() {
   let lastError = null;
   for (const key of ['Z', 'Q', 'J']) {
     try {
-      return await request('activation.configure', { enabled: true, key });
+      const configuration = await request('activation.configure', {
+        enabled: true,
+        bindings: [
+          { key, shift: false },
+          { key, shift: true },
+        ],
+      });
+      return { key, configuration };
     } catch (error) {
       lastError = error;
     }
@@ -89,19 +96,25 @@ async function runInteractive() {
       'Focus a test editor and verify Enter/Esc type normally. Return here and press Enter to continue. ',
     );
     notifications.length = 0;
-    await request('activation.configure', { enabled: true, key: 'Z' });
+    await request('activation.configure', {
+      enabled: true,
+      bindings: [
+        { key: 'Z', shift: false },
+        { key: 'Z', shift: true },
+      ],
+    });
     console.log(
       'For 15 seconds, focus the editor and press Alt/Option+Z, hold it for repeat, then press Alt/Option+Shift+Z.',
     );
     await delay(15_000);
-    await request('activation.configure', { enabled: false, key: 'Z' });
+    await request('activation.configure', { enabled: false, bindings: [] });
     const activations = printObserved('activation.event');
     assertPairedEvents(activations, 'activation.event');
     const activationDowns = activations.filter((event) => event.params.phase === 'down');
-    if (!activationDowns.some((event) => event.params.alternate === false)) {
+    if (!activationDowns.some((event) => event.params.shift === false)) {
       throw new Error('No normal activation-down event was observed');
     }
-    if (!activationDowns.some((event) => event.params.alternate === true)) {
+    if (!activationDowns.some((event) => event.params.shift === true)) {
       throw new Error('No Shift-alternate activation-down event was observed');
     }
 

@@ -42,6 +42,8 @@ function fixture(
     readonly insert?: InsertionService['insert'];
     readonly helperReadiness?: HelperReadiness;
     readonly startDictation?: RecordingService['startDictation'];
+    readonly stopDictation?: RecordingService['stopDictation'];
+    readonly getFrontApp?: EchoHelperPort['getFrontApp'];
     readonly smartProcessor?: SmartTranscriptProcessor;
     readonly commands?: VoiceCommandMatcherPort;
     readonly isModelReady?: () => boolean;
@@ -97,6 +99,15 @@ function fixture(
     options.setSessionCapture ?? ((active: boolean) => Promise.resolve({ active })),
   );
   const resetSessionCapture = vi.fn(options.resetSessionCapture ?? (() => Promise.resolve()));
+  const getFrontApp = vi.fn(
+    options.getFrontApp ??
+      (() =>
+        Promise.resolve({
+          processName: 'target',
+          windowTitle: 'Target',
+          windowBounds: { x: 100, y: 200, width: 800, height: 600 },
+        })),
+  );
   const helper = {
     readiness:
       options.helperReadiness ??
@@ -125,12 +136,7 @@ function fixture(
     configureActivation,
     setSessionCapture,
     resetSessionCapture,
-    getFrontApp: () =>
-      Promise.resolve({
-        processName: 'target',
-        windowTitle: 'Target',
-        windowBounds: { x: 100, y: 200, width: 800, height: 600 },
-      }),
+    getFrontApp,
   } as unknown as HelperClient;
   const startDictation = vi.fn(
     options.startDictation ??
@@ -142,7 +148,7 @@ function fixture(
         });
       }),
   );
-  const stopDictation = vi.fn(() => Promise.resolve());
+  const stopDictation = vi.fn(options.stopDictation ?? (() => Promise.resolve()));
   const recording = { startDictation, stopDictation } as unknown as RecordingService;
   const transcribe = vi.fn(
     options.transcribe ??
@@ -217,6 +223,7 @@ function fixture(
       insert,
       startDictation,
       stopDictation,
+      getFrontApp,
       configureActivation,
       setSessionCapture,
       resetSessionCapture,
@@ -791,6 +798,23 @@ describe('EchoSessionController integration', () => {
     });
   });
 
+  it('keeps final capture frames that arrive while microphone stop is draining', async () => {
+    const stopped = deferred<undefined>();
+    const test = fixture({
+      stopDictation: (captureId) => (captureId === undefined ? Promise.resolve() : stopped.promise),
+    });
+    test.notify(activation('down'));
+    await settle();
+    test.frame(new Float32Array(320).fill(0.1));
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.spies.stopDictation).toHaveBeenCalledOnce());
+
+    test.frame(new Float32Array(320).fill(0.2));
+    stopped.resolve(undefined);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.spies.transcribe.mock.calls[0]?.[0]).toHaveLength(640);
+  });
+
   it.each([
     { name: 'Raw', mode: 'raw' as const, smart: undefined, kind: 'raw-completed' },
     {
@@ -888,6 +912,68 @@ describe('EchoSessionController integration', () => {
       dictationMode: 'quick',
     });
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+  });
+
+  it('waits for asynchronous capture startup when Enter arrives in the activation batch', async () => {
+    const startup = deferred<{ captureId: string; activeMicrophoneId: string }>();
+    const callbacks: { current: DictationCaptureCallbacks | null } = { current: null };
+    const test = fixture({
+      startDictation: (nextCallbacks) => {
+        callbacks.current = nextCallbacks;
+        return startup.promise;
+      },
+    });
+
+    test.notify(activation('down'));
+    test.notify(key('enter'));
+    expect(test.controller.snapshot).toMatchObject({ phase: 'arming', dictationMode: 'quick' });
+    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    expect(test.spies.stopDictation).not.toHaveBeenCalled();
+    startup.resolve({ captureId: 'batched-capture', activeMicrophoneId: 'default' });
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    expect(test.controller.snapshot.phase).toBe('arming');
+    expect(test.spies.transcribe).not.toHaveBeenCalled();
+
+    callbacks.current?.onFrame(new Float32Array(320).fill(0.2), 0.2);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.spies.stopDictation).toHaveBeenCalledWith('batched-capture');
+    expect(test.spies.transcribe).toHaveBeenCalledOnce();
+  });
+
+  it('keeps activation feedback when the first frame precedes capture startup acknowledgement', async () => {
+    const startup = deferred<{ captureId: string; activeMicrophoneId: string }>();
+    const callbacks: { current: DictationCaptureCallbacks | null } = { current: null };
+    const test = fixture({
+      startDictation: (nextCallbacks) => {
+        callbacks.current = nextCallbacks;
+        return startup.promise;
+      },
+    });
+    test.notify(activation('down'));
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    callbacks.current?.onFrame(new Float32Array(320).fill(0.2), 0.2);
+    startup.resolve({ captureId: 'early-frame', activeMicrophoneId: 'default' });
+
+    await vi.waitFor(() => expect(test.spies.sound).toHaveBeenCalled());
+    expect(test.spies.showWidget).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+  });
+
+  it('fails safely when activated capture never produces its first audio frame', async () => {
+    vi.useFakeTimers();
+    const test = fixture();
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    test.notify(key('enter'));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'The microphone did not provide audio.',
+    });
+    expect(test.spies.transcribe).not.toHaveBeenCalled();
+    await test.controller.shutdown();
   });
 
   it('cancels with Esc and inserts nothing', async () => {
@@ -1347,7 +1433,7 @@ describe('EchoSessionController integration', () => {
     },
   );
 
-  it('fails and tears down without widget or start sound when helper capture enable fails', async () => {
+  it('shows immediate arming feedback, then fails without a start sound when helper capture enable fails', async () => {
     vi.useFakeTimers();
     let enableAttempts = 0;
     const test = fixture({
@@ -1360,16 +1446,41 @@ describe('EchoSessionController integration', () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
     expect(test.spies.stopDictation).toHaveBeenCalled();
-    expect(test.spies.showWidget).not.toHaveBeenCalled();
+    expect(test.spies.showWidget).toHaveBeenCalledOnce();
     expect(test.spies.sound).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1_200);
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledTimes(2));
     expect(test.spies.sound).toHaveBeenCalledOnce();
     test.controller.cancel();
+    await test.controller.shutdown();
+  });
+
+  it('does not reset to idle while a terminal-phase activation is still being disarmed', async () => {
+    vi.useFakeTimers();
+    const terminalDisable = deferred<{ active: boolean }>();
+    let blockDisable = false;
+    const test = fixture({
+      setSessionCapture: (active) =>
+        !active && blockDisable ? terminalDisable.promise : Promise.resolve({ active }),
+    });
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    test.frame();
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+
+    blockDisable = true;
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(test.controller.snapshot.phase).toBe('completed');
+
+    terminalDisable.resolve({ active: false });
+    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
     await test.controller.shutdown();
   });
 
@@ -1396,7 +1507,7 @@ describe('EchoSessionController integration', () => {
 
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledTimes(2));
     expect(test.controller.snapshot.phase).toBe('arming');
     expect(setSessionCapture.mock.calls.map(([active]) => active)).toEqual([true, false, true]);
     test.controller.cancel();
@@ -1420,6 +1531,60 @@ describe('EchoSessionController integration', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(setSessionCapture.mock.calls.map(([active]) => active)).toEqual([true, false]);
     expect(test.spies.resetSessionCapture).toHaveBeenCalledOnce();
+    await test.controller.shutdown();
+  });
+
+  it('reissues capture-off when activation re-arms native capture before an old acknowledgement', async () => {
+    const firstDisable = deferred<{ active: boolean }>();
+    const secondDisable = deferred<{ active: boolean }>();
+    let disableCalls = 0;
+    const test = fixture({
+      setSessionCapture: (active) => {
+        if (active) return Promise.resolve({ active });
+        disableCalls += 1;
+        return disableCalls === 1 ? firstDisable.promise : secondDisable.promise;
+      },
+    });
+    test.notify(activation('down'));
+    await settle();
+    test.frame();
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(disableCalls).toBe(1));
+    expect(test.controller.snapshot.phase).toBe('transcribing');
+
+    test.notify(activation('down'));
+    firstDisable.resolve({ active: false });
+    await vi.waitFor(() => expect(disableCalls).toBe(2));
+    expect(test.controller.snapshot.phase).toBe('transcribing');
+
+    secondDisable.resolve({ active: false });
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    await test.controller.shutdown();
+  });
+
+  it('reconciles again when activation re-arms capture during helper-reset fallback', async () => {
+    const reset = deferred<undefined>();
+    let disableCalls = 0;
+    const test = fixture({
+      setSessionCapture: (active) => {
+        if (active) return Promise.resolve({ active });
+        disableCalls += 1;
+        return disableCalls === 1
+          ? Promise.reject(new Error('capture state unknown'))
+          : Promise.resolve({ active: false });
+      },
+      resetSessionCapture: () => reset.promise,
+    });
+    test.notify(activation('down'));
+    await settle();
+    test.frame();
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.spies.resetSessionCapture).toHaveBeenCalledOnce());
+
+    test.notify(activation('down'));
+    reset.resolve(undefined);
+    await vi.waitFor(() => expect(disableCalls).toBe(2));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
     await test.controller.shutdown();
   });
 
@@ -1449,7 +1614,7 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
     test.setHelperReadiness(test.helper.readiness);
-    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledTimes(2));
     expect(setSessionCapture.mock.calls.map(([active]) => active)).toEqual([true, false, true]);
 
     test.controller.cancel();
@@ -1492,6 +1657,35 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.startSession).toHaveBeenCalledOnce();
     expect(push).toHaveBeenCalledOnce();
     expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a hung Extended stream opening so failure teardown is not trapped behind it', async () => {
+    vi.useFakeTimers();
+    const startup: { signal: AbortSignal | null } = { signal: null };
+    const test = fixture({
+      startSession: (_options, signal) => {
+        startup.signal = signal ?? null;
+        return new Promise(() => undefined);
+      },
+    });
+
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(600);
+    await vi.waitFor(() => expect(test.spies.startSession).toHaveBeenCalledOnce());
+
+    test.loseCapture();
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'The microphone stopped unexpectedly.',
+    });
+    expect(startup.signal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(test.spies.stopDictation).toHaveBeenCalled());
+    expect(test.spies.setSessionCapture).toHaveBeenLastCalledWith(false);
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
+    await test.controller.shutdown();
   });
 
   it('fails closed instead of retaining unbounded Extended audio behind a slow stream', async () => {
@@ -1537,6 +1731,79 @@ describe('EchoSessionController integration', () => {
     expect(finish).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
     expect(test.spies.stopDictation).toHaveBeenCalled();
+  });
+
+  it('does not expose idle or a new session before bounded stream teardown completes', async () => {
+    vi.useFakeTimers();
+    const test = fixture({
+      startSession: () =>
+        Promise.resolve({
+          id: 'hung-cancel',
+          push: () => Promise.resolve(),
+          finish: vi.fn(),
+          cancel: () => new Promise(() => undefined),
+        }),
+    });
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(600);
+    test.controller.cancel();
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(test.controller.snapshot.phase).toBe('cancelled');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
+    await test.controller.shutdown();
+  });
+
+  it('overlaps model acquisition with helper capture confirmation', async () => {
+    const model = deferred<EchoModelUseGrant>();
+    const helperEnable = deferred<{ active: boolean }>();
+    const test = fixture({
+      acquireModelUse: () => model.promise,
+      setSessionCapture: (active) =>
+        active ? helperEnable.promise : Promise.resolve({ active: false }),
+    });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(test.spies.setSessionCapture).toHaveBeenCalledWith(true));
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+
+    model.resolve({ status: { state: 'ready' }, release: vi.fn() });
+    await Promise.resolve();
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    helperEnable.resolve({ active: true });
+    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    test.controller.cancel();
+    await test.controller.shutdown();
+  });
+
+  it('bounds teardown when one parallel startup gate fails and the other never settles', async () => {
+    vi.useFakeTimers();
+    const test = fixture({
+      acquireModelUse: () => new Promise(() => undefined),
+      setSessionCapture: (active) =>
+        active ? Promise.reject(new Error('capture enable failed')) : Promise.resolve({ active }),
+    });
+
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.controller.snapshot.phase).toBe('error');
+
+    const shutdown = test.controller.shutdown();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(shutdown).resolves.toBeUndefined();
+  });
+
+  it('shows activation feedback without entering the serialized foreground-app path', async () => {
+    const test = fixture({ getFrontApp: () => new Promise(() => undefined) });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    expect(test.spies.sound).toHaveBeenCalledOnce();
+    expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
+    expect(test.spies.getFrontApp).not.toHaveBeenCalled();
+    test.controller.cancel();
+    await test.controller.shutdown();
   });
 
   it('confirms helper capture before microphone startup and releases the Quick model lease', async () => {
@@ -1602,7 +1869,7 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.resetSessionCapture).toHaveBeenCalledOnce();
   });
 
-  it('shutdown races a hung capture startup and cleans up a late capture without UI', async () => {
+  it('shutdown races a hung capture startup and cleans up a late capture after arming feedback', async () => {
     const startupControl: {
       resolve: ((capture: { captureId: string; activeMicrophoneId: string }) => void) | null;
     } = { resolve: null };
@@ -1613,11 +1880,11 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down'));
     await settle();
     await expect(test.controller.shutdown()).resolves.toBeUndefined();
-    expect(test.spies.showWidget).not.toHaveBeenCalled();
+    expect(test.spies.showWidget).toHaveBeenCalledOnce();
     if (startupControl.resolve === null) throw new Error('Capture startup was not invoked');
     startupControl.resolve({ captureId: 'late-capture', activeMicrophoneId: 'default' });
     await vi.waitFor(() => expect(test.spies.stopDictation).toHaveBeenCalledWith('late-capture'));
-    expect(test.spies.showWidget).not.toHaveBeenCalled();
+    expect(test.spies.showWidget).toHaveBeenCalledOnce();
   });
 
   it('treats an unexpected AbortError from an active operation as failure with teardown', async () => {

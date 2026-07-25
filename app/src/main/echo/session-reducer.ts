@@ -13,6 +13,9 @@ export interface EchoSessionState extends EchoSessionSnapshot {
   readonly finalText: string | null;
   readonly insertionState: 'none' | 'pending' | 'cancel-requested' | 'committed';
   readonly fallbackReason: 'provider-error' | 'timeout' | null;
+  readonly captureReady: boolean;
+  readonly audioReady: boolean;
+  readonly submitPending: boolean;
 }
 
 export type EchoSessionEvent =
@@ -25,6 +28,8 @@ export type EchoSessionEvent =
     }
   | { readonly type: 'hold-elapsed'; readonly now: number }
   | { readonly type: 'shortcut-up'; readonly now: number }
+  | { readonly type: 'capture-started' }
+  | { readonly type: 'audio-started' }
   | { readonly type: 'level'; readonly rms: number; readonly elapsedMs: number }
   | {
       readonly type: 'submit';
@@ -83,6 +88,9 @@ export const IDLE_ECHO_SESSION: EchoSessionState = Object.freeze({
   finalText: null,
   insertionState: 'none',
   fallbackReason: null,
+  captureReady: false,
+  audioReady: false,
+  submitPending: false,
 });
 
 export function reduceEchoSession(
@@ -108,14 +116,30 @@ export function reduceEchoSession(
       { type: 'start-capture' },
     );
   }
+  if (event.type === 'capture-started' || event.type === 'audio-started') {
+    if (!isRecordingOrArming(state.phase)) return transition(state);
+    const ready = {
+      ...state,
+      captureReady: state.captureReady || event.type === 'capture-started',
+      audioReady: state.audioReady || event.type === 'audio-started',
+    };
+    if (!ready.submitPending || !ready.captureReady || !ready.audioReady) {
+      return transition(ready);
+    }
+    return transition(
+      { ...ready, phase: 'transcribing', rms: 0, submitPending: false },
+      { type: 'stop-and-transcribe' },
+    );
+  }
   if (event.type === 'hold-elapsed') {
-    if (state.phase !== 'arming') return transition(state);
+    if (state.phase !== 'arming' || state.submitPending) return transition(state);
     return transition(
       withElapsed({ ...state, phase: 'recordingExtended', dictationMode: 'extended' }, event.now),
       { type: 'begin-extended-transcription' },
     );
   }
   if (event.type === 'shortcut-up') {
+    if (state.phase === 'arming' && state.submitPending) return transition(state);
     if (state.phase === 'arming') {
       const elapsed = Math.max(0, event.now - (state.startedAt ?? event.now));
       if (elapsed >= ECHO_HOLD_THRESHOLD_MS) {
@@ -138,14 +162,19 @@ export function reduceEchoSession(
     return transition({ ...state, rms: event.rms, elapsedMs: event.elapsedMs });
   }
   if (event.type === 'submit') {
-    if (state.phase === 'arming') {
-      return transition(
-        { ...state, phase: 'transcribing', dictationMode: 'quick', rms: 0 },
-        { type: 'stop-and-transcribe' },
-      );
+    if (!isRecordingOrArming(state.phase)) return transition(state);
+    const submitted = {
+      ...state,
+      dictationMode: state.phase === 'arming' ? ('quick' as const) : state.dictationMode,
+      rms: 0,
+    };
+    if (!state.captureReady || !state.audioReady) {
+      return transition({ ...submitted, submitPending: true });
     }
-    if (!isRecording(state.phase)) return transition(state);
-    return transition({ ...state, phase: 'transcribing', rms: 0 }, { type: 'stop-and-transcribe' });
+    return transition(
+      { ...submitted, phase: 'transcribing', submitPending: false },
+      { type: 'stop-and-transcribe' },
+    );
   }
   if (event.type === 'voice-command-matched') {
     if (state.phase !== 'transcribing') return transition(state);

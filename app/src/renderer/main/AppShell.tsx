@@ -1,14 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type RefObject } from 'react';
 import appIcon from '../../../assets/app-icon.png';
 import type { BootstrapData } from '../../shared/bridge/api';
 import type { AppState } from '../../shared/schemas/app-state';
 import type { Settings } from '../../shared/schemas/settings';
+import type { WelcomeState } from '../../shared/schemas/welcome';
 import { Button, Status } from '../design';
 import { presentAppStatus } from '../status-presentation';
 import { EchoScreen } from './screens/EchoScreen';
-import { InfoScreen } from './screens/InfoScreen';
-import { SettingsScreen } from './screens/SettingsScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
+
+const InfoScreen = lazy(async () => {
+  const module = await import('./screens/InfoScreen');
+  return { default: module.InfoScreen };
+});
+const SettingsScreen = lazy(async () => {
+  const module = await import('./screens/SettingsScreen');
+  return { default: module.SettingsScreen };
+});
 
 const screens = ['echo', 'settings', 'info'] as const;
 type Screen = (typeof screens)[number];
@@ -18,25 +26,19 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
   const [state, setState] = useState<AppState>(bootstrap.state);
   const [settings, setSettings] = useState<Settings>(bootstrap.settings);
   const [welcomeReopened, setWelcomeReopened] = useState(false);
-  const [welcomeCompleted, setWelcomeCompleted] = useState(
-    bootstrap.settings.welcome.completedAt !== null,
-  );
   const [maximized, setMaximized] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const welcomeRequired = settings.welcome.completedAt === null;
 
   useEffect(() => window.talkingQuill.app.onStateChanged(setState), []);
   useEffect(
     () =>
-      window.talkingQuill.settings.onChanged((next) => {
-        setSettings(next);
-        if (next.welcome.completedAt !== null) setWelcomeCompleted(true);
-      }),
+      window.talkingQuill.settings.onChanged((next) =>
+        setSettings((current) => mergeSettingsSnapshot(current, next)),
+      ),
     [],
   );
   useEffect(() => window.talkingQuill.windowControls.onMaximizedChanged(setMaximized), []);
-  useEffect(() => headingRef.current?.focus(), [screen]);
-
-  const welcomeRequired = !welcomeCompleted;
   if (welcomeRequired || welcomeReopened) {
     return (
       <WelcomeWizard
@@ -44,22 +46,17 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
         state={state}
         platform={bootstrap.platform}
         reopened={welcomeReopened && !welcomeRequired}
-        onSettingsSaved={setSettings}
+        onSettingsSaved={(next) => setSettings((current) => mergeSettingsSnapshot(current, next))}
         onClose={() => {
           setWelcomeReopened(false);
           requestAnimationFrame(() =>
             document.querySelector<HTMLElement>('#reopen-welcome')?.focus(),
           );
         }}
-        onComplete={() => {
-          setSettings((current) => ({
-            ...current,
-            welcome: { ...current.welcome, completedAt: Date.now(), lastStep: 6 },
-          }));
-          setWelcomeCompleted(true);
+        onComplete={(welcome) => {
+          setSettings((current) => mergeWelcomeState(current, welcome));
           setWelcomeReopened(false);
           setScreen('echo');
-          requestAnimationFrame(() => headingRef.current?.focus());
         }}
       />
     );
@@ -79,7 +76,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
         headingRef={headingRef}
         settings={settings}
         platform={bootstrap.platform}
-        onSettingsSaved={setSettings}
+        onSettingsSaved={(next) => setSettings((current) => mergeSettingsSnapshot(current, next))}
       />
     ) : (
       <InfoScreen
@@ -153,9 +150,52 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
           </Status>
         </aside>
         <main className="content" id="main-content">
-          {screenContent}
+          <Suspense fallback={<p aria-live="polite">Loading screen…</p>}>
+            {screenContent}
+            <ScreenHeadingFocus headingRef={headingRef} screen={screen} />
+          </Suspense>
         </main>
       </div>
     </div>
   );
+}
+
+function ScreenHeadingFocus({
+  headingRef,
+  screen,
+}: {
+  readonly headingRef: RefObject<HTMLHeadingElement | null>;
+  readonly screen: Screen;
+}) {
+  useEffect(() => headingRef.current?.focus(), [headingRef, screen]);
+  return null;
+}
+
+function mergeSettingsSnapshot(current: Settings, next: Settings): Settings {
+  if ((current.welcome.revision ?? 0) <= (next.welcome.revision ?? 0)) return next;
+  return { ...next, welcome: current.welcome };
+}
+
+function mergeWelcomeState(current: Settings, state: WelcomeState): Settings {
+  const welcome: Settings['welcome'] = {
+    completedAt: state.completedAt,
+    lastStep: state.lastStep,
+    microphoneTested: state.microphoneTested,
+    activationTested: state.activationTested,
+    microphoneEvidence: state.microphoneEvidence,
+    activationEvidence: state.activationEvidence,
+    modelEvidence: state.modelEvidence,
+    revision: state.revision,
+  };
+  const currentRevision = current.welcome.revision ?? 0;
+  const nextRevision = welcome.revision ?? 0;
+  if (
+    currentRevision > nextRevision ||
+    (currentRevision === nextRevision &&
+      current.welcome.completedAt === welcome.completedAt &&
+      current.welcome.lastStep === welcome.lastStep)
+  ) {
+    return current;
+  }
+  return { ...current, welcome };
 }

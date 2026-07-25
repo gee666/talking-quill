@@ -14,6 +14,12 @@ import type { CredentialResolver } from './contracts';
 
 const MAX_BINDING_LENGTH = 4_096;
 
+export interface ProviderCredentialReconciliation {
+  readonly providerId: RunnableProviderId;
+  readonly endpointBinding: string | null;
+  readonly credentialEpoch: number;
+}
+
 export class ProviderCredentialService implements CredentialResolver {
   readonly #vault: CredentialVault;
   readonly #activeEpochs = new Map<RunnableProviderId, number>();
@@ -103,6 +109,25 @@ export class ProviderCredentialService implements CredentialResolver {
   async purgeProvider(providerId: RunnableProviderId): Promise<void> {
     const id = RunnableProviderIdSchema.parse(providerId);
     await this.#purgeProvider(id);
+  }
+
+  async reconcileAll(entries: readonly ProviderCredentialReconciliation[]): Promise<void> {
+    const prefixes: string[] = [];
+    const exactIds: string[] = [];
+    const retainedIds: string[] = [];
+    const seen = new Set<RunnableProviderId>();
+    for (const entry of entries) {
+      const providerId = RunnableProviderIdSchema.parse(entry.providerId);
+      if (seen.has(providerId)) throw new Error('Duplicate provider credential reconciliation');
+      seen.add(providerId);
+      const epoch = zCredentialEpoch(entry.credentialEpoch);
+      prefixes.push(vaultPrefix(providerId));
+      exactIds.push(legacyVaultId(providerId));
+      if (entry.endpointBinding !== null) {
+        retainedIds.push(vaultId(providerId, parseBinding(entry.endpointBinding), epoch));
+      }
+    }
+    await this.#vault.reconcileRecords({ prefixes, exactIds, retainedIds });
   }
 
   unconfiguredStatus(providerId: RunnableProviderId): ProviderCredentialStatus {

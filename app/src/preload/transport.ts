@@ -30,9 +30,9 @@ export async function invoke<Channel extends InvokeChannel>(
 ): Promise<InvokeResponse<Channel>> {
   const request = invokeRegistry[channel].request.parse(input);
   const raw: unknown = await ipcRenderer.invoke(channel, request);
-  const failure = failureResponseSchema.safeParse(raw);
-  if (failure.success) {
-    throw new RendererApiError(failure.data.error.code, failure.data.error.message);
+  if (typeof raw === 'object' && raw !== null && Reflect.get(raw, 'ok') === false) {
+    const failure = failureResponseSchema.parse(raw);
+    throw new RendererApiError(failure.error.code, failure.error.message);
   }
   return successResponseSchema(channel).parse(raw).data;
 }

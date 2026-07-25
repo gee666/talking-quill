@@ -4,6 +4,7 @@ import {
   type SpawnOptionsWithoutStdio,
 } from 'node:child_process';
 import { dirname } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   HELPER_PROTOCOL_VERSION,
   HelperNotificationSchema,
@@ -35,6 +36,7 @@ const REQUEST_TIMEOUT_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const SHUTDOWN_TIMEOUT_MS = 1_000;
 const STDERR_LIMIT_BYTES = 8 * 1024;
+const OUTBOUND_QUEUE_CAPACITY = 256;
 const FAILURE_WINDOW_MS = 2 * 60_000;
 const FAILURE_LIMIT = 5;
 const RESTART_DELAYS_MS = [250, 1_000, 4_000, 15_000, 30_000] as const;
@@ -48,10 +50,20 @@ interface PendingRequest {
   readonly method: HelperMethod;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
-  readonly timer: NodeJS.Timeout;
+  readonly deadlineAt: number;
+  readonly timeoutReason: HelperReadinessReason;
   readonly removeAbort: () => void;
   readonly onPasteCommitted?: (() => void) | undefined;
+  timer: NodeJS.Timeout | null;
+  dispatched: boolean;
   abortRequested: boolean;
+  pasteCommitted: boolean;
+}
+
+interface QueuedWrite {
+  readonly id: number;
+  readonly frame: Buffer;
+  readonly child: ChildProcessWithoutNullStreams;
 }
 
 export interface HelperClientOptions {
@@ -80,8 +92,11 @@ export class HelperClient {
   readonly #pending = new Map<number, PendingRequest>();
   readonly #readinessListeners = new Set<(readiness: HelperReadiness) => void>();
   readonly #notificationListeners = new Set<(notification: HelperNotification) => void>();
+  readonly #writeQueue: QueuedWrite[] = [];
   #child: ChildProcessWithoutNullStreams | null = null;
   #decoder = new HelperFrameDecoder();
+  #writeBlocked = false;
+  #writeClosed = true;
   #nextRequestId = 1;
   #generation = 0;
   #desiredRunning = false;
@@ -222,57 +237,129 @@ export class HelperClient {
     timeoutMs = REQUEST_TIMEOUT_MS,
     signal?: AbortSignal,
     onPasteCommitted?: () => void,
+    timeoutReason: HelperReadinessReason = 'request-timeout',
+    allowStopping = false,
   ): Promise<HelperResult<Method>> {
     if (signal?.aborted === true) {
       return Promise.reject(new DOMException('Native helper request cancelled', 'AbortError'));
     }
     const child = this.#child;
-    if (child === null || child.stdin.destroyed || !child.stdin.writable) {
-      return Promise.reject(new HelperClientError('not-running', 'Native helper is not running'));
+    if (
+      child === null ||
+      this.#writeClosed ||
+      (!this.#desiredRunning && !allowStopping) ||
+      child.stdin.destroyed ||
+      !child.stdin.writable
+    ) {
+      return Promise.reject(new HelperClientError('not-running', 'Native helper is terminating'));
+    }
+
+    if (this.#writeQueue.length >= OUTBOUND_QUEUE_CAPACITY) {
+      return Promise.reject(
+        new HelperClientError('transport-error', 'Native helper outbound queue is full'),
+      );
     }
 
     const id = this.#takeRequestId();
     const validParams = helperParamsSchemas[method].parse(params);
     const frame = encodeHelperFrame({ jsonrpc: '2.0', id, method, params: validParams });
     return new Promise<HelperResult<Method>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const pending = this.#pending.get(id);
-        if (pending === undefined) return;
-        pending.removeAbort();
-        this.#pending.delete(id);
-        reject(
-          pending.abortRequested
-            ? new DOMException('Native helper request cancelled', 'AbortError')
-            : new HelperClientError('request-timeout', `Native helper ${method} timed out`),
-        );
-        this.#terminateCurrent('request-timeout', true);
-      }, timeoutMs);
-      timer.unref();
       const abort = (): void => {
         const pending = this.#pending.get(id);
-        if (pending !== undefined) pending.abortRequested = true;
+        if (pending === undefined) return;
+        if (pending.dispatched) {
+          pending.abortRequested = true;
+          return;
+        }
+        const queuedIndex = this.#writeQueue.findIndex((queued) => queued.id === id);
+        if (queuedIndex !== -1) this.#writeQueue.splice(queuedIndex, 1);
+        if (pending.timer !== null) clearTimeout(pending.timer);
+        pending.removeAbort();
+        this.#pending.delete(id);
+        pending.reject(new DOMException('Native helper request cancelled', 'AbortError'));
       };
       signal?.addEventListener('abort', abort, { once: true });
       this.#pending.set(id, {
         method,
-        timer,
+        deadlineAt: performance.now() + timeoutMs,
+        timeoutReason,
+        timer: null,
+        dispatched: false,
         resolve: (result) => resolve(result as HelperResult<Method>),
         reject,
         removeAbort: () => signal?.removeEventListener('abort', abort),
         onPasteCommitted,
         abortRequested: false,
+        pasteCommitted: false,
       });
-      child.stdin.write(frame, (error) => {
-        if (error === null || error === undefined) return;
-        const pending = this.#pending.get(id);
-        if (pending === undefined) return;
-        clearTimeout(pending.timer);
-        pending.removeAbort();
-        this.#pending.delete(id);
-        pending.reject(new HelperClientError('transport-error', 'Native helper stdin failed'));
-        this.#terminateCurrent('unexpected-exit', true);
-      });
+      this.#armRequestTimeout(id);
+      this.#writeQueue.push({ id, frame, child });
+      this.#pumpWrites(child);
     });
+  }
+
+  #armRequestTimeout(id: number): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    const remaining = Math.max(0, pending.deadlineAt - performance.now());
+    pending.timer = setTimeout(() => this.#expireRequest(id), remaining);
+    pending.timer.unref();
+  }
+
+  #expireRequest(id: number): void {
+    const current = this.#pending.get(id);
+    if (current === undefined) return;
+    const queuedIndex = this.#writeQueue.findIndex((queued) => queued.id === id);
+    if (queuedIndex !== -1) this.#writeQueue.splice(queuedIndex, 1);
+    if (current.timer !== null) clearTimeout(current.timer);
+    current.removeAbort();
+    this.#pending.delete(id);
+    current.reject(
+      current.abortRequested
+        ? new DOMException('Native helper request cancelled', 'AbortError')
+        : new HelperClientError('request-timeout', `Native helper ${current.method} timed out`),
+    );
+    this.#terminateCurrent(current.timeoutReason, true);
+  }
+
+  #pumpWrites(child: ChildProcessWithoutNullStreams): void {
+    if (this.#writeClosed || this.#writeBlocked || this.#child !== child) return;
+    while (this.#writeQueue.length > 0) {
+      const queued = this.#writeQueue.shift();
+      if (queued === undefined) return;
+      const pending = this.#pending.get(queued.id);
+      if (pending === undefined) continue;
+      if (queued.child !== child || child.stdin.destroyed || !child.stdin.writable) {
+        this.#failTransport(child, 'Native helper stdin is unavailable');
+        return;
+      }
+      if (performance.now() >= pending.deadlineAt) {
+        this.#expireRequest(queued.id);
+        return;
+      }
+
+      pending.dispatched = true;
+
+      const writable = child.stdin.write(queued.frame, (error) => {
+        if (error !== null && error !== undefined) {
+          this.#failTransport(child, 'Native helper stdin failed');
+        }
+      });
+      if (!writable) {
+        this.#writeBlocked = true;
+        return;
+      }
+    }
+  }
+
+  #failTransport(child: ChildProcessWithoutNullStreams, message: string): void {
+    if (this.#child !== child) return;
+    this.#terminateCurrent(
+      'unexpected-exit',
+      true,
+      new HelperClientError('transport-error', message),
+    );
   }
 
   async #performStop(): Promise<void> {
@@ -281,17 +368,33 @@ export class HelperClient {
     const child = this.#child;
     if (child !== null) {
       this.#plannedExit = { reason: 'shutdown', restart: false };
-      await this.request('session.set_capture', { active: false }, 250).catch(() => undefined);
-      await this.request('activation.configure', { enabled: false, bindings: [] }, 250).catch(
+      await this.request(
+        'session.set_capture',
+        { active: false },
+        250,
+        undefined,
+        undefined,
+        'request-timeout',
+        true,
+      ).catch(() => undefined);
+      await this.request(
+        'activation.configure',
+        { enabled: false, bindings: [] },
+        250,
+        undefined,
+        undefined,
+        'request-timeout',
+        true,
+      ).catch(() => undefined);
+      const close = waitForClose(child);
+      await this.request('shutdown', {}, 250, undefined, undefined, 'request-timeout', true).catch(
         () => undefined,
       );
-      const close = waitForClose(child);
-      await this.request('shutdown', {}, 250).catch(() => undefined);
       const closed = await Promise.race([
         close.then(() => true),
         delay(SHUTDOWN_TIMEOUT_MS).then(() => false),
       ]);
-      if (!closed && this.#child === child) child.kill();
+      if (!closed && this.#child === child) this.#terminateCurrent('shutdown', false);
       const forcedClosed =
         closed ||
         (await Promise.race([
@@ -344,6 +447,9 @@ export class HelperClient {
     if (!this.#desiredRunning) return;
 
     this.#decoder = new HelperFrameDecoder();
+    this.#writeQueue.length = 0;
+    this.#writeBlocked = false;
+    this.#writeClosed = true;
     this.#plannedExit = null;
     const generation = ++this.#generation;
     let child: ChildProcessWithoutNullStreams;
@@ -359,20 +465,35 @@ export class HelperClient {
       return;
     }
     this.#child = child;
+    this.#writeClosed = false;
     this.#attachProcess(child, generation);
 
+    const launchDeadline = performance.now() + HANDSHAKE_TIMEOUT_MS;
+    const remainingLaunchTime = () => launchDeadline - performance.now();
     try {
       const initialized = await this.request(
         'initialize',
         { protocolVersion: HELPER_PROTOCOL_VERSION },
-        HANDSHAKE_TIMEOUT_MS,
+        remainingLaunchTime(),
+        undefined,
+        undefined,
+        'handshake-timeout',
       );
       if (!this.#isActiveChild(child)) return;
       this.#validateHandshake(initialized);
-      await this.request('activation.configure', {
-        enabled: this.#desiredActivation.enabled,
-        bindings: [...this.#desiredActivation.bindings],
-      });
+      if (this.#desiredActivation.enabled || this.#desiredActivation.bindings.length > 0) {
+        await this.request(
+          'activation.configure',
+          {
+            enabled: this.#desiredActivation.enabled,
+            bindings: [...this.#desiredActivation.bindings],
+          },
+          remainingLaunchTime(),
+          undefined,
+          undefined,
+          'handshake-timeout',
+        );
+      }
       if (!this.#isActiveChild(child)) return;
       this.#setReadiness(
         readinessFromHandshake(
@@ -415,6 +536,17 @@ export class HelperClient {
   }
 
   #attachProcess(child: ChildProcessWithoutNullStreams, generation: number): void {
+    child.stdin.on('drain', () => {
+      if (this.#child !== child || this.#generation !== generation || this.#writeClosed) return;
+      this.#writeBlocked = false;
+      this.#pumpWrites(child);
+    });
+    child.stdin.once('error', () => this.#failTransport(child, 'Native helper stdin failed'));
+    child.stdin.once('close', () => this.#failTransport(child, 'Native helper stdin closed'));
+    child.stdout.once('error', () => this.#failTransport(child, 'Native helper stdout failed'));
+    // stderr is diagnostic-only, but it still needs an error observer so a broken pipe cannot
+    // become an uncaught main-process exception.
+    child.stderr.once('error', () => undefined);
     child.stdout.on('data', (chunk: Buffer) => {
       if (this.#child !== child || this.#generation !== generation) return;
       try {
@@ -428,14 +560,14 @@ export class HelperClient {
       try {
         this.#decoder.finish();
       } catch {
-        this.#plannedExit ??= { reason: 'malformed-response', restart: true };
+        this.#terminateCurrent('malformed-response', true);
+        return;
       }
+      this.#terminateCurrent('unexpected-exit', true);
     });
     child.stderr.on('data', (chunk: Buffer) => this.#appendDiagnostics(chunk));
     child.once('error', () => {
-      if (this.#child === child) {
-        this.#plannedExit ??= { reason: 'spawn-failed', restart: true };
-      }
+      if (this.#child === child) this.#terminateCurrent('spawn-failed', true);
     });
     child.once('close', () => this.#handleClose(child, generation));
   }
@@ -447,7 +579,7 @@ export class HelperClient {
       if (response.data.id === null) throw new Error('Uncorrelated helper response');
       const pending = this.#pending.get(response.data.id);
       if (pending === undefined) throw new Error('Unknown helper response ID');
-      clearTimeout(pending.timer);
+      if (pending.timer !== null) clearTimeout(pending.timer);
       pending.removeAbort();
       this.#pending.delete(response.data.id);
       if ('error' in response.data) {
@@ -473,7 +605,13 @@ export class HelperClient {
     if (notification.method === 'paste.committed') {
       const pending = this.#pending.get(notification.params.requestId);
       if (pending?.method !== 'paste.inject') throw new Error('Unknown paste commit request ID');
-      pending.onPasteCommitted?.();
+      if (pending.pasteCommitted) return;
+      pending.pasteCommitted = true;
+      try {
+        pending.onPasteCommitted?.();
+      } catch {
+        // Commit observers are application callbacks, not part of protocol supervision.
+      }
       return;
     }
     for (const listener of this.#notificationListeners) {
@@ -488,6 +626,9 @@ export class HelperClient {
   #handleClose(child: ChildProcessWithoutNullStreams, generation: number): void {
     if (this.#child !== child || this.#generation !== generation) return;
     this.#child = null;
+    this.#writeQueue.length = 0;
+    this.#writeBlocked = false;
+    this.#writeClosed = true;
     this.#clearHeartbeat();
     this.#rejectPending(new HelperClientError('transport-error', 'Native helper stopped'));
     const planned = this.#plannedExit;
@@ -496,11 +637,24 @@ export class HelperClient {
     this.#recordFailure(planned?.reason ?? 'unexpected-exit', planned?.restart ?? true);
   }
 
-  #terminateCurrent(reason: HelperReadinessReason, restart: boolean): void {
+  #terminateCurrent(
+    reason: HelperReadinessReason,
+    restart: boolean,
+    pendingError: Error = new HelperClientError(
+      'transport-error',
+      'Native helper transport is terminating',
+    ),
+  ): void {
     const child = this.#child;
-    if (child === null || this.#plannedExit !== null) return;
-    this.#plannedExit = { reason, restart };
+    if (child === null || this.#writeClosed) return;
+    this.#plannedExit ??= { reason, restart };
+    // Close the write side synchronously. kill() and the eventual close event
+    // are asynchronous, so neither may guard request admission or drain pumps.
+    this.#writeClosed = true;
+    this.#writeBlocked = false;
+    this.#writeQueue.length = 0;
     this.#clearHeartbeat();
+    this.#rejectPending(pendingError);
     child.kill();
   }
 
@@ -566,7 +720,7 @@ export class HelperClient {
 
   #rejectPending(error: Error): void {
     for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer !== null) clearTimeout(pending.timer);
       pending.removeAbort();
       pending.reject(error);
     }

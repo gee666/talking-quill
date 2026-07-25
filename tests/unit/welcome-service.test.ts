@@ -125,6 +125,40 @@ describe('WelcomeService', () => {
     expect(store.get().welcome.lastStep).toBe(4);
   });
 
+  it('commits each step once, skips no-op writes, and completes idempotently', async () => {
+    const root = await createTestDirectory('welcome-write-count');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    let updates = 0;
+    store.subscribe(() => {
+      updates += 1;
+    });
+    const service = new WelcomeService(store, ready(), () => 1234);
+
+    await service.setStep(2);
+    await service.setStep(2);
+    await service.setStep(3);
+    expect(store.get().welcome.microphoneEvidence).not.toBeNull();
+    await service.setStep(4);
+    expect(store.get().welcome.modelEvidence).not.toBeNull();
+    await service.setStep(5);
+    expect(store.get().welcome.activationEvidence).not.toBeNull();
+    await expect(service.complete()).rejects.toThrow('every Welcome step');
+    expect(updates).toBe(4);
+    await service.setStep(6);
+    expect(updates).toBe(5);
+
+    const completed = await service.complete();
+    expect(updates).toBe(6);
+    const resumed = new WelcomeService(
+      store,
+      ready({ microphone: false, model: false, helper: false, gesture: false }),
+    );
+    expect(await resumed.complete()).toEqual(completed);
+    expect(updates).toBe(6);
+  });
+
   it('rejects completion when readiness invalidates during asynchronous verification', async () => {
     const root = await createTestDirectory('welcome-race');
     roots.push(root);
@@ -149,6 +183,76 @@ describe('WelcomeService', () => {
     const invalidation = service.invalidateModelSelection();
     releaseModelCheck();
     await expect(completion).rejects.toThrow('changed while');
+    await invalidation;
+    expect(service.state()).toMatchObject({ completedAt: null, lastStep: 3 });
+  });
+
+  it('rolls back when invalidation arrives during the final completion write', async () => {
+    let blockCompletionWrite = false;
+    let completionWriteStarted!: () => void;
+    let releaseCompletionWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      completionWriteStarted = resolve;
+    });
+    const writeReleased = new Promise<void>((resolve) => {
+      releaseCompletionWrite = resolve;
+    });
+    const store = new SettingsStore('memory://welcome-completion-race', {
+      io: {
+        read: () => Promise.resolve(null),
+        write: async (_path, value) => {
+          const completedAt = (value as { welcome?: { completedAt?: number | null } }).welcome
+            ?.completedAt;
+          if (blockCompletionWrite && completedAt !== null && completedAt !== undefined) {
+            completionWriteStarted();
+            await writeReleased;
+          }
+        },
+        preserveInvalid: () => Promise.resolve(null),
+      },
+    });
+    await store.initialize();
+    const service = new WelcomeService(store, ready(), () => 1234);
+    for (const step of [2, 3, 4, 5, 6] as const) await service.setStep(step);
+    const observedCompletionStates: (number | null)[] = [];
+    store.subscribe((settings) => {
+      observedCompletionStates.push(settings.welcome.completedAt);
+    });
+
+    blockCompletionWrite = true;
+    const completion = service.complete();
+    await writeStarted;
+    const invalidation = service.invalidateModelSelection();
+    releaseCompletionWrite();
+
+    await expect(completion).rejects.toThrow('changed while');
+    await invalidation;
+    expect(service.state()).toMatchObject({ completedAt: null, lastStep: 3 });
+    expect(observedCompletionStates).not.toContain(1234);
+  });
+
+  it('rejects a forward step when readiness invalidates during verification', async () => {
+    let releaseModelCheck!: () => void;
+    const delayedModel = new Promise<boolean>((resolve) => {
+      releaseModelCheck = () => resolve(true);
+    });
+    const root = await createTestDirectory('welcome-step-race');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    const service = new WelcomeService(store, {
+      ...ready(),
+      modelReady: () => delayedModel,
+    });
+    await service.setStep(2);
+    await service.setStep(3);
+
+    const forward = service.setStep(4);
+    await Promise.resolve();
+    const invalidation = service.invalidateModelSelection();
+    releaseModelCheck();
+
+    await expect(forward).rejects.toThrow('changed while');
     await invalidation;
     expect(service.state()).toMatchObject({ completedAt: null, lastStep: 3 });
   });

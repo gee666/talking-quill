@@ -44,13 +44,19 @@ export class VaultUnavailableError extends Error {
 export class CredentialVault {
   readonly #path: string;
   readonly #safeStorage: SafeStorageAdapter;
+  readonly #writeJson: (path: string, value: unknown) => Promise<void>;
   #data: VaultData = { schemaVersion: VAULT_SCHEMA_VERSION, records: {} };
   #faulted = false;
   #writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(path: string, safeStorage: SafeStorageAdapter) {
+  constructor(
+    path: string,
+    safeStorage: SafeStorageAdapter,
+    options: { readonly writeJson?: (path: string, value: unknown) => Promise<void> } = {},
+  ) {
     this.#path = path;
     this.#safeStorage = safeStorage;
+    this.#writeJson = options.writeJson ?? writeJsonAtomic;
   }
 
   async initialize(): Promise<void> {
@@ -68,11 +74,13 @@ export class CredentialVault {
       return;
     }
     if (source === null) return;
+    let parsed: VaultData;
+    let records: VaultData['records'];
     try {
       const input = JSON.parse(source) as unknown;
       assertVaultRecordCapacity(input);
-      const parsed = VaultSchema.parse(input);
-      const records: VaultData['records'] = {};
+      parsed = VaultSchema.parse(input);
+      records = {};
       for (const [id, record] of Object.entries(parsed.records)) {
         const encrypted = Buffer.from(record.encrypted, 'base64');
         assertEncryptedSize(encrypted);
@@ -84,12 +92,17 @@ export class CredentialVault {
         }
       }
       this.#data = VaultSchema.parse({ schemaVersion: VAULT_SCHEMA_VERSION, records });
-      if (Object.keys(records).length !== Object.keys(parsed.records).length) {
-        await this.#write(this.#data);
-      }
     } catch {
       this.#faulted = true;
-      await preserveInvalidFile(this.#path);
+      await preserveInvalidFile(this.#path, source);
+      return;
+    }
+
+    // A failure to persist valid reconciliation is an I/O failure, not evidence that the source
+    // vault was corrupt. Leave the valid source in place and fail startup rather than quarantining
+    // credentials that can be retried safely.
+    if (Object.keys(records).length !== Object.keys(parsed.records).length) {
+      await this.#write(this.#data);
     }
   }
 
@@ -156,6 +169,7 @@ export class CredentialVault {
         encrypted: encryptedBuffer.toString('base64'),
         updatedAt,
       };
+      assertRecordCapacity(records);
       const next = VaultSchema.parse({ schemaVersion: VAULT_SCHEMA_VERSION, records });
       await this.#write(next);
       this.#data = next;
@@ -178,6 +192,23 @@ export class CredentialVault {
         return matches;
       });
       return deleted;
+    });
+  }
+
+  async reconcileRecords(options: {
+    readonly prefixes: readonly string[];
+    readonly exactIds: readonly string[];
+    readonly retainedIds: readonly string[];
+  }): Promise<void> {
+    const prefixes = options.prefixes.map((prefix) => CredentialIdSchema.parse(prefix));
+    const exactIds = new Set(options.exactIds.map((id) => CredentialIdSchema.parse(id)));
+    const retainedIds = new Set(options.retainedIds.map((id) => CredentialIdSchema.parse(id)));
+    await this.#enqueueMutation(async () => {
+      await this.#deleteWhere(
+        (recordId) =>
+          (exactIds.has(recordId) || prefixes.some((prefix) => recordId.startsWith(prefix))) &&
+          !retainedIds.has(recordId),
+      );
     });
   }
 
@@ -215,7 +246,7 @@ export class CredentialVault {
   }
 
   async #write(data: VaultData): Promise<void> {
-    await writeJsonAtomic(this.#path, data);
+    await this.#writeJson(this.#path, data);
     await chmod(this.#path, 0o600).catch(() => undefined);
   }
 
@@ -260,6 +291,10 @@ function assertVaultRecordCapacity(input: unknown): void {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return;
   const records = (input as Readonly<Record<string, unknown>>).records;
   if (typeof records !== 'object' || records === null || Array.isArray(records)) return;
+  assertRecordCapacity(records);
+}
+
+function assertRecordCapacity(records: object): void {
   if (Object.keys(records).length > MAX_RECORDS) throw new VaultUnavailableError();
 }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   StreamingPcmProcessor,
   StreamingResampler,
@@ -61,6 +61,37 @@ describe('capture audio processing', () => {
       expect(phaseError / (output.length - 2_000)).toBeLessThan(0.03);
     },
   );
+
+  it.each([32_000, 44_100, 48_000, 96_000])(
+    'keeps %s Hz output independent of arbitrary input chunk boundaries',
+    (inputRate) => {
+      let seed = 0x12345678;
+      const input = Float32Array.from({ length: Math.round(inputRate * 0.2) }, () => {
+        seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+        return (seed / 0xffff_ffff) * 1.8 - 0.9;
+      });
+      const chunked = resampleInChunks(inputRate, input);
+      const oneShotResampler = new StreamingResampler(inputRate, 16_000);
+      const body = oneShotResampler.process(input);
+      const tail = oneShotResampler.flush();
+      const oneShot = new Float32Array(body.length + tail.length);
+      oneShot.set(body);
+      oneShot.set(tail, body.length);
+      expect(chunked).toEqual(oneShot);
+    },
+  );
+
+  it('does not evaluate trigonometric filter coefficients on the common-rate hot path', () => {
+    const resampler = new StreamingResampler(44_100, 16_000);
+    const sin = vi.spyOn(Math, 'sin');
+    const cos = vi.spyOn(Math, 'cos');
+    resampler.process(new Float32Array(44_100));
+    resampler.flush();
+    expect(sin).not.toHaveBeenCalled();
+    expect(cos).not.toHaveBeenCalled();
+    sin.mockRestore();
+    cos.mockRestore();
+  });
 
   it('attenuates frequencies above the 16 kHz Nyquist limit', () => {
     const output = resampleInChunks(48_000, sine(48_000, 12_000, 1, 0.8));

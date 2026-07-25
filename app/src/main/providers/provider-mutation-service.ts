@@ -17,7 +17,10 @@ import type { Settings } from '../../shared/schemas/settings';
 import { parseAwsCredentials } from './aws-sigv4';
 import { ProviderError } from './errors';
 import type { ProviderConfigService } from './provider-config-service';
-import type { ProviderCredentialService } from './provider-credentials';
+import type {
+  ProviderCredentialReconciliation,
+  ProviderCredentialService,
+} from './provider-credentials';
 import type { ProviderService } from './provider-service';
 
 type Configs = Pick<
@@ -27,7 +30,8 @@ type Configs = Pick<
 type Credentials = Pick<
   ProviderCredentialService,
   'set' | 'status' | 'purgeProvider' | 'retainOnly' | 'unconfiguredStatus' | 'activateEpoch'
->;
+> &
+  Partial<Pick<ProviderCredentialService, 'reconcileAll'>>;
 type Providers = Pick<ProviderService, 'credentialBinding' | 'credentialPolicy'>;
 
 interface BindingTokenState {
@@ -154,13 +158,44 @@ export class ProviderMutationService {
 
   reconcileAll(): Promise<void> {
     return this.#run(async () => {
+      if (this.#credentials.reconcileAll === undefined) {
+        for (const providerId of RUNNABLE_PROVIDER_IDS) {
+          try {
+            const state = this.#currentBindingState(providerId);
+            await this.#reconcileProvider(providerId, state.config, state.epoch);
+          } catch {
+            // Incomplete provider drafts have no usable credential binding yet. Cleanup is retried
+            // after the next valid save/status operation for that provider.
+          }
+        }
+        return;
+      }
+
+      const reconciliation: ProviderCredentialReconciliation[] = [];
       for (const providerId of RUNNABLE_PROVIDER_IDS) {
         try {
           const state = this.#currentBindingState(providerId);
-          await this.#reconcileProvider(providerId, state.config, state.epoch);
+          reconciliation.push({
+            providerId,
+            endpointBinding:
+              this.#providers.credentialPolicy(providerId) === 'none' ? null : state.binding,
+            credentialEpoch: state.epoch,
+          });
         } catch {
-          // Incomplete provider drafts have no usable credential binding yet. Cleanup is retried
-          // after the next valid save/status operation for that provider.
+          // Keep credentials for incomplete drafts physically intact but unreachable. A later
+          // valid save/status operation will reconcile that provider.
+        }
+      }
+      try {
+        await this.#credentials.reconcileAll(reconciliation);
+        for (const { providerId } of reconciliation) {
+          this.#pendingReconciliation.delete(providerId);
+        }
+      } catch {
+        // Epoch activation above is authoritative. One best-effort bulk vault rewrite replaces
+        // provider-by-provider startup rewrites without making obsolete credentials reachable.
+        for (const { providerId } of reconciliation) {
+          this.#pendingReconciliation.add(providerId);
         }
       }
     });

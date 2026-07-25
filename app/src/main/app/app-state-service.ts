@@ -18,23 +18,24 @@ export class AppStateService {
   #helperReadiness: HelperReadiness = INITIAL_HELPER_READINESS;
   #sessionPhase: EchoSessionSnapshot['phase'] = 'idle';
   #modelReady = false;
+  #enabled: boolean;
+  #state: AppState;
 
   constructor(settings: SettingsStore, events: IpcEventEmitter) {
     this.#settings = settings;
     this.#events = events;
+    this.#enabled = settings.get().app.enabled;
+    this.#state = this.#createState();
     this.#settings.subscribe((next) => {
       this.#events.send('settings:changed', next);
-      this.#events.send('app:state-changed', this.getState());
+      if (this.#enabled === next.app.enabled) return;
+      this.#enabled = next.app.enabled;
+      this.#publishStateChange();
     });
   }
 
   getState(): AppState {
-    return AppStateSchema.parse({
-      enabled: this.#settings.get().app.enabled,
-      status: this.#status(),
-      modelReady: this.#modelReady,
-      helper: this.#helperReadiness,
-    });
+    return structuredClone(this.#state);
   }
 
   getSettings(): Settings {
@@ -42,8 +43,9 @@ export class AppStateService {
   }
 
   setSession(snapshot: EchoSessionSnapshot): void {
+    if (this.#sessionPhase === snapshot.phase) return;
     this.#sessionPhase = snapshot.phase;
-    this.#events.send('app:state-changed', this.getState());
+    this.#publishStateChange();
   }
 
   get modelReady(): boolean {
@@ -51,13 +53,15 @@ export class AppStateService {
   }
 
   setModelReady(ready: boolean): void {
+    if (this.#modelReady === ready) return;
     this.#modelReady = ready;
-    this.#events.send('app:state-changed', this.getState());
+    this.#publishStateChange();
   }
 
   setHelperReadiness(readiness: HelperReadiness): void {
+    if (helperReadinessEquals(this.#helperReadiness, readiness)) return;
     this.#helperReadiness = readiness;
-    this.#events.send('app:state-changed', this.getState());
+    this.#publishStateChange();
   }
 
   async setEnabled(enabled: boolean): Promise<AppState> {
@@ -69,8 +73,24 @@ export class AppStateService {
     return this.#settings.update(PublicSettingsPatchSchema.parse(patch));
   }
 
+  #createState(): AppState {
+    return AppStateSchema.parse({
+      enabled: this.#enabled,
+      status: this.#status(),
+      modelReady: this.#modelReady,
+      helper: this.#helperReadiness,
+    });
+  }
+
+  #publishStateChange(): void {
+    const next = this.#createState();
+    if (appStateEquals(this.#state, next)) return;
+    this.#state = next;
+    this.#events.send('app:state-changed', next);
+  }
+
   #status(): AppState['status'] {
-    if (!this.#settings.get().app.enabled) return 'disabled';
+    if (!this.#enabled) return 'disabled';
     if (this.#sessionPhase === 'arming' || this.#sessionPhase.startsWith('recording')) {
       return 'recording';
     }
@@ -80,4 +100,24 @@ export class AppStateService {
     }
     return this.#helperReadiness.status === 'ready' && this.#modelReady ? 'ready' : 'needs-setup';
   }
+}
+
+function appStateEquals(first: AppState, second: AppState): boolean {
+  return (
+    first.enabled === second.enabled &&
+    first.status === second.status &&
+    first.modelReady === second.modelReady &&
+    helperReadinessEquals(first.helper, second.helper)
+  );
+}
+
+function helperReadinessEquals(first: HelperReadiness, second: HelperReadiness): boolean {
+  return (
+    first.status === second.status &&
+    first.reason === second.reason &&
+    first.helperVersion === second.helperVersion &&
+    first.permissions.accessibility === second.permissions.accessibility &&
+    first.permissions.inputMonitoring === second.permissions.inputMonitoring &&
+    first.permissions.eventPost === second.permissions.eventPost
+  );
 }

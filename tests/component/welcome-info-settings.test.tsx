@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /* eslint-disable @typescript-eslint/require-await -- async mocks model the preload Promise API. */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WelcomeWizard } from '../../app/src/renderer/main/welcome/WelcomeWizard';
@@ -153,7 +153,80 @@ describe('Welcome, Info, and settings completion', () => {
     );
     await user.click(screen.getByRole('button', { name: 'Start using Talking Quill' }));
     expect((api.welcome as { complete: ReturnType<typeof vi.fn> }).complete).toHaveBeenCalledOnce();
-    expect(onComplete).toHaveBeenCalledOnce();
+    expect((api.providers as { catalog: ReturnType<typeof vi.fn> }).catalog).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith({ completedAt: 10, lastStep: 6, reopened: false });
+  });
+
+  it('uses authoritative step responses and follows persisted progress rollbacks', async () => {
+    const user = userEvent.setup();
+    const configured = settings();
+    configured.welcome.lastStep = 3;
+    const setStep = (api.welcome as { setStep: ReturnType<typeof vi.fn> }).setStep;
+    setStep.mockResolvedValueOnce({ completedAt: null, lastStep: 2, reopened: false });
+    const props = {
+      state,
+      platform: 'win32',
+      reopened: false,
+      onSettingsSaved: vi.fn(),
+      onComplete: vi.fn(),
+      onClose: vi.fn(),
+    } as const;
+    const view = render(<WelcomeWizard {...props} settings={configured} />);
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('heading', { name: 'Microphone' })).toHaveFocus();
+
+    const advanced = settings();
+    advanced.welcome.lastStep = 6;
+    view.rerender(<WelcomeWizard {...props} settings={advanced} />);
+    expect(await screen.findByRole('heading', { name: 'Ready' })).toHaveFocus();
+
+    const rolledBack = settings();
+    rolledBack.welcome.lastStep = 3;
+    view.rerender(<WelcomeWizard {...props} settings={rolledBack} />);
+    expect(await screen.findByRole('heading', { name: 'Local model' })).toHaveFocus();
+  });
+
+  it('does not let an older step response overwrite a newer settings rollback', async () => {
+    const user = userEvent.setup();
+    let resolveStep!: (value: {
+      completedAt: null;
+      lastStep: 4;
+      revision: 4;
+      reopened: false;
+    }) => void;
+    const setStep = (api.welcome as { setStep: ReturnType<typeof vi.fn> }).setStep;
+    setStep.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStep = resolve;
+      }),
+    );
+    const configured = settings();
+    configured.welcome.lastStep = 3;
+    configured.welcome.revision = 3;
+    const props = {
+      state,
+      platform: 'win32',
+      reopened: false,
+      onSettingsSaved: vi.fn(),
+      onComplete: vi.fn(),
+      onClose: vi.fn(),
+    } as const;
+    const view = render(<WelcomeWizard {...props} settings={configured} />);
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    const rolledBack = settings();
+    rolledBack.welcome.lastStep = 2;
+    rolledBack.welcome.revision = 5;
+    view.rerender(<WelcomeWizard {...props} settings={rolledBack} />);
+    expect(await screen.findByRole('heading', { name: 'Microphone' })).toHaveFocus();
+
+    await act(async () => {
+      resolveStep({ completedAt: null, lastStep: 4, revision: 4, reopened: false });
+      await Promise.resolve();
+    });
+    expect(setStep).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: 'Microphone' })).toHaveFocus();
   });
 
   it('lets Welcome users replace the General shortcut before testing it', async () => {

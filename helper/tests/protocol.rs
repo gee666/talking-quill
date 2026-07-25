@@ -4,12 +4,18 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    thread,
     time::Duration,
 };
 
 use crossbeam_channel::{Receiver, bounded};
+use proptest::{
+    prelude::*,
+    test_runner::{Config as ProptestConfig, RngSeed},
+};
+use serde_json::{Value, json};
 use talking_quill_helper::{
-    RunError,
+    CriticalDelivery, RunError,
     framing::{MAX_FRAME_BYTES, read_frame, write_frame},
     keyboard::{ActivationBindings, ActivationKey, EventPhase, HelperEvent, SessionKey},
     platform::{
@@ -19,11 +25,6 @@ use talking_quill_helper::{
     protocol::{INBOUND_METHODS, Outbound, Server, encode_outbound, parse_request},
     run_framed_stream,
 };
-use proptest::{
-    prelude::*,
-    test_runner::{Config as ProptestConfig, RngSeed},
-};
-use serde_json::{Value, json};
 
 struct FakeState {
     activation: Mutex<ActivationKey>,
@@ -171,6 +172,20 @@ fn setup_observable() -> (
     let (terminal_tx, _terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (sender, receiver) = bounded(32);
+    let (critical_sender, critical_receiver) = bounded::<CriticalDelivery>(1);
+    let relay = sender.clone();
+    thread::spawn(move || {
+        while let Ok(delivery) = critical_receiver.recv() {
+            let Some(batch) = delivery.accept() else {
+                return;
+            };
+            for message in batch {
+                if relay.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
     (
         Server::new(
             FakePlatform {
@@ -179,6 +194,7 @@ fn setup_observable() -> (
                 gate: Some(Arc::clone(&gate)),
             },
             sender,
+            critical_sender,
             Arc::clone(&gate),
             terminal,
         ),
@@ -481,6 +497,90 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
         run_framed_stream(fake_platform(), Cursor::new(truncated), Vec::new()),
         Err(RunError::Framing(_))
     ));
+}
+
+#[test]
+fn full_ordinary_queue_cannot_drop_a_reserved_paste_delivery() {
+    let gate = Arc::new(CallbackGate::new());
+    let state = Arc::new(FakeState::default());
+    let (terminal_tx, _terminal_rx) = bounded(1);
+    let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
+    let (outbound_tx, outbound_rx) = bounded(256);
+    let (critical_tx, critical_rx) = bounded::<CriticalDelivery>(1);
+    let (delivered_tx, delivered_rx) = bounded(1);
+    thread::spawn(move || {
+        while let Ok(delivery) = critical_rx.recv() {
+            let Some(batch) = delivery.accept() else {
+                return;
+            };
+            if delivered_tx.send(batch).is_err() {
+                return;
+            }
+        }
+    });
+    let mut server = Server::new(
+        FakePlatform {
+            state: Arc::clone(&state),
+            outbound: None,
+            gate: None,
+        },
+        outbound_tx.clone(),
+        critical_tx,
+        gate,
+        terminal,
+    );
+    initialize(&mut server, &outbound_rx);
+    for _ in 0..256 {
+        outbound_tx
+            .send(Outbound::Event(HelperEvent::Activation {
+                key: ActivationKey::A,
+                phase: EventPhase::Down,
+                shift: false,
+            }))
+            .unwrap();
+    }
+
+    assert!(server.handle_payload(&request(257, "paste.inject", json!({}))));
+    assert_eq!(outbound_rx.len(), 256);
+    assert!(state.calls.lock().unwrap().contains(&"inject_paste"));
+    let delivered = delivered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(delivered.len(), 2);
+    let committed: Value =
+        serde_json::from_slice(&encode_outbound(&delivered[0]).unwrap()).unwrap();
+    let response: Value = serde_json::from_slice(&encode_outbound(&delivered[1]).unwrap()).unwrap();
+    assert_eq!(committed["method"], "paste.committed");
+    assert_eq!(committed["params"]["requestId"], 257);
+    assert_eq!(response["id"], 257);
+    assert_eq!(response["result"]["submitted"], true);
+}
+
+#[test]
+fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
+    let gate = Arc::new(CallbackGate::new());
+    let state = Arc::new(FakeState::default());
+    let (terminal_tx, terminal_rx) = bounded(1);
+    let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
+    let (outbound_tx, outbound_rx) = bounded(2);
+    let (critical_tx, _critical_rx) = bounded(1);
+    let mut server = Server::new(
+        FakePlatform {
+            state: Arc::clone(&state),
+            outbound: None,
+            gate: None,
+        },
+        outbound_tx,
+        critical_tx,
+        gate,
+        terminal,
+    );
+    initialize(&mut server, &outbound_rx);
+
+    assert!(!server.handle_payload(&request(2, "paste.inject", json!({}))));
+    assert!(!state.calls.lock().unwrap().contains(&"inject_paste"));
+    assert_eq!(
+        terminal_rx.try_recv(),
+        Ok(TerminalReason::OutboundQueueUnavailable)
+    );
 }
 
 #[test]
@@ -855,6 +955,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(1);
+    let (critical_tx, _critical_rx) = bounded(1);
     drop(outbound_rx);
     let mut server = Server::new(
         FakePlatform {
@@ -863,6 +964,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
+        critical_tx,
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
@@ -885,6 +987,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(2);
+    let (critical_tx, _critical_rx) = bounded(1);
     let mut server = Server::new(
         FakePlatform {
             state: Arc::new(FakeState::default()),
@@ -892,6 +995,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
+        critical_tx,
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
@@ -918,6 +1022,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, _outbound_rx) = bounded(1);
+    let (critical_tx, _critical_rx) = bounded(1);
     let mut server = Server::new(
         FakePlatform {
             state: Arc::new(FakeState::default()),
@@ -925,6 +1030,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
+        critical_tx,
         Arc::clone(&gate),
         terminal,
     );

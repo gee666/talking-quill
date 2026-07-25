@@ -5,6 +5,7 @@ import '../design/global.css';
 import { Button, Status } from '../design';
 import './widget.css';
 import { isWidgetPointerCancelable, piFallbackLabel } from './fallback-label';
+import { subscribeToWidgetSession } from './session-subscription';
 
 const EMPTY: EchoSessionSnapshot = {
   sessionId: null,
@@ -38,13 +39,8 @@ export function WidgetShell() {
     return () => window.removeEventListener('resize', update);
   }, []);
   useEffect(() => {
-    let active = true;
-    void window.talkingQuillWidget.ready().then((snapshot) => {
-      if (active) setSession(snapshot);
-    });
-    const unsubscribe = window.talkingQuillWidget.onSessionChanged(setSession);
+    const unsubscribe = subscribeToWidgetSession(window.talkingQuillWidget, setSession);
     return () => {
-      active = false;
       setInteractive(false);
       unsubscribe();
     };
@@ -180,6 +176,7 @@ function phaseLabel(session: EchoSessionSnapshot): string {
     return 'Falling back to raw';
   switch (session.phase) {
     case 'arming':
+      return 'Preparing microphone';
     case 'recordingQuick':
     case 'recordingExtended':
       return 'Listening';

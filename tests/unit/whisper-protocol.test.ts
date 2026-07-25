@@ -55,6 +55,20 @@ describe('Whisper worker protocol', () => {
       }).success,
     ).toBe(true);
     expect(
+      WhisperWorkerRequestSchema.safeParse({
+        version: 1,
+        requestId: 'cancel-request',
+        type: 'session-cancel',
+        sessionId: 'session-1',
+      }).success,
+    ).toBe(true);
+    expect(
+      WhisperWorkerResponseSchema.safeParse({
+        ...envelope,
+        result: { type: 'acknowledged', operation: 'session-cancel' },
+      }).success,
+    ).toBe(true);
+    expect(
       WhisperWorkerResponseSchema.safeParse({
         ...envelope,
         result: { type: 'acknowledged' },

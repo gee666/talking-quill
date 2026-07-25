@@ -21,6 +21,7 @@ const MAX_CAPABILITIES = 64;
 const MAX_MODEL_INFO_ENTRIES = 4_096;
 const MAX_DETAILS_CACHE_ENTRIES = 128;
 const DETAILS_CACHE_TTL_MS = 5 * 60_000;
+const MODEL_DETAIL_CONCURRENCY = 4;
 
 interface ModelDetails {
   readonly contextWindow: number | null;
@@ -122,19 +123,24 @@ export class OllamaProvider implements SmartProvider {
         names.unshift(selectedModel);
       }
     }
-    for (const name of names.slice(0, MAX_MODELS)) {
-      throwIfAborted(signal);
-      const details = await this.#showModel(invocation, name, signal);
-      if (details.embedding) continue;
-      models.push(
-        ModelInfoSchema.parse({
-          id: name,
-          name,
-          contextWindow: details.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
-          vision: details.vision,
-        }),
-      );
-    }
+    const discovered = await mapWithConcurrency(
+      names.slice(0, MAX_MODELS),
+      MODEL_DETAIL_CONCURRENCY,
+      signal,
+      async (name, operationSignal) => {
+        throwIfAborted(operationSignal);
+        const details = await this.#showModel(invocation, name, operationSignal);
+        return details.embedding
+          ? null
+          : ModelInfoSchema.parse({
+              id: name,
+              name,
+              contextWindow: details.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+              vision: details.vision,
+            });
+      },
+    );
+    models.push(...discovered.filter((model): model is ModelInfo => model !== null));
     if (models.length === 0) throw new ProviderError('NO_MODELS');
     models.sort(
       (left, right) =>
@@ -436,6 +442,44 @@ function hasControlCharacters(value: string): boolean {
     if (code <= 31 || code === 127) return true;
   }
   return false;
+}
+
+async function mapWithConcurrency<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  signal: AbortSignal,
+  operation: (value: Input, signal: AbortSignal) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(values.length);
+  const controller = new AbortController();
+  const operationSignal = AbortSignal.any([signal, controller.signal]);
+  let nextIndex = 0;
+  const failure: { occurred: boolean; error: unknown } = { occurred: false, error: null };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (failure.occurred || operationSignal.aborted) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      const value = values[index];
+      if (value === undefined) return;
+      try {
+        results[index] = await operation(value, operationSignal);
+      } catch (error: unknown) {
+        if (controller.signal.aborted) return;
+        failure.occurred = true;
+        failure.error = error;
+        controller.abort(error);
+        return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
+  if (failure.occurred) {
+    if (failure.error instanceof Error) throw failure.error;
+    throw new ProviderError('UNAVAILABLE');
+  }
+  throwIfAborted(signal);
+  return results;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

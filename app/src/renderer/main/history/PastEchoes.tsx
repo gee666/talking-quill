@@ -36,9 +36,16 @@ export function PastEchoes() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.talkingQuill.history.onChanged(() => void load());
-    queueMicrotask(() => void load());
-    return unsubscribe;
+    const cancelInitialLoad = scheduleDeferredTask(() => void load());
+    const unsubscribe = window.talkingQuill.history.onChanged(() => {
+      cancelInitialLoad();
+      void load();
+    });
+    return () => {
+      requestSequence.current += 1;
+      cancelInitialLoad();
+      unsubscribe();
+    };
   }, [load]);
 
   const copy = async (id: string) => {
@@ -196,6 +203,7 @@ export function PastEchoes() {
 }
 
 function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
+  const container = useRef<HTMLDivElement>(null);
   const [thumbnail, setThumbnail] = useState<{
     readonly itemId: string;
     readonly objectUrl: string;
@@ -204,29 +212,49 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
     item.hasScreenshot && thumbnail?.itemId === item.id ? thumbnail.objectUrl : null;
   useEffect(() => {
     let active = true;
-    if (!item.hasScreenshot)
-      return () => {
-        active = false;
-      };
+    let started = false;
     let createdUrl: string | null = null;
-    void window.talkingQuill.history
-      .thumbnail(item.id)
-      .then((value) => {
-        if (!active || value === null) return;
-        const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-        createdUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
-        setThumbnail({ itemId: item.id, objectUrl: createdUrl });
-      })
-      .catch(() => {
-        if (active) setThumbnail(null);
-      });
+    let observer: IntersectionObserver | null = null;
+    const load = () => {
+      if (!active || started) return;
+      started = true;
+      void window.talkingQuill.history
+        .thumbnail(item.id)
+        .then((value) => {
+          if (!active || value === null) return;
+          const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+          createdUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+          setThumbnail({ itemId: item.id, objectUrl: createdUrl });
+        })
+        .catch(() => {
+          if (active) setThumbnail(null);
+        });
+    };
+    if (item.hasScreenshot) {
+      if (typeof IntersectionObserver === 'undefined') {
+        load();
+      } else {
+        observer = new IntersectionObserver(
+          (entries) => {
+            if (!entries.some((entry) => entry.isIntersecting)) return;
+            observer?.disconnect();
+            observer = null;
+            load();
+          },
+          { rootMargin: '200px 0px' },
+        );
+        if (container.current === null) load();
+        else observer.observe(container.current);
+      }
+    }
     return () => {
       active = false;
+      observer?.disconnect();
       if (createdUrl !== null) URL.revokeObjectURL(createdUrl);
     };
   }, [item.hasScreenshot, item.id]);
   return (
-    <div className="history-entry__screenshot" aria-label="Screenshot attachment">
+    <div ref={container} className="history-entry__screenshot" aria-label="Screenshot attachment">
       {objectUrl === null ? (
         <>
           <span aria-hidden="true">▧</span>
@@ -237,6 +265,15 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
       )}
     </div>
   );
+}
+
+function scheduleDeferredTask(task: () => void): () => void {
+  if (typeof window.requestIdleCallback === 'function') {
+    const handle = window.requestIdleCallback(task, { timeout: 250 });
+    return () => window.cancelIdleCallback(handle);
+  }
+  const handle = window.setTimeout(task, 0);
+  return () => window.clearTimeout(handle);
 }
 
 function fallbackDescription(category: string | null): string {

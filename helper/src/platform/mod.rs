@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     keyboard::{ActivationBindings, EventPhase, HelperEvent},
-    protocol::{Outbound, encode_outbound},
+    protocol::Outbound,
 };
 
 #[cfg(target_os = "macos")]
@@ -273,20 +273,17 @@ const fn callback_delivery_outcome(encoded: bool, queued: bool) -> CallbackDeliv
     }
 }
 
-/// Attempts one bounded callback notification. Any encoding or nonblocking
-/// queue failure closes the gate before returning false; the reducer decides
-/// whether the current event is an initial fail-open down or a balancing up.
+/// Attempts one bounded callback notification. The finite, strongly typed event
+/// is serialized once by the writer thread; any nonblocking queue failure closes
+/// the gate before returning false. The reducer decides whether the current event
+/// is an initial fail-open down or a balancing up.
 pub(crate) fn deliver_callback_event(
     outbound: &Sender<Outbound>,
     terminal: &TerminalSignal,
     event: HelperEvent,
 ) -> bool {
     let message = Outbound::Event(event);
-    let outcome = if encode_outbound(&message).is_err() {
-        callback_delivery_outcome(false, false)
-    } else {
-        callback_delivery_outcome(true, outbound.try_send(message).is_ok())
-    };
+    let outcome = callback_delivery_outcome(true, outbound.try_send(message).is_ok());
     match outcome {
         CallbackDeliveryOutcome::Delivered => true,
         CallbackDeliveryOutcome::Failed(reason) => {

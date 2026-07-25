@@ -18,6 +18,9 @@ import {
 } from '../../shared/schemas/transcription';
 
 const HISTORY_SCHEMA_VERSION = 2;
+const MIGRATION_BATCH_SIZE = 256;
+const SCREENSHOT_LOOKUP_BATCH_SIZE = 256;
+const ScreenshotFilenameSchema = HistoryCreateSchema.shape.screenshotFilename.unwrap();
 
 interface HistoryRow {
   readonly id: string;
@@ -47,19 +50,27 @@ export class HistoryStore {
 
   constructor(path: string) {
     this.#database = new Database(path);
-    this.#database.pragma('foreign_keys = ON');
-    this.#database.pragma('journal_mode = WAL');
-    this.#database.pragma('busy_timeout = 5000');
-    this.#migrate();
-    for (const ownedFile of [path, `${path}-wal`, `${path}-shm`]) {
-      if (existsSync(ownedFile)) {
-        try {
-          chmodSync(ownedFile, 0o600);
-        } catch (error: unknown) {
-          if (process.platform !== 'win32') throw error;
-          // Windows does not expose POSIX file modes; access remains user-scoped.
+    try {
+      this.#database.pragma('foreign_keys = ON');
+      if (this.#database.pragma('journal_mode', { simple: true }) !== 'wal') {
+        this.#database.pragma('journal_mode = WAL');
+      }
+      this.#database.pragma('busy_timeout = 5000');
+      this.#migrate();
+      for (const ownedFile of [path, `${path}-wal`, `${path}-shm`]) {
+        if (existsSync(ownedFile)) {
+          try {
+            chmodSync(ownedFile, 0o600);
+          } catch (error: unknown) {
+            if (process.platform !== 'win32') throw error;
+            // Windows does not expose POSIX file modes; access remains user-scoped.
+          }
         }
       }
+    } catch (error: unknown) {
+      this.#database.close();
+      this.#closed = true;
+      throw error;
     }
   }
 
@@ -188,14 +199,54 @@ export class HistoryStore {
     this.#assertOpen();
     const rows = this.#database
       .prepare('SELECT screenshot_filename FROM history WHERE screenshot_filename IS NOT NULL')
-      .all() as { readonly screenshot_filename: string }[];
-    return rows.map((row) => row.screenshot_filename);
+      .all() as { readonly screenshot_filename: unknown }[];
+    return rows.map((row) => ScreenshotFilenameSchema.parse(row.screenshot_filename));
+  }
+
+  listRetainedScreenshotFilenames(candidates: readonly string[]): ReadonlySet<string> {
+    this.#assertOpen();
+    const unique = [...new Set(candidates.map((value) => ScreenshotFilenameSchema.parse(value)))];
+    const retained = new Set<string>();
+    for (let offset = 0; offset < unique.length; offset += SCREENSHOT_LOOKUP_BATCH_SIZE) {
+      const batch = unique.slice(offset, offset + SCREENSHOT_LOOKUP_BATCH_SIZE);
+      const placeholders = batch.map(() => '?').join(', ');
+      const rows = this.#database
+        .prepare(
+          `SELECT DISTINCT screenshot_filename FROM history WHERE screenshot_filename IN (${placeholders})`,
+        )
+        .all(...batch) as { readonly screenshot_filename: unknown }[];
+      for (const row of rows) {
+        retained.add(ScreenshotFilenameSchema.parse(row.screenshot_filename));
+      }
+    }
+    return retained;
   }
 
   deleteOlderThan(cutoffTimestamp: number): number {
+    return this.deleteOlderThanWithScreenshots(cutoffTimestamp).deletedCount;
+  }
+
+  deleteOlderThanWithScreenshots(cutoffTimestamp: number): {
+    readonly deletedCount: number;
+    readonly screenshotFilenames: readonly string[];
+  } {
     this.#assertOpen();
     const cutoff = HistoryCursorSchema.shape.createdAt.parse(cutoffTimestamp);
-    return this.#database.prepare('DELETE FROM history WHERE created_at < ?').run(cutoff).changes;
+    return this.#database.transaction(() => {
+      const rows = this.#database
+        .prepare(
+          `SELECT DISTINCT screenshot_filename FROM history
+           WHERE created_at < ? AND screenshot_filename IS NOT NULL`,
+        )
+        .all(cutoff) as { readonly screenshot_filename: unknown }[];
+      const screenshotFilenames = rows.map((row) =>
+        ScreenshotFilenameSchema.parse(row.screenshot_filename),
+      );
+      const deletedCount = this.#database
+        .prepare('DELETE FROM history WHERE created_at < ?')
+        .run(cutoff).changes;
+      return { deletedCount, screenshotFilenames };
+    })();
   }
 
   close(): void {
@@ -238,19 +289,29 @@ export class HistoryStore {
     }
     if (current === 1) {
       this.#database.transaction(() => {
-        const rows = this.#database
-          .prepare('SELECT id, raw_text, processed_text, voice_snippet FROM history')
-          .all() as Pick<HistoryRow, 'id' | 'raw_text' | 'processed_text' | 'voice_snippet'>[];
+        const selectBatch = this.#database.prepare(
+          `SELECT id, raw_text, processed_text, voice_snippet FROM history
+           WHERE id > ? ORDER BY id LIMIT ?`,
+        );
         const update = this.#database.prepare(
           'UPDATE history SET raw_text = ?, processed_text = ?, voice_snippet = ? WHERE id = ?',
         );
-        for (const row of rows) {
-          update.run(
-            truncateLegacyTranscript(row.raw_text),
-            truncateLegacyTranscript(row.processed_text),
-            truncateLegacyTranscript(row.voice_snippet),
-            row.id,
-          );
+        let lastId = '';
+        for (;;) {
+          const rows = selectBatch.all(lastId, MIGRATION_BATCH_SIZE) as Pick<
+            HistoryRow,
+            'id' | 'raw_text' | 'processed_text' | 'voice_snippet'
+          >[];
+          if (rows.length === 0) break;
+          for (const row of rows) {
+            update.run(
+              truncateLegacyTranscript(row.raw_text),
+              truncateLegacyTranscript(row.processed_text),
+              truncateLegacyTranscript(row.voice_snippet),
+              row.id,
+            );
+          }
+          lastId = rows.at(-1)?.id ?? lastId;
         }
         this.#database.pragma('user_version = 2');
       })();

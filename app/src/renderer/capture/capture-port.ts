@@ -57,14 +57,13 @@ export class CapturePortController {
     const sequence = this.#sequence;
     this.#sequence += 1;
     // Electron's renderer-to-main port bridge does not reliably preserve a message when a
-    // nested typed-array buffer is transferred. These small frames are structured-cloned.
-    this.#send({
-      type: 'stream:frame',
-      captureId,
-      sequence,
-      samples: Float32Array.from(samples),
-      rms,
-    });
+    // nested typed-array buffer is transferred. The worklet-owned frame is structured-cloned
+    // directly; CaptureEngine already validated it and main validates the IPC boundary again.
+    const frameSamples =
+      samples.buffer instanceof ArrayBuffer
+        ? (samples as Float32Array<ArrayBuffer>)
+        : Float32Array.from(samples);
+    this.#post({ type: 'stream:frame', captureId, sequence, samples: frameSamples, rms });
   }
 
   notifyUnexpectedStop(reason: 'device-lost' | 'error'): void {
@@ -158,9 +157,10 @@ export class CapturePortController {
       return;
     }
     if (this.#pendingStart === pendingStart) this.#pendingStart = null;
-    if (this.#captureId === captureId) this.#captureId = null;
     try {
+      // Keep routing frames until the worklet flush completed inside engine.stop().
       await this.#engine.stop();
+      if (this.#captureId === captureId) this.#captureId = null;
       if (pendingStart !== null) {
         this.#sendError(pendingStart.requestId, captureId, 'capture-failed');
       }
@@ -180,9 +180,18 @@ export class CapturePortController {
   }
 
   #send(message: CapturePortMessage): boolean {
+    try {
+      return this.#post(CapturePortMessageSchema.parse(message));
+    } catch {
+      this.close();
+      return false;
+    }
+  }
+
+  #post(message: CapturePortMessage): boolean {
     if (this.#closed) return false;
     try {
-      this.#port.postMessage(CapturePortMessageSchema.parse(message));
+      this.#port.postMessage(message);
       return true;
     } catch {
       this.close();

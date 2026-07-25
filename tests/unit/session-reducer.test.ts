@@ -13,6 +13,11 @@ function arming() {
   }).state;
 }
 
+function withCaptureAndAudio(state: ReturnType<typeof arming>) {
+  const captured = reduceEchoSession(state, { type: 'capture-started' }).state;
+  return reduceEchoSession(captured, { type: 'audio-started' }).state;
+}
+
 describe('Echo session reducer', () => {
   it('starts exactly one session and ignores a competing shortcut', () => {
     const first = reduceEchoSession(IDLE_ECHO_SESSION, {
@@ -68,18 +73,44 @@ describe('Echo session reducer', () => {
   });
 
   it.each(['silence', 'enter', 'shortcut', 'stop', 'duration-cap'] as const)(
-    'immediately submits from arming via %s',
+    'defers an arming submit from %s until capture has started',
     (source) => {
-      const result = reduceEchoSession(arming(), { type: 'submit', source });
-      expect(result.state).toMatchObject({ phase: 'transcribing', dictationMode: 'quick' });
+      const pending = reduceEchoSession(arming(), { type: 'submit', source });
+      expect(pending.state).toMatchObject({
+        phase: 'arming',
+        dictationMode: 'quick',
+        submitPending: true,
+      });
+      expect(pending.effects).toEqual([]);
+
+      const captured = reduceEchoSession(pending.state, { type: 'capture-started' });
+      expect(captured.state).toMatchObject({ phase: 'arming', captureReady: true });
+      expect(captured.effects).toEqual([]);
+
+      const result = reduceEchoSession(captured.state, { type: 'audio-started' });
+      expect(result.state).toMatchObject({ phase: 'transcribing', submitPending: false });
       expect(result.effects).toEqual([{ type: 'stop-and-transcribe' }]);
     },
   );
 
+  it('defers a Quick submit when release wins the capture-start race', () => {
+    const quick = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+    const pending = reduceEchoSession(quick, { type: 'submit', source: 'enter' });
+    expect(pending.state).toMatchObject({ phase: 'recordingQuick', submitPending: true });
+    expect(pending.effects).toEqual([]);
+
+    const captured = reduceEchoSession(pending.state, { type: 'capture-started' }).state;
+    const result = reduceEchoSession(captured, { type: 'audio-started' });
+    expect(result.state.phase).toBe('transcribing');
+    expect(result.effects).toEqual([{ type: 'stop-and-transcribe' }]);
+  });
+
   it.each(['silence', 'enter', 'shortcut', 'stop', 'duration-cap'] as const)(
     'submits a recording from %s',
     (source) => {
-      const quick = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+      let quick = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+      quick = reduceEchoSession(quick, { type: 'capture-started' }).state;
+      quick = reduceEchoSession(quick, { type: 'audio-started' }).state;
       const result = reduceEchoSession(quick, { type: 'submit', source });
       expect(result.state.phase).toBe('transcribing');
       expect(result.effects).toEqual([{ type: 'stop-and-transcribe' }]);
@@ -87,7 +118,9 @@ describe('Echo session reducer', () => {
   );
 
   it('routes raw transcription directly to insertion', () => {
-    const quick = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+    const quick = withCaptureAndAudio(
+      reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state,
+    );
     const transcribing = reduceEchoSession(quick, { type: 'submit', source: 'enter' }).state;
     const result = reduceEchoSession(transcribing, {
       type: 'transcribed',
@@ -99,7 +132,9 @@ describe('Echo session reducer', () => {
   });
 
   it('supports the Smart extension point and raw fallback', () => {
-    const quick = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+    const quick = withCaptureAndAudio(
+      reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state,
+    );
     const transcribing = reduceEchoSession(quick, { type: 'submit', source: 'enter' }).state;
     const smart = reduceEchoSession(transcribing, {
       type: 'transcribed',
