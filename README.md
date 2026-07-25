@@ -8,7 +8,7 @@ Talking Quill is a free, account-free desktop dictation app for Windows and macO
 - local Whisper small/large models with resumable, verified downloads
 - clipboard-preserving insertion into the focused application
 - 38 Smart providers, including Ollama, Pi, and OpenAI API-key authentication
-- optional On-Screen Awareness, voice commands, custom vocabulary, and Past Echoes
+- optional On-Screen Awareness, voice commands, custom vocabulary, and a local dictation history
 - encrypted credential storage, scoped data deletion, no accounts or telemetry
 
 ## Install and use

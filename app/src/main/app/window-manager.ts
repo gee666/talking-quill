@@ -139,7 +139,7 @@ export class WindowManager {
     const common: Electron.BrowserWindowConstructorOptions = {
       show: false,
       frame: false,
-      backgroundColor: '#080B11',
+      backgroundColor: '#161B23',
       icon: electronApp.isPackaged
         ? join(process.resourcesPath, 'app-icon.png')
         : join(electronApp.getAppPath(), 'assets', 'app-icon.png'),

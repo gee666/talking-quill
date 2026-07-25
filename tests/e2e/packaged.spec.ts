@@ -386,10 +386,10 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
         }
       });
     });
-    // Remount Past Echoes after diagnostics are attached so thumbnail loading and CSP enforcement
-    // are observed rather than relying on renderer events emitted before CDP connected.
+    // Remount the dictation history after diagnostics are attached so thumbnail loading and CSP
+    // enforcement are observed rather than relying on renderer events emitted before CDP connected.
     await launched.main.getByRole('button', { name: 'Settings' }).click();
-    await launched.main.getByRole('button', { name: 'Echo' }).click();
+    await launched.main.getByRole('button', { name: 'Dashboard' }).click();
     await expect(
       launched.main.getByRole('heading', { name: 'Dictation needs local setup' }),
     ).toBeVisible();

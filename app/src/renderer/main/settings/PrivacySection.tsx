@@ -53,7 +53,7 @@ export function PrivacySection({
   };
 
   return (
-    <Card title="Privacy & data" description="Control local Past Echo storage and retention.">
+    <Card title="Privacy & data" description="Control local history storage and retention.">
       <Toggle
         checked={settings.privacy.historyEnabled}
         disabled={disabled}
@@ -63,8 +63,8 @@ export function PrivacySection({
             'History preference saved.',
           )
         }
-        label="Store completed dictations in Past Echoes"
-        hint="Turning this off prevents future entries. Existing Past Echoes remain until you explicitly delete them."
+        label="Store completed dictations in the history"
+        hint="Turning this off prevents future entries. Existing entries remain until you explicitly delete them."
       />
       <div className="setting-divider" />
       <Toggle
@@ -77,7 +77,7 @@ export function PrivacySection({
           )
         }
         label="Retain On-Screen Awareness screenshots"
-        hint="Off by default. When enabled, successful Smart entries keep an user-profile JPEG and thumbnail until that Past Echo is deleted. Screenshots are otherwise used once and never written to disk."
+        hint="Off by default. When enabled, successful Smart entries keep an user-profile JPEG and thumbnail until that history entry is deleted. Screenshots are otherwise used once and never written to disk."
       />
       <div className="setting-divider" />
       <Select
@@ -117,8 +117,8 @@ export function PrivacySection({
         <div>
           <strong>Reset all application data</strong>
           <p>
-            Removes settings, Past Echoes, credentials, downloaded Whisper models, screenshots,
-            logs, and temporary files. It never removes Ollama or Ollama models.
+            Removes settings, history, credentials, downloaded Whisper models, screenshots, logs,
+            and temporary files. It never removes Ollama or Ollama models.
           </p>
         </div>
         <Button

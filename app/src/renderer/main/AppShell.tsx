@@ -6,22 +6,22 @@ import type { AppState } from '../../shared/schemas/app-state';
 import type { Settings } from '../../shared/schemas/settings';
 import { Button, Icon, Status, useTheme, type IconName } from '../design';
 import { presentAppStatus } from '../status-presentation';
-import { EchoScreen } from './screens/EchoScreen';
+import { DashboardScreen } from './screens/DashboardScreen';
 import { InfoScreen } from './screens/InfoScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
 
-const screens = ['echo', 'settings', 'info'] as const;
+const screens = ['dashboard', 'settings', 'info'] as const;
 type Screen = (typeof screens)[number];
 
 const SCREEN_ICONS: Record<Screen, IconName> = {
-  echo: 'echo',
+  dashboard: 'dashboard',
   settings: 'settings',
   info: 'info',
 };
 
 export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
-  const [screen, setScreen] = useState<Screen>('echo');
+  const [screen, setScreen] = useState<Screen>('dashboard');
   const [state, setState] = useState<AppState>(bootstrap.state);
   const [settings, setSettings] = useState<Settings>(bootstrap.settings);
   const [welcomeReopened, setWelcomeReopened] = useState(false);
@@ -66,7 +66,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
           }));
           setWelcomeCompleted(true);
           setWelcomeReopened(false);
-          setScreen('echo');
+          setScreen('dashboard');
           requestAnimationFrame(() => headingRef.current?.focus());
         }}
       />
@@ -75,8 +75,8 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
 
   const status = presentAppStatus(state.status);
   const screenContent =
-    screen === 'echo' ? (
-      <EchoScreen
+    screen === 'dashboard' ? (
+      <DashboardScreen
         headingRef={headingRef}
         state={state}
         settings={settings}

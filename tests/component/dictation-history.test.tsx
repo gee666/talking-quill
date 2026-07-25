@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
 import type { HistoryListItem } from '../../app/src/shared/schemas/history';
-import { PastEchoes } from '../../app/src/renderer/main/history/PastEchoes';
+import { DictationHistory } from '../../app/src/renderer/main/history/DictationHistory';
 
 const item: HistoryListItem = {
   id: '11111111-1111-4111-8111-111111111111',
@@ -62,18 +62,18 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe('Past Echoes', () => {
+describe('Dictation history', () => {
   it('loads, copies, deletes, and refreshes after a change event', async () => {
     const user = userEvent.setup();
-    render(<PastEchoes />);
+    render(<DictationHistory />);
     expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
     await user.click(
-      screen.getByRole('button', { name: 'Copy Echo: A locally stored transcript.' }),
+      screen.getByRole('button', { name: 'Copy transcript: A locally stored transcript.' }),
     );
     expect(copy).toHaveBeenCalledWith(item.id);
-    expect(await screen.findByText('Echo copied to the clipboard.')).toBeVisible();
+    expect(await screen.findByText('Transcript copied to the clipboard.')).toBeVisible();
     await user.click(
-      screen.getByRole('button', { name: 'Delete Echo: A locally stored transcript.' }),
+      screen.getByRole('button', { name: 'Delete transcript: A locally stored transcript.' }),
     );
     expect(remove).toHaveBeenCalledWith(item.id);
     changed?.(1);
@@ -96,7 +96,7 @@ describe('Past Echoes', () => {
       nextCursor: null,
       revision: 0,
     });
-    render(<PastEchoes />);
+    render(<DictationHistory />);
     expect(await screen.findByLabelText('Smart provider and model')).toHaveTextContent(
       'Provider: pi · Model: anthropic/claude-test',
     );
@@ -119,32 +119,34 @@ describe('Past Echoes', () => {
       nextCursor: null,
       revision: 0,
     });
-    render(<PastEchoes />);
+    render(<DictationHistory />);
 
     expect(await screen.findByText('Polished text must not replace raw.')).toBeVisible();
     expect(screen.getByText('Second polished transcript.')).toBeVisible();
     expect(screen.queryByText('A locally stored transcript.')).not.toBeInTheDocument();
     expect(screen.queryByText('Second raw transcript.')).not.toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: 'Copy Echo: Polished text must not replace raw.' }),
+      screen.getByRole('button', { name: 'Copy transcript: Polished text must not replace raw.' }),
     ).toBeVisible();
     expect(
-      screen.getByRole('button', { name: 'Copy Echo: Second polished transcript.' }),
+      screen.getByRole('button', { name: 'Copy transcript: Second polished transcript.' }),
     ).toBeVisible();
     expect(
-      screen.getByRole('button', { name: 'Delete Echo: Polished text must not replace raw.' }),
+      screen.getByRole('button', {
+        name: 'Delete transcript: Polished text must not replace raw.',
+      }),
     ).toBeVisible();
     expect(
-      screen.getByRole('button', { name: 'Delete Echo: Second polished transcript.' }),
+      screen.getByRole('button', { name: 'Delete transcript: Second polished transcript.' }),
     ).toBeVisible();
   });
 
   it('requires confirmation before deleting all', async () => {
     const user = userEvent.setup();
-    render(<PastEchoes />);
+    render(<DictationHistory />);
     await screen.findByText('A locally stored transcript.');
-    await user.click(screen.getByRole('button', { name: 'Delete all Past Echoes' }));
-    expect(screen.getByRole('dialog', { name: 'Delete all Past Echoes?' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Delete all history' }));
+    expect(screen.getByRole('dialog', { name: 'Delete all history?' })).toBeVisible();
     expect(removeAll).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: /^Delete all$/ }));
     expect(removeAll).toHaveBeenCalledOnce();
@@ -153,16 +155,18 @@ describe('Past Echoes', () => {
   it('truthfully warns when screenshot cleanup remains pending after deletion', async () => {
     remove.mockResolvedValueOnce({ deleted: true, revision: 1, screenshotCleanup: 'pending' });
     const user = userEvent.setup();
-    render(<PastEchoes />);
+    render(<DictationHistory />);
     await user.click(
-      await screen.findByRole('button', { name: 'Delete Echo: A locally stored transcript.' }),
+      await screen.findByRole('button', {
+        name: 'Delete transcript: A locally stored transcript.',
+      }),
     );
     expect(
       await screen.findByText(
-        'The Echo was deleted, but screenshot cleanup is incomplete and will be retried.',
+        'The entry was deleted, but screenshot cleanup is incomplete and will be retried.',
       ),
     ).toBeVisible();
-    expect(screen.queryByText('The Echo could not be deleted.')).not.toBeInTheDocument();
+    expect(screen.queryByText('The entry could not be deleted.')).not.toBeInTheDocument();
   });
 
   it('warns truthfully and closes confirmation after partial Delete All cleanup', async () => {
@@ -172,28 +176,26 @@ describe('Past Echoes', () => {
       screenshotCleanup: 'partial',
     });
     const user = userEvent.setup();
-    render(<PastEchoes />);
+    render(<DictationHistory />);
     await screen.findByText('A locally stored transcript.');
-    await user.click(screen.getByRole('button', { name: 'Delete all Past Echoes' }));
+    await user.click(screen.getByRole('button', { name: 'Delete all history' }));
     await user.click(screen.getByRole('button', { name: /^Delete all$/ }));
     expect(
       await screen.findByText(
-        'All Past Echoes were deleted, but screenshot cleanup is incomplete and will be retried.',
+        'All history entries were deleted, but screenshot cleanup is incomplete and will be retried.',
       ),
     ).toBeVisible();
-    expect(
-      screen.queryByRole('dialog', { name: 'Delete all Past Echoes?' }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Delete all history?' })).not.toBeInTheDocument();
   });
 
   it('renders empty and bounded public-error states', async () => {
     list.mockResolvedValueOnce({ items: [], nextCursor: null, revision: 0 });
-    const { unmount } = render(<PastEchoes />);
-    expect(await screen.findByText('No Past Echoes yet')).toBeVisible();
+    const { unmount } = render(<DictationHistory />);
+    expect(await screen.findByText('No dictations yet')).toBeVisible();
     unmount();
     list.mockRejectedValueOnce(new Error('private database path'));
-    render(<PastEchoes />);
-    expect(await screen.findByText('Past Echoes could not be loaded.')).toBeVisible();
+    render(<DictationHistory />);
+    expect(await screen.findByText('The dictation history could not be loaded.')).toBeVisible();
     expect(screen.queryByText(/private database path/i)).not.toBeInTheDocument();
   });
 });

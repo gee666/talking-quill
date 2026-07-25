@@ -2,10 +2,10 @@ import { useState, type RefObject } from 'react';
 import type { AppState } from '../../../shared/schemas/app-state';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Card, Status, Toast, Toggle } from '../../design';
-import { PastEchoes } from '../history/PastEchoes';
+import { DictationHistory } from '../history/DictationHistory';
 import { presentAppStatus } from '../../status-presentation';
 
-const ECHO_STATUS_COPY: Record<
+const STATUS_COPY: Record<
   AppState['status'],
   { readonly heading: string; readonly introduction: string; readonly readiness: string }
 > = {
@@ -42,7 +42,7 @@ const ECHO_STATUS_COPY: Record<
   },
 };
 
-export function EchoScreen({
+export function DashboardScreen({
   headingRef,
   state,
   settings,
@@ -56,7 +56,7 @@ export function EchoScreen({
   const [savingEnabled, setSavingEnabled] = useState(false);
   const [enabledError, setEnabledError] = useState<string | null>(null);
   const status = presentAppStatus(state.status);
-  const copy = ECHO_STATUS_COPY[state.status];
+  const copy = STATUS_COPY[state.status];
   const helper = presentHelperReadiness(state.helper.status);
 
   const updateEnabled = async (enabled: boolean) => {
@@ -75,7 +75,7 @@ export function EchoScreen({
     <div className="screen">
       <header className="screen__header">
         <div>
-          <p className="eyebrow">Echo</p>
+          <p className="eyebrow">Dashboard</p>
           <h1 ref={headingRef} tabIndex={-1}>
             {copy.heading}
           </h1>
@@ -141,7 +141,7 @@ export function EchoScreen({
           title="Try it here"
           description="Focus this field, then use your activation shortcut."
         >
-          <label className="try-echo">
+          <label className="try-dictation">
             <span>Dictation test area</span>
             <textarea
               className="me-field__control"
@@ -172,7 +172,7 @@ export function EchoScreen({
             </div>
           </div>
         </Card>
-        <PastEchoes />
+        <DictationHistory />
       </div>
     </div>
   );

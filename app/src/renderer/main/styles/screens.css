@@ -1,4 +1,4 @@
-/* Echo, Info and Past Echoes screens. */
+/* Dashboard, Info and dictation-history screens. */
 
 /* ============================================================ Row groups */
 /* Rows that live inside an explicit `.group` need the row padding that
@@ -12,7 +12,7 @@
   color: var(--color-text);
 }
 
-/* ================================================================== Echo */
+/* ============================================================= Dashboard */
 .readiness-group > .readiness-note {
   padding: 0 var(--space-3) var(--space-2);
   color: var(--color-secondary);
@@ -22,12 +22,12 @@
   border-top: 0;
 }
 
-.try-echo {
+.try-dictation {
   display: grid;
   gap: var(--space-1);
   min-width: 0;
 }
-.try-echo > span {
+.try-dictation > span {
   color: var(--color-secondary);
   font-size: var(--fs-xs);
   font-weight: 500;
@@ -87,7 +87,7 @@
   overflow-wrap: anywhere;
 }
 
-/* ========================================================== Past Echoes */
+/* ==================================================== Dictation history */
 .history-heading-actions {
   display: flex;
   justify-content: flex-end;

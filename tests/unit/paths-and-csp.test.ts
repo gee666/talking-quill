@@ -97,16 +97,16 @@ describe('security and paths foundations', () => {
       '#8A5C0B',
       '#B23A37',
       // Dark theme.
-      '#080B11',
-      '#0C1017',
-      '#10151D',
-      '#1C242F',
-      '#E7ECF3',
-      '#97A3B4',
-      '#6F9ED1',
-      '#56C39A',
-      '#DDAB5B',
-      '#E5837F',
+      '#161B23',
+      '#1B212B',
+      '#1F2530',
+      '#2C3441',
+      '#DDE4EE',
+      '#98A4B5',
+      '#7AA8D8',
+      '#5CC9A0',
+      '#E0B063',
+      '#E88B84',
     ]) {
       expect(tokens.toUpperCase()).toContain(color);
     }
@@ -125,19 +125,19 @@ describe('security and paths foundations', () => {
       ['#8a5c0b', '#f8eeda'],
       ['#b23a37', '#fbe9e8'],
       // Dark theme: ink and supporting copy on every surface.
-      ['#e7ecf3', '#080b11'],
-      ['#e7ecf3', '#0c1017'],
-      ['#e7ecf3', '#10151d'],
-      ['#97a3b4', '#080b11'],
-      ['#97a3b4', '#0c1017'],
-      ['#97a3b4', '#10151d'],
+      ['#dde4ee', '#161b23'],
+      ['#dde4ee', '#1b212b'],
+      ['#dde4ee', '#1f2530'],
+      ['#98a4b5', '#161b23'],
+      ['#98a4b5', '#1b212b'],
+      ['#98a4b5', '#1f2530'],
       // Dark theme: accent, brand and status tones on their own tinted backgrounds.
-      ['#08111c', '#6f9ed1'],
-      ['#6f9ed1', '#12202f'],
-      ['#d9b779', '#0c1017'],
-      ['#56c39a', '#0f231d'],
-      ['#ddab5b', '#241d10'],
-      ['#e5837f', '#251214'],
+      ['#0e1622', '#7aa8d8'],
+      ['#7aa8d8', '#222f40'],
+      ['#dcbb80', '#1b212b'],
+      ['#5cc9a0', '#18302a'],
+      ['#e0b063', '#2d2519'],
+      ['#e88b84', '#2e1a1c'],
     ];
     for (const [foreground, background] of contrastPairs) {
       expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);

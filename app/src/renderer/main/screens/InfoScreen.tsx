@@ -176,7 +176,7 @@ export function InfoScreen({
         <Card title="Privacy">
           <p className="body-copy">
             Audio stays on this device. There is no telemetry. Diagnostic logging is off by default
-            and Past Echoes can be disabled or deleted.
+            and the dictation history can be disabled or deleted.
           </p>
         </Card>
         <Card

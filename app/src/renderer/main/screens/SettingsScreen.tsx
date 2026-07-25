@@ -98,7 +98,7 @@ export function SettingsScreen({
     {
       title: 'Privacy & data',
       keywords:
-        'Privacy data Past Echoes history enabled screenshots retention duration delete all reset diagnostic logging',
+        'Privacy data dictation history enabled screenshots retention duration delete all reset diagnostic logging',
       node: <PrivacySection settings={settings} disabled={saving} onSave={saveGeneral} />,
     },
     {

@@ -210,10 +210,10 @@ No emoji, no `◉ ⚙ ⓘ ☾` glyphs. Use inline SVG from
 `app/src/renderer/design/Icon.tsx`:
 
 ```tsx
-<Icon name="echo" />   // 14px by default, size prop for 16/18
+<Icon name="dashboard" />   // 14px by default, size prop for 16/18
 ```
 
-Available names must include: `echo`, `settings`, `info`, `general`, `profiles`,
+Available names must include: `dashboard`, `settings`, `info`, `general`, `profiles`,
 `recording`, `model`, `privacy`, `smart`, `commands`, `vocabulary`, `sun`, `moon`,
 `minimize`, `maximize`, `restore`, `close`, `chevron`, `check`, `search`, `trash`,
 `copy`, `plus`. All 16×16 viewBox, `fill="none" stroke="currentColor"

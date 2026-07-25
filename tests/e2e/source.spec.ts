@@ -107,7 +107,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
 
   await expect(main.getByRole('heading', { name: 'Dictation needs local setup' })).toBeVisible();
   await expect(widget.getByText('Ready', { exact: true })).toBeAttached();
-  await expectAccessible(main, 'Echo screen');
+  await expectAccessible(main, 'Dashboard screen');
   await expectAccessible(widget, 'Widget shell');
   await expect
     .poll(() => capture.evaluate(() => document.documentElement.dataset.ready))
