@@ -18,7 +18,8 @@ body {
   white-space: nowrap;
 }
 
-/* The shell is the floating pill itself: one centred row inside the widget window. */
+/* The shell spans the whole widget window and stays invisible; it only centres
+   the pill so the floating chrome hugs its content instead of the window. */
 .widget-shell {
   position: absolute;
   top: 0;
@@ -27,14 +28,25 @@ body {
   overflow: hidden;
   align-items: center;
   justify-content: center;
-  gap: var(--space-3);
   width: var(--widget-layout-width);
   height: var(--widget-layout-height);
-  padding: 0 var(--space-3);
+  padding: 0 var(--space-1);
   transform: scale(var(--widget-scale));
   transform-origin: top left;
+  background: transparent;
+}
+
+/* The pill is the visible floating chrome. */
+.widget-pill {
+  display: flex;
+  overflow: hidden;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  min-height: 40px;
+  padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--color-surface) 92%, transparent);
   box-shadow: var(--shadow-1);
   backdrop-filter: blur(12px);
@@ -71,7 +83,7 @@ body {
 .widget-copy {
   display: grid;
   overflow: hidden;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   gap: 1px;
   min-width: 0;
   max-width: 100%;
@@ -79,9 +91,10 @@ body {
 }
 .widget-heading {
   display: flex;
+  overflow: hidden;
   min-width: 0;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
 }
 .widget-heading .me-status {
   flex: none;
@@ -102,7 +115,7 @@ body {
   white-space: nowrap;
 }
 
-.widget-shell time {
+.widget-pill time {
   flex: none;
   color: var(--color-secondary);
   font-size: var(--fs-xs);
@@ -117,11 +130,11 @@ body {
 }
 .widget-actions .me-button {
   min-height: var(--control-height-sm);
-  padding: 0 10px;
+  padding: 0 var(--space-2);
   font-size: var(--fs-xs);
 }
 .widget-actions .me-button--quiet {
-  padding: 0 var(--space-2);
+  padding: 0 6px;
 }
 
 @media (prefers-reduced-motion: reduce) {

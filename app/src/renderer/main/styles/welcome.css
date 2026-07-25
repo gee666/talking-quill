@@ -20,8 +20,8 @@
   min-width: 0;
 }
 .welcome__brand-logo {
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   flex: none;
   border-radius: 50%;
   object-fit: cover;

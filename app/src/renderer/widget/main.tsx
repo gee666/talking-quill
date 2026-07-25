@@ -87,67 +87,69 @@ export function WidgetShell() {
         This status window never takes keyboard focus. Use global Enter to submit, Escape to cancel,
         or the activation shortcut to stop. Pointer Stop and Cancel controls are also available.
       </p>
-      <div
-        className="widget-level"
-        aria-label="Microphone level"
-        role="meter"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={level}
-        aria-valuetext={`${String(level)} percent, ${microphoneLevelState(level)}`}
-      >
-        {Array.from({ length: 5 }, (_value, index) => (
-          <i key={index} className={level >= (index + 1) * 16 ? 'active' : ''} />
-        ))}
-        <span className="widget-live">
-          Microphone level {level} percent, {microphoneLevelState(level)}
-        </span>
-      </div>
-      <div className="widget-copy">
-        <div className="widget-heading">
-          <strong>{phaseLabel(session)}</strong>
-          <Status
-            tone={
-              session.phase === 'error'
-                ? 'error'
-                : session.phase === 'completed'
-                  ? 'success'
-                  : 'info'
-            }
-          >
-            {session.processingMode === 'smart' ? 'Smart' : 'Raw'}
-          </Status>
+      <div className="widget-pill">
+        <div
+          className="widget-level"
+          aria-label="Microphone level"
+          role="meter"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={level}
+          aria-valuetext={`${String(level)} percent, ${microphoneLevelState(level)}`}
+        >
+          {Array.from({ length: 5 }, (_value, index) => (
+            <i key={index} className={level >= (index + 1) * 16 ? 'active' : ''} />
+          ))}
+          <span className="widget-live">
+            Microphone level {level} percent, {microphoneLevelState(level)}
+          </span>
         </div>
-        <span>{session.message ?? secondaryLabel(session)}</span>
-      </div>
-      {extended && recording ? <time>{formatElapsed(session.elapsedMs)}</time> : null}
-      {cancelable ? (
-        <div className="widget-actions">
-          {recording && extended ? (
+        <div className="widget-copy">
+          <div className="widget-heading">
+            <strong>{phaseLabel(session)}</strong>
+            <Status
+              tone={
+                session.phase === 'error'
+                  ? 'error'
+                  : session.phase === 'completed'
+                    ? 'success'
+                    : 'info'
+              }
+            >
+              {session.processingMode === 'smart' ? 'Smart' : 'Raw'}
+            </Status>
+          </div>
+          <span>{session.message ?? secondaryLabel(session)}</span>
+        </div>
+        {extended && recording ? <time>{formatElapsed(session.elapsedMs)}</time> : null}
+        {cancelable ? (
+          <div className="widget-actions">
+            {recording && extended ? (
+              <Button
+                aria-label="Stop Extended Dictation"
+                aria-describedby="widget-keyboard-equivalents"
+                onClick={() => {
+                  setInteractive(false);
+                  void window.talkingQuillWidget.stop();
+                }}
+              >
+                Stop
+              </Button>
+            ) : null}
             <Button
-              aria-label="Stop Extended Dictation"
+              variant="quiet"
+              aria-label="Cancel dictation"
               aria-describedby="widget-keyboard-equivalents"
               onClick={() => {
                 setInteractive(false);
-                void window.talkingQuillWidget.stop();
+                void window.talkingQuillWidget.cancel();
               }}
             >
-              Stop
+              Cancel
             </Button>
-          ) : null}
-          <Button
-            variant="quiet"
-            aria-label="Cancel dictation"
-            aria-describedby="widget-keyboard-equivalents"
-            onClick={() => {
-              setInteractive(false);
-              void window.talkingQuillWidget.cancel();
-            }}
-          >
-            Cancel
-          </Button>
-        </div>
-      ) : null}
+          </div>
+        ) : null}
+      </div>
     </main>
   );
 }
