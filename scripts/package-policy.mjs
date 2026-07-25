@@ -138,7 +138,7 @@ const PROVIDER_LOGO_PATTERN = new RegExp(
   `^out/renderer/assets/(?:${PROVIDER_LOGO_BASENAMES.join('|')})-[A-Za-z0-9_-]+\\.(?:png|jpeg)$`,
 );
 const OUT_ASSET_PATTERN =
-  /^out\/renderer\/assets\/(?:(?:main|widget|capture|capture\.worklet|audio|status-presentation|Status)-[A-Za-z0-9_-]+\.(?:js|css)|app-icon-[A-Za-z0-9_-]+\.png)$/;
+  /^out\/renderer\/assets\/(?:(?:main|widget|capture|capture\.worklet|audio|status-presentation|Status|InfoScreen|SettingsScreen|SmartProcessingSection|schemas)-[A-Za-z0-9_-]+\.(?:js|css)|app-icon-[A-Za-z0-9_-]+\.png)$/;
 const COMMON_RESOURCE_PATHS = [
   'app.asar',
   'LICENSE',
