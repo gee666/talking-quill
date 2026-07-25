@@ -361,6 +361,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await resetSession(application);
 
     // Smart-unavailable raw fallback plus copied-to-clipboard result.
+    await main.getByRole('button', { name: 'Dictation profiles' }).click();
     const generalMode = main.getByRole('combobox', { name: 'General processing mode' });
     await generalMode.selectOption('smart');
     await expect(generalMode).toHaveValue('smart');
@@ -389,6 +390,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     // Voice Commands run immediately after transcription, bypass unavailable Smart processing,
     // insert the snippet, and persist a typed history outcome.
     await driverCall(application, 'setCopied', [false]);
+    await main.getByRole('button', { name: 'Voice Commands' }).click();
     await main.getByLabel(/Trigger phrase/).fill('archive this project');
     await main.getByLabel('Snippet').fill('Project archived successfully');
     await main.getByRole('button', { name: 'Add voice command' }).click();

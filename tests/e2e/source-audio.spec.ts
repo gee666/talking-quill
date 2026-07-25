@@ -168,6 +168,7 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
       .toBe(1);
 
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Recording' }).click();
     await main.getByRole('button', { name: 'Test microphone' }).click();
     await expect(main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
     await expect
@@ -184,6 +185,7 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
     await expect(main.getByRole('button', { name: 'Settings' })).toBeVisible();
     await expectEveryReturnedTrackEnded(capture, 1);
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Recording' }).click();
     const picker = main.getByRole('combobox', { name: 'Microphone' });
     await expect(picker).toBeEnabled();
     const fakeDeviceOption = picker.locator('option').last();
@@ -246,6 +248,7 @@ test('Electron policy denial does not masquerade as Windows privacy denial', asy
       );
     });
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Recording' }).click();
     await main.getByRole('button', { name: 'Test microphone' }).click();
     await expect(main.getByText('Microphone unavailable')).toBeVisible();
     await expect(main.getByRole('alert')).toContainText(

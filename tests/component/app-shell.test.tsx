@@ -424,10 +424,10 @@ describe('main application shell', () => {
     expect(await screen.findByRole('heading', { name: 'Local model' })).toHaveFocus();
   });
 
-  it('offers only Echo, Settings, and Info with keyboard navigation and truthful content', async () => {
+  it('offers only Dashboard, Settings, and Info with keyboard navigation and truthful content', async () => {
     const user = userEvent.setup();
     renderShell();
-    expect(screen.getAllByRole('button', { name: /Echo|Settings|Info/ })).toHaveLength(3);
+    expect(screen.getAllByRole('button', { name: /Dashboard|Settings|Info/ })).toHaveLength(3);
     const settingsButton = screen.getByRole('button', { name: 'Settings' });
     settingsButton.focus();
     await user.keyboard('{Enter}');
@@ -478,7 +478,7 @@ describe('main application shell', () => {
     expect(await screen.findByRole('button', { name: 'Maximize window' })).toBeVisible();
   });
 
-  it('restores authoritative Echo state and reports rejected enabled writes', async () => {
+  it('restores authoritative application state and reports rejected enabled writes', async () => {
     const user = userEvent.setup();
     setEnabled.mockRejectedValueOnce(new Error('secret persistence detail'));
     renderShell();
@@ -583,8 +583,9 @@ describe('main application shell', () => {
     await waitFor(() =>
       expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked(),
     );
-    expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('Q');
     expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
+    await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
+    expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('Q');
   });
 
   it('does not overwrite a newer settings event with an older failed-save reload', async () => {
@@ -611,6 +612,7 @@ describe('main application shell', () => {
       settings: structuredClone(DEFAULT_SETTINGS),
     });
 
+    await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
     await waitFor(() =>
       expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('X'),
     );

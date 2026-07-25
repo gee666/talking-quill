@@ -18,10 +18,21 @@ body {
   overflow: hidden;
   background: var(--color-background);
   color: var(--color-text);
-  font-family: var(--font-system);
-  font-size: 15px;
-  line-height: 1.5;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: 0;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 button,
@@ -29,6 +40,7 @@ input,
 select,
 textarea {
   font: inherit;
+  letter-spacing: inherit;
 }
 
 button,
@@ -39,6 +51,17 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
+/* Headings receive programmatic focus on navigation; a ring box reads as an error. */
+h1[tabindex='-1']:focus-visible,
+h2[tabindex='-1']:focus-visible {
+  outline: none;
+  box-shadow: none;
+  text-decoration: underline;
+  text-decoration-color: var(--color-accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 6px;
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -47,6 +70,20 @@ dialog:focus-visible,
 [tabindex]:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--scrollbar-thumb);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .sr-only {

@@ -1,0 +1,223 @@
+/* Dashboard, Info and dictation-history screens. */
+
+/* ============================================================ Row groups */
+/* Rows that live inside an explicit `.group` need the row padding that
+   `components.css` only applies to direct children of `.me-card__body`. */
+.group > .readiness-row {
+  min-height: var(--row-height);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-md);
+}
+.group > .readiness-row > span:first-child {
+  color: var(--color-text);
+}
+
+/* ============================================================= Dashboard */
+.readiness-group > .readiness-note {
+  padding: 0 var(--space-3) var(--space-2);
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+.readiness-group > .readiness-row + .readiness-note {
+  border-top: 0;
+}
+
+.try-dictation {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.try-dictation > span {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* ================================================================== Info */
+.info-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.permission-list {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.permission-list .readiness-row > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-alert {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-error) 40%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--color-error-soft);
+}
+.info-alert p {
+  margin: 0;
+  color: var(--color-error);
+  font-size: var(--fs-sm);
+}
+
+.notices,
+.notices-text {
+  max-height: 260px;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-3);
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+  color: var(--color-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ==================================================== Dictation history */
+.history-heading-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.history-heading-actions .me-button {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+}
+
+.history-list {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+  list-style: none;
+}
+
+.history-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  transition: background-color var(--transition-fast);
+}
+.history-entry > * {
+  grid-column: 1;
+  min-width: 0;
+}
+.history-entry + .history-entry {
+  border-top: 1px solid var(--color-border);
+}
+.history-entry:hover,
+.history-entry:focus-within {
+  background: var(--color-hover);
+}
+
+.history-entry__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+.history-entry__meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.history-entry > p {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.history-entry > .history-entry__detail {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+.history-entry > .history-entry__fallback {
+  color: var(--color-warning);
+  font-weight: 500;
+}
+
+.history-entry__screenshot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-muted);
+  font-size: var(--fs-xs);
+}
+.history-entry__screenshot:has(img) {
+  display: block;
+}
+.history-entry__screenshot img {
+  display: block;
+  width: auto;
+  max-width: 180px;
+  height: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.history-entry__actions {
+  display: flex;
+  grid-row: 1;
+  grid-column: 2;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+.history-entry:hover .history-entry__actions,
+.history-entry:focus-within .history-entry__actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .history-entry__actions {
+    opacity: 1;
+  }
+}
+.history-entry__actions .me-button {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+}
+.history-entry__actions .me-button--secondary {
+  border-color: var(--color-border);
+  background: transparent;
+  color: var(--color-secondary);
+}
+.history-entry__actions .me-button--secondary:hover:not(:disabled) {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.history-more {
+  display: flex;
+  justify-content: center;
+}
+.history-more .me-button {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+}

@@ -107,7 +107,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
 
   await expect(main.getByRole('heading', { name: 'Dictation needs local setup' })).toBeVisible();
   await expect(widget.getByText('Ready', { exact: true })).toBeAttached();
-  await expectAccessible(main, 'Echo screen');
+  await expectAccessible(main, 'Dashboard screen');
   await expectAccessible(widget, 'Widget shell');
   await expect
     .poll(() => capture.evaluate(() => document.documentElement.dataset.ready))
@@ -402,6 +402,7 @@ test('authentic opt-in npm Pi is auto-discovered and shown through the source Se
       .poll(() => main.evaluate(() => window.talkingQuill.providers.piInstallationStatus()))
       .toMatchObject({ state: 'ready', version: '0.81.1' });
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Smart processing' }).click();
     await main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     await main.getByRole('searchbox', { name: 'Search providers' }).fill('Pi');
     await main.locator('#pi[role="option"]').click();
@@ -426,6 +427,7 @@ test('Pi settings expose not-found recovery and explicit retry discovery', async
   try {
     const { main } = await rendererPages(application);
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Smart processing' }).click();
     await main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     await main.getByRole('searchbox', { name: 'Search providers' }).fill('Pi');
     await main.locator('#pi[role="option"]').click();
@@ -499,6 +501,7 @@ test('provider UI and a fresh-renderer canary prove secrets stay outside rendere
       Reflect.set(globalThis, '__providerSettingsEvents', events);
     });
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Smart processing' }).click();
     await main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     const providerLogos = main
       .getByRole('listbox', { name: 'Smart processing providers' })
@@ -658,6 +661,7 @@ test('categorized source egress proof exposes only explicit user-triggered choke
     expect(await readEgressCategories(profile)).toEqual([]);
 
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Smart processing' }).click();
     const providerForm = main.locator('.provider-form');
     await providerForm.getByLabel('Model').fill('proof-model');
     await providerForm.getByRole('button', { name: 'Save configuration' }).click();
@@ -670,6 +674,7 @@ test('categorized source egress proof exposes only explicit user-triggered choke
     await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'update']);
 
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Transcription model' }).click();
     await main.getByRole('button', { name: 'Download model' }).click();
     await expect
       .poll(() => readEgressCategories(profile))

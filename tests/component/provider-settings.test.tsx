@@ -397,6 +397,7 @@ describe('Smart processing settings', () => {
     });
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText('Vision support is unknown and remains off.')).toBeVisible();
     expect(screen.queryByRole('checkbox', { name: /focused display/i })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Run disclosed image-echo test' }));
@@ -417,6 +418,7 @@ describe('Smart processing settings', () => {
   it('renders a searchable keyboard picker with all 38 providers enabled', async () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i });
 
     await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
@@ -446,6 +448,7 @@ describe('Smart processing settings', () => {
     async (provider) => {
       const user = renderSettings();
       await user.click(screen.getByRole('button', { name: 'Settings' }));
+      await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
       await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
       const option = document.querySelector(`#${provider.id}`);
       expect(option).toBeVisible();
@@ -466,6 +469,7 @@ describe('Smart processing settings', () => {
     ]);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
     await user.click(screen.getByRole('option', { name: /^PiUse/ }));
@@ -514,6 +518,7 @@ describe('Smart processing settings', () => {
       .mockResolvedValue(ready);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
     await user.click(screen.getByRole('option', { name: /^PiUse/ }));
@@ -542,6 +547,7 @@ describe('Smart processing settings', () => {
     listModels.mockResolvedValueOnce([]);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
     await user.click(screen.getByRole('option', { name: /^PiUse/ }));
@@ -562,6 +568,7 @@ describe('Smart processing settings', () => {
     ]);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
     await user.click(screen.getByRole('option', { name: /^PiUse/ }));
@@ -595,6 +602,7 @@ describe('Smart processing settings', () => {
     ]);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText(/exact selected Pi model.*retained/i)).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Pi model' })).toHaveValue('p/removed');
     await user.click(screen.getByRole('button', { name: 'Choose a discovered model' }));
@@ -615,6 +623,7 @@ describe('Smart processing settings', () => {
   it('renders validated native Azure and Bedrock configuration controls', async () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Azure');
     await user.click(screen.getByRole('option', { name: /^Azure OpenAI/ }));
@@ -642,6 +651,7 @@ describe('Smart processing settings', () => {
     setSecret.mockReturnValueOnce(pending.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Bedrock');
     await user.click(screen.getByRole('option', { name: /^AWS Bedrock/ }));
@@ -678,6 +688,7 @@ describe('Smart processing settings', () => {
   it('requires an explicit saved Ollama model before connection testing', async () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText('Select and save a model before testing')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
     expect(testConnection).not.toHaveBeenCalled();
@@ -688,6 +699,7 @@ describe('Smart processing settings', () => {
     setSecret.mockReturnValueOnce(pending.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     const password = await screen.findByLabelText('API key', { selector: 'input' });
     const canary = 'component-secret-canary';
     await user.type(password, canary);
@@ -718,6 +730,7 @@ describe('Smart processing settings', () => {
     );
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await screen.findByRole('button', { name: 'Discover models' });
 
     await user.click(screen.getByRole('button', { name: 'Discover models' }));
@@ -751,6 +764,7 @@ describe('Smart processing settings', () => {
     testConnection.mockReturnValueOnce(pendingTest.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await screen.findByRole('button', { name: 'Test connection' });
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     const oldOperationId = testConnection.mock.calls[0]?.[1];
@@ -785,6 +799,7 @@ describe('Smart processing settings', () => {
     });
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText('Configured')).toBeVisible();
 
     const endpoint = screen.getByRole('textbox', { name: 'Endpoint URL' });
@@ -817,6 +832,7 @@ describe('Smart processing settings', () => {
       .mockReturnValue(newBindingStatus.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
 
     const endpoint = await screen.findByRole('textbox', { name: 'Endpoint URL' });
     await user.clear(endpoint);
@@ -872,6 +888,7 @@ describe('Smart processing settings', () => {
     });
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText('Configured')).toBeVisible();
 
     const endpoint = screen.getByRole('textbox', { name: 'Endpoint URL' });
@@ -892,6 +909,7 @@ describe('Smart processing settings', () => {
       .mockReturnValueOnce(secondDestination.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     const password = await screen.findByLabelText('API key', { selector: 'input' });
     await user.type(password, 'destination-secret');
     await user.click(screen.getByRole('button', { name: 'Store API key' }));
@@ -923,6 +941,7 @@ describe('Smart processing settings', () => {
     testConnection.mockReturnValueOnce(pendingTest.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await screen.findByRole('button', { name: 'Discover models' });
 
     await user.click(screen.getByRole('button', { name: 'Discover models' }));
@@ -947,6 +966,7 @@ describe('Smart processing settings', () => {
     listModels.mockReturnValueOnce(pending.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await screen.findByRole('button', { name: 'Discover models' });
     await user.click(screen.getByRole('button', { name: 'Discover models' }));
     await user.click(screen.getByRole('button', { name: 'Cancel discovery' }));

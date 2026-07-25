@@ -24,6 +24,7 @@ test('Settings UI exports and imports vocabulary through typed IPC and dialog fi
   try {
     const { main } = await rendererPages(application);
     await main.getByRole('button', { name: 'Settings' }).click();
+    await main.getByRole('button', { name: 'Custom Vocabulary' }).click();
     const vocabulary = main.getByRole('list', { name: 'Custom vocabulary' });
     const input = main.getByLabel(/Word or phrase/);
 

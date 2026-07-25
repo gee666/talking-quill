@@ -1,10 +1,12 @@
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- the constrained setup region must receive PageDown/End keyboard focus */
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import logoDark from '../../../../assets/logo-dark.png';
+import logoLight from '../../../../assets/logo-light.png';
 import type { AppState } from '../../../shared/schemas/app-state';
 import { GENERAL_PROFILE_ID } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
 import type { WelcomeState, WelcomeStep } from '../../../shared/schemas/welcome';
-import { Button, Card, Status } from '../../design';
+import { Button, Card, Status, useTheme } from '../../design';
 import { GeneralSection } from '../settings/GeneralSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { ModelSetup } from '../setup/ModelSetup';
@@ -47,13 +49,12 @@ export function WelcomeWizard({
     source: settings.welcome,
   }));
   const step =
-    optimisticStep.source === settings.welcome
-      ? optimisticStep.step
-      : settings.welcome.lastStep;
+    optimisticStep.source === settings.welcome ? optimisticStep.step : settings.welcome.lastStep;
   const [saving, setSaving] = useState(false);
   const [showSmartProcessing, setShowSmartProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contentScrollable, setContentScrollable] = useState(false);
+  const [theme] = useTheme();
   const heading = useRef<HTMLHeadingElement>(null);
   const content = useRef<HTMLElement>(null);
   const latestWelcomeRevision = useRef(settings.welcome.revision ?? 0);
@@ -120,18 +121,30 @@ export function WelcomeWizard({
 
   return (
     <main className="welcome" aria-labelledby="welcome-heading">
+      <div className="welcome__brand">
+        <img
+          className="welcome__brand-logo"
+          src={theme === 'light' ? logoLight : logoDark}
+          alt=""
+          aria-hidden="true"
+        />
+        <span className="welcome__brand-copy">
+          <span className="welcome__brand-wordmark">Talking Quill</span>
+          <span className="welcome__brand-tagline">Speak naturally. Write effortlessly.</span>
+        </span>
+      </div>
       <header className="welcome__header">
-        <div>
-          <p className="eyebrow">Setup · Step {step} of 6</p>
-          <h1 id="welcome-heading" ref={heading} tabIndex={-1}>
-            {STEP_NAMES[step - 1]}
-          </h1>
+        <h1 id="welcome-heading" ref={heading} tabIndex={-1} className="welcome__title">
+          {STEP_NAMES[step - 1]}
+        </h1>
+        <div className="welcome__header-meta">
+          <p className="eyebrow welcome__counter">Setup · Step {step} of 6</p>
+          {reopened ? (
+            <Button variant="quiet" onClick={onClose}>
+              Exit Welcome
+            </Button>
+          ) : null}
         </div>
-        {reopened ? (
-          <Button variant="quiet" onClick={onClose}>
-            Exit Welcome
-          </Button>
-        ) : null}
       </header>
       <ol className="welcome__progress" aria-label="Setup progress">
         {STEP_NAMES.map((name, index) => {
@@ -144,9 +157,7 @@ export function WelcomeWizard({
               data-state={progressState}
               aria-current={progressState === 'current' ? 'step' : undefined}
             >
-              <span className="welcome__progress-marker" aria-hidden="true">
-                {progressState === 'complete' ? '✓' : position}
-              </span>
+              <span className="welcome__progress-marker" aria-hidden="true" />
               <span className="welcome__progress-label">{name}</span>
             </li>
           );

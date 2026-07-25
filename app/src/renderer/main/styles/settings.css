@@ -1,0 +1,325 @@
+/* ==================================================== Settings tab layout */
+.screen--settings {
+  max-width: 900px;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+.settings-rail {
+  display: grid;
+  gap: var(--space-3);
+  position: sticky;
+  top: 0;
+}
+.settings-rail nav {
+  display: grid;
+  gap: 2px;
+}
+.settings-panel {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.settings-panel > section {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.settings-domain,
+.settings-domain__form,
+.settings-domain__preview {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.settings-domain__form--row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+}
+.settings-domain__preview {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+.settings-results {
+  display: grid;
+  gap: var(--space-5);
+}
+
+/* ========================================================== Gesture test */
+.gesture-test {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+}
+.gesture-test strong {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.gesture-test span {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+
+/* The dictation profile editor reuses the panel shell as a real fieldset. */
+fieldset.gesture-test {
+  display: block;
+  justify-items: stretch;
+  margin: 0;
+}
+fieldset.gesture-test > * + * {
+  margin-top: var(--space-2);
+}
+fieldset.gesture-test > .me-field--row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 240px);
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: var(--row-height);
+}
+fieldset.gesture-test > .me-field--row > .me-field__label {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+fieldset.gesture-test > .me-field--row > .me-field__control {
+  grid-column: 2;
+  grid-row: 1;
+}
+fieldset.gesture-test > .me-field--row > .me-field__hint,
+fieldset.gesture-test > .me-field--row > .me-field__error {
+  grid-column: 1 / -1;
+}
+fieldset.gesture-test > legend {
+  padding-inline: var(--space-1);
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+fieldset.gesture-test > div:not(.me-field) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ============================================================= Recording */
+.recording-test {
+  display: grid;
+  gap: var(--space-2);
+}
+.recording-test__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.permission-guidance {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-error) 45%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--color-error-soft);
+}
+.permission-guidance p {
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+
+/* ====================================================== Provider picker */
+.provider-picker {
+  position: relative;
+  display: grid;
+  gap: var(--space-1);
+}
+.provider-picker__label {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.provider-picker__trigger {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--row-height);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+.provider-picker__trigger:hover {
+  border-color: var(--color-muted);
+}
+.provider-picker__trigger img,
+.provider-option img {
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+.provider-picker__trigger span:nth-child(2),
+.provider-option > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.provider-picker small,
+.provider-option small {
+  overflow: hidden;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-picker__popover {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
+}
+.provider-picker__list {
+  display: grid;
+  gap: 1px;
+  max-height: min(320px, 46vh);
+  padding: 0;
+  overflow: auto;
+}
+.provider-option {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+.provider-option:hover:not(:disabled),
+.provider-option.is-active:not(:disabled),
+.provider-option[aria-selected='true'] {
+  background: var(--color-hover);
+}
+.provider-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.provider-option__pending {
+  color: var(--color-warning);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.provider-summary,
+.provider-actions,
+.credential-panel__heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.provider-summary,
+.credential-panel__heading {
+  justify-content: space-between;
+}
+.provider-form,
+.credential-panel,
+.connection-panel,
+.provider-pending {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+}
+.provider-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.provider-form > .provider-actions,
+.provider-form > .model-field {
+  grid-column: 1 / -1;
+}
+.model-field {
+  display: grid;
+  gap: var(--space-1);
+}
+.credential-panel h3,
+.connection-panel h3 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.credential-panel p,
+.connection-panel p,
+.provider-pending p {
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+.vision-test-code {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+  }
+  .settings-rail {
+    position: static;
+  }
+  .settings-rail nav {
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    overflow-x: auto;
+  }
+  .provider-form {
+    grid-template-columns: 1fr;
+  }
+  .provider-form > * {
+    grid-column: 1;
+  }
+  .settings-domain__form--row,
+  .settings-domain__preview {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}

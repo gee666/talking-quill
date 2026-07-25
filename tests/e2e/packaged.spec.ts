@@ -386,10 +386,10 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
         }
       });
     });
-    // Remount Past Echoes after diagnostics are attached so thumbnail loading and CSP enforcement
-    // are observed rather than relying on renderer events emitted before CDP connected.
+    // Remount the dictation history after diagnostics are attached so thumbnail loading and CSP
+    // enforcement are observed rather than relying on renderer events emitted before CDP connected.
     await launched.main.getByRole('button', { name: 'Settings' }).click();
-    await launched.main.getByRole('button', { name: 'Echo' }).click();
+    await launched.main.getByRole('button', { name: 'Dashboard' }).click();
     await expect(
       launched.main.getByRole('heading', { name: 'Dictation needs local setup' }),
     ).toBeVisible();
@@ -517,6 +517,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     ).toBe(true);
 
     await launched.main.getByRole('button', { name: 'Settings' }).click();
+    await launched.main.getByRole('button', { name: 'Recording' }).click();
     await launched.main.getByRole('button', { name: 'Test microphone' }).click();
     await expect(launched.main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
     await expect
@@ -532,8 +533,10 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
       .toBeGreaterThan(0.01);
     await launched.main.getByRole('button', { name: 'Stop microphone test' }).click();
     await expect(launched.main.getByText('Test stopped')).toBeVisible();
+    await launched.main.getByRole('button', { name: 'General' }).click();
     await launched.main.getByRole('checkbox', { name: 'Close to tray' }).click();
     await expect(launched.main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
+    await launched.main.getByRole('button', { name: 'Smart processing' }).click();
     await launched.main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     const providerLogos = launched.main
       .getByRole('listbox', { name: 'Smart processing providers' })
@@ -561,6 +564,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     await launched.main.getByRole('button', { name: 'Check for updates' }).click();
     await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'update']);
     await launched.main.getByRole('button', { name: 'Settings' }).click();
+    await launched.main.getByRole('button', { name: 'Transcription model' }).click();
     await launched.main.getByRole('button', { name: 'Download model' }).click();
     await expect
       .poll(() => readEgressCategories(profile))
@@ -573,6 +577,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
 
     launched = await launchPackaged(profile);
     await launched.main.getByRole('button', { name: 'Settings' }).click();
+    await launched.main.getByRole('button', { name: 'General' }).click();
     await expect(launched.main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
     const secondExit = waitForExit(launched.child);
     await launched.main.getByRole('button', { name: 'Close window' }).click();

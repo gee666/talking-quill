@@ -16,7 +16,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   const errorId = error === undefined ? undefined : `${controlId}-error`;
   const describedBy = [hintId, errorId].filter(Boolean).join(' ') || undefined;
   return (
-    <div className="me-field">
+    <div className="me-field me-field--row">
       <label className="me-field__label" htmlFor={controlId}>
         {label}{' '}
         {required ? (

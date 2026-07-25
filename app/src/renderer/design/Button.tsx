@@ -25,7 +25,7 @@ export function Button({
     >
       {busy ? (
         <span className="me-button__busy" aria-hidden="true">
-          ●
+          •
         </span>
       ) : null}
       {children}

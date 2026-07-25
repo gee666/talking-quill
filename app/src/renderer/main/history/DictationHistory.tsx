@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HistoryCursor, HistoryListItem } from '../../../shared/schemas/history';
-import { Button, Card, Dialog, EmptyState, Toast } from '../../design';
+import { Button, Card, Dialog, EmptyState, Icon, Toast } from '../../design';
 
-export function PastEchoes() {
+export function DictationHistory() {
   const [items, setItems] = useState<readonly HistoryListItem[]>([]);
   const [cursor, setCursor] = useState<HistoryCursor | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,7 +26,8 @@ export function PastEchoes() {
       setItems((current) => (nextCursor === null ? page.items : [...current, ...page.items]));
       setCursor(page.nextCursor);
     } catch {
-      if (sequence === requestSequence.current) setError('Past Echoes could not be loaded.');
+      if (sequence === requestSequence.current)
+        setError('The dictation history could not be loaded.');
     } finally {
       if (sequence === requestSequence.current) {
         setLoading(false);
@@ -53,9 +54,9 @@ export function PastEchoes() {
     setNotice(null);
     try {
       await window.talkingQuill.history.copy(id);
-      setNotice({ message: 'Echo copied to the clipboard.', tone: 'success' });
+      setNotice({ message: 'Transcript copied to the clipboard.', tone: 'success' });
     } catch {
-      setError('The Echo could not be copied.');
+      setError('The transcript could not be copied.');
     }
   };
   const remove = async (id: string) => {
@@ -67,12 +68,12 @@ export function PastEchoes() {
       if (result.screenshotCleanup !== 'complete') {
         setNotice({
           message:
-            'The Echo was deleted, but screenshot cleanup is incomplete and will be retried.',
+            'The entry was deleted, but screenshot cleanup is incomplete and will be retried.',
           tone: 'warning',
         });
       }
     } catch {
-      setError('The Echo could not be deleted.');
+      setError('The entry could not be deleted.');
     } finally {
       setBusy(false);
     }
@@ -86,40 +87,45 @@ export function PastEchoes() {
       setConfirmDeleteAll(false);
       setNotice(
         result.screenshotCleanup === 'complete'
-          ? { message: 'All Past Echoes were deleted.', tone: 'success' }
+          ? { message: 'All history entries were deleted.', tone: 'success' }
           : {
               message:
-                'All Past Echoes were deleted, but screenshot cleanup is incomplete and will be retried.',
+                'All history entries were deleted, but screenshot cleanup is incomplete and will be retried.',
               tone: 'warning',
             },
       );
     } catch {
-      setError('Past Echoes could not be deleted.');
+      setError('The dictation history could not be deleted.');
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Card title="Past Echoes" description="Completed dictations stored locally on this device.">
+    <Card
+      title="Dictation history"
+      description="Completed dictations stored locally on this device."
+    >
       {items.length === 0 ? null : (
         <div className="history-heading-actions">
           <Button variant="danger" onClick={() => setConfirmDeleteAll(true)} disabled={busy}>
-            Delete all Past Echoes
+            Delete all history
           </Button>
         </div>
       )}
-      {loading ? (
-        <p aria-live="polite">Loading Past Echoes…</p>
+      {loading && items.length === 0 ? (
+        <p className="body-copy" aria-live="polite">
+          Loading history…
+        </p>
       ) : error !== null && items.length === 0 ? (
-        <EmptyState title="Unable to load Past Echoes" description={error} />
+        <EmptyState title="Unable to load history" description={error} />
       ) : items.length === 0 ? (
         <EmptyState
-          title="No Past Echoes yet"
+          title="No dictations yet"
           description="Completed dictations will appear here when history is enabled."
         />
       ) : (
-        <ol className="history-list" aria-label="Past Echoes">
+        <ol className="history-list" aria-label="Dictation history">
           {items.map((item) => (
             <li key={item.id} className="history-entry">
               <div className="history-entry__meta">
@@ -170,9 +176,11 @@ export function PastEchoes() {
         </ol>
       )}
       {cursor === null || loading ? null : (
-        <Button variant="secondary" busy={busy} onClick={() => void load(cursor)}>
-          Load more
-        </Button>
+        <div className="history-more">
+          <Button variant="secondary" busy={busy} onClick={() => void load(cursor)}>
+            Load more
+          </Button>
+        </div>
       )}
       {error === null || items.length === 0 ? null : (
         <Toast tone="error" message={error} onDismiss={() => setError(null)} />
@@ -182,13 +190,13 @@ export function PastEchoes() {
       )}
       <Dialog
         open={confirmDeleteAll}
-        title="Delete all Past Echoes?"
+        title="Delete all history?"
         description="This permanently removes all locally stored history entries."
         onClose={() => setConfirmDeleteAll(false)}
         actions={
           <>
             <Button variant="secondary" onClick={() => setConfirmDeleteAll(false)}>
-              Keep Past Echoes
+              Keep history
             </Button>
             <Button variant="danger" busy={busy} onClick={() => void removeAll()} data-autofocus>
               Delete all
@@ -215,10 +223,13 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
     let started = false;
     let createdUrl: string | null = null;
     let observer: IntersectionObserver | null = null;
-    let cancelFallbackLoad = () => undefined;
+    let cancelFallbackLoad: () => void = () => undefined;
     const load = () => {
       if (!active || started) return;
       started = true;
+      cancelFallbackLoad();
+      observer?.disconnect();
+      observer = null;
       void window.talkingQuill.history
         .thumbnail(item.id)
         .then((value) => {
@@ -237,10 +248,7 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
       } else {
         observer = new IntersectionObserver(
           (entries) => {
-            if (!entries.some((entry) => entry.isIntersecting)) return;
-            observer?.disconnect();
-            observer = null;
-            load();
+            if (entries.some((entry) => entry.isIntersecting)) load();
           },
           { rootMargin: '200px 0px' },
         );
@@ -264,7 +272,7 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
     <div ref={container} className="history-entry__screenshot" aria-label="Screenshot attachment">
       {objectUrl === null ? (
         <>
-          <span aria-hidden="true">▧</span>
+          <Icon name="profiles" />
           {item.hasScreenshot ? 'Screenshot unavailable' : 'No screenshot retained'}
         </>
       ) : (
@@ -275,12 +283,26 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
 }
 
 function scheduleDeferredTask(task: () => void): () => void {
+  let pending = true;
+  const run = () => {
+    if (!pending) return;
+    pending = false;
+    task();
+  };
   if (typeof window.requestIdleCallback === 'function') {
-    const handle = window.requestIdleCallback(task, { timeout: 250 });
-    return () => window.cancelIdleCallback(handle);
+    const handle = window.requestIdleCallback(run, { timeout: 250 });
+    return () => {
+      if (!pending) return;
+      pending = false;
+      window.cancelIdleCallback(handle);
+    };
   }
-  const handle = window.setTimeout(task, 0);
-  return () => window.clearTimeout(handle);
+  const handle = window.setTimeout(run, 0);
+  return () => {
+    if (!pending) return;
+    pending = false;
+    window.clearTimeout(handle);
+  };
 }
 
 function fallbackDescription(category: string | null): string {
@@ -303,5 +325,5 @@ function historyDisplayText(item: HistoryListItem): string | null {
 function historyActionLabel(action: 'Copy' | 'Delete', item: HistoryListItem): string {
   const normalized = (historyDisplayText(item) ?? '').replaceAll(/\s+/g, ' ').trim().slice(0, 80);
   const preview = normalized.length === 0 ? 'empty transcript' : normalized;
-  return `${action} Echo: ${preview}`;
+  return `${action} transcript: ${preview}`;
 }

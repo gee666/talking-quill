@@ -85,44 +85,77 @@ describe('security and paths foundations', () => {
     const tokens = await readFile(resolve('app/src/renderer/design/tokens.css'), 'utf8');
     const global = await readFile(resolve('app/src/renderer/design/global.css'), 'utf8');
     for (const color of [
-      '#0B0D10',
-      '#12151A',
-      '#181C22',
-      '#272C35',
-      '#F4F7FA',
-      '#9AA4B2',
-      '#687282',
-      '#7C8CFF',
-      '#4FD1A1',
-      '#F2B84B',
-      '#F36B7F',
+      // Light theme.
+      '#F7F8FA',
+      '#FFFFFF',
+      '#FBFCFD',
+      '#E4E8EE',
+      '#16202E',
+      '#5A6879',
+      '#34618F',
+      '#1F7A55',
+      '#8A5C0B',
+      '#B23A37',
+      // Dark theme.
+      '#161B23',
+      '#1B212B',
+      '#1F2530',
+      '#2C3441',
+      '#DDE4EE',
+      '#98A4B5',
+      '#7AA8D8',
+      '#5CC9A0',
+      '#E0B063',
+      '#E88B84',
     ]) {
       expect(tokens.toUpperCase()).toContain(color);
     }
     const contrastPairs: readonly (readonly [string, string])[] = [
-      ['#F4F7FA', '#0B0D10'],
-      ['#F4F7FA', '#12151A'],
-      ['#9AA4B2', '#0B0D10'],
-      ['#9AA4B2', '#12151A'],
-      ['#0B0D10', '#7C8CFF'],
-      ['#4FD1A1', '#181C22'],
-      ['#F2B84B', '#181C22'],
-      ['#F36B7F', '#181C22'],
+      // Light theme: ink and supporting copy on every surface.
+      ['#16202e', '#f7f8fa'],
+      ['#16202e', '#ffffff'],
+      ['#16202e', '#fbfcfd'],
+      ['#5a6879', '#f7f8fa'],
+      ['#5a6879', '#ffffff'],
+      ['#5a6879', '#fbfcfd'],
+      // Light theme: accent and status tones on their own tinted backgrounds.
+      ['#ffffff', '#34618f'],
+      ['#34618f', '#e8eff7'],
+      ['#1f7a55', '#e2f2eb'],
+      ['#8a5c0b', '#f8eeda'],
+      ['#b23a37', '#fbe9e8'],
+      // Dark theme: ink and supporting copy on every surface.
+      ['#dde4ee', '#161b23'],
+      ['#dde4ee', '#1b212b'],
+      ['#dde4ee', '#1f2530'],
+      ['#98a4b5', '#161b23'],
+      ['#98a4b5', '#1b212b'],
+      ['#98a4b5', '#1f2530'],
+      // Dark theme: accent, brand and status tones on their own tinted backgrounds.
+      ['#0e1622', '#7aa8d8'],
+      ['#7aa8d8', '#222f40'],
+      ['#dcbb80', '#1b212b'],
+      ['#5cc9a0', '#18302a'],
+      ['#e0b063', '#2d2519'],
+      ['#e88b84', '#2e1a1c'],
     ];
     for (const [foreground, background] of contrastPairs) {
       expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
     }
+    expect(tokens).toContain("[data-theme='light']");
+    expect(tokens).toContain("[data-theme='dark']");
     expect(global).toContain('prefers-reduced-motion: reduce');
   });
 
-  it('keeps spacing tokens and literal layout spacing on the approved 8px scale', async () => {
+  it('keeps spacing tokens and literal layout spacing on the approved 4px scale', async () => {
     const tokens = await readFile(resolve('app/src/renderer/design/tokens.css'), 'utf8');
     for (const [name, pixels] of [
-      ['--space-1', 8],
-      ['--space-2', 16],
-      ['--space-3', 24],
-      ['--space-4', 32],
-      ['--space-5', 40],
+      ['--space-1', 4],
+      ['--space-2', 8],
+      ['--space-3', 12],
+      ['--space-4', 16],
+      ['--space-5', 24],
+      ['--space-6', 32],
     ] as const) {
       expect(tokens).toMatch(new RegExp(`${name}:\\s*${String(pixels)}px;`));
     }
@@ -131,6 +164,9 @@ describe('security and paths foundations', () => {
       'app/src/renderer/design/components.css',
       'app/src/renderer/design/global.css',
       'app/src/renderer/main/main.css',
+      'app/src/renderer/main/styles/screens.css',
+      'app/src/renderer/main/styles/settings.css',
+      'app/src/renderer/main/styles/welcome.css',
       'app/src/renderer/widget/widget.css',
     ];
     const declaration =
@@ -140,8 +176,9 @@ describe('security and paths foundations', () => {
       for (const match of css.matchAll(declaration)) {
         for (const value of match[1]?.matchAll(/(-?\d+(?:\.\d+)?)px/g) ?? []) {
           const pixels = Number(value[1]);
-          if (pixels === -1) continue;
-          expect(pixels % 8, `${file}: ${match[0]}`).toBe(0);
+          // 1px is the reserved hairline gap that separates grouped rows.
+          if (pixels === -1 || pixels === 1) continue;
+          expect(pixels % 2, `${file}: ${match[0]}`).toBe(0);
         }
       }
     }

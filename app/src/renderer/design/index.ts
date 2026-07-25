@@ -9,3 +9,11 @@ export { Progress, type ProgressProps } from './Progress';
 export { Status, type StatusProps } from './Status';
 export { Toast, type ToastProps } from './Toast';
 export { EmptyState, type EmptyStateProps } from './EmptyState';
+export { Icon, type IconName, type IconProps } from './Icon';
+export {
+  applyTheme,
+  readStoredTheme,
+  resolveInitialTheme,
+  useTheme,
+  type ThemeName,
+} from './theme';

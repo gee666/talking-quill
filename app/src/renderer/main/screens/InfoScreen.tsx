@@ -110,7 +110,7 @@ export function InfoScreen({
       </header>
       <div className="screen__grid">
         <Card title="Updates" description="Checks only when you ask; no background update traffic.">
-          <div className="provider-actions">
+          <div className="info-actions provider-actions">
             <Button busy={checking} onClick={() => void check()}>
               Check for updates
             </Button>
@@ -147,17 +147,19 @@ export function InfoScreen({
             </Status>
           )}
           {update?.status === 'available' ? (
-            <Button
-              variant="secondary"
-              onClick={() =>
-                void runAction(
-                  () => window.talkingQuill.info.openRelease(update.releaseUrl),
-                  'The release page could not be opened.',
-                )
-              }
-            >
-              Open release page
-            </Button>
+            <div className="info-actions">
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  void runAction(
+                    () => window.talkingQuill.info.openRelease(update.releaseUrl),
+                    'The release page could not be opened.',
+                  )
+                }
+              >
+                Open release page
+              </Button>
+            </div>
           ) : null}
         </Card>
         <Card title="Raw and Smart transcription">
@@ -174,7 +176,7 @@ export function InfoScreen({
         <Card title="Privacy">
           <p className="body-copy">
             Audio stays on this device. There is no telemetry. Diagnostic logging is off by default
-            and Past Echoes can be disabled or deleted.
+            and the dictation history can be disabled or deleted.
           </p>
         </Card>
         <Card
@@ -182,52 +184,62 @@ export function InfoScreen({
           description="Open the relevant operating-system pane when access needs attention."
         >
           {permissionError ? (
-            <div role="alert">
+            <div className="info-alert" role="alert">
               <p>Permission status is unavailable.</p>
               <Button variant="secondary" onClick={() => void refreshPermissions()}>
                 Retry permission check
               </Button>
             </div>
           ) : permissions === null ? (
-            <p role="status">Checking permissions…</p>
+            <p className="body-copy" role="status">
+              Checking permissions…
+            </p>
           ) : (
             <div className="permission-list">
-              <Button variant="secondary" onClick={() => void refreshPermissions()}>
-                Refresh permission status
-              </Button>
-              <PermissionRow
-                label="Microphone"
-                value={permissions.microphone}
-                open={() => window.talkingQuill.info.openPermissionSettings('microphone')}
-                onError={() => setNotice('Microphone settings could not be opened.')}
-              />
-              {bootstrap.platform === 'darwin' ? (
-                <>
-                  <PermissionRow
-                    label="Accessibility"
-                    value={permissions.helper.permissions.accessibility}
-                    open={() => window.talkingQuill.info.openPermissionSettings('accessibility')}
-                    onError={() => setNotice('Accessibility settings could not be opened.')}
-                  />
-                  <PermissionRow
-                    label="Input Monitoring"
-                    value={permissions.helper.permissions.inputMonitoring}
-                    open={() => window.talkingQuill.info.openPermissionSettings('input-monitoring')}
-                    onError={() => setNotice('Input Monitoring settings could not be opened.')}
-                  />
-                  <PermissionRow
-                    label="Screen Recording"
-                    value={permissions.screenRecording}
-                    open={() => window.talkingQuill.info.openPermissionSettings('screen-recording')}
-                    onError={() => setNotice('Screen Recording settings could not be opened.')}
-                  />
-                </>
-              ) : null}
+              <div className="info-actions">
+                <Button variant="secondary" onClick={() => void refreshPermissions()}>
+                  Refresh permission status
+                </Button>
+              </div>
+              <div className="group">
+                <PermissionRow
+                  label="Microphone"
+                  value={permissions.microphone}
+                  open={() => window.talkingQuill.info.openPermissionSettings('microphone')}
+                  onError={() => setNotice('Microphone settings could not be opened.')}
+                />
+                {bootstrap.platform === 'darwin' ? (
+                  <>
+                    <PermissionRow
+                      label="Accessibility"
+                      value={permissions.helper.permissions.accessibility}
+                      open={() => window.talkingQuill.info.openPermissionSettings('accessibility')}
+                      onError={() => setNotice('Accessibility settings could not be opened.')}
+                    />
+                    <PermissionRow
+                      label="Input Monitoring"
+                      value={permissions.helper.permissions.inputMonitoring}
+                      open={() =>
+                        window.talkingQuill.info.openPermissionSettings('input-monitoring')
+                      }
+                      onError={() => setNotice('Input Monitoring settings could not be opened.')}
+                    />
+                    <PermissionRow
+                      label="Screen Recording"
+                      value={permissions.screenRecording}
+                      open={() =>
+                        window.talkingQuill.info.openPermissionSettings('screen-recording')
+                      }
+                      onError={() => setNotice('Screen Recording settings could not be opened.')}
+                    />
+                  </>
+                ) : null}
+              </div>
             </div>
           )}
         </Card>
         <Card title="Help and local data">
-          <div className="provider-actions">
+          <div className="info-actions provider-actions">
             <Button id="reopen-welcome" variant="secondary" onClick={onOpenWelcome}>
               Reopen Welcome
             </Button>
@@ -302,7 +314,7 @@ function PermissionRow({
   return (
     <div className="readiness-row">
       <span>{label}</span>
-      <div className="provider-actions">
+      <div className="info-actions provider-actions">
         <Status tone={ready ? 'success' : value === 'denied' ? 'error' : 'warning'}>
           {ready ? 'Allowed' : value === 'denied' ? 'Denied' : 'Needs review'}
         </Status>

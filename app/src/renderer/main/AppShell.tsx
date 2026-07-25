@@ -1,12 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState, type RefObject } from 'react';
-import appIcon from '../../../assets/app-icon.png';
+import logoDark from '../../../assets/logo-dark.png';
+import logoLight from '../../../assets/logo-light.png';
 import type { BootstrapData } from '../../shared/bridge/api';
 import type { AppState } from '../../shared/schemas/app-state';
 import type { Settings } from '../../shared/schemas/settings';
 import type { WelcomeState } from '../../shared/schemas/welcome';
-import { Button, Status } from '../design';
+import { Button, Icon, Status, useTheme, type IconName } from '../design';
 import { presentAppStatus } from '../status-presentation';
-import { EchoScreen } from './screens/EchoScreen';
+import { DashboardScreen } from './screens/DashboardScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
 
 const InfoScreen = lazy(async () => {
@@ -18,15 +19,22 @@ const SettingsScreen = lazy(async () => {
   return { default: module.SettingsScreen };
 });
 
-const screens = ['echo', 'settings', 'info'] as const;
+const screens = ['dashboard', 'settings', 'info'] as const;
 type Screen = (typeof screens)[number];
 
+const SCREEN_ICONS: Record<Screen, IconName> = {
+  dashboard: 'dashboard',
+  settings: 'settings',
+  info: 'info',
+};
+
 export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
-  const [screen, setScreen] = useState<Screen>('echo');
+  const [screen, setScreen] = useState<Screen>('dashboard');
   const [state, setState] = useState<AppState>(bootstrap.state);
   const [settings, setSettings] = useState<Settings>(bootstrap.settings);
   const [welcomeReopened, setWelcomeReopened] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [theme, setTheme] = useTheme();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const welcomeRequired = settings.welcome.completedAt === null;
 
@@ -56,7 +64,8 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
         onComplete={(welcome) => {
           setSettings((current) => mergeWelcomeState(current, welcome));
           setWelcomeReopened(false);
-          setScreen('echo');
+          setScreen('dashboard');
+          requestAnimationFrame(() => headingRef.current?.focus());
         }}
       />
     );
@@ -64,8 +73,8 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
 
   const status = presentAppStatus(state.status);
   const screenContent =
-    screen === 'echo' ? (
-      <EchoScreen
+    screen === 'dashboard' ? (
+      <DashboardScreen
         headingRef={headingRef}
         state={state}
         settings={settings}
@@ -88,18 +97,34 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
 
   return (
     <div className="app-shell">
-      <header className="titlebar">
-        <div className="titlebar__drag">
-          <img className="titlebar__mark" src={appIcon} alt="" aria-hidden="true" />
-          <span>Talking Quill</span>
+      <header className="brandbar">
+        <div className="brandbar__drag">
+          <img
+            className="brandbar__logo"
+            src={theme === 'light' ? logoLight : logoDark}
+            alt=""
+            aria-hidden="true"
+          />
+          <span className="brandbar__copy">
+            <span className="brandbar__wordmark">Talking Quill</span>
+            <span className="brandbar__tagline">Speak naturally. Write effortlessly.</span>
+          </span>
         </div>
-        <div className="titlebar__controls" aria-label="Window controls">
+        <div className="brandbar__controls" aria-label="Window controls">
+          <Button
+            className="brandbar__theme"
+            variant="quiet"
+            aria-label={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+          >
+            <Icon name={theme === 'light' ? 'moon' : 'sun'} size={15} />
+          </Button>
           <Button
             variant="quiet"
             aria-label="Minimize window"
             onClick={() => void window.talkingQuill.windowControls.minimize()}
           >
-            —
+            <Icon name="minimize" size={13} />
           </Button>
           <Button
             variant="quiet"
@@ -109,26 +134,20 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
               void window.talkingQuill.windowControls.toggleMaximize().then(setMaximized)
             }
           >
-            {maximized ? '❐' : '□'}
+            <Icon name={maximized ? 'restore' : 'maximize'} size={11} />
           </Button>
           <Button
+            className="brandbar__close"
             variant="quiet"
             aria-label="Close window"
             onClick={() => void window.talkingQuill.windowControls.close()}
           >
-            ×
+            <Icon name="close" size={13} />
           </Button>
         </div>
       </header>
       <div className="app-frame">
         <aside className="sidebar">
-          <div className="sidebar__brand">
-            <img className="sidebar__logo" src={appIcon} alt="" aria-hidden="true" />
-            <div>
-              <strong>Talking Quill</strong>
-              <span>Local dictation</span>
-            </div>
-          </div>
           <nav aria-label="Primary">
             {screens.map((item) => (
               <button
@@ -137,11 +156,11 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
                 aria-current={screen === item ? 'page' : undefined}
                 onClick={() => setScreen(item)}
               >
-                <span aria-hidden="true">
-                  {item === 'echo' ? '◉' : item === 'settings' ? '⚙' : 'ⓘ'}
+                <Icon name={SCREEN_ICONS[item]} />
+                <span>
+                  {item[0]?.toUpperCase()}
+                  {item.slice(1)}
                 </span>
-                {item[0]?.toUpperCase()}
-                {item.slice(1)}
               </button>
             ))}
           </nav>

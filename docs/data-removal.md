@@ -1,6 +1,6 @@
 # Removing Talking Quill data
 
-Talking Quill stores its settings, Past Echoes, encrypted provider credentials, downloaded Whisper models, retained screenshots, diagnostic logs, and temporary files in its own application-data folder. It does not store data in an Ollama installation, an Ollama model directory, or Pi's separate configuration, authentication, package, cache, or session directories.
+Talking Quill stores its settings, the dictation history, encrypted provider credentials, downloaded Whisper models, retained screenshots, diagnostic logs, and temporary files in its own application-data folder. It does not store data in an Ollama installation, an Ollama model directory, or Pi's separate configuration, authentication, package, cache, or session directories.
 
 ## Reset from the application
 

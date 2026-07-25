@@ -55,37 +55,41 @@ export function GeneralShortcutSetup({
       title="General shortcut"
       description="Choose the shortcut you will use for the General profile, then test it below."
     >
-      <Select
-        label="Activation key"
-        value={activationKey}
-        disabled={disabled || busy}
-        onChange={(event) => setActivationKey(event.currentTarget.value as ActivationKey)}
-      >
-        {KEYS.map((key) => (
-          <option key={key} value={key}>
-            {key}
-          </option>
-        ))}
-      </Select>
-      <Select
-        label="General Shift modifier"
-        value={shift ? 'shift' : 'plain'}
-        disabled={disabled || busy}
-        onChange={(event) => setShift(event.currentTarget.value === 'shift')}
-      >
-        <option value="plain">Alt/Option only</option>
-        <option value="shift">Alt/Option + Shift</option>
-      </Select>
+      <div className="shortcut-setup">
+        <Select
+          label="Activation key"
+          value={activationKey}
+          disabled={disabled || busy}
+          onChange={(event) => setActivationKey(event.currentTarget.value as ActivationKey)}
+        >
+          {KEYS.map((key) => (
+            <option key={key} value={key}>
+              {key}
+            </option>
+          ))}
+        </Select>
+        <Select
+          label="General Shift modifier"
+          value={shift ? 'shift' : 'plain'}
+          disabled={disabled || busy}
+          onChange={(event) => setShift(event.currentTarget.value === 'shift')}
+        >
+          <option value="plain">Alt/Option only</option>
+          <option value="shift">Alt/Option + Shift</option>
+        </Select>
+      </div>
       {duplicate ? <Status tone="error">That exact shortcut is already used.</Status> : null}
       {reserved ? <Status tone="error">{RESERVED_DICTATION_BINDING_ERROR}</Status> : null}
       {error === null ? null : <Status tone="error">{error}</Status>}
-      <Button
-        busy={busy}
-        disabled={disabled || busy || duplicate || reserved || unchanged}
-        onClick={() => void save()}
-      >
-        Save General shortcut
-      </Button>
+      <div className="shortcut-setup__actions">
+        <Button
+          busy={busy}
+          disabled={disabled || busy || duplicate || reserved || unchanged}
+          onClick={() => void save()}
+        >
+          Save General shortcut
+        </Button>
+      </div>
     </Card>
   );
 }
