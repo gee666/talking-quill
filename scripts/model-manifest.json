@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "transformersVersion": "3.8.1",
+  "models": [
+    {
+      "id": "onnx-community/whisper-large-v3-turbo",
+      "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
+      "dtype": "q8",
+      "totalBytes": 1087527940,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 1332,
+          "sha256": "35cd83669f75bc2867f3b3a4461850392d5e308cd6ea951c3700539883c28df1"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 3897,
+          "sha256": "16f95291d2f47c944d3c2b19390bba7965666555c1ea2a0bdc850d1fab45612f"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 2480617,
+          "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 282843,
+          "sha256": "844b642c73a91359722f47b35705f7174686df33d252695d8572cf9ac03a6389"
+        },
+        {
+          "path": "onnx/encoder_model_quantized.onnx",
+          "size": 644822195,
+          "sha256": "d2f853dc3254fdc0079f55dd4433ea716ac98ec5574d3b475f288f2a77cebba9"
+        },
+        {
+          "path": "onnx/decoder_model_merged_quantized.onnx",
+          "size": 439936716,
+          "sha256": "61481bd3be3a445d5a4b9070e8f8b2c6cc4fbbbbdc9f0e7ed048a132b8b84e0d"
+        }
+      ]
+    },
+    {
+      "id": "Xenova/whisper-small",
+      "revision": "2d67713f236afa48a18992566e7647f6ca848e13",
+      "dtype": "q8",
+      "totalBytes": 251875316,
+      "files": [
+        {
+          "path": "config.json",
+          "size": 2232,
+          "sha256": "5a6429d21d7a3379dd0861b74510f9f7076f32b563bffc9fcb072482d55ab3be"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 3837,
+          "sha256": "0b7407a4e53a677f826e03c75d409e6f830663932bf43dda3b08c5efa2223279"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 339,
+          "sha256": "a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 2480466,
+          "sha256": "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 282683,
+          "sha256": "2a4c4281cf9f51ac6ccc406fdc711a087afe6530f671fa7b80953edc498275ce"
+        },
+        {
+          "path": "onnx/encoder_model_quantized.onnx",
+          "size": 92324809,
+          "sha256": "969f5ac12974340386bf7a02ea6626003e5e2dee396ffc6ab0eec282bf55ba06"
+        },
+        {
+          "path": "onnx/decoder_model_merged_quantized.onnx",
+          "size": 156780950,
+          "sha256": "fcfc6100dc7339e7507e10f8b274350be7c4f8d8b575f0293f94cc0e156d6d24"
+        }
+      ]
+    }
+  ]
+}

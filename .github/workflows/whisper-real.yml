@@ -1,0 +1,39 @@
+name: Real Whisper
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  whisper-small-q8:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.13.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: tmp/whisper-real-cache
+          key: whisper-real-${{ runner.os }}-transformers-3.8.1-small-2d67713f-${{ hashFiles('scripts/model-manifest.json') }}
+      - run: pnpm audio-fixture:check
+      - run: pnpm test:whisper-real
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'

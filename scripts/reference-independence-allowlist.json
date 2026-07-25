@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "referenceInventoryCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+  "entries": [
+    {
+      "path": "app/assets/provider-logos/anthropic.png",
+      "blob": "09ff1535ff00e0c4761063b4972eca905980a5d6",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/anthropic.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/apipie.png",
+      "blob": "f7faf500283cd6aba54afd8691a87df3ebb2a559",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/apipie.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/azure.png",
+      "blob": "4ce890ca26b4192029b44685f2c3f8f4295b41fb",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/azure.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/bedrock.png",
+      "blob": "58a74acb03a39713e9b712742196f565820d17b0",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/bedrock.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/cohere.png",
+      "blob": "5ec86e49b572f0f51ac8252baa8800fe4b83eb08",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/cohere.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/deepseek.png",
+      "blob": "bb8b9f2734e58208c65e477617c7d23ac76c7ada",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/deepseek.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/docker-model-runner.png",
+      "blob": "961d921cb22e782c5ec1c99b58fee584100f5e14",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/docker-model-runner.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/fireworksai.jpeg",
+      "blob": "46a25812cce2a62e05264d811f745625cd2f5d05",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/fireworksai.jpeg"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/foundry-local.png",
+      "blob": "5155f78efe2f151f0aad0fa30703b2d0f931ac29",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/foundry-local.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/gemini.png",
+      "blob": "aa81cfd86f9766dee0ba7530deecd74fcf740f0d",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/gemini.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/generic-openai.png",
+      "blob": "302f5dbee0aebe15a3fc4cd6073d58314c418487",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/generic-openai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/giteeai.png",
+      "blob": "a1ef5fdade648ab07c48675d7271196bb16af83f",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/giteeai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/groq.png",
+      "blob": "31564145e1068131f3cf0a49766efbd68a0b4d54",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/groq.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/koboldcpp.png",
+      "blob": "5724f04ab3a1bc40ac4e56c1fe9ee61fc67ba3ea",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/koboldcpp.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/litellm.png",
+      "blob": "da4faf5b5ca6c812a73e3c1a74d93ea6f6afa682",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/litellm.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/lmstudio.png",
+      "blob": "0a9dd41e7dbbabb752c14ac96362f87a88fd9640",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/lmstudio.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/localai.jpeg",
+      "blob": "0d23596d07a0e2b2772ac467d3ad78ddf293f2fa",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/localai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/mistral.jpeg",
+      "blob": "1019f495d4d690dd639aa9f4e5751c403b2eff27",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/mistral.jpeg"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/moonshotai.png",
+      "blob": "71f408054152b2c56d7d1f703d430da6266933ed",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/moonshotai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/novita.png",
+      "blob": "9a5fadb741662258c8198fa7e51860fce9e85c56",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/novita.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/nvidia-nim.png",
+      "blob": "f26e5979f8612bc7120c40d41d97f8c6c226a710",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/nvidia-nim.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/ollama.png",
+      "blob": "2a898a6ebbd85026715453aed13885742cbb7712",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/ollama.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/omlx.png",
+      "blob": "4ef9573b5857a199a71757e944ea39ea6503b76c",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/omlx.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/openai.png",
+      "blob": "b720ec753d1108c5f02107c3e4e46d1e3d9b6437",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/openai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/openrouter.jpeg",
+      "blob": "ce272ac81e15a41ebc3b2724085275a103bb0837",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/openrouter.jpeg"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/perplexity.png",
+      "blob": "f4767169a12cbe2189eab51d8c59deafe4ae5b33",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/perplexity.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/ppio.png",
+      "blob": "37b131a54404718a78c102edfb1e21dfbf200e03",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/ppio.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/text-generation-webui.png",
+      "blob": "415644485b8db163c50befd4f21cb23c2c72a2ba",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/text-generation-webui.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/togetherai.png",
+      "blob": "95e796a6b8209b7b932cf93751e4dce33b9729d1",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/togetherai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/xai.png",
+      "blob": "93106761e4a616f0ddf38b4cdd2292b4c029a406",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/xai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    },
+    {
+      "path": "app/assets/provider-logos/zai.png",
+      "blob": "e83c6da4c0a5cc078c76200285517120773d6e46",
+      "sourcePaths": ["reference/frontend/src/media/llmprovider/zai.png"],
+      "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
+    }
+  ]
+}

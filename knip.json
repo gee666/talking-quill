@@ -1,0 +1,28 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": [
+        "*.config.{ts,mjs}",
+        "build/mac-sign.cjs",
+        "scripts/*.{mjs,cjs}",
+        "tests/**/*.{ts,tsx,mjs,cjs}"
+      ],
+      "project": ["scripts/**/*.{mjs,cjs}", "tests/**/*.{ts,tsx,mjs,cjs}"],
+      "ignoreDependencies": ["@vitejs/plugin-react"]
+    },
+    "app": {
+      "entry": [
+        "src/main/index.ts",
+        "src/preload/*.ts",
+        "src/workers/**/*.ts",
+        "src/renderer/**/main.tsx",
+        "src/renderer/capture/main.ts",
+        "src/renderer/capture/capture.worklet.ts"
+      ],
+      "project": ["src/**/*.{ts,tsx}"],
+      "ignoreDependencies": ["@huggingface/transformers", "onnxruntime-common", "onnxruntime-node"]
+    }
+  },
+  "include": ["files", "dependencies", "unlisted", "binaries"]
+}

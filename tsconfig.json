@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["app/src/shared/*"],
+      "@renderer/*": ["app/src/renderer/*"]
+    },
+    "noEmit": true
+  },
+  "include": [
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "vitest.config.ts",
+    "playwright.config.ts",
+    "app/src/shared/bridge/globals.d.ts",
+    "app/src/main/proper-lockfile.d.ts",
+    "scripts/package-policy.d.mts",
+    "scripts/native-architecture.d.mts",
+    "scripts/performance-metrics.d.mts",
+    "scripts/secret-history-schema.d.mts"
+  ]
+}

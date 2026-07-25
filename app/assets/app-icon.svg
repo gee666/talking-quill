@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Talking Quill app icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2A3574"/>
+      <stop offset="0.55" stop-color="#182148"/>
+      <stop offset="1" stop-color="#0E1330"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(280 200) scale(600)">
+      <stop stop-color="#6E7BE0" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#6E7BE0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bubble" x1="140" y1="120" x2="880" y2="880" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EFE2C6"/>
+    </linearGradient>
+    <linearGradient id="vane" x1="700" y1="155" x2="345" y2="660" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3D4A96"/>
+      <stop offset="1" stop-color="#26306B"/>
+    </linearGradient>
+    <linearGradient id="vaneShade" x1="700" y1="200" x2="380" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#222B63"/>
+      <stop offset="1" stop-color="#161D47"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+
+  <g fill="url(#bubble)">
+    <path d="M340 748 268 902l212-120Z"/>
+    <rect x="120" y="110" width="784" height="680" rx="188"/>
+  </g>
+
+  <g transform="translate(133 40) scale(0.79)">
+    <path d="M700 155C501 167 371 307 345 650c165-61 305-221 355-495Z" fill="url(#vane)"/>
+    <path d="M700 155c-110 165-235 315-355 495 165-61 305-221 355-495Z" fill="url(#vaneShade)"/>
+    <path d="M372 608C476 462 584 324 684 180" fill="none" stroke="#F7EEDC" stroke-width="24"/>
+    <path d="M364 624c-27 63-52 124-77 184" fill="none" stroke="#2B3576" stroke-width="34"/>
+    <path d="M306 818 252 892l16-92Z" fill="#F2A03D"/>
+  </g>
+</svg>

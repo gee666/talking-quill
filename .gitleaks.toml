@@ -1,0 +1,34 @@
+title = "Talking Quill full-history high-confidence secret rules"
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS access key ID"
+regex = '''\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'''
+
+[[rules]]
+id = "github-token"
+description = "GitHub token"
+regex = '''\bgh[pousr]_[A-Za-z0-9]{20,}\b'''
+
+[[rules]]
+id = "openai-key"
+description = "OpenAI-compatible secret key"
+regex = '''\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b'''
+
+[[rules.allowlists]]
+description = "Reviewed exact historical placeholder values; no path or commit wildcard"
+regexTarget = "match"
+regexes = [
+  '''^sk-myApiKeyToAccessMyChromaInstance$''',
+  '''^sk-local-no-key-required$''',
+]
+
+[[rules]]
+id = "google-api-key"
+description = "Google API key"
+regex = '''\bAIza[0-9A-Za-z_-]{35}\b'''
+
+[[rules]]
+id = "slack-token"
+description = "Slack token"
+regex = '''\bxox[baprs]-[0-9A-Za-z-]{20,}\b'''

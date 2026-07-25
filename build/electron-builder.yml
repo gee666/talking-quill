@@ -1,0 +1,109 @@
+appId: com.talkingquill.app
+productName: Talking Quill
+copyright: Copyright © Talking Quill contributors
+directories:
+  output: ../release
+  buildResources: ../build
+asar:
+  smartUnpack: false
+asarUnpack:
+  - node_modules/better-sqlite3/build/Release/better_sqlite3.node
+  - node_modules/onnxruntime-node/bin/napi-v3/**/*
+files:
+  - out/main/index.js
+  - out/workers/whisper-bootstrap.cjs
+  - out/workers/whisper-payload.cjs
+  - out/preload/main.js
+  - out/preload/widget.js
+  - out/preload/capture.js
+  - out/renderer/main/index.html
+  - out/renderer/widget/index.html
+  - out/renderer/capture/index.html
+  - out/renderer/assets/*.js
+  - out/renderer/assets/*.css
+  - out/renderer/assets/*.png
+  - out/renderer/assets/*.jpeg
+  - package.json
+  - '!node_modules/**/*'
+  - node_modules/better-sqlite3/package.json
+  - node_modules/better-sqlite3/LICENSE
+  - node_modules/better-sqlite3/lib/index.js
+  - node_modules/better-sqlite3/lib/database.js
+  - node_modules/better-sqlite3/lib/sqlite-error.js
+  - node_modules/better-sqlite3/lib/util.js
+  - node_modules/better-sqlite3/lib/methods/aggregate.js
+  - node_modules/better-sqlite3/lib/methods/backup.js
+  - node_modules/better-sqlite3/lib/methods/function.js
+  - node_modules/better-sqlite3/lib/methods/inspect.js
+  - node_modules/better-sqlite3/lib/methods/pragma.js
+  - node_modules/better-sqlite3/lib/methods/serialize.js
+  - node_modules/better-sqlite3/lib/methods/table.js
+  - node_modules/better-sqlite3/lib/methods/transaction.js
+  - node_modules/better-sqlite3/lib/methods/wrappers.js
+  - node_modules/better-sqlite3/build/Release/better_sqlite3.node
+  - node_modules/bindings/package.json
+  - node_modules/bindings/LICENSE.md
+  - node_modules/bindings/bindings.js
+  - node_modules/file-uri-to-path/package.json
+  - node_modules/file-uri-to-path/LICENSE
+  - node_modules/file-uri-to-path/index.js
+  - node_modules/onnxruntime-node/package.json
+  - node_modules/onnxruntime-node/dist/*.js
+  - node_modules/onnxruntime-node/bin/napi-v3/**/*
+  - node_modules/onnxruntime-common/package.json
+  - node_modules/onnxruntime-common/dist/cjs/package.json
+  - node_modules/onnxruntime-common/dist/cjs/*.js
+extraResources:
+  - from: ../LICENSE
+    to: LICENSE
+  - from: assets/app-icon.png
+    to: app-icon.png
+  - from: assets/THIRD_PARTY_NOTICES.txt
+    to: THIRD_PARTY_NOTICES.txt
+  - from: native
+    to: helper
+    filter:
+      - talking-quill-helper
+      - talking-quill-helper.exe
+npmRebuild: true
+buildDependenciesFromSource: false
+afterPack: after-pack.cjs
+artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}
+win:
+  icon: icon.png
+  signExts:
+    - .exe
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+nsis:
+  include: installer.nsh
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+mac:
+  icon: icon.png
+  sign: ../build/mac-sign.cjs
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: true
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.inherit.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Talking Quill uses the microphone only while you record dictation or test your input level.
+    NSScreenCaptureUsageDescription: Talking Quill captures the screen only when On-Screen Awareness is enabled.
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+publish: null

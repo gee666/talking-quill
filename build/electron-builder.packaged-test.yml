@@ -1,0 +1,8 @@
+extends: ../build/electron-builder.yml
+appId: com.talkingquill.packaged-test
+productName: Talking Quill Packaged Test
+directories:
+  output: ../tmp/packaged-media-build
+files:
+  - out/main/chunks/task6-test-composition-*.js
+artifactName: Talking-Quill-Packaged-Test-${version}-${os}-${arch}.${ext}

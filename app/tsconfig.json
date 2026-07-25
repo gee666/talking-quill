@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@renderer/*": ["src/renderer/*"],
+      "@huggingface/transformers": ["src/workers/whisper/transformers-audio.d.ts"]
+    },
+    "noEmit": true
+  },
+  "include": ["electron.vite.config.ts", "src/**/*.ts", "src/**/*.tsx"]
+}

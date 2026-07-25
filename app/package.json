@@ -1,0 +1,31 @@
+{
+  "name": "@talking-quill/app",
+  "version": "1.0.2",
+  "private": true,
+  "description": "Talking Quill desktop application",
+  "author": "Talking Quill contributors",
+  "license": "MIT",
+  "main": "out/main/index.js",
+  "scripts": {
+    "build": "node ../scripts/production-build-check.mjs && electron-vite build && node ../scripts/build-preloads.mjs && node ../scripts/build-whisper-worker.mjs",
+    "build:test": "electron-vite build --mode test && node ../scripts/build-preloads.mjs && node ../scripts/build-whisper-worker.mjs",
+    "build:helper": "node ../scripts/build-helper.mjs",
+    "dev": "node ../scripts/run-dev.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "rebuild:native": "electron-builder install-app-deps",
+    "package:win": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.yml --win nsis --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
+    "package:win:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && electron-builder --config ../build/electron-builder.yml --win nsis --arm64 && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
+    "package:win:dir": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.yml --win dir --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
+    "package:mac:x64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 && electron-builder --config ../build/electron-builder.yml --mac dmg zip --x64 && node ../scripts/inspect-package.mjs ../release/mac",
+    "package:mac:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 && electron-builder --config ../build/electron-builder.yml --mac dmg zip --arm64 && node ../scripts/inspect-package.mjs ../release/mac-arm64"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "better-sqlite3": "12.11.1",
+    "onnxruntime-common": "1.21.0",
+    "onnxruntime-node": "1.21.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "4.4.3"
+  }
+}

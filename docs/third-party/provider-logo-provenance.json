@@ -1,0 +1,350 @@
+{
+  "schemaVersion": 1,
+  "notice": "Provider marks are used nominatively. Copyright/license/trademark approval remains an external release blocker and is not asserted by this inventory.",
+  "assets": [
+    {
+      "path": "app/assets/provider-logos/anthropic.png",
+      "sha256": "f5b832918f4634716206a12e22b0a5679ac5f1740a8e993b999d3eb04e943b85",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/anthropic.png",
+      "sourceBlob": "09ff1535ff00e0c4761063b4972eca905980a5d6",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/apipie.png",
+      "sha256": "72329feddd2a3223f89c62db204bf641377bda549c40bd3d2d09b4fb6aa5765b",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/apipie.png",
+      "sourceBlob": "f7faf500283cd6aba54afd8691a87df3ebb2a559",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/azure.png",
+      "sha256": "0b70cf5b364ac3257fedf3d8290e7718aecd74ac9fc74e3b7511d736f113d1b6",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/azure.png",
+      "sourceBlob": "4ce890ca26b4192029b44685f2c3f8f4295b41fb",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/bedrock.png",
+      "sha256": "eb5d2fdefb02a76ccda8ead5e1f1890f83501615de27113f891103676fb239cd",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/bedrock.png",
+      "sourceBlob": "58a74acb03a39713e9b712742196f565820d17b0",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/cerebras.png",
+      "sha256": "d5bc9c0b120424cf57bb0ca0498a17af71b1269b6ff17c3a2c56a9c5903d6b3f",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/cerebras.png",
+      "sourceBlob": "012b8ee42eca03e92fd13670b87e41e5ec985849",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/cohere.png",
+      "sha256": "14e85cd1b0be617db63843e97f9501e24f9ace1dcbf8228e629388b72c91103d",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/cohere.png",
+      "sourceBlob": "5ec86e49b572f0f51ac8252baa8800fe4b83eb08",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/cometapi.png",
+      "sha256": "19db3237c9ca518e7f5b0bf831bb74603c41e7b03b3fc375d40685a71ab4e754",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/cometapi.png",
+      "sourceBlob": "40d139ded573867fddb6da3c46630384f028fd2b",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/deepseek.png",
+      "sha256": "58153e0400f5312323a36895d84f717cada9a98e8a4facac0ba2116ce004b399",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/deepseek.png",
+      "sourceBlob": "bb8b9f2734e58208c65e477617c7d23ac76c7ada",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/docker-model-runner.png",
+      "sha256": "8e3244e4bb1ababee1bd623f84049b703a8735609dda57e32421a103a8b77ed4",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/docker-model-runner.png",
+      "sourceBlob": "961d921cb22e782c5ec1c99b58fee584100f5e14",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/fireworksai.jpeg",
+      "sha256": "8a234fe1b19af1910c35163c21d2350506f73cae8de6279f336a8dd04ed5ddc9",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/fireworksai.jpeg",
+      "sourceBlob": "46a25812cce2a62e05264d811f745625cd2f5d05",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/foundry-local.png",
+      "sha256": "633c8a45a9654d2997fbf198ad7cbed11364b35871a9669838124af098190ed8",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/foundry-local.png",
+      "sourceBlob": "5155f78efe2f151f0aad0fa30703b2d0f931ac29",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/gemini.png",
+      "sha256": "e28c949adfc20f612e3f15323acb2cf3b728a5cbed4c60c9500bb710021af053",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/gemini.png",
+      "sourceBlob": "aa81cfd86f9766dee0ba7530deecd74fcf740f0d",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/generic-openai.png",
+      "sha256": "e1f6304f93660fb1dc450878728dc28d9aa1e0e626a8dca0786c0a1b3eaf8597",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/generic-openai.png",
+      "sourceBlob": "302f5dbee0aebe15a3fc4cd6073d58314c418487",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/giteeai.png",
+      "sha256": "e7f0dad0a43aeb2c26ccc0747c655c5342c166e02ec240f2b1a342a5dca526f7",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/giteeai.png",
+      "sourceBlob": "a1ef5fdade648ab07c48675d7271196bb16af83f",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/groq.png",
+      "sha256": "c14139144903cfc7e4dce92f642bb1f5bbf6341dcdd7eb0a0d3b02a5f6025e78",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/groq.png",
+      "sourceBlob": "31564145e1068131f3cf0a49766efbd68a0b4d54",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/koboldcpp.png",
+      "sha256": "70f72787b711dffc7859f18600504780a4d605120ccdc4397e2b7fd3aae2b79d",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/koboldcpp.png",
+      "sourceBlob": "5724f04ab3a1bc40ac4e56c1fe9ee61fc67ba3ea",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/lemonade.png",
+      "sha256": "009bc495f02e146ffef2f939a5add08de3c262a787bde7a48a4e728e1dcfa03b",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/lemonade.png",
+      "sourceBlob": "33d343136eeb5f9cbc9cf7241341f602a5175ce3",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/litellm.png",
+      "sha256": "d731f9e65442e5b3cbbcb34fc60f89637589be5c1930d966c31dac8d00c30b1d",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/litellm.png",
+      "sourceBlob": "da4faf5b5ca6c812a73e3c1a74d93ea6f6afa682",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/lmstudio.png",
+      "sha256": "172a598a13302b217afbf58cfb2dbb5cda8951198dc921792a4d930ee3413fc8",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/lmstudio.png",
+      "sourceBlob": "0a9dd41e7dbbabb752c14ac96362f87a88fd9640",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/localai.jpeg",
+      "sha256": "8a3d8735362b3b3fcb8d4b7902b09156ac3aa94d62e6c165c1519b2dde492c6e",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/localai.png",
+      "sourceBlob": "0d23596d07a0e2b2772ac467d3ad78ddf293f2fa",
+      "transformation": "bytes unchanged; filename extension corrected from .png to .jpeg to match JPEG encoding",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/minimax.png",
+      "sha256": "71aa6d6c865c41665681deb1047dc71da1405ef087442b449f1fcf8cba518b71",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/minimax.png",
+      "sourceBlob": "417d88cd3ad462ef97633684c38ce06f692be60c",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/mistral.jpeg",
+      "sha256": "7617df594a20598dd536ca2d8bfd3dc4c61582576b8f4a001c122c0e25f1ee88",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/mistral.jpeg",
+      "sourceBlob": "1019f495d4d690dd639aa9f4e5751c403b2eff27",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/moonshotai.png",
+      "sha256": "df8f99700b245d10599c098e53b25ce29e0af060841df0067a8ee1c4303fac80",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/moonshotai.png",
+      "sourceBlob": "71f408054152b2c56d7d1f703d430da6266933ed",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/novita.png",
+      "sha256": "45ebc2fa1414e0b1a3e2065edfd34deed59dd8e5ad17ce3c74668b7fce0d9432",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/novita.png",
+      "sourceBlob": "9a5fadb741662258c8198fa7e51860fce9e85c56",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/nvidia-nim.png",
+      "sha256": "43bb33af82aa0529fb2458acd866ee6a40a3effda54173587262119b621a4d8f",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/nvidia-nim.png",
+      "sourceBlob": "f26e5979f8612bc7120c40d41d97f8c6c226a710",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/ollama.png",
+      "sha256": "7dea0e3d9333a4e131d16c8af4f0c25a1c2bfb6a9f05baa9efcb8d9dfd114094",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/ollama.png",
+      "sourceBlob": "2a898a6ebbd85026715453aed13885742cbb7712",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/omlx.png",
+      "sha256": "230d72a561e1384cc2d3a4a64b23bd70a301f38328917cafd3c5f1af2fa59e53",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/omlx.png",
+      "sourceBlob": "4ef9573b5857a199a71757e944ea39ea6503b76c",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/openai.png",
+      "sha256": "702c1dd3d2231a61286977bded865bca4e31f5193ed71cf54bd48364a1da6b99",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/openai.png",
+      "sourceBlob": "b720ec753d1108c5f02107c3e4e46d1e3d9b6437",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/openrouter.jpeg",
+      "sha256": "6bdb8156eab82c0bbcd5f0a0c49b49c156e85a01d4eb67d803a6c0470e5d75e7",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/openrouter.jpeg",
+      "sourceBlob": "ce272ac81e15a41ebc3b2724085275a103bb0837",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/perplexity.png",
+      "sha256": "916ad5d0a4cc13c81b79db4e8773eb879b6763917438e76ef7d8b14ede4b3201",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/perplexity.png",
+      "sourceBlob": "f4767169a12cbe2189eab51d8c59deafe4ae5b33",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/pi.png",
+      "sha256": "45b7fd96dcc776930849c96ff64929c3f6900687de292975348012088da27447",
+      "sourceCommit": "115ba3dfd5f1555dcd5008ebff163e60b16d2745",
+      "sourcePath": "app/assets/provider-logos/pi.png",
+      "sourceBlob": "9dfa78bc4dfdb2e53073f2ff285490478c29e1fc",
+      "sourceUrl": "https://pi.dev/",
+      "upstreamSelector": ".hero-logo-download-overlay",
+      "transformation": "Upstream did not expose an immutable content-addressed URL. The retrieved PNG was committed unchanged; sourceCommit/sourceBlob and sha256 make the reviewed bytes reproducible while upstream-origin revalidation remains an external release check.",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/ppio.png",
+      "sha256": "1e0534249e28837d3d97e6b3ca1f73c47647360107d4961b4149c9cd1ab57bd5",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/ppio.png",
+      "sourceBlob": "37b131a54404718a78c102edfb1e21dfbf200e03",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/privatemode.png",
+      "sha256": "3a2f473118cb37867dc131d45cd886cd3b2e8160479b426fc15041d83f45c24e",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/privatemode.png",
+      "sourceBlob": "e4bcf382ea0a5dec8b242198d560b3ae28dec038",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/sambanova.png",
+      "sha256": "051712d1345f2663dcef0b85f3d42f1f5cd46b345ecf9a662a2cd21e4d824144",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/sambanova.png",
+      "sourceBlob": "46c0fcf639ca206357c60f9fb227ad3cde57e1e3",
+      "transformation": "binary modified during Talking Quill asset normalization; original and current hashes are retained for review",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/text-generation-webui.png",
+      "sha256": "fa5373ee2a282305d037e358da7b26204ac832dcce70c567d2cd280cbda6c972",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/text-generation-webui.png",
+      "sourceBlob": "415644485b8db163c50befd4f21cb23c2c72a2ba",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/togetherai.png",
+      "sha256": "23bbd12be937fc78eaa8bde0249637f6dccc6ff2a3a4420eaf7e6fa2480c22e2",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/togetherai.png",
+      "sourceBlob": "95e796a6b8209b7b932cf93751e4dce33b9729d1",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/xai.png",
+      "sha256": "63836ddf885a087d34713ea612cae8a46b22857441c115da176359c3e2d64f15",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/xai.png",
+      "sourceBlob": "93106761e4a616f0ddf38b4cdd2292b4c029a406",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    },
+    {
+      "path": "app/assets/provider-logos/zai.png",
+      "sha256": "b3a70c42724d642a77ccce42ab25d3e80feb4a8072fdbd532d173dc6ac7898eb",
+      "sourceCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+      "sourcePath": "reference/frontend/src/media/llmprovider/zai.png",
+      "sourceBlob": "e83c6da4c0a5cc078c76200285517120773d6e46",
+      "transformation": "none; bytes unchanged",
+      "trademarkApproval": "external-blocked"
+    }
+  ]
+}
