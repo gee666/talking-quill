@@ -138,7 +138,7 @@ const PROVIDER_LOGO_PATTERN = new RegExp(
   `^out/renderer/assets/(?:${PROVIDER_LOGO_BASENAMES.join('|')})-[A-Za-z0-9_-]+\\.(?:png|jpeg)$`,
 );
 const OUT_ASSET_PATTERN =
-  /^out\/renderer\/assets\/(?:(?:main|widget|capture|capture\.worklet|audio|status-presentation|Status)-[A-Za-z0-9_-]+\.(?:js|css)|app-icon-[A-Za-z0-9_-]+\.png)$/;
+  /^out\/renderer\/assets\/(?:(?:main|widget|capture|capture\.worklet|audio|status-presentation|Status|theme)-[A-Za-z0-9_-]+\.(?:js|css)|(?:app-icon|logo-light|logo-dark)-[A-Za-z0-9_-]+\.png)$/;
 const COMMON_RESOURCE_PATHS = [
   'app.asar',
   'LICENSE',
@@ -212,8 +212,8 @@ export function validateAsarEntries(entries) {
     /^out\/renderer\/assets\/capture-[A-Za-z0-9_-]+\.js$/,
     /^out\/renderer\/assets\/capture\.worklet-[A-Za-z0-9_-]+\.js$/,
     /^out\/renderer\/assets\/audio-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/(?:status-presentation|Status)-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/(?:status-presentation|Status)-[A-Za-z0-9_-]+\.css$/,
+    /^out\/renderer\/assets\/(?:status-presentation|Status|theme)-[A-Za-z0-9_-]+\.js$/,
+    /^out\/renderer\/assets\/(?:status-presentation|Status|theme)-[A-Za-z0-9_-]+\.css$/,
   ]) {
     if (!normalized.some((entry) => asset.test(entry))) {
       throw new Error(`Required renderer asset is missing: ${String(asset)}`);
