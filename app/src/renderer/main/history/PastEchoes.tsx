@@ -215,6 +215,7 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
     let started = false;
     let createdUrl: string | null = null;
     let observer: IntersectionObserver | null = null;
+    let cancelFallbackLoad = () => undefined;
     const load = () => {
       if (!active || started) return;
       started = true;
@@ -244,11 +245,17 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
           { rootMargin: '200px 0px' },
         );
         if (container.current === null) load();
-        else observer.observe(container.current);
+        else {
+          observer.observe(container.current);
+          // Hidden/below-fold history still becomes available after the initial interaction has
+          // settled. This bounds lazy loading without making screenshots depend on scrolling.
+          cancelFallbackLoad = scheduleDeferredTask(load);
+        }
       }
     }
     return () => {
       active = false;
+      cancelFallbackLoad();
       observer?.disconnect();
       if (createdUrl !== null) URL.revokeObjectURL(createdUrl);
     };
