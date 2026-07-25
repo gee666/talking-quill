@@ -161,6 +161,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
       'activationTest',
       'app',
       'settings',
+      'profiles',
       'data',
       'recording',
       'echo',
@@ -609,6 +610,7 @@ for (const attempt of [0, 1, 2]) {
     try {
       let main = (await rendererPages(application)).main;
       await main.getByRole('button', { name: 'Settings' }).click();
+      await expect(main.getByRole('checkbox', { name: 'Close to tray' })).toBeVisible();
 
       await closeWithDiagnostics(application, `case ${String(attempt + 1)} immediate quit`, () =>
         toggleCloseToTrayAndCloseImmediately(main),
@@ -617,6 +619,7 @@ for (const attempt of [0, 1, 2]) {
       application = await launch(profile);
       main = (await rendererPages(application)).main;
       await main.getByRole('button', { name: 'Settings' }).click();
+      await expect(main.getByRole('checkbox', { name: 'Close to tray' })).toBeVisible();
       await expect(main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
 
       await toggleCloseToTrayAndCloseImmediately(main);

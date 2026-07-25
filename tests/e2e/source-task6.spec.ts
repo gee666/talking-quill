@@ -361,8 +361,19 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await resetSession(application);
 
     // Smart-unavailable raw fallback plus copied-to-clipboard result.
-    await main.getByRole('combobox', { name: 'Default processing mode' }).selectOption('smart');
-    await expect(main.getByText('Default mode saved.')).toBeVisible();
+    const generalMode = main.getByRole('combobox', { name: 'General processing mode' });
+    await generalMode.selectOption('smart');
+    await expect(generalMode).toHaveValue('smart');
+    await main.getByRole('button', { name: 'Save profile' }).first().click();
+    await expect
+      .poll(() =>
+        main.evaluate(async () => {
+          const bootstrap = await window.talkingQuill.app.getBootstrap();
+          return bootstrap.settings.dictationProfiles.find((profile) => profile.id === 'general')
+            ?.processingMode;
+        }),
+      )
+      .toBe('smart');
     await driverCall(application, 'setCopied', [true]);
     await driverCall(application, 'setTranscript', ['raw fallback text']);
     await beginQuick(application, 8);

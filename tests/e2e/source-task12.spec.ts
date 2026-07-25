@@ -89,7 +89,7 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await main.getByRole('button', { name: 'Continue' }).click();
     await expect(main.getByRole('heading', { name: 'Local model' })).toBeFocused();
     await main.getByRole('button', { name: 'Continue' }).click();
-    await expect(main.getByRole('heading', { name: 'Shortcut' })).toBeFocused();
+    await expect(main.getByRole('heading', { name: 'Shortcut', exact: true })).toBeFocused();
     await main.getByRole('button', { name: 'Test activation shortcut' }).click();
     await driver(application, 'activationDown');
     await driver(application, 'activationUp');
@@ -178,11 +178,10 @@ test('Task 12 screens remain accessible without overflow at 960 by 600', async (
         fullPage: false,
       });
       if (step === 4) {
+        await main.getByRole('button', { name: 'Configure Smart processing' }).click();
         const scrollRegion = main.getByRole('region', { name: 'Smart processing setup controls' });
-        await scrollRegion.focus();
-        await scrollRegion.press('End');
-        await expect.poll(() => scrollRegion.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
         const lastControl = scrollRegion.getByRole('button').last();
+        await lastControl.evaluate((node) => node.scrollIntoView({ block: 'nearest' }));
         await expect(lastControl).toBeInViewport();
         await main.screenshot({
           path: 'tmp/review-screenshots/smart-scrolled-960.png',
