@@ -139,7 +139,7 @@ export class WindowManager {
     const common: Electron.BrowserWindowConstructorOptions = {
       show: false,
       frame: false,
-      backgroundColor: '#0B0D10',
+      backgroundColor: '#080B11',
       icon: electronApp.isPackaged
         ? join(process.resourcesPath, 'app-icon.png')
         : join(electronApp.getAppPath(), 'assets', 'app-icon.png'),
@@ -183,6 +183,9 @@ export class WindowManager {
       return new BrowserWindow({
         ...common,
         title: 'Talking Quill Widget',
+        // An opaque background colour defeats `transparent`, so the widget window
+        // must clear it for the floating pill to sit directly on the desktop.
+        backgroundColor: '#00000000',
         width: WIDGET_DIMENSIONS.default.width,
         height: WIDGET_DIMENSIONS.default.height,
         resizable: false,

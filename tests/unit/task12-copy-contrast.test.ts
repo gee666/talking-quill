@@ -21,8 +21,8 @@ describe('Task 12 shipped-copy and AA audit', () => {
   });
 
   it('keeps every normal text token at WCAG AA contrast on approved dark surfaces', () => {
-    const surfaces = ['#0B0D10', '#12151A', '#181C22'];
-    for (const foreground of ['#F4F7FA', '#9AA4B2']) {
+    const surfaces = ['#080B11', '#0C1017', '#10151D'];
+    for (const foreground of ['#E7ECF3', '#97A3B4']) {
       for (const background of surfaces)
         expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
     }
