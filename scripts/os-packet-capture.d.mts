@@ -4,21 +4,22 @@ export function selectMacCaptureInterface(
   requested?: string,
   scope?: string,
 ): string;
-export function tcpdumpArguments(
-  platform: string,
+export function macTcpdumpArguments(
   output: string,
   interfaces: readonly string[],
   requested: string,
   scope: string,
 ): readonly string[];
-export interface CaptureStatus {
-  readonly schemaVersion: 2;
-  readonly evidenceType: 'os-packet-capture';
-  readonly platform: string;
-  readonly tool: string | null;
-  readonly toolAvailable: boolean;
-  readonly interfaces: readonly string[];
-  readonly permissionVerified: false;
-  readonly limitation: string;
+export interface CaptureInvocation {
+  readonly command: string;
+  readonly commandArgs: readonly string[];
+  readonly output: string;
+  readonly tmpRoot: string;
+  readonly requestedInterface: string | null;
+  readonly scope: string;
 }
-export function detectCaptureStatus(platform?: string): CaptureStatus;
+export function parseCaptureInvocation(
+  arguments_: readonly string[],
+  root?: string,
+): CaptureInvocation;
+export function validatePcapBytes(bytes: Buffer): void;

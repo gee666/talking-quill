@@ -1,0 +1,133 @@
+{
+  "v2-task4-recording": {
+    "schemaVersion": 2,
+    "app": { "enabled": false, "closeToTray": false },
+    "recording": { "preferredMicrophoneId": "fixture-mic-v2-task4", "silencePreset": "aggressive" }
+  },
+  "v2-task9-provider": {
+    "schemaVersion": 2,
+    "app": { "enabled": false, "closeToTray": false },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "ftp://legacy.example/v2-task9",
+          "modelId": "fixture-model-v2-task9"
+        }
+      }
+    }
+  },
+  "v4-task6-transcription": {
+    "schemaVersion": 4,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v4-task6",
+      "silencePreset": "aggressive"
+    },
+    "transcription": { "modelId": "Xenova/whisper-large", "language": "fixture-v4-task6" },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "file:///legacy/v4-task6",
+          "modelId": "fixture-model-v4-task6"
+        }
+      }
+    }
+  },
+  "v4-task11-provider": {
+    "schemaVersion": 4,
+    "app": { "enabled": false, "closeToTray": false },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v4-task11",
+      "silencePreset": "relaxed"
+    },
+    "smartProcessing": {
+      "selectedProviderId": "azure",
+      "providers": {
+        "azure": {
+          "baseUrl": "https://fixture.openai.azure.com",
+          "modelId": "fixture-model-v4-task11",
+          "modelType": "reasoning"
+        }
+      }
+    }
+  },
+  "v7-task7-privacy": {
+    "schemaVersion": 7,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v7-task7",
+      "silencePreset": "relaxed"
+    },
+    "transcription": { "modelId": "Xenova/whisper-large", "language": "fixture-v7-task7" },
+    "privacy": { "historyEnabled": false, "historyRetentionDays": 90 },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "ftp://legacy.example/v7-task7",
+          "modelId": "fixture-model-v7-task7"
+        }
+      },
+      "credentialEpochs": { "generic-openai": 7 }
+    }
+  },
+  "v7-task8-lists": {
+    "schemaVersion": 7,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v7-task8",
+      "silencePreset": "relaxed"
+    },
+    "transcription": { "modelId": "Xenova/whisper-large", "language": "fixture-v7-task8" },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "file:///legacy/v7-task8",
+          "modelId": "fixture-model-v7-task8"
+        }
+      },
+      "credentialEpochs": { "generic-openai": 7 }
+    },
+    "voiceCommands": [
+      {
+        "id": "70000007-0007-4007-8007-000000000007",
+        "trigger": "fixture command v7 task8",
+        "snippet": "fixture snippet v7 task8",
+        "createdAt": 7,
+        "updatedAt": 7
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "71000007-0007-4007-8007-000000000007",
+        "value": "Fixture vocabulary v7 task8",
+        "createdAt": 7,
+        "updatedAt": 7
+      }
+    ]
+  }
+}

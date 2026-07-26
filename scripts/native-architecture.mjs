@@ -23,29 +23,6 @@ export async function readNativeArchitectures(path) {
   }
 }
 
-/** Backward-compatible single-architecture probe for callers that require a thin image. */
-export async function readNativeArchitecture(path, mac) {
-  const parsed = await readNativeArchitectures(path);
-  if (parsed === null || (mac && parsed.format === 'pe') || (!mac && parsed.format !== 'pe')) {
-    throw new Error(`Expected a ${mac ? 'Mach-O' : 'PE'} executable: ${path}`);
-  }
-  if (parsed.architectures.length !== 1) {
-    throw new Error(`Expected a single native executable architecture: ${path}`);
-  }
-  return parsed.architectures[0];
-}
-
-export function parseNativeArchitecture(bytes, path, mac) {
-  const parsed = parseNativeArchitectures(bytes, path);
-  if (parsed === null || (mac && parsed.format === 'pe') || (!mac && parsed.format !== 'pe')) {
-    throw new Error(`Expected a ${mac ? 'Mach-O' : 'PE'} executable: ${path}`);
-  }
-  if (parsed.architectures.length !== 1) {
-    throw new Error(`Expected a single native executable architecture: ${path}`);
-  }
-  return parsed.architectures[0];
-}
-
 /** Returns null for non-native data and a complete architecture set for PE/Mach-O images. */
 export function parseNativeArchitectures(bytes, path) {
   if (bytes.length >= 2 && bytes.readUInt16LE(0) === PE_MAGIC) return parsePe(bytes, path);
@@ -68,9 +45,12 @@ export function parseNativeArchitectures(bytes, path) {
 }
 
 /** Recursively verifies every regular file whose bytes identify it as PE or Mach-O. */
-export async function inspectNativeTree(root, expectedArchitecture, exceptions = {}) {
-  if (!['x64', 'arm64'].includes(expectedArchitecture)) {
-    throw new Error(`Invalid expected native architecture: ${String(expectedArchitecture)}`);
+export async function inspectNativeTree(root, options) {
+  const { architecture, platform, exceptions = {} } = options ?? {};
+  if (!['x64', 'arm64'].includes(architecture) || !['win', 'mac'].includes(platform)) {
+    throw new Error(
+      'Native tree inspection requires a win|mac platform and x64|arm64 architecture',
+    );
   }
   const exceptionEntries = Object.entries(exceptions);
   for (const [path, architecture] of exceptionEntries) {
@@ -98,7 +78,13 @@ export async function inspectNativeTree(root, expectedArchitecture, exceptions =
       const parsed = await readNativeArchitectures(absolute);
       if (parsed === null) continue;
       const name = relative(root, absolute).replaceAll('\\', '/');
-      if (!parsed.architectures.includes(expectedArchitecture)) {
+      const expectedFormat = platform === 'win' ? 'pe' : 'mach-o';
+      if ((platform === 'win') !== (parsed.format === 'pe')) {
+        throw new Error(
+          `Native format mismatch: ${name} is ${parsed.format}, expected ${expectedFormat}`,
+        );
+      }
+      if (!parsed.architectures.includes(architecture)) {
         const exceptionArchitecture = exceptions[name];
         if (
           exceptionArchitecture === undefined ||
@@ -106,7 +92,7 @@ export async function inspectNativeTree(root, expectedArchitecture, exceptions =
           parsed.architectures[0] !== exceptionArchitecture
         ) {
           throw new Error(
-            `Native architecture mismatch: ${name} is ${parsed.architectures.join('+')}, expected ${expectedArchitecture}`,
+            `Native architecture mismatch: ${name} is ${parsed.architectures.join('+')}, expected ${architecture}`,
           );
         }
       }

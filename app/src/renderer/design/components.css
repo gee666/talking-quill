@@ -111,7 +111,7 @@ select.me-field__control {
   cursor: pointer;
 }
 .me-field__control::placeholder {
-  color: var(--color-muted);
+  color: var(--color-secondary);
 }
 .me-field__control:hover:not(:disabled) {
   border-color: var(--color-muted);

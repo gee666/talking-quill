@@ -7,7 +7,7 @@ export interface TextAreaProps extends TextareaHTMLAttributes<HTMLTextAreaElemen
 }
 
 export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(function TextArea(
-  { label, hint, error, id, className = '', ...props },
+  { label, hint, error, id, required, className = '', ...props },
   ref,
 ) {
   const generatedId = useId();
@@ -17,12 +17,18 @@ export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(function 
   return (
     <div className="me-field">
       <label className="me-field__label" htmlFor={controlId}>
-        {label}
+        {label}{' '}
+        {required ? (
+          <span className="me-field__required" aria-hidden="true">
+            *
+          </span>
+        ) : null}
       </label>
       <textarea
         {...props}
         ref={ref}
         id={controlId}
+        required={required}
         className={`me-field__control ${className}`.trim()}
         aria-invalid={error === undefined ? undefined : true}
         aria-describedby={[hintId, errorId].filter(Boolean).join(' ') || undefined}

@@ -12,10 +12,10 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const artifactProvenanceManifestPath = resolve(repositoryRoot, 'artifact-provenance.json');
 const temporaryManifestPath = resolve(repositoryRoot, 'tmp', 'artifact-provenance.json.pending');
 
@@ -40,7 +40,7 @@ export async function writeArtifactProvenanceManifest(options) {
     package: { ...identity, root: packageRootPath },
     entries: [...packageFiles, ...artifacts].sort(compareEntries),
   };
-  validateManifestShape(manifest);
+  validateArtifactProvenanceManifest(manifest);
   await mkdir(dirname(temporaryManifestPath), { recursive: true });
   await writeFile(temporaryManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
     encoding: 'utf8',
@@ -60,7 +60,7 @@ export async function verifyArtifactProvenanceManifest() {
   } catch {
     throw new Error('Artifact provenance manifest is not valid JSON');
   }
-  validateManifestShape(manifest);
+  validateArtifactProvenanceManifest(manifest);
   if (manifest.sourceCommit !== currentCommit()) {
     throw new Error('Artifact provenance manifest is stale for the current source commit');
   }
@@ -86,6 +86,7 @@ export async function verifyArtifactProvenanceManifest() {
   }
 
   const packageRoot = resolveManifestPath(manifest.package.root);
+  await assertCanonicalRealPath(packageRoot, 'package root');
   const actualEntries = [
     ...(await inventoryTree(packageRoot)).map((entry) => ({ ...entry, role: 'package-file' })),
     ...(await Promise.all(
@@ -106,7 +107,7 @@ export async function verifyArtifactProvenanceManifest() {
 }
 
 export function artifactUploadPaths(manifest) {
-  validateManifestShape(manifest);
+  validateArtifactProvenanceManifest(manifest);
   return [
     `${manifest.package.root}/**`,
     ...manifest.entries
@@ -145,6 +146,7 @@ async function inventoryTree(root) {
 
 async function fileEntry(path) {
   const canonical = resolve(path);
+  await assertCanonicalRealPath(canonical, 'file');
   const before = await lstat(canonical);
   if (!before.isFile() || before.isSymbolicLink()) {
     throw new Error(`Provenance artifact is not a regular file: ${repositoryRelative(canonical)}`);
@@ -207,12 +209,22 @@ async function containedRealPath(path) {
   return canonical;
 }
 
+async function assertCanonicalRealPath(path, label) {
+  const canonical = resolve(path);
+  const physical = await realpath(canonical);
+  repositoryRelative(physical);
+  const comparable = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  if (comparable(physical) !== comparable(canonical)) {
+    throw new Error(`Artifact provenance ${label} is not a canonical physical path: ${path}`);
+  }
+}
+
 function repositoryRelative(path) {
-  const name = relative(repositoryRoot, resolve(path)).replaceAll('\\', '/');
-  if (name.length === 0 || name === '..' || name.startsWith('../')) {
+  const name = relative(repositoryRoot, resolve(path));
+  if (name.length === 0 || isAbsolute(name) || name === '..' || name.startsWith(`..${sep}`)) {
     throw new Error(`Artifact provenance path escapes the canonical repository root: ${path}`);
   }
-  return name;
+  return name.replaceAll('\\', '/');
 }
 
 function resolveManifestPath(path) {
@@ -240,7 +252,7 @@ function validateIdentity(options) {
   return { version: options.version, platform: options.platform, arch: options.arch };
 }
 
-function validateManifestShape(manifest) {
+export function validateArtifactProvenanceManifest(manifest) {
   if (
     manifest === null ||
     typeof manifest !== 'object' ||

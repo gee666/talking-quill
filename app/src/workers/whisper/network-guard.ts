@@ -94,6 +94,8 @@ export function installWorkerNetworkGuard(): WorkerNetworkGuardState {
   const dgram = requireRecord(require, 'node:dgram');
   const dns = requireRecord(require, 'node:dns');
   const dnsPromises = requireRecord(require, 'node:dns/promises');
+  const inspector = requireRecord(require, 'node:inspector');
+  const inspectorPromises = requireRecord(require, 'node:inspector/promises');
   const childProcess = requireRecord(require, 'node:child_process');
   const workerThreads = requireRecord(require, 'node:worker_threads');
   const cluster = requireRecord(require, 'node:cluster');
@@ -114,12 +116,16 @@ export function installWorkerNetworkGuard(): WorkerNetworkGuardState {
   patchMethods(tls, ['connect', 'createServer'], blocked);
   patchPrototypeMethods(tls, 'TLSSocket', ['connect', '_start'], blocked);
   patchPrototypeMethods(tls, 'Server', ['listen'], blocked);
-  patchMethods(dgram, ['createSocket'], blocked);
   patchPrototypeMethods(dgram, 'Socket', ['bind', 'connect', 'send'], blocked);
+  patchMethods(dgram, ['createSocket', 'Socket', '_createSocketHandle'], blocked);
   patchMethods(dns, DNS_CALLBACK_METHODS, blocked);
   patchPrototypeMethods(dns, 'Resolver', DNS_RESOLVER_METHODS, blocked);
+  patchMethods(dns, ['Resolver'], blocked);
   patchMethods(dnsPromises, DNS_CALLBACK_METHODS, blockedAsync);
   patchPrototypeMethods(dnsPromises, 'Resolver', DNS_RESOLVER_METHODS, blockedAsync);
+  patchMethods(dnsPromises, ['Resolver'], blocked);
+  patchMethods(inspector, ['open'], blocked);
+  patchMethods(inspectorPromises, ['open'], blocked);
   patchMethods(
     childProcess,
     ['exec', 'execFile', 'execFileSync', 'execSync', 'fork', 'spawn', 'spawnSync'],
@@ -144,6 +150,8 @@ export function installWorkerNetworkGuard(): WorkerNetworkGuardState {
       ['dgram', dgram],
       ['dns', dns],
       ['dns/promises', dnsPromises],
+      ['inspector', inspector],
+      ['inspector/promises', inspectorPromises],
       ['child_process', childProcess],
       ['worker_threads', workerThreads],
       ['cluster', cluster],
@@ -171,6 +179,8 @@ export async function verifyWorkerNetworkGuardForTest(): Promise<void> {
   const dgram = requireRecord(require, 'node:dgram');
   const dns = requireRecord(require, 'dns');
   const dnsPromises = requireRecord(require, 'node:dns/promises');
+  const inspector = requireRecord(require, 'inspector');
+  const inspectorPromises = requireRecord(require, 'node:inspector/promises');
   const childProcess = requireRecord(require, 'child_process');
   const workerThreads = requireRecord(require, 'node:worker_threads');
   const cluster = requireRecord(require, 'cluster');
@@ -196,12 +206,14 @@ export async function verifyWorkerNetworkGuardForTest(): Promise<void> {
   probeMethods(tls, ['connect', 'createServer']);
   probePrototypeMethods(tls, 'TLSSocket', ['connect', '_start']);
   probePrototypeMethods(tls, 'Server', ['listen']);
-  probeMethods(dgram, ['createSocket']);
-  probePrototypeMethods(dgram, 'Socket', ['bind', 'connect', 'send']);
+  probeMethods(dgram, ['createSocket', '_createSocketHandle']);
+  probeConstructor(dgram, 'Socket');
   probeMethods(dns, DNS_CALLBACK_METHODS);
-  probePrototypeMethods(dns, 'Resolver', DNS_RESOLVER_METHODS);
+  probeConstructor(dns, 'Resolver');
   await probeAsynchronousMethods(dnsPromises, DNS_CALLBACK_METHODS);
-  await probeAsynchronousPrototypeMethods(dnsPromises, 'Resolver', DNS_RESOLVER_METHODS);
+  probeConstructor(dnsPromises, 'Resolver');
+  probeMethods(inspector, ['open']);
+  probeMethods(inspectorPromises, ['open']);
   probeMethods(childProcess, [
     'exec',
     'execFile',
@@ -225,6 +237,24 @@ export async function verifyWorkerNetworkGuardForTest(): Promise<void> {
     const builtinNet = asRecord(Reflect.apply(getBuiltinModule, process, [moduleName]));
     probeMethods(builtinNet, ['connect', '_createServerHandle']);
   }
+  for (const moduleName of ['dgram', 'node:dgram']) {
+    const builtinDgram = asRecord(Reflect.apply(getBuiltinModule, process, [moduleName]));
+    probeMethods(builtinDgram, ['createSocket', '_createSocketHandle']);
+    probeConstructor(builtinDgram, 'Socket');
+  }
+  for (const moduleName of ['dns', 'node:dns', 'dns/promises', 'node:dns/promises']) {
+    const builtinDns = asRecord(Reflect.apply(getBuiltinModule, process, [moduleName]));
+    probeConstructor(builtinDns, 'Resolver');
+  }
+  for (const moduleName of [
+    'inspector',
+    'node:inspector',
+    'inspector/promises',
+    'node:inspector/promises',
+  ]) {
+    const builtinInspector = asRecord(Reflect.apply(getBuiltinModule, process, [moduleName]));
+    probeMethods(builtinInspector, ['open']);
+  }
   for (const moduleName of ['child_process', 'node:child_process']) {
     const builtinChildProcess = asRecord(Reflect.apply(getBuiltinModule, process, [moduleName]));
     probeMethods(builtinChildProcess, ['exec', 'spawn']);
@@ -239,6 +269,12 @@ export async function verifyWorkerNetworkGuardForTest(): Promise<void> {
   const importedNodeNet = asRecord(await import('node:net'));
   const importedAliasNet = asRecord(await import('net'));
   const importedDns = asRecord(await import('node:dns'));
+  const importedAliasDns = asRecord(await import('dns'));
+  const importedDgram = asRecord(await import('node:dgram'));
+  const importedAliasDgram = asRecord(await import('dgram'));
+  const importedInspector = asRecord(await import('node:inspector'));
+  const importedAliasInspector = asRecord(await import('inspector'));
+  const importedInspectorPromises = asRecord(await import('node:inspector/promises'));
   const importedChildProcess = asRecord(await import('node:child_process'));
   const importedWorkerThreads = asRecord(await import('node:worker_threads'));
   for (const importedHttp of [importedNodeHttp, importedAliasHttp]) {
@@ -248,7 +284,21 @@ export async function verifyWorkerNetworkGuardForTest(): Promise<void> {
   for (const importedNet of [importedNodeNet, importedAliasNet]) {
     probeMethods(importedNet, ['connect', '_createServerHandle']);
   }
-  probeMethods(importedDns, ['resolve']);
+  for (const importedResolver of [importedDns, importedAliasDns]) {
+    probeMethods(importedResolver, ['resolve']);
+    probeConstructor(importedResolver, 'Resolver');
+  }
+  for (const importedSocket of [importedDgram, importedAliasDgram]) {
+    probeMethods(importedSocket, ['createSocket', '_createSocketHandle']);
+    probeConstructor(importedSocket, 'Socket');
+  }
+  for (const importedInspectorModule of [
+    importedInspector,
+    importedAliasInspector,
+    importedInspectorPromises,
+  ]) {
+    probeMethods(importedInspectorModule, ['open']);
+  }
   probeMethods(importedChildProcess, ['exec', 'spawn']);
   probeConstructor(importedWorkerThreads, 'Worker');
 
@@ -360,22 +410,6 @@ async function probeAsynchronousMethods(
     if (!(name in target)) continue;
     const operation = readFunction(target, name);
     await expectAsynchronousBlock(() => Reflect.apply(operation, target, []));
-  }
-}
-
-async function probeAsynchronousPrototypeMethods(
-  target: UnknownRecord,
-  constructorName: string,
-  names: readonly string[],
-): Promise<void> {
-  const constructor: unknown = Reflect.get(target, constructorName);
-  if (typeof constructor !== 'function') return;
-  const prototype: unknown = Reflect.get(constructor, 'prototype');
-  if (typeof prototype !== 'object' || prototype === null) return;
-  for (const name of names) {
-    if (!(name in prototype)) continue;
-    const operation = readFunction(prototype as UnknownRecord, name);
-    await expectAsynchronousBlock(() => Reflect.apply(operation, Object.create(prototype), []));
   }
 }
 

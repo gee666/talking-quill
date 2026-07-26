@@ -13,8 +13,8 @@
 //! JSON-RPC responses and helper notifications. It never contains logs or other
 //! unframed text. Process-level diagnostics are written to stderr. Serialized
 //! outbound values are checked before writing: oversized request results become
-//! a bounded Response too large error, while an unexpectedly oversized helper
-//! notification is dropped fail-open without writing a partial frame.
+//! a bounded Response too large error, while any unexpected encoding overflow
+//! is terminal and never writes a partial frame.
 //!
 //! # Request envelope, IDs, and notifications
 //!
@@ -56,7 +56,9 @@
 //!     "permissions":PERMISSIONS}`.
 //! - `activation.configure`
 //!   - Params/result: `{"enabled":boolean,"bindings":[{"key":"A".."Z","shift":boolean}]}`.
-//!     At most ten distinct exact bindings are accepted. On Windows the helper
+//!     At most ten distinct exact bindings are accepted. Enabling on macOS is
+//!     rejected unless required permissions and the event tap are ready;
+//!     disabling remains available during permission loss. On Windows the helper
 //!     retains unchanged no-repeat registrations and transactionally adds/removes
 //!     changed chords. Any conflict leaves the prior configuration unchanged.
 //! - `session.set_capture`
@@ -77,7 +79,8 @@
 //!     complete response, including the largest valid request ID, fits 16 KiB.
 //! - `permissions.get`
 //!   - Params: `{}`.
-//!   - Result: `PERMISSIONS`.
+//!   - Result: `PERMISSIONS`. On macOS, a denied permission snapshot disables
+//!     activation and session capture before the response is queued.
 //! - `ping`
 //!   - Params: `{}`.
 //!   - Result: `{"ok":true,"hookStatus":HOOK_STATUS}`.
@@ -159,6 +162,8 @@
 mod messages;
 mod server;
 
+#[cfg(test)]
+pub(crate) use messages::RpcResponse;
 pub use messages::{
     INBOUND_METHODS, Outbound, OutboundEncodingError, RequestId, encode_outbound, parse_request,
 };

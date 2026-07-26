@@ -59,7 +59,7 @@ function pruneOnnxRuntime(context) {
   const root = join(
     context.appOutDir,
     context.electronPlatformName === 'darwin'
-      ? 'Talking Quill.app/Contents/Resources'
+      ? `${context.packager.appInfo.productFilename}.app/Contents/Resources`
       : 'resources',
     'app.asar.unpacked',
     'node_modules',

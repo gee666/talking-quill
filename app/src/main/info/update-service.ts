@@ -9,8 +9,6 @@ import { PublicAppError } from '../security/public-error';
 import { ProviderError } from '../providers/errors';
 import { RELEASE_REPOSITORY, RELEASES_API_URL, validateReleaseUrl } from './release-url-policy';
 
-export { RELEASE_REPOSITORY, RELEASES_API_URL } from './release-url-policy';
-
 const ReleaseSchema = z.looseObject({
   tag_name: z.string().min(1).max(64),
   html_url: z.url().max(2_048),
@@ -26,6 +24,7 @@ export class UpdateService {
   }
 
   async check(currentVersion: string, signal: AbortSignal): Promise<UpdateCheckResult> {
+    const normalizedCurrent = normalizeVersion(currentVersion);
     let response: JsonTransportResponse;
     try {
       response = await this.#transport.request({
@@ -33,7 +32,7 @@ export class UpdateService {
         method: 'GET',
         headers: {
           accept: 'application/vnd.github+json',
-          'user-agent': `Talking-Quill/${currentVersion}`,
+          'user-agent': `Talking-Quill/${normalizedCurrent}`,
           'x-github-api-version': '2022-11-28',
         },
         credentialed: false,
@@ -57,7 +56,6 @@ export class UpdateService {
       throw new PublicAppError({ code: 'UNAVAILABLE', message: 'No stable release is available.' });
     }
     const latestVersion = normalizeVersion(release.tag_name);
-    const normalizedCurrent = normalizeVersion(currentVersion);
     let releaseUrl: string;
     try {
       releaseUrl = validateReleaseUrl(release.html_url, release.tag_name);

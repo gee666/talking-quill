@@ -11,6 +11,7 @@ import {
   MAX_NATIVE_PAGES,
   boundedString,
   completionText,
+  credentialFingerprint,
   freezeModels,
   modelInfo,
   parseConfig,
@@ -29,6 +30,7 @@ export class CohereProvider implements SmartProvider {
   readonly #transport: JsonTransport;
   readonly #override: string | undefined;
   readonly #capabilities = new Map<string, VisionCapability>();
+  readonly #preflightCapabilities = new Map<string, VisionCapability>();
 
   constructor(transport: JsonTransport, endpointOverride?: string) {
     this.#transport = transport;
@@ -88,15 +90,17 @@ export class CohereProvider implements SmartProvider {
           : features.length > 0
             ? 'unsupported'
             : 'unknown';
-        this.#capabilities.set(id, vision);
         const context =
           Number.isInteger(candidate.context_length) && Number(candidate.context_length) > 0
             ? Number(candidate.context_length)
             : null;
         models.push(modelInfo(id, id, context, vision));
       }
-      if (body.next_page_token === undefined || body.next_page_token === null)
-        return freezeModels(models);
+      if (body.next_page_token === undefined || body.next_page_token === null) {
+        const catalog = freezeModels(models);
+        this.#replaceCapabilities(catalog, credentialFingerprint(invocation));
+        return catalog;
+      }
       pageToken = boundedString(body.next_page_token, 2_048);
     }
     throw new ProviderError('INVALID_RESPONSE');
@@ -105,6 +109,23 @@ export class CohereProvider implements SmartProvider {
   capabilities(_config: ProviderConfig, modelId: string): VisionCapability {
     return this.#capabilities.get(modelId) ?? 'unknown';
   }
+
+  async capabilityPreflight(
+    invocation: ProviderInvocationConfig,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<VisionCapability> {
+    this.#validate(invocation);
+    const requestedModel = requireModel(invocation.config, modelId);
+    const credentialScope = credentialFingerprint(invocation);
+    const cached = this.#preflightCapabilities.get(
+      this.#preflightKey(credentialScope, requestedModel),
+    );
+    if (cached !== undefined) return cached;
+    const models = await this.listModels(invocation, signal);
+    return models.find((model) => model.id === requestedModel)?.vision ?? 'unknown';
+  }
+
   async cleanTranscript(
     invocation: ProviderInvocationConfig,
     request: Parameters<SmartProvider['cleanTranscript']>[1],
@@ -177,6 +198,19 @@ export class CohereProvider implements SmartProvider {
       return content.text;
     });
     return Object.freeze({ text: completionText(parts), destination: response.destination });
+  }
+
+  #replaceCapabilities(models: readonly ModelInfo[], credentialScope: string): void {
+    this.#capabilities.clear();
+    this.#preflightCapabilities.clear();
+    for (const model of models) {
+      this.#capabilities.set(model.id, model.vision);
+      this.#preflightCapabilities.set(this.#preflightKey(credentialScope, model.id), model.vision);
+    }
+  }
+
+  #preflightKey(credentialScope: string, modelId: string): string {
+    return `${credentialScope}\n${modelId}`;
   }
 
   #validate(invocation: ProviderInvocationConfig): void {

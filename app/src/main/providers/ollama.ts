@@ -69,7 +69,7 @@ export class OllamaProvider implements SmartProvider {
     // Validation must exercise the same selected model used by Task 9 transcript cleanup.
     await this.cleanTranscript(
       invocation,
-      { input: 'Reply with OK.', modelId: selected, temperature: 0, maxOutputTokens: 1 },
+      { input: 'Reply with OK.', modelId: selected, temperature: 0, maxOutputTokens: 8 },
       signal,
     );
     return ProviderValidationResultSchema.parse({
@@ -129,7 +129,12 @@ export class OllamaProvider implements SmartProvider {
       signal,
       async (name, operationSignal) => {
         throwIfAborted(operationSignal);
-        const details = await this.#showModel(invocation, name, operationSignal);
+        const details = await this.#showModel(
+          invocation,
+          name,
+          operationSignal,
+          invocation.refreshModels === true,
+        );
         return details.embedding
           ? null
           : ModelInfoSchema.parse({
@@ -241,10 +246,13 @@ export class OllamaProvider implements SmartProvider {
     invocation: ProviderInvocationConfig,
     model: string,
     signal: AbortSignal,
+    refresh = false,
   ): Promise<ModelDetails> {
     const cacheKey = this.#capabilityKey(invocation.config, model, invocation.credential);
-    const cached = this.#readCachedDetails(cacheKey);
-    if (cached !== null) return cached;
+    if (!refresh) {
+      const cached = this.#readCachedDetails(cacheKey);
+      if (cached !== null) return cached;
+    }
     const response = await this.#transport.request({
       url: new URL('/api/show', this.#baseUrl(invocation.config)),
       method: 'POST',
@@ -420,6 +428,9 @@ function parseChatOutput(input: unknown): string {
   const content = message?.content;
   if (
     envelope?.done !== true ||
+    (envelope.done_reason !== undefined &&
+      envelope.done_reason !== null &&
+      envelope.done_reason !== 'stop') ||
     message?.role !== 'assistant' ||
     typeof content !== 'string' ||
     content.trim().length === 0 ||

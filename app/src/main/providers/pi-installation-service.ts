@@ -3,7 +3,7 @@ import { posix, win32 } from 'node:path';
 import type { PiInstallationStatus } from '../../shared/schemas/pi-installation';
 import { PiInstallationPathSchema } from '../../shared/schemas/settings';
 import type { SettingsStore } from '../persistence/settings-store';
-import { discoverPiInstallation, piInstallationStatus } from './pi-discovery';
+import { piInstallationStatus } from './pi-discovery';
 import { ProviderError } from './errors';
 
 export interface PiInstallationDialogs {
@@ -26,6 +26,10 @@ export class PiInstallationService {
   readonly #platform: NodeJS.Platform;
   readonly #dialogs: PiInstallationDialogs;
   readonly #interactiveAppData: string | undefined;
+  readonly #statusProbe: (
+    configuredPath: string | null,
+    signal: AbortSignal,
+  ) => Promise<PiInstallationStatus>;
 
   constructor(
     settings: SettingsStore,
@@ -33,6 +37,10 @@ export class PiInstallationService {
       readonly environment?: NodeJS.ProcessEnv;
       readonly platform?: NodeJS.Platform;
       readonly dialogs?: PiInstallationDialogs;
+      readonly statusProbe?: (
+        configuredPath: string | null,
+        signal: AbortSignal,
+      ) => Promise<PiInstallationStatus>;
       /** Electron's interactive-user appData known folder; survives packaged restricted PATH/env. */
       readonly interactiveAppData?: string;
       readonly interactiveHome?: string;
@@ -52,6 +60,16 @@ export class PiInstallationService {
         : inherited;
     this.#dialogs = options.dialogs ?? DEFAULT_DIALOGS;
     this.#interactiveAppData = options.interactiveAppData;
+    this.#statusProbe =
+      options.statusProbe ??
+      ((configuredPath, signal) =>
+        piInstallationStatus(
+          this.#environment,
+          this.#platform,
+          configuredPath,
+          this.#interactiveAppData,
+          signal,
+        ));
   }
 
   configuredPath(): string | null {
@@ -63,23 +81,13 @@ export class PiInstallationService {
     return await this.#status(Date.now() + PI_INSTALLATION_OPERATION_TIMEOUT_MS, controller);
   }
 
-  async #status(deadline: number, controller: AbortController): Promise<PiInstallationStatus> {
+  async #status(
+    deadline: number,
+    controller: AbortController,
+    configuredPath = this.configuredPath(),
+  ): Promise<PiInstallationStatus> {
     return await withinInstallationDeadline(
-      this.#interactiveAppData === undefined
-        ? piInstallationStatus(
-            this.#environment,
-            this.#platform,
-            this.configuredPath(),
-            undefined,
-            controller.signal,
-          )
-        : piInstallationStatus(
-            this.#environment,
-            this.#platform,
-            this.configuredPath(),
-            this.#interactiveAppData,
-            controller.signal,
-          ),
+      this.#statusProbe(configuredPath, controller.signal),
       deadline,
       () => controller.abort(),
     );
@@ -100,57 +108,31 @@ export class PiInstallationService {
     controller: AbortController,
   ): Promise<PiInstallationStatus> {
     const path = PiInstallationPathSchema.parse(pathInput);
-    if (path !== null) {
-      if (!(this.#platform === 'win32' ? win32 : posix).isAbsolute(path))
-        throw new ProviderError('PI_CONFIG_INVALID');
-      if (this.#interactiveAppData === undefined)
-        await withinInstallationDeadline(
-          discoverPiInstallation(
-            this.#environment,
-            this.#platform,
-            path,
-            undefined,
-            controller.signal,
-          ),
-          deadline,
-          () => controller.abort(),
-        );
-      else
-        await withinInstallationDeadline(
-          discoverPiInstallation(
-            this.#environment,
-            this.#platform,
-            path,
-            this.#interactiveAppData,
-            controller.signal,
-          ),
-          deadline,
-          () => controller.abort(),
-        );
+    if (path !== null && !(this.#platform === 'win32' ? win32 : posix).isAbsolute(path)) {
+      throw new ProviderError('PI_CONFIG_INVALID');
+    }
+    // Finish every fallible discovery/capability probe before committing the path. A reported
+    // timeout or validation error must never be followed by a late persisted setting.
+    const status = await this.#status(deadline, controller, path);
+    if (path !== null && status.state !== 'ready') {
+      throw new ProviderError(status.errorCode ?? 'PI_CONFIG_INVALID');
     }
     await withinInstallationDeadline(
       this.#settings.update({ smartProcessing: { piInstallationPath: path } }, controller.signal),
       deadline,
       () => controller.abort(),
     );
-    return await this.#status(deadline, controller);
+    return status;
   }
 
-  async browse(owner: BrowserWindow): Promise<PiInstallationStatus> {
-    const deadline = Date.now() + PI_INSTALLATION_OPERATION_TIMEOUT_MS;
-    const controller = new AbortController();
-    const selected = await withinInstallationDeadline(
-      this.#dialogs.choose(owner, {
-        title: 'Choose Pi installation folder',
-        buttonLabel: 'Use this folder',
-        properties: ['openDirectory'],
-      }),
-      deadline,
-      () => controller.abort(),
-    );
-    return selected === null
-      ? await this.#status(deadline, controller)
-      : await this.#save(selected, deadline, controller);
+  async browse(owner: BrowserWindow): Promise<string | null> {
+    // Keep unbounded human dialog dwell separate from bounded validation and persistence. The
+    // renderer explicitly submits a non-null selection through save() after this returns.
+    return await this.#dialogs.choose(owner, {
+      title: 'Choose Pi installation folder',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory'],
+    });
   }
 }
 

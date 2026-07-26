@@ -370,7 +370,8 @@ const PRESET_DATA = [
   {
     id: 'textgenwebui',
     displayName: 'Oobabooga Web UI',
-    description: "Run local LLMs using Oobabooga's Text Generation Web UI.",
+    description:
+      "Use the model already loaded by Oobabooga's Text Generation Web UI; no model ID is required.",
     logo: 'text-generation-webui.png',
     destinationHint: 'local',
     endpoint: configurable('http://127.0.0.1:5000/v1'),

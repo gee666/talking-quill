@@ -283,6 +283,9 @@ impl<P: Platform> Server<P> {
         self.gate.close();
         let _ = self.platform.set_session_capture(false);
         self.stop_platform();
+        if self.terminal.is_triggered() {
+            return false;
+        }
         self.send_success(id, EmptyResult {})
     }
 
@@ -293,7 +296,9 @@ impl<P: Platform> Server<P> {
 
     fn stop_platform(&mut self) {
         if !self.platform_stopped {
-            self.platform.shutdown();
+            if let Some(reason) = self.platform.shutdown() {
+                self.terminal.trigger(reason);
+            }
             self.platform_stopped = true;
         }
     }
@@ -398,7 +403,9 @@ impl<P: Platform> Server<P> {
         // results have already been replaced; never recurse if even a fallback
         // or future message violates the bound.
         if encode_outbound(&outbound).is_err() {
-            return true;
+            self.terminal
+                .trigger(TerminalReason::OutboundEncodingUnavailable);
+            return false;
         }
         if sender.try_send(outbound).is_ok() {
             true

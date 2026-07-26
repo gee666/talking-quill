@@ -152,7 +152,7 @@ describe('Echo session reducer', () => {
     (reason) => {
       const result = reduceEchoSession(arming(), { type: 'abort', reason });
       expect(result.state).toMatchObject({ phase: 'cancelled', abortReason: reason });
-      expect(result.effects).toEqual([{ type: 'teardown' }, { type: 'schedule-reset' }]);
+      expect(result.effects).toEqual([{ type: 'teardown' }]);
     },
   );
 
@@ -171,7 +171,7 @@ describe('Echo session reducer', () => {
     };
     const result = reduceEchoSession(state, { type: 'abort', reason: 'shutdown' });
     expect(result.state).toMatchObject({ phase: 'cancelled', abortReason: 'shutdown' });
-    expect(result.effects).toEqual([{ type: 'teardown' }, { type: 'schedule-reset' }]);
+    expect(result.effects).toEqual([{ type: 'teardown' }]);
   });
 
   it('keeps shutdown commit-pending until paste dispatch resolves', () => {
@@ -191,7 +191,7 @@ describe('Echo session reducer', () => {
     expect(pending.effects).toEqual([]);
     const cancelled = reduceEchoSession(pending.state, { type: 'insertion-cancelled' });
     expect(cancelled.state).toMatchObject({ phase: 'cancelled', abortReason: 'shutdown' });
-    expect(cancelled.effects).toEqual([{ type: 'teardown' }, { type: 'schedule-reset' }]);
+    expect(cancelled.effects).toEqual([{ type: 'teardown' }]);
   });
 
   it('lets a committed paste win over a pending shutdown without reporting cancellation', () => {
@@ -241,7 +241,7 @@ describe('Echo session reducer', () => {
       smart: false,
     });
     expect(result.state).toMatchObject({ phase: 'error', message: 'No speech was detected.' });
-    expect(result.effects).toEqual([{ type: 'teardown' }, { type: 'schedule-reset' }]);
+    expect(result.effects).toEqual([{ type: 'teardown' }]);
   });
 
   it.each(['user-cancel', 'shutdown', 'target-lost'] as const)(
@@ -280,21 +280,21 @@ describe('Echo session reducer', () => {
       state: { ...arming(), phase: 'processingSmart' as const, transcript: 'raw' },
       event: { type: 'smart-completed' as const, text: '   ' },
       phase: 'error',
-      effects: [{ type: 'teardown' }, { type: 'schedule-reset' }],
+      effects: [{ type: 'teardown' }],
     },
     {
       name: 'fail preserves a usable transcript',
       state: { ...arming(), phase: 'transcribing' as const },
       event: { type: 'fail' as const, message: 'worker failed', transcript: 'partial' },
       phase: 'error',
-      effects: [{ type: 'teardown' }, { type: 'schedule-reset' }],
+      effects: [{ type: 'teardown' }],
     },
     {
       name: 'inserted false completes as inserted',
       state: { ...arming(), phase: 'inserting' as const, transcript: 'text' },
       event: { type: 'inserted' as const, copied: false },
       phase: 'completed',
-      effects: [{ type: 'teardown' }, { type: 'schedule-reset' }],
+      effects: [{ type: 'teardown' }],
     },
     {
       name: 'reset always returns idle',

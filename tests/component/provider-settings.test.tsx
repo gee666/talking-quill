@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PROVIDER_CATALOG } from '../../app/src/main/providers/registry';
@@ -23,6 +23,10 @@ const setOnScreenAwareness = vi.fn<MainApi['providers']['setOnScreenAwareness']>
 const verifyVision = vi.fn<MainApi['providers']['verifyVision']>();
 const confirmVision = vi.fn<MainApi['providers']['confirmVision']>();
 const BINDING_TOKEN = '11111111-1111-4111-8111-111111111111';
+const LEGACY_PROVIDER_ENDPOINTS = [
+  'file:///legacy/provider',
+  'ftp://legacy.example/models',
+] as const;
 
 let settings = structuredClone(DEFAULT_SETTINGS);
 let settingsListener: ((next: Settings) => void) | null = null;
@@ -96,7 +100,13 @@ const api: MainApi = {
     onChanged: () => () => undefined,
   },
   app: {
-    getBootstrap: vi.fn(),
+    getBootstrap: () =>
+      Promise.resolve({
+        appVersion: '1.0.0',
+        platform: 'win32',
+        state: { enabled: true, status: 'needs-setup', modelReady: false, helper },
+        settings,
+      }),
     setEnabled: (enabled) =>
       Promise.resolve({ enabled, status: 'needs-setup', modelReady: false, helper }),
     onStateChanged: () => () => undefined,
@@ -206,16 +216,7 @@ const api: MainApi = {
         source: null,
         errorCode: 'PI_NOT_FOUND',
       }),
-    browsePiInstallation: () =>
-      Promise.resolve({
-        mode: 'automatic',
-        state: 'not-found',
-        configuredPath: null,
-        path: null,
-        version: null,
-        source: null,
-        errorCode: 'PI_NOT_FOUND',
-      }),
+    browsePiInstallation: () => Promise.resolve(null),
     saveConfig,
     setSecret,
     secretStatus,
@@ -316,12 +317,15 @@ beforeEach(() => {
   cancel.mockReset();
   cancel.mockResolvedValue(true);
   osaStatus.mockReset();
-  osaStatus.mockResolvedValue({
-    providerId: 'openai',
-    modelId: 'gpt-4.1-nano',
-    capability: 'supported',
-    manualTestAllowed: false,
-    screenPermission: 'granted',
+  osaStatus.mockImplementation(() => {
+    const providerId = settings.smartProcessing.selectedProviderId;
+    return Promise.resolve({
+      providerId,
+      modelId: settings.smartProcessing.providers[providerId]?.modelId ?? null,
+      capability: 'supported',
+      manualTestAllowed: false,
+      screenPermission: 'granted',
+    });
   });
   setOnScreenAwareness.mockReset();
   setOnScreenAwareness.mockResolvedValue(structuredClone(DEFAULT_SETTINGS));
@@ -332,7 +336,10 @@ beforeEach(() => {
   Object.defineProperty(window, 'talkingQuill', { configurable: true, value: api });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function renderSettings() {
   render(
@@ -363,22 +370,27 @@ describe('Pi model selection reconciliation', () => {
   };
 
   it('preserves exact selections and never silently selects or clears a model', () => {
-    expect(
-      reconcileDiscoveredModels([first, second], { modelId: 'p/two' }, true).draft.modelId,
-    ).toBe('p/two');
-    expect(reconcileDiscoveredModels([first], { modelId: 'p/two' }, true).draft.modelId).toBe(
-      'p/two',
+    expect(reconcileDiscoveredModels([first, second], { modelId: 'p/two' }, true).message).toBe(
+      null,
     );
-    expect(reconcileDiscoveredModels([first], {}, true).draft.modelId).toBeUndefined();
-    expect(reconcileDiscoveredModels([first, second], {}, true).draft.modelId).toBeUndefined();
-    const empty = reconcileDiscoveredModels([], { modelId: 'p/two' }, true);
-    expect(empty.draft.modelId).toBe('p/two');
-    expect(empty.message).toMatch(/exact saved model is retained/u);
+    expect(reconcileDiscoveredModels([first], { modelId: 'p/two' }, true).message).toMatch(
+      /exact selected Pi model.*retained/u,
+    );
+    expect(reconcileDiscoveredModels([first], {}, true).message).toBeNull();
+    expect(reconcileDiscoveredModels([first, second], {}, true).message).toBeNull();
+    expect(reconcileDiscoveredModels([], { modelId: 'p/two' }, true).message).toMatch(
+      /exact saved model is retained/u,
+    );
   });
 });
 
 describe('Smart processing settings', () => {
   it('keeps unknown vision off and cancels disclosed live image-echo verification', async () => {
+    settings = settingsWithConfig(settings, {
+      providerId: 'generic-openai',
+      baseUrl: 'https://example.test/v1',
+      modelId: 'private-model',
+    });
     const pendingVision: {
       resolve: ((value: { readonly verificationId: string }) => void) | null;
     } = { resolve: null };
@@ -441,6 +453,266 @@ describe('Smart processing settings', () => {
       }),
     );
     expect(await screen.findByRole('button', { name: /Groq.*The fastest/i })).toBeVisible();
+  });
+
+  it.each(LEGACY_PROVIDER_ENDPOINTS)(
+    'opens an unselected inert legacy endpoint for safe repair without executing it: %s',
+    async (baseUrl) => {
+      settings.smartProcessing.providers['generic-openai'] = {
+        baseUrl,
+        modelId: 'legacy-model',
+      };
+      const user = renderSettings();
+      await user.click(screen.getByRole('button', { name: 'Settings' }));
+      await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+      await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+      await user.type(
+        screen.getByRole('searchbox', { name: 'Search providers' }),
+        'Generic OpenAI',
+      );
+      await user.click(screen.getByRole('option', { name: /^Generic OpenAI.*Connect/ }));
+
+      const endpoint = await screen.findByRole('textbox', { name: 'Endpoint URL' });
+      expect(endpoint).toHaveValue(baseUrl);
+      expect(screen.getByText(/stored legacy endpoint is inactive/i)).toBeVisible();
+      expect(screen.getByText(/Destination unknown — not yet verified/i)).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Discover models' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Save configuration' })).toBeDisabled();
+      expect(saveConfig).not.toHaveBeenCalled();
+      expect(listModels).not.toHaveBeenCalled();
+      expect(testConnection).not.toHaveBeenCalled();
+      expect(destination).not.toHaveBeenCalled();
+
+      await user.clear(endpoint);
+      await user.type(endpoint, 'ftp://still-inert.example/models');
+      expect(screen.getByRole('button', { name: 'Save configuration' })).toBeDisabled();
+      await user.clear(endpoint);
+      await user.type(endpoint, 'https://repaired.example.test/v1');
+      expect(screen.queryByText(/stored legacy endpoint is inactive/i)).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+
+      await waitFor(() =>
+        expect(saveConfig).toHaveBeenCalledWith(
+          expect.objectContaining({
+            providerId: 'generic-openai',
+            baseUrl: 'https://repaired.example.test/v1',
+            modelId: 'legacy-model',
+          }),
+        ),
+      );
+      expect(await screen.findByText('Draft saved')).toBeVisible();
+      expect(await screen.findByRole('button', { name: /^Generic OpenAI.*Connect/ })).toBeVisible();
+    },
+  );
+
+  it('keeps the authoritative baseline across chained legacy repair selections', async () => {
+    settings.smartProcessing.providers['generic-openai'] = {
+      baseUrl: 'file:///legacy/provider',
+      modelId: 'legacy-model',
+    };
+    settings.smartProcessing.providers.litellm = {
+      baseUrl: 'ftp://legacy.example/models',
+      modelId: 'legacy-model',
+    };
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Generic OpenAI');
+    await user.click(screen.getByRole('option', { name: /^Generic OpenAI.*Connect/ }));
+    await user.click(await screen.findByRole('button', { name: /^Generic OpenAI.*Connect/ }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'LiteLLM');
+    await user.click(screen.getByRole('option', { name: /^LiteLLM/ }));
+    expect(await screen.findByRole('textbox', { name: 'Endpoint URL' })).toHaveValue(
+      'ftp://legacy.example/models',
+    );
+
+    settings = {
+      ...settings,
+      app: { ...settings.app, soundsEnabled: !settings.app.soundsEnabled },
+    };
+    act(() => {
+      settingsListener?.(settings);
+    });
+
+    expect(await screen.findByRole('button', { name: /^LiteLLM/ })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Endpoint URL' })).toHaveValue(
+      'ftp://legacy.example/models',
+    );
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it('abandons a repair draft when the authoritative provider changes', async () => {
+    settings.smartProcessing.providers['generic-openai'] = {
+      baseUrl: 'file:///legacy/provider',
+      modelId: 'legacy-model',
+    };
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Generic OpenAI');
+    await user.click(screen.getByRole('option', { name: /^Generic OpenAI.*Connect/ }));
+    expect(await screen.findByText(/stored legacy endpoint is inactive/i)).toBeVisible();
+
+    settings = settingsWithConfig(settings, {
+      providerId: 'openai',
+      modelId: 'gpt-4.1-mini',
+    });
+    act(() => {
+      settingsListener?.(settings);
+    });
+
+    expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps the persisted provider active while a new selection is saving or rejected', async () => {
+    const pending = deferred<Awaited<ReturnType<MainApi['providers']['saveConfig']>>>();
+    saveConfig.mockReturnValueOnce(pending.promise);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    const osa = await screen.findByRole('checkbox', {
+      name: 'Use the focused display for Smart context',
+    });
+    expect(osa).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
+    await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
+
+    expect(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i })).toBeDisabled();
+    expect(osa).toBeDisabled();
+    await user.click(osa);
+    expect(setOnScreenAwareness).not.toHaveBeenCalled();
+
+    pending.reject(new Error('selection write failed'));
+    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i })).toBeEnabled();
+  });
+
+  it('adopts a provider selection that commits before post-commit cleanup rejects', async () => {
+    saveConfig.mockImplementationOnce((config) => {
+      settings = settingsWithConfig(settings, config);
+      settingsListener?.(settings);
+      return Promise.reject(new Error('post-commit cleanup failed'));
+    });
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
+    await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
+
+    expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
+    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+  });
+
+  it('reconciles an authoritative provider event received while mounted', async () => {
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i });
+
+    settings = settingsWithConfig(settings, {
+      providerId: 'openai',
+      modelId: 'gpt-4.1-mini',
+    });
+    act(() => {
+      settingsListener?.(settings);
+    });
+
+    expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
+  });
+
+  it('refreshes retained credentials when a rejected selection invalidates an in-flight status request', async () => {
+    const staleStatus = deferred<ProviderCredentialState>();
+    const refreshedStatus = deferred<ProviderCredentialState>();
+    secretStatus
+      .mockReturnValueOnce(staleStatus.promise)
+      .mockReturnValueOnce(refreshedStatus.promise);
+    const selection = deferred<Awaited<ReturnType<MainApi['providers']['saveConfig']>>>();
+    saveConfig.mockReturnValueOnce(selection.promise);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await waitFor(() => expect(secretStatus).toHaveBeenCalledOnce());
+
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
+    await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
+    selection.reject(new Error('selection write failed'));
+
+    await waitFor(() => expect(secretStatus).toHaveBeenCalledTimes(2));
+    staleStatus.resolve({
+      providerId: 'ollama',
+      configured: true,
+      updatedAt: 1,
+      bindingToken: BINDING_TOKEN,
+    });
+    refreshedStatus.resolve({
+      providerId: 'ollama',
+      configured: false,
+      updatedAt: null,
+      bindingToken: BINDING_TOKEN,
+    });
+
+    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Store API key' })).toBeEnabled(),
+    );
+    expect(screen.queryByRole('button', { name: 'Replace API key' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Delete API key' })).toBeNull();
+  });
+
+  it('blocks credential mutations until a provider selection settles and restores the prior provider after rejection', async () => {
+    const pending = deferred<Awaited<ReturnType<MainApi['providers']['saveConfig']>>>();
+    saveConfig.mockReturnValueOnce(pending.promise);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    const password = await screen.findByLabelText('API key', { selector: 'input' });
+    const storeCredential = screen.getByRole('button', { name: 'Store API key' });
+    await waitFor(() => expect(storeCredential).toBeEnabled());
+    await user.type(password, 'selection-race-secret');
+
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
+    await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
+
+    expect(password).toBeDisabled();
+    expect(storeCredential).toBeDisabled();
+    await user.click(storeCredential);
+    expect(setSecret).not.toHaveBeenCalled();
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+
+    pending.reject(new Error('selection write failed'));
+    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i })).toBeEnabled();
+    expect(password).toBeEnabled();
+    expect(storeCredential).toBeEnabled();
+    expect(password).toHaveValue('selection-race-secret');
+  });
+
+  it('clears unsaved credentials after a successful provider switch', async () => {
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    const ollamaCredential = await screen.findByLabelText('API key', { selector: 'input' });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Store API key' })).toBeEnabled(),
+    );
+    await user.type(ollamaCredential, 'must-not-cross-providers');
+
+    await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
+    await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
+
+    expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
+    expect(screen.getByLabelText('API key', { selector: 'input' })).toHaveValue('');
   });
 
   it.each(PROVIDER_CATALOG)(
@@ -515,7 +787,7 @@ describe('Smart processing settings', () => {
       .mockResolvedValue(ready);
     const browse = vi
       .spyOn(window.talkingQuill.providers, 'browsePiInstallation')
-      .mockResolvedValue(ready);
+      .mockResolvedValue('C:\\Browsed\\pi.cmd');
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
@@ -534,6 +806,7 @@ describe('Smart processing settings', () => {
 
     await user.click(screen.getByRole('button', { name: 'Browse folder…' }));
     await waitFor(() => expect(browse).toHaveBeenCalledOnce());
+    await waitFor(() => expect(savePath).toHaveBeenLastCalledWith('C:\\Browsed\\pi.cmd'));
 
     savePath.mockRejectedValueOnce({ code: 'PI_CONFIG_INVALID' });
     await user.clear(input);
@@ -541,6 +814,60 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('button', { name: 'Save path' }));
     expect(await screen.findByText(/configured path is stale or invalid/i)).toBeVisible();
     expect(screen.queryByText(/Pi 0\.81\.0/)).toBeNull();
+  });
+
+  it('keeps Pi dialog dwell separate from bounded validation and does not persist cancellation', async () => {
+    const dialog = deferred<string | null>();
+    const browse = vi
+      .spyOn(window.talkingQuill.providers, 'browsePiInstallation')
+      .mockReturnValueOnce(dialog.promise);
+    const savePath = vi.spyOn(window.talkingQuill.providers, 'savePiInstallation');
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
+    await user.click(screen.getByRole('option', { name: /^PiUse/ }));
+
+    const browseButton = await screen.findByRole('button', { name: 'Browse folder…' });
+    await user.click(browseButton);
+    expect(browse).toHaveBeenCalledOnce();
+    expect(browseButton).toBeDisabled();
+    expect(savePath).not.toHaveBeenCalled();
+
+    dialog.resolve(null);
+    await waitFor(() => expect(browseButton).toBeEnabled());
+    expect(savePath).not.toHaveBeenCalled();
+  });
+
+  it('prevents Pi path and provider configuration mutations from overlapping', async () => {
+    const pendingPath = deferred<Awaited<ReturnType<MainApi['providers']['savePiInstallation']>>>();
+    vi.spyOn(window.talkingQuill.providers, 'savePiInstallation').mockReturnValueOnce(
+      pendingPath.promise,
+    );
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Pi');
+    await user.click(screen.getByRole('option', { name: /^PiUse/ }));
+
+    const path = await screen.findByRole('textbox', { name: 'Pi installation path' });
+    await user.type(path, 'C:\\Program Files\\npm\\pi.cmd');
+    await user.click(screen.getByRole('button', { name: 'Save path' }));
+
+    expect(screen.getByRole('button', { name: /^PiUse/ })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Pi model' })).toBeDisabled();
+    pendingPath.resolve({
+      mode: 'configured',
+      state: 'ready',
+      configuredPath: 'C:\\Program Files\\npm\\pi.cmd',
+      path: 'C:\\Program Files\\npm\\node_modules\\pi\\dist\\cli.js',
+      version: '0.81.0',
+      source: 'configured',
+      errorCode: null,
+    });
+    await waitFor(() => expect(path).toBeEnabled());
   });
 
   it('renders Pi empty and malformed discovery states with specific guidance', async () => {
@@ -620,6 +947,30 @@ describe('Smart processing settings', () => {
     expect(await screen.findByText('Model discovery cancelled.')).toBeVisible();
   });
 
+  it('tests Text Generation WebUI using its currently loaded model without model controls', async () => {
+    settings = settingsWithConfig(settings, {
+      providerId: 'textgenwebui',
+      baseUrl: 'http://127.0.0.1:5000/v1',
+      contextWindow: 4_096,
+    });
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+
+    expect(await screen.findByText(/model already loaded.*no model ID is required/i)).toBeVisible();
+    expect(screen.queryByRole('textbox', { name: 'Model' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Discover models' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Select and save a model before testing')).not.toBeInTheDocument();
+    expect(screen.getByText(/using the model currently loaded by the provider/i)).toBeVisible();
+    const testButton = screen.getByRole('button', { name: 'Test connection' });
+    expect(testButton).toBeEnabled();
+    await user.click(testButton);
+    expect(testConnection).toHaveBeenCalledWith(
+      'textgenwebui',
+      expect.stringContaining('textgenwebui-test-'),
+    );
+  });
+
   it('renders validated native Azure and Bedrock configuration controls', async () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
@@ -642,8 +993,26 @@ describe('Smart processing settings', () => {
     await user.clear(screen.getByRole('searchbox', { name: 'Search providers' }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Bedrock');
     await user.click(screen.getByRole('option', { name: /^AWS Bedrock/ }));
-    expect(await screen.findByRole('combobox', { name: 'AWS region' })).toHaveValue('us-west-2');
+    expect(await screen.findByRole('textbox', { name: 'AWS region' })).toHaveValue('us-west-2');
     expect(screen.getByRole('textbox', { name: 'Model' })).toBeVisible();
+  });
+
+  it('renders provider-managed Text Generation WebUI guidance without Azure deployment advice', async () => {
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Oobabooga');
+    await user.click(screen.getByRole('option', { name: /^Oobabooga Web UI/ }));
+
+    expect(
+      await screen.findByText(/uses its currently loaded model.*does not select one/i),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/Deployment discovery requires Azure management-plane credentials/i),
+    ).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Discover models' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Model' })).toBeNull();
   });
 
   it('stores structured Bedrock credentials write-only and clears every field immediately', async () => {
@@ -659,19 +1028,24 @@ describe('Smart processing settings', () => {
     const accessKey = screen.getByLabelText('AWS access key ID');
     const secretKey = screen.getByLabelText('AWS secret access key');
     const sessionToken = screen.getByLabelText('AWS session token (optional)');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Store AWS credentials' })).toBeEnabled(),
+    );
     await user.type(accessKey, 'AKIDCOMPONENT1234');
     await user.type(secretKey, 'component-secret-access-key');
     await user.type(sessionToken, 'component-session-token');
     await user.click(screen.getByRole('button', { name: 'Store AWS credentials' }));
 
-    expect(setSecret).toHaveBeenCalledWith(
-      'bedrock',
-      BINDING_TOKEN,
-      JSON.stringify({
-        accessKeyId: 'AKIDCOMPONENT1234',
-        secretAccessKey: 'component-secret-access-key',
-        sessionToken: 'component-session-token',
-      }),
+    await waitFor(() =>
+      expect(setSecret).toHaveBeenCalledWith(
+        'bedrock',
+        BINDING_TOKEN,
+        JSON.stringify({
+          accessKeyId: 'AKIDCOMPONENT1234',
+          secretAccessKey: 'component-secret-access-key',
+          sessionToken: 'component-session-token',
+        }),
+      ),
     );
     expect(accessKey).toHaveValue('');
     expect(secretKey).toHaveValue('');
@@ -695,12 +1069,22 @@ describe('Smart processing settings', () => {
   });
 
   it('clears write-only secrets immediately and supports configured, replace, and delete status', async () => {
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: 'llama3.2',
+    };
     const pending = deferred<Awaited<ReturnType<MainApi['providers']['setSecret']>>>();
     setSecret.mockReturnValueOnce(pending.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     const password = await screen.findByLabelText('API key', { selector: 'input' });
+    const connectionTest = screen.getByRole('button', { name: 'Test connection' });
+    const osa = await screen.findByRole('checkbox', {
+      name: 'Use the focused display for Smart context',
+    });
+    expect(connectionTest).toBeEnabled();
+    expect(osa).toBeEnabled();
     const canary = 'component-secret-canary';
     await user.type(password, canary);
 
@@ -709,6 +1093,8 @@ describe('Smart processing settings', () => {
     expect(setSecret).toHaveBeenCalledWith('ollama', BINDING_TOKEN, canary);
     expect(password).toHaveValue('');
     expect(document.body.textContent).not.toContain(canary);
+    expect(connectionTest).toBeDisabled();
+    expect(osa).toBeDisabled();
     pending.resolve({
       providerId: 'ollama',
       configured: true,
@@ -734,7 +1120,7 @@ describe('Smart processing settings', () => {
     await screen.findByRole('button', { name: 'Discover models' });
 
     await user.click(screen.getByRole('button', { name: 'Discover models' }));
-    expect(await screen.findByText('1 models found')).toBeVisible();
+    expect(await screen.findByText('1 model found')).toBeVisible();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'llama3.2');
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
 
@@ -753,6 +1139,29 @@ describe('Smart processing settings', () => {
     expect(
       await screen.findByText(/Connection verified. 1 compatible model reported/),
     ).toBeVisible();
+  });
+
+  it('bounds large model pickers and keeps every model searchable', async () => {
+    listModels.mockResolvedValue(
+      Array.from({ length: 350 }, (_, index) => ({
+        id: `model-${String(index)}`,
+        name: `Model ${String(index)}`,
+        contextWindow: 8_192,
+        vision: 'unsupported' as const,
+      })),
+    );
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await user.click(await screen.findByRole('button', { name: 'Discover models' }));
+
+    const model = await screen.findByRole('combobox', { name: 'Model' });
+    expect(within(model).getAllByRole('option')).toHaveLength(201);
+    const searchModels = screen.getByRole('searchbox', { name: 'Search discovered models' });
+    await user.type(searchModels, 'Model 349');
+    expect(within(model).getByRole('option', { name: 'Model 349' })).toBeVisible();
+    await user.selectOptions(model, 'model-349');
+    expect(model).toHaveValue('model-349');
   });
 
   it('ignores a stale connection result after switching providers', async () => {
@@ -818,6 +1227,34 @@ describe('Smart processing settings', () => {
     );
     expect(await screen.findByText('Not configured')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Store API key' })).toBeEnabled();
+  });
+
+  it('keeps a persisted credential status request valid across draft edit and revert', async () => {
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: 'llama3.2',
+    };
+    const pendingStatus = deferred<ProviderCredentialState>();
+    secretStatus.mockReturnValueOnce(pendingStatus.promise);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await waitFor(() => expect(secretStatus).toHaveBeenCalledOnce());
+
+    const model = screen.getByRole('textbox', { name: 'Model' });
+    await user.clear(model);
+    await user.type(model, 'temporary-model');
+    await user.clear(model);
+    await user.type(model, 'llama3.2');
+    pendingStatus.resolve({
+      providerId: 'ollama',
+      configured: true,
+      updatedAt: 1,
+      bindingToken: BINDING_TOKEN,
+    });
+
+    expect(await screen.findByText('Configured')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Replace API key' })).toBeEnabled();
   });
 
   it('never exposes the previous binding status while the new status is pending', async () => {
@@ -928,6 +1365,60 @@ describe('Smart processing settings', () => {
     firstDestination.resolve('local');
     await waitFor(() => expect(screen.getByText(/Cloud destination — verified/)).toBeVisible());
     expect(screen.getByText(/provider may charge your account/i)).toBeVisible();
+  });
+
+  it('keeps a newer connection destination authoritative over a late destination-only result', async () => {
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: 'llama3.2',
+    };
+    const staleDestination = deferred<'local'>();
+    destination.mockReturnValueOnce(staleDestination.promise);
+    testConnection.mockResolvedValueOnce({ ok: true, destination: 'cloud', modelCount: 1 });
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+
+    const model = screen.getByRole('textbox', { name: 'Model' });
+    await user.clear(model);
+    await user.type(model, 'new-model');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    await waitFor(() => expect(destination).toHaveBeenCalledOnce());
+    const staleOperationId = destination.mock.calls[0]?.[1];
+
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(cancel).toHaveBeenCalledWith(staleOperationId);
+    expect(await screen.findByText(/Cloud destination — verified/)).toBeVisible();
+    staleDestination.resolve('local');
+    await waitFor(() => expect(screen.getByText(/Cloud destination — verified/)).toBeVisible());
+    expect(screen.queryByText(/Local destination — verified/)).toBeNull();
+  });
+
+  it('settles a connection test when later model discovery claims destination authority', async () => {
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: 'llama3.2',
+    };
+    const pendingConnection =
+      deferred<Awaited<ReturnType<MainApi['providers']['testConnection']>>>();
+    const pendingDestination = deferred<'local'>();
+    testConnection.mockReturnValueOnce(pendingConnection.promise);
+    destination.mockReturnValueOnce(pendingDestination.promise);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    await user.click(screen.getByRole('button', { name: 'Discover models' }));
+    await waitFor(() => expect(destination).toHaveBeenCalledOnce());
+    pendingConnection.resolve({ ok: true, destination: 'cloud', modelCount: 1 });
+
+    expect(
+      await screen.findByText(/Connection verified. 1 compatible model reported/),
+    ).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Cancel test' })).toBeNull();
+    pendingDestination.resolve('local');
+    expect(await screen.findByText(/Local destination — verified/)).toBeVisible();
   });
 
   it('keeps overlapping model and connection cancellation scoped to the right operation', async () => {

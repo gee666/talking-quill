@@ -121,4 +121,32 @@ describe('atomic reset preparation', () => {
     expect(cancel).toHaveBeenCalledOnce();
     expect(onAbort).toHaveBeenCalledExactlyOnceWith(true);
   });
+
+  it('preserves drain diagnostics when journal cancellation also fails', async () => {
+    const onAbort = vi.fn();
+    const preparation = prepareResetSafely({
+      journal: {
+        prepareReset: vi.fn(),
+        cancelPreparedReset: () => Promise.reject(new Error('journal cleanup failed')),
+      },
+      quiesce: vi.fn(),
+      criticalSteps: [{ name: 'settings', run: () => Promise.reject(new Error('flush failed')) }],
+      timeoutMs: 100,
+      onAbort,
+    });
+
+    let rejection: unknown;
+    try {
+      await preparation;
+    } catch (error: unknown) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(ResetPreparationError);
+    if (!(rejection instanceof ResetPreparationError)) throw new Error('Expected rejection');
+    expect(rejection.diagnostics).toEqual([
+      { phase: 'shutdown', step: 'settings', outcome: 'rejected' },
+    ]);
+    expect(rejection.cause).toBeInstanceOf(AggregateError);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(false);
+  });
 });

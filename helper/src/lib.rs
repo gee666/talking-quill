@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use thiserror::Error;
 
 use crate::{
@@ -159,6 +159,7 @@ pub fn run() -> Result<(), RunError> {
 
     let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
     server.shutdown();
+    let outcome = outcome_after_shutdown(outcome, &terminal);
     drop(server);
 
     // Accepted critical batches receive the same bounded flush window on
@@ -178,11 +179,12 @@ pub fn run() -> Result<(), RunError> {
 }
 
 /// In-memory production coordinator used by framing/property integration tests.
-/// It shares the exact stdin decoder, coordinator, server, outbound encoder, and frame writer.
-/// `output` must be an in-memory/nonblocking writer; unlike `run`, this test
-/// adapter joins its scoped writer directly so it cannot safely detach a borrow.
+/// It shares the exact bounded, detached stdin reader, coordinator, server,
+/// outbound encoder, and frame writer. `output` must be an in-memory/nonblocking
+/// writer; unlike `run`, this test adapter joins its scoped writer directly so
+/// it cannot safely detach a borrow.
 #[doc(hidden)]
-pub fn run_framed_stream<P: Platform, R: Read, W: Write + Send>(
+pub fn run_framed_stream<P: Platform, R: Read + Send + 'static, W: Write + Send>(
     platform: P,
     input: R,
     mut output: W,
@@ -201,8 +203,20 @@ pub fn run_framed_stream<P: Platform, R: Read, W: Write + Send>(
     );
     drop(critical_tx);
     drop(outbound_tx);
-    let (input_tx, input_rx) = unbounded();
-    stdin_loop(input, input_tx);
+    let (input_tx, input_rx) = bounded(INPUT_QUEUE_CAPACITY);
+    let stdin_reader = match thread::Builder::new()
+        .name("talking-quill-helper-test-stdin".into())
+        .spawn(move || stdin_loop(input, input_tx))
+    {
+        Ok(reader) => reader,
+        Err(_) => {
+            server.shutdown();
+            drop(server);
+            return Err(RunError::ReaderThread);
+        }
+    };
+    // Match production: a blocked reader must not delay terminal shutdown.
+    drop(stdin_reader);
     let writer_terminal = Arc::clone(&terminal);
     let (outcome, writer_result) = thread::scope(|scope| {
         let writer = scope.spawn(move || {
@@ -210,6 +224,7 @@ pub fn run_framed_stream<P: Platform, R: Read, W: Write + Send>(
         });
         let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
         server.shutdown();
+        let outcome = outcome_after_shutdown(outcome, &terminal);
         drop(server);
         let writer_result = writer
             .join()
@@ -285,6 +300,16 @@ fn coordinate<P: Platform>(
                 }
             }
         }
+    }
+}
+
+fn outcome_after_shutdown(
+    outcome: CoordinatorOutcome,
+    terminal: &TerminalSignal,
+) -> CoordinatorOutcome {
+    match (outcome, terminal.reason()) {
+        (CoordinatorOutcome::Clean, Some(reason)) => CoordinatorOutcome::Terminal(reason),
+        (outcome, _) => outcome,
     }
 }
 
@@ -424,14 +449,12 @@ fn write_message<W: Write>(
 ) -> Result<(), FrameError> {
     let payload = match encode_outbound(&message) {
         Ok(payload) => payload,
-        Err(OutboundEncodingError::FrameTooLarge(_)) => {
-            // The complete JSON value was rejected before any stdout write.
-            // Drop unexpected oversized notifications fail-open; request
-            // results are replaced with a bounded error before enqueue.
-            return Ok(());
+        Err(OutboundEncodingError::FrameTooLarge(size)) => {
+            terminal.trigger(TerminalReason::OutboundEncodingUnavailable);
+            return Err(FrameError::OutboundTooLarge(size));
         }
         Err(OutboundEncodingError::Serialization(error)) => {
-            terminal.trigger(TerminalReason::StdoutDisconnected);
+            terminal.trigger(TerminalReason::OutboundEncodingUnavailable);
             return Err(FrameError::Io(io::Error::other(error)));
         }
     };
@@ -445,7 +468,10 @@ fn write_message<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::{ActivationKey, EventPhase, HelperEvent};
+    use crate::{
+        keyboard::{ActivationKey, EventPhase, HelperEvent},
+        protocol::{RequestId, RpcResponse},
+    };
 
     struct BrokenWriter;
 
@@ -504,6 +530,35 @@ mod tests {
         assert_eq!(
             terminal_rx.try_recv(),
             Ok(TerminalReason::StdoutDisconnected)
+        );
+    }
+
+    #[test]
+    fn unexpected_outbound_encoding_overflow_is_terminal() {
+        let gate = Arc::new(CallbackGate::new());
+        gate.open();
+        let (terminal_tx, _terminal_rx) = bounded(1);
+        let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
+        let (outbound_tx, outbound_rx) = bounded(1);
+        outbound_tx
+            .send(Outbound::Response(
+                RpcResponse::success(
+                    RequestId::Number(1),
+                    "x".repeat(crate::framing::MAX_FRAME_BYTES),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        drop(outbound_tx);
+
+        assert!(matches!(
+            write_messages(outbound_rx, Arc::clone(&terminal), &mut Vec::new()),
+            Err(FrameError::OutboundTooLarge(_))
+        ));
+        assert!(!gate.is_open());
+        assert_eq!(
+            terminal.reason(),
+            Some(TerminalReason::OutboundEncodingUnavailable)
         );
     }
 

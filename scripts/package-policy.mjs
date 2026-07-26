@@ -71,8 +71,62 @@ const ASAR_EXACT_FILES = new Set([
   'node_modules/onnxruntime-common/package.json',
   'node_modules/onnxruntime-common/dist/cjs/package.json',
 ]);
-const ONNX_RUNTIME_PATTERN =
-  /^node_modules\/onnxruntime-(?:node\/(?:dist\/[\w-]+\.js|bin\/napi-v3(?:\/(?:darwin|win32|linux)(?:\/(?:x64|arm64)(?:\/[\w.-]+)?)?)?)|common\/dist\/cjs\/[\w-]+\.js)$/;
+export const ONNX_RUNTIME_PATHS = Object.freeze([
+  'node_modules/onnxruntime-node/dist/backend.js',
+  'node_modules/onnxruntime-node/dist/binding.js',
+  'node_modules/onnxruntime-node/dist/index.js',
+  'node_modules/onnxruntime-node/dist/version.js',
+  ...[
+    'backend-impl',
+    'backend',
+    'env-impl',
+    'env',
+    'index',
+    'inference-session-impl',
+    'inference-session',
+    'onnx-model',
+    'onnx-value',
+    'tensor-conversion-impl',
+    'tensor-conversion',
+    'tensor-factory-impl',
+    'tensor-factory',
+    'tensor-impl-type-mapping',
+    'tensor-impl',
+    'tensor-utils-impl',
+    'tensor-utils',
+    'tensor',
+    'trace',
+    'type-helper',
+    'version',
+  ].map((name) => `node_modules/onnxruntime-common/dist/cjs/${name}.js`),
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/libonnxruntime.1.21.0.dylib',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/onnxruntime_binding.node',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/libonnxruntime.1.21.0.dylib',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/onnxruntime_binding.node',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/arm64',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/arm64/libonnxruntime.so.1',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/arm64/libonnxruntime.so.1.21.0',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/arm64/onnxruntime_binding.node',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/x64',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.1',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.1.21.0',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_shared.so',
+  'node_modules/onnxruntime-node/bin/napi-v3/linux/x64/onnxruntime_binding.node',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/arm64',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/DirectML.dll',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/onnxruntime.dll',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/onnxruntime_binding.node',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/DirectML.dll',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
+]);
+const ONNX_RUNTIME_EXACT_PATHS = new Set(ONNX_RUNTIME_PATHS);
 const OUT_EXACT_PATHS = new Set([
   'out',
   'out/main',
@@ -134,11 +188,75 @@ export const PROVIDER_LOGO_BASENAMES = Object.freeze([
   'xai',
   'zai',
 ]);
+const JPEG_PROVIDER_LOGOS = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 const PROVIDER_LOGO_PATTERN = new RegExp(
-  `^out/renderer/assets/(?:${PROVIDER_LOGO_BASENAMES.join('|')})-[A-Za-z0-9_-]+\\.(?:png|jpeg)$`,
+  `^out/renderer/assets/(${PROVIDER_LOGO_BASENAMES.join('|')})-[A-Za-z0-9_-]+\\.(png|jpeg)$`,
 );
-const OUT_ASSET_PATTERN =
-  /^out\/renderer\/assets\/(?:(?:main|widget|capture|capture\.worklet|audio|status-presentation|Status|theme|InfoScreen|SettingsScreen|SmartProcessingSection|schemas)-[A-Za-z0-9_-]+\.(?:js|css)|(?:app-icon|logo-light|logo-dark)-[A-Za-z0-9_-]+\.png)$/;
+const REQUIRED_RENDERER_CHUNKS = Object.freeze([
+  ['main', 'js'],
+  ['main', 'css'],
+  ['widget', 'js'],
+  ['widget', 'css'],
+  ['capture', 'js'],
+  ['capture.worklet', 'js'],
+  ['audio', 'js'],
+  ['echo-session', 'js'],
+  ['echo-session', 'css'],
+  ['InfoScreen', 'js'],
+  ['SettingsScreen', 'js'],
+  ['SmartProcessingSection', 'js'],
+  ['schemas', 'js'],
+]);
+const REQUIRED_BRAND_LOGOS = Object.freeze(['logo-light', 'logo-dark']);
+
+function rendererChunkPattern(stem, extension) {
+  return new RegExp(
+    `^out/renderer/assets/${stem.replaceAll('.', '\\.')}-[A-Za-z0-9_-]+\\.${extension}$`,
+  );
+}
+
+function isAllowedRendererAsset(entry) {
+  if (
+    REQUIRED_RENDERER_CHUNKS.some(([stem, extension]) =>
+      rendererChunkPattern(stem, extension).test(entry),
+    )
+  ) {
+    return true;
+  }
+  if (/^out\/renderer\/assets\/logo-(?:light|dark)-[A-Za-z0-9_-]+\.png$/u.test(entry)) {
+    return true;
+  }
+  const provider = PROVIDER_LOGO_PATTERN.exec(entry);
+  return (
+    provider !== null && provider[2] === (JPEG_PROVIDER_LOGOS.has(provider[1]) ? 'jpeg' : 'png')
+  );
+}
+
+function requireExactlyOneAsset(entries, pattern, label) {
+  const count = entries.filter((entry) => pattern.test(entry)).length;
+  if (count === 0) throw new Error(`Required renderer asset is missing: ${label}`);
+  if (count !== 1) throw new Error(`Required renderer asset count is not one (${label}): ${count}`);
+}
+const ONNX_RESOURCE_PREFIX = 'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3';
+const ONNX_RESOURCE_PATHS = Object.freeze({
+  win: Object.freeze([
+    `${ONNX_RESOURCE_PREFIX}/win32`,
+    ...['x64', 'arm64'].flatMap((arch) => [
+      `${ONNX_RESOURCE_PREFIX}/win32/${arch}`,
+      `${ONNX_RESOURCE_PREFIX}/win32/${arch}/DirectML.dll`,
+      `${ONNX_RESOURCE_PREFIX}/win32/${arch}/onnxruntime.dll`,
+      `${ONNX_RESOURCE_PREFIX}/win32/${arch}/onnxruntime_binding.node`,
+    ]),
+  ]),
+  mac: Object.freeze([
+    `${ONNX_RESOURCE_PREFIX}/darwin`,
+    ...['x64', 'arm64'].flatMap((arch) => [
+      `${ONNX_RESOURCE_PREFIX}/darwin/${arch}`,
+      `${ONNX_RESOURCE_PREFIX}/darwin/${arch}/libonnxruntime.1.21.0.dylib`,
+      `${ONNX_RESOURCE_PREFIX}/darwin/${arch}/onnxruntime_binding.node`,
+    ]),
+  ]),
+});
 const COMMON_RESOURCE_PATHS = [
   'app.asar',
   'LICENSE',
@@ -152,11 +270,9 @@ const COMMON_RESOURCE_PATHS = [
   'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
   'app.asar.unpacked/node_modules/onnxruntime-node',
   'app.asar.unpacked/node_modules/onnxruntime-node/bin',
-  'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3',
+  ONNX_RESOURCE_PREFIX,
   'helper',
 ];
-const ONNX_RESOURCE_PATTERN =
-  /^app\.asar\.unpacked\/node_modules\/onnxruntime-node\/bin\/napi-v3\/(?:darwin|win32|linux)(?:\/(?:x64|arm64)(?:\/[\w.-]+)?)?$/;
 const PLATFORM_RESOURCE_PATHS = Object.freeze({
   win: Object.freeze(['elevate.exe', 'helper/talking-quill-helper.exe']),
   mac: Object.freeze(['electron.icns', 'helper/talking-quill-helper']),
@@ -169,9 +285,8 @@ export function validateAsarEntries(entries) {
       entry.length > 0 &&
       !ASAR_EXACT_FILES.has(entry) &&
       !OUT_EXACT_PATHS.has(entry) &&
-      !OUT_ASSET_PATTERN.test(entry) &&
-      !ONNX_RUNTIME_PATTERN.test(entry) &&
-      !PROVIDER_LOGO_PATTERN.test(entry),
+      !isAllowedRendererAsset(entry) &&
+      !ONNX_RUNTIME_EXACT_PATHS.has(entry),
   );
   assertSafePaths(normalized);
   if (unexpected.length > 0) {
@@ -198,26 +313,31 @@ export function validateAsarEntries(entries) {
     if (!normalized.includes(required))
       throw new Error(`Required runtime file is missing: ${required}`);
   }
-  for (const logo of PROVIDER_LOGO_BASENAMES) {
-    const asset = new RegExp(`^out/renderer/assets/${logo}-[A-Za-z0-9_-]+\\.(?:png|jpeg)$`);
-    if (!normalized.some((entry) => asset.test(entry))) {
-      throw new Error(`Required provider logo is missing: ${logo}`);
+  for (const required of ONNX_RUNTIME_PATHS) {
+    if (!normalized.includes(required)) {
+      throw new Error(`Required ONNX runtime path is missing: ${required}`);
     }
   }
-  for (const asset of [
-    /^out\/renderer\/assets\/main-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/main-[A-Za-z0-9_-]+\.css$/,
-    /^out\/renderer\/assets\/widget-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/widget-[A-Za-z0-9_-]+\.css$/,
-    /^out\/renderer\/assets\/capture-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/capture\.worklet-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/audio-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/(?:status-presentation|Status|theme)-[A-Za-z0-9_-]+\.js$/,
-    /^out\/renderer\/assets\/(?:status-presentation|Status|theme)-[A-Za-z0-9_-]+\.css$/,
-  ]) {
-    if (!normalized.some((entry) => asset.test(entry))) {
-      throw new Error(`Required renderer asset is missing: ${String(asset)}`);
-    }
+  for (const logo of PROVIDER_LOGO_BASENAMES) {
+    const extension = JPEG_PROVIDER_LOGOS.has(logo) ? 'jpeg' : 'png';
+    const asset = new RegExp(`^out/renderer/assets/${logo}-[A-Za-z0-9_-]+\\.${extension}$`);
+    const count = normalized.filter((entry) => asset.test(entry)).length;
+    if (count === 0) throw new Error(`Required provider logo is missing: ${logo}`);
+    if (count !== 1) throw new Error(`Required provider logo count is not one (${logo}): ${count}`);
+  }
+  for (const [stem, extension] of REQUIRED_RENDERER_CHUNKS) {
+    requireExactlyOneAsset(
+      normalized,
+      rendererChunkPattern(stem, extension),
+      `${stem}.${extension}`,
+    );
+  }
+  for (const logo of REQUIRED_BRAND_LOGOS) {
+    requireExactlyOneAsset(
+      normalized,
+      new RegExp(`^out/renderer/assets/${logo}-[A-Za-z0-9_-]+\\.png$`),
+      `${logo}.png`,
+    );
   }
 }
 
@@ -284,20 +404,18 @@ export function validateSharedReleaseArtifacts(artifactNames, mode, expectedArti
     throw new Error(`Unexpected shared release artifacts: ${unrelated.join(', ')}`);
 }
 
-export function validateExpectedFinalArtifacts(artifactNames, mode, expectedArtifact) {
-  const normalized = artifactNames.map(normalizePackagePath);
-  if (
-    expectedArtifact === null ||
-    typeof expectedArtifact !== 'object' ||
-    !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/u.test(expectedArtifact.version) ||
-    !['win', 'mac'].includes(expectedArtifact.platform) ||
-    !['x64', 'arm64'].includes(expectedArtifact.arch)
-  ) {
-    throw new Error('Expected final-artifact version, platform, and architecture are invalid');
-  }
+export function finalArtifactNamesForIdentity(artifactNames, expectedArtifact) {
+  validateExpectedArtifactIdentity(expectedArtifact);
   const expectedStem = `Talking-Quill-${expectedArtifact.version}-${expectedArtifact.platform}-${expectedArtifact.arch}`;
   const expectedNamePattern = new RegExp(`^${escapeRegExp(expectedStem)}\\.(?:exe|dmg|zip)$`, 'u');
-  const unexpectedNames = normalized.filter((name) => !expectedNamePattern.test(name));
+  return artifactNames.map(normalizePackagePath).filter((name) => expectedNamePattern.test(name));
+}
+
+export function validateExpectedFinalArtifacts(artifactNames, mode, expectedArtifact) {
+  validateExpectedArtifactIdentity(expectedArtifact);
+  const normalized = artifactNames.map(normalizePackagePath);
+  const matching = finalArtifactNamesForIdentity(normalized, expectedArtifact);
+  const unexpectedNames = normalized.filter((name) => !matching.includes(name));
   if (unexpectedNames.length > 0) {
     throw new Error(`Unexpected final artifact names: ${unexpectedNames.join(', ')}`);
   }
@@ -370,12 +488,17 @@ export function validatePhysicalPackageEntries(entries, target) {
 }
 
 export function validateResourceEntries(entries, target) {
+  if (!['win', 'mac'].includes(target)) {
+    throw new Error(`Unknown packaged resource target: ${String(target)}`);
+  }
   const normalized = entries.map(normalizePackagePath);
-  const allowed = new Set([...COMMON_RESOURCE_PATHS, ...PLATFORM_RESOURCE_PATHS[target]]);
+  const allowed = new Set([
+    ...COMMON_RESOURCE_PATHS,
+    ...PLATFORM_RESOURCE_PATHS[target],
+    ...ONNX_RESOURCE_PATHS[target],
+  ]);
   assertSafePaths(normalized);
-  const unexpected = normalized.filter(
-    (entry) => entry.length > 0 && !allowed.has(entry) && !ONNX_RESOURCE_PATTERN.test(entry),
-  );
+  const unexpected = normalized.filter((entry) => entry.length > 0 && !allowed.has(entry));
   if (unexpected.length > 0) {
     throw new Error(`Unexpected packaged resources: ${unexpected.join(', ')}`);
   }
@@ -386,11 +509,29 @@ export function validateResourceEntries(entries, target) {
     'LICENSE',
     'THIRD_PARTY_NOTICES.txt',
     'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
-    'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3',
+    ONNX_RESOURCE_PREFIX,
     helper,
   ]) {
     if (!normalized.includes(required)) {
       throw new Error(`Required packaged resource is missing: ${required}`);
+    }
+  }
+  const onnxPlatform = target === 'mac' ? 'darwin' : 'win32';
+  const platformRoot = `${ONNX_RESOURCE_PREFIX}/${onnxPlatform}`;
+  const architectures = ['x64', 'arm64'].filter((arch) =>
+    normalized.includes(`${platformRoot}/${arch}`),
+  );
+  if (architectures.length !== 1) {
+    throw new Error(
+      `Required ONNX resource architecture count is not one: ${architectures.length}`,
+    );
+  }
+  const architectureRoot = `${platformRoot}/${architectures[0]}`;
+  for (const required of ONNX_RESOURCE_PATHS[target].filter(
+    (entry) => entry === platformRoot || entry.startsWith(`${architectureRoot}/`),
+  )) {
+    if (!normalized.includes(required)) {
+      throw new Error(`Required ONNX resource path is missing: ${required}`);
     }
   }
 }
@@ -416,6 +557,18 @@ export function validateRuntimeContent(path, source) {
     throw new Error(`AnythingLLM runtime content is forbidden: ${normalized}`);
   }
   validateSecretContent(normalized, source);
+}
+
+function validateExpectedArtifactIdentity(expectedArtifact) {
+  if (
+    expectedArtifact === null ||
+    typeof expectedArtifact !== 'object' ||
+    !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/u.test(expectedArtifact.version) ||
+    !['win', 'mac'].includes(expectedArtifact.platform) ||
+    !['x64', 'arm64'].includes(expectedArtifact.arch)
+  ) {
+    throw new Error('Expected final-artifact version, platform, and architecture are invalid');
+  }
 }
 
 function escapeRegExp(value) {

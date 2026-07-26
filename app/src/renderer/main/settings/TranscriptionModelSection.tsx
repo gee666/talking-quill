@@ -39,13 +39,13 @@ export function TranscriptionLanguageSetting({
     setDraft(authoritative);
     setMessage(null);
   }
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       saveSequence.current += 1;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const saveLanguage = async () => {
     const operation = ++saveSequence.current;
@@ -80,6 +80,7 @@ export function TranscriptionLanguageSetting({
         value={draft}
         placeholder="Auto-detect"
         hint="Leave empty to detect automatically, or enter a language name or code."
+        disabled={saving}
         onChange={(event) => {
           setDraft(event.currentTarget.value);
           setMessage(null);

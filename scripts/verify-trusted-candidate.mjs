@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const POLICY_PATHS = Object.freeze([
+  '.npmrc',
   '.github/workflows/release.yml',
   '.github/workflows/publish-release.yml',
   'release.config.json',
@@ -26,10 +27,14 @@ export const POLICY_PATHS = Object.freeze([
   'scripts/verify-draft-release.mjs',
   'scripts/verify-public-release.mjs',
   'scripts/verify-macos-release.mjs',
+  'scripts/generate-notices.mjs',
   'scripts/inspect-package.mjs',
+  'scripts/native-architecture.mjs',
   'scripts/package-policy.mjs',
+  'scripts/release-config.mjs',
+  'scripts/secret-rules.mjs',
 ]);
-export function hashGitPaths(repository, paths) {
+function hashGitPaths(repository, paths) {
   const tree = execFileSync('git', ['ls-tree', 'HEAD', '--', ...paths], {
     cwd: repository,
     encoding: 'utf8',

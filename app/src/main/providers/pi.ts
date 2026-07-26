@@ -1,9 +1,4 @@
 import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptionsWithoutStdio,
-} from 'node:child_process';
-import {
   ModelInfoSchema,
   ProviderCompletionRequestSchema,
   ProviderConfigSchema,
@@ -18,16 +13,13 @@ import type { ProviderInvocationConfig, SmartProvider } from './contracts';
 import type { EgressObserver } from '../security/egress-audit';
 import { ProviderError } from './errors';
 import { MAX_NATIVE_OUTPUT_CHARACTERS } from './native-common';
-import {
-  identityKey,
-  piSpawnCommand,
-  resolveCanonicalPiCli,
-  revalidatePiCliIdentity,
-  windowsSystemTools,
-  type PiCliIdentity,
-} from './pi-discovery';
+import { resolveCanonicalPiCli } from './pi-discovery';
+import { identityKey, revalidatePiCliIdentity, type PiCliIdentity } from './pi-executable';
+import { runPiInvocation, type SpawnPi } from './pi-process-runtime';
 export { resolveCanonicalPiCli } from './pi-discovery';
-export type { PiCliIdentity } from './pi-discovery';
+export type { PiCliIdentity } from './pi-executable';
+export { terminateProcessTree } from './pi-process-runtime';
+export type { PiTreeTerminationOptions, SpawnPi } from './pi-process-runtime';
 
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
@@ -38,12 +30,6 @@ const PI_TERMINATION_RESERVE_MS = 5_000;
 const PI_MIN_OPERATION_TIMEOUT_MS = PI_TERMINATION_RESERVE_MS + 500;
 const CONNECTION_TEST_PROMPT = 'Reply with exactly: TALKING_QUILL_CONNECTION_OK';
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._:@+-]{0,383}$/u;
-
-export type SpawnPi = (
-  executable: string,
-  args: readonly string[],
-  options: SpawnOptionsWithoutStdio,
-) => ChildProcessWithoutNullStreams;
 
 export interface PiProviderOptions {
   readonly spawnPi?: SpawnPi;
@@ -75,7 +61,7 @@ interface ModelCache extends ModelCatalog {
 export class PiProvider implements SmartProvider {
   readonly id = 'pi' as const;
   readonly credentialPolicy = 'none' as const;
-  readonly #spawnPi: SpawnPi;
+  readonly #spawnPi: SpawnPi | undefined;
   readonly #environment: NodeJS.ProcessEnv;
   readonly #platform: NodeJS.Platform;
   readonly #workingDirectory: string;
@@ -90,7 +76,7 @@ export class PiProvider implements SmartProvider {
   #operationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: PiProviderOptions = {}) {
-    this.#spawnPi = options.spawnPi ?? spawn;
+    this.#spawnPi = options.spawnPi;
     this.#platform = options.platform ?? process.platform;
     this.#environment = withInteractiveHome(
       options.environment ?? process.env,
@@ -270,79 +256,16 @@ export class PiProvider implements SmartProvider {
         this.#models = null;
         identity = await this.#resolveIdentity(signal);
       }
-      const command = piSpawnCommand(
-        identity.canonicalPath,
-        args,
-        this.#environment,
-        this.#platform,
-      );
-      return await new Promise<string>((resolveOutput, rejectOutput) => {
-        let settled = false;
-        let terminating = false;
-        let stdoutBytes = 0;
-        let stderrBytes = 0;
-        const stdout: Buffer[] = [];
-        const stderr: Buffer[] = [];
-        let child: ChildProcessWithoutNullStreams;
-        const finish = (error: ProviderError | null, output = ''): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          signal.removeEventListener('abort', abort);
-          if (error === null) resolveOutput(output);
-          else rejectOutput(error);
-        };
-        const terminate = (error: ProviderError): void => {
-          if (settled || terminating) return;
-          terminating = true;
-          void terminateProcessTree(child, this.#platform, this.#environment).then(
-            () => finish(error),
-            () => finish(new ProviderError('PI_LAUNCH_FAILED')),
-          );
-        };
-        const abort = (): void => terminate(new ProviderError('CANCELLED'));
-        try {
-          child = this.#spawnPi(command.executable, command.args, {
-            env: this.#environment,
-            cwd: this.#workingDirectory,
-            shell: false,
-            windowsHide: true,
-            windowsVerbatimArguments:
-              this.#platform === 'win32' && /\.(?:cmd|bat)$/iu.test(identity.canonicalPath),
-            detached: this.#platform !== 'win32',
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
-        } catch {
-          rejectOutput(new ProviderError('PI_LAUNCH_FAILED'));
-          return;
-        }
-        const timer = setTimeout(() => terminate(new ProviderError('TIMEOUT')), timeoutMs);
-        timer.unref();
-        signal.addEventListener('abort', abort, { once: true });
-        if (signal.aborted) {
-          abort();
-          return;
-        }
-        child.stdout.on('data', (chunk: Buffer) => {
-          stdoutBytes += chunk.byteLength;
-          if (stdoutBytes > MAX_STDOUT_BYTES) terminate(new ProviderError('RESPONSE_TOO_LARGE'));
-          else stdout.push(Buffer.from(chunk));
-        });
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderrBytes += chunk.byteLength;
-          if (stderrBytes > MAX_STDERR_BYTES) terminate(new ProviderError('RESPONSE_TOO_LARGE'));
-          else stderr.push(Buffer.from(chunk));
-        });
-        child.once('error', () => terminate(new ProviderError('PI_LAUNCH_FAILED')));
-        child.once('close', (code) => {
-          if (settled || terminating) return;
-          if (code === 0) finish(null, Buffer.concat(stdout, stdoutBytes).toString('utf8'));
-          else finish(classifyPiFailure(Buffer.concat(stderr, stderrBytes).toString('utf8')));
-        });
-        child.stdin.on('error', () => terminate(new ProviderError('PI_LAUNCH_FAILED')));
-        if (input === null) child.stdin.end();
-        else child.stdin.end(input, 'utf8');
+      const result = await runPiInvocation(identity.canonicalPath, args, input, signal, timeoutMs, {
+        spawnPi: this.#spawnPi,
+        environment: this.#environment,
+        platform: this.#platform,
+        workingDirectory: this.#workingDirectory,
+        maxStdoutBytes: MAX_STDOUT_BYTES,
+        maxStderrBytes: MAX_STDERR_BYTES,
       });
+      if (result.code === 0) return result.stdout;
+      throw classifyPiFailure(result.stderr);
     } finally {
       release();
     }
@@ -461,97 +384,4 @@ function waitForAbort<Result>(operation: Promise<Result>, signal: AbortSignal): 
       },
     );
   });
-}
-
-interface PiTreeKiller {
-  once(event: 'error', listener: () => void): unknown;
-  once(event: 'close', listener: (code: number | null) => void): unknown;
-  kill(): boolean;
-}
-export interface PiTreeTerminationOptions {
-  readonly spawnKiller?: (executable: string, args: readonly string[]) => PiTreeKiller;
-  readonly processExists?: (pid: number) => boolean;
-  readonly listDescendants?: (pid: number) => Promise<readonly number[]>;
-}
-export async function terminateProcessTree(
-  child: ChildProcessWithoutNullStreams,
-  platform: NodeJS.Platform,
-  environment: NodeJS.ProcessEnv,
-  options: PiTreeTerminationOptions = {},
-): Promise<void> {
-  const pid = child.pid;
-  if (pid === undefined) {
-    child.kill('SIGKILL');
-    return;
-  }
-  if (platform === 'win32') {
-    const tools = windowsSystemTools(environment);
-    let killer: PiTreeKiller;
-    try {
-      killer =
-        options.spawnKiller?.(tools.taskkill, ['/pid', String(pid), '/t', '/f']) ??
-        spawn(tools.taskkill, ['/pid', String(pid), '/t', '/f'], {
-          env: environment,
-          shell: false,
-          windowsHide: true,
-          stdio: 'ignore',
-        });
-    } catch {
-      child.kill('SIGKILL');
-      throw new Error('Pi process-tree killer did not start');
-    }
-    const taskkillSucceeded = await new Promise<boolean>((resolveDone) => {
-      let settled = false;
-      const finish = (succeeded: boolean): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolveDone(succeeded);
-      };
-      const timer = setTimeout(() => {
-        killer.kill();
-        finish(false);
-      }, 2_000);
-      timer.unref();
-      killer.once('error', () => finish(false));
-      killer.once('close', (code) => finish(code === 0));
-    });
-    if (!taskkillSucceeded) {
-      child.kill('SIGKILL');
-      throw new Error('Pi process-tree killer failed');
-    }
-    const exists = options.processExists ?? processExists;
-    const deadline = Date.now() + 2_000;
-    while (exists(pid) && Date.now() < deadline)
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-    if (exists(pid)) throw new Error('Pi process tree did not terminate');
-    return;
-  }
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-  const deadline = Date.now() + 2_000;
-  while (processGroupExists(pid) && Date.now() < deadline)
-    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-  if (processGroupExists(pid)) throw new Error('Pi process group did not terminate');
-}
-
-function processGroupExists(pid: number): boolean {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }

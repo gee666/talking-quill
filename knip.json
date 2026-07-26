@@ -4,15 +4,16 @@
     ".": {
       "entry": [
         "*.config.{ts,mjs}",
-        "build/mac-sign.cjs",
+        "build/*.cjs",
         "scripts/*.{mjs,cjs}",
         "tests/**/*.{ts,tsx,mjs,cjs}"
       ],
-      "project": ["scripts/**/*.{mjs,cjs}", "tests/**/*.{ts,tsx,mjs,cjs}"],
-      "ignoreDependencies": ["@vitejs/plugin-react"]
+      "project": ["scripts/**/*.{mjs,cjs}", "tests/**/*.{ts,tsx,mjs,cjs}"]
     },
     "app": {
       "entry": [
+        "electron.vite.config.ts",
+        "after-pack.cjs",
         "src/main/index.ts",
         "src/preload/*.ts",
         "src/workers/**/*.ts",
@@ -20,7 +21,7 @@
         "src/renderer/capture/main.ts",
         "src/renderer/capture/capture.worklet.ts"
       ],
-      "project": ["src/**/*.{ts,tsx}"],
+      "project": ["*.{ts,cjs}", "src/**/*.{ts,tsx}"],
       "ignoreDependencies": ["@huggingface/transformers", "onnxruntime-common", "onnxruntime-node"]
     }
   },

@@ -95,8 +95,8 @@ describe('microphone permission policy', () => {
     const source = platform();
     const controller = new MicrophonePermissionController(source.value, () => now);
     controller.authorize(7, 'capture-id');
-    now = 15_001;
-    expect(controller.allowsCheck(audioRequest)).toBe(false);
+    now = 15_000;
+    expect(controller.allowsRequest(audioRequest)).toBe(false);
     controller.authorizeEnumeration(7, 'capture-id');
     expect(controller.allowsCheck(audioRequest)).toBe(true);
     controller.release('different');

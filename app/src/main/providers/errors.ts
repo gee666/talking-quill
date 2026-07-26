@@ -69,7 +69,7 @@ export function providerErrorFromStatus(
     return new ProviderError(requestKind === 'model-list' ? 'REMOTE_FAILURE' : 'MODEL_NOT_FOUND');
   }
   if (status === 408 || status === 504) return new ProviderError('TIMEOUT');
-  if (status === 413) return new ProviderError('RESPONSE_TOO_LARGE');
+  if (status === 413) return new ProviderError('REQUEST_TOO_LARGE');
   if (status === 429) return new ProviderError('RATE_LIMITED');
   if (status >= 500) return new ProviderError('UNAVAILABLE');
   return new ProviderError('REMOTE_FAILURE');

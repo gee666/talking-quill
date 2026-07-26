@@ -1,5 +1,5 @@
 import { app, dialog } from 'electron';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { APP_ID, APP_NAME } from '../shared/constants/app';
 import { TalkingQuillApplication } from './app/application';
@@ -9,6 +9,7 @@ import { createAppPaths } from './persistence/paths';
 import { resetOwnedApplicationData } from './data/data-lifecycle-service';
 import { consumeUninstallResetChallenge } from './data/uninstall-reset-challenge';
 import { clearLaunchAtLoginForUninstall } from './app/launch-at-login-service';
+import { isStrictPathChild, selectAbsolutePathOverride } from './app/runtime-path-policy';
 import { resolveHelperExecutable } from './helper';
 import { createNativeOwnedTreeRemoval } from './data/native-owned-tree-removal';
 
@@ -25,9 +26,9 @@ const developmentProfile = process.env.TALKING_QUILL_DEV_VISIBLE_PROFILE;
 if (developmentVisibleNonce !== null) {
   if (developmentProfile === undefined) throw new Error('Development probe profile is missing');
   const profile = resolve(developmentProfile);
-  const relativeToTemp = relative(resolve(tmpdir()), profile);
-  if (relativeToTemp.startsWith('..') || relativeToTemp === '')
+  if (!isStrictPathChild(resolve(tmpdir()), profile)) {
     throw new Error('Development probe profile must be a unique temporary child');
+  }
   app.setPath('appData', dirname(profile));
   app.setPath('userData', profile);
   app.on('browser-window-created', (_event, window) => {
@@ -60,15 +61,16 @@ if (injectedUserData !== null && testUserDataOverrideAllowed) {
 const uninstallResetChallenge = app.isPackaged
   ? readArgument('--talking-quill-reset-owned-data-and-exit=')
   : null;
-const nsisEvidenceRoot =
-  process.env.TALKING_QUILL_NSIS_EVIDENCE_ROOT ??
-  readArgument('--talking-quill-nsis-evidence-root=');
+const nsisEvidenceRoot = selectAbsolutePathOverride(
+  process.env.TALKING_QUILL_NSIS_EVIDENCE_ROOT,
+  readArgument('--talking-quill-nsis-evidence-root='),
+);
 let uninstallResetTarget: string | null = null;
 if (uninstallResetChallenge !== null) {
   uninstallResetTarget =
-    nsisEvidenceRoot !== null && isAbsolute(nsisEvidenceRoot)
-      ? resolve(nsisEvidenceRoot, 'profile', 'AppData', 'Roaming', 'Talking Quill')
-      : app.getPath('userData');
+    nsisEvidenceRoot === null
+      ? app.getPath('userData')
+      : resolve(nsisEvidenceRoot, 'profile', 'AppData', 'Roaming', 'Talking Quill');
   // Chromium opens files in userData during app readiness. Keep its transient reset-helper runtime
   // outside the owned target so Windows can atomically rename and remove the target directory.
   app.setPath(
@@ -145,7 +147,7 @@ if (!hasLock) {
         code: report.code,
         diagnosticId: report.diagnosticId,
       };
-      if (process.env.TALKING_QUILL_NSIS_EVIDENCE_ROOT !== undefined) {
+      if (nsisEvidenceRoot !== null) {
         console.error('Talking Quill isolated NSIS evidence failed', publicDetails, error);
       } else if (app.isPackaged || process.env.CI === 'true') {
         console.error('Talking Quill startup failed', publicDetails);

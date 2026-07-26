@@ -530,7 +530,7 @@ test('provider UI and a fresh-renderer canary prove secrets stay outside rendere
     await expect(password).toHaveValue('');
     await expect(main.getByText('Configured', { exact: true })).toBeVisible();
     await main.getByRole('button', { name: 'Discover models' }).click();
-    await expect(main.getByText('1 models found')).toBeVisible();
+    await expect(main.getByText('1 model found')).toBeVisible();
     await main.getByRole('button', { name: 'Test connection' }).click();
     await expect(main.getByText(/Connection verified/)).toBeVisible();
     await expect(main.getByText(/Local destination — verified/)).toBeVisible();
@@ -567,7 +567,7 @@ test('provider UI and a fresh-renderer canary prove secrets stay outside rendere
     await main.getByRole('button', { name: 'Save configuration' }).click();
     await expect(main.getByText('Not configured')).toBeVisible();
     await main.getByRole('button', { name: 'Discover models' }).click();
-    await expect(main.getByText('1 models found')).toBeVisible();
+    await expect(main.getByText('1 model found')).toBeVisible();
     expect(oldAuthorizationSentToEndpointB).toBe(false);
 
     const firstExit = application.waitForEvent('close');

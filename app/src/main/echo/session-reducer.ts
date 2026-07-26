@@ -1,5 +1,5 @@
 import { ECHO_HOLD_THRESHOLD_MS } from '../../shared/constants/echo-session';
-import type { DictationMode, ProcessingMode } from '../../shared/schemas/history';
+import type { ProcessingMode } from '../../shared/schemas/history';
 import type { VoiceCommand } from '../../shared/schemas/commands';
 import type {
   EchoAbortReason,
@@ -58,13 +58,8 @@ export type EchoSessionEffect =
   | { readonly type: 'begin-extended-transcription' }
   | { readonly type: 'stop-and-transcribe' }
   | { readonly type: 'process-smart'; readonly text: string }
-  | {
-      readonly type: 'insert';
-      readonly text: string;
-      readonly voiceCommand?: { readonly command: VoiceCommand; readonly transcript: string };
-    }
-  | { readonly type: 'teardown' }
-  | { readonly type: 'schedule-reset' };
+  | { readonly type: 'insert'; readonly text: string }
+  | { readonly type: 'teardown' };
 
 export interface EchoTransition {
   readonly state: EchoSessionState;
@@ -182,11 +177,7 @@ export function reduceEchoSession(
     if (transcript.length === 0) return terminalError(state, 'No speech was detected.');
     return transition(
       { ...state, phase: 'inserting', transcript, insertionState: 'pending' },
-      {
-        type: 'insert',
-        text: event.command.snippet,
-        voiceCommand: { command: event.command, transcript },
-      },
+      { type: 'insert', text: event.command.snippet },
     );
   }
   if (event.type === 'transcribed') {
@@ -255,7 +246,6 @@ export function reduceEchoSession(
     return transition(
       { ...state, phase: 'cancelled', abortReason: event.reason, rms: 0 },
       { type: 'teardown' },
-      { type: 'schedule-reset' },
     );
   }
   if (event.type === 'insertion-committed') {
@@ -276,11 +266,7 @@ export function reduceEchoSession(
     if (state.phase !== 'inserting' || state.insertionState !== 'cancel-requested') {
       return transition(state);
     }
-    return transition(
-      { ...state, phase: 'cancelled', rms: 0 },
-      { type: 'teardown' },
-      { type: 'schedule-reset' },
-    );
+    return transition({ ...state, phase: 'cancelled', rms: 0 }, { type: 'teardown' });
   }
   if (event.type === 'inserted') {
     if (state.phase !== 'inserting' && state.phase !== 'restoringClipboard')
@@ -294,7 +280,6 @@ export function reduceEchoSession(
         insertionState: event.copied ? 'none' : 'committed',
       },
       { type: 'teardown' },
-      { type: 'schedule-reset' },
     );
   }
   if (state.phase === 'idle' || isTerminal(state.phase)) return transition(state);
@@ -315,7 +300,6 @@ function terminalError(
       transcript: transcript ?? state.transcript,
     },
     { type: 'teardown' },
-    { type: 'schedule-reset' },
   );
 }
 
@@ -337,10 +321,4 @@ function isRecordingOrArming(phase: EchoSessionPhase): boolean {
 
 function isTerminal(phase: EchoSessionPhase): boolean {
   return phase === 'completed' || phase === 'cancelled' || phase === 'error';
-}
-
-export function resolveDictationMode(phase: EchoSessionPhase): DictationMode | null {
-  if (phase === 'recordingQuick') return 'quick';
-  if (phase === 'recordingExtended') return 'extended';
-  return null;
 }

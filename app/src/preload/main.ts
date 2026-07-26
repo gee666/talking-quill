@@ -104,7 +104,7 @@ const api: MainApi = {
     catalog: async () => (await invoke('provider:catalog', {})).providers,
     piInstallationStatus: () => invoke('provider:pi-installation-status', {}),
     savePiInstallation: (path) => invoke('provider:pi-installation-save', { path }),
-    browsePiInstallation: () => invoke('provider:pi-installation-browse', {}),
+    browsePiInstallation: async () => (await invoke('provider:pi-installation-browse', {})).path,
     saveConfig: (config) => invoke('provider:config-save', { config }),
     setSecret: (providerId, expectedBindingToken, secret) =>
       invoke('provider:secret-set', { providerId, expectedBindingToken, secret }),

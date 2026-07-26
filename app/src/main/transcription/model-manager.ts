@@ -1,23 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  rm,
-  statfs,
-  writeFile,
-  type FileHandle,
-} from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve } from 'node:path';
-import {
-  MODEL_DOWNLOAD_HEADROOM_RATIO,
-  MODEL_DOWNLOAD_MAX_REDIRECTS,
-  MODEL_DOWNLOAD_MINIMUM_HEADROOM_BYTES,
-  MODEL_DOWNLOAD_REQUEST_TIMEOUT_MS,
-} from '../../shared/constants/whisper';
+import type { link, rename } from 'node:fs/promises';
 import type {
   ModelManifest,
   ModelManifestEntry,
@@ -25,7 +6,6 @@ import type {
   WhisperModelId,
   VerifiedModelFileIdentity,
 } from '../../shared/schemas/model-manifest';
-import { VerifiedModelFileIdentitySchema } from '../../shared/schemas/model-manifest';
 import {
   ModelProgressSchema,
   ModelStatusSchema,
@@ -35,12 +15,14 @@ import {
   type ModelStatus,
 } from '../../shared/schemas/transcription';
 import type { EgressObserver } from '../security/egress-audit';
-import { ModelManagerError, WhisperClientError } from './errors';
-import { inspectFile, sameVerifiedIdentity } from './model-integrity';
 import { ModelAccessCoordinator } from './model-access-coordinator';
+import { ModelDownloadTransport, type ModelDownloadResponse } from './model-download-transport';
+import { ModelManagerError, WhisperClientError } from './errors';
+import type { inspectFile } from './model-integrity';
 import { MODEL_MANIFEST } from './model-manifest';
+import type { RevisionBackupRemover } from './model-publication';
+import { ModelRepository } from './model-repository';
 
-const COMPLETION_MARKER = '.talking-quill-complete.json';
 type DownloadIntent = 'running' | 'paused' | 'cancelled' | 'external' | 'shutdown';
 
 interface ActiveDownload {
@@ -81,26 +63,22 @@ export interface ModelManagerOptions {
   readonly accessCoordinator?: ModelAccessCoordinator;
   readonly inspectFile?: typeof inspectFile;
   readonly observeEgress?: EgressObserver;
-  /** Test seam for platform rename behavior; production always uses node:fs/promises. */
+  /** Test seams for platform filesystem behavior; production uses node:fs/promises. */
   readonly rename?: typeof rename;
+  readonly link?: typeof link;
+  readonly removeRevisionBackup?: RevisionBackupRemover;
 }
 
+/** Public lifecycle and concurrency facade for model installation and use. */
 export class ModelManager {
-  readonly #modelsDirectory: string;
-  readonly #temporaryDirectory: string;
-  readonly #fetch: typeof fetch;
-  readonly #availableBytes: (path: string) => Promise<number>;
-  readonly #urlFor: (model: ModelManifestEntry, file: ModelManifestFile) => string;
-  readonly #validateRequestUrl: (url: string) => boolean;
-  readonly #requestTimeoutMs: number;
   readonly #manifest: ModelManifest;
   readonly #access: ModelAccessCoordinator;
-  readonly #inspectFile: typeof inspectFile;
-  readonly #observeEgress: EgressObserver;
-  readonly #rename: typeof rename;
+  readonly #transport: ModelDownloadTransport;
+  readonly #repository: ModelRepository;
   readonly #listeners = new Set<(event: ModelProgress) => void>();
   readonly #states = new Map<WhisperModelId, StateOverride>();
   readonly #verificationTasks = new Map<WhisperModelId, SharedVerification>();
+  readonly #verificationLifecycle = new Set<SharedVerification>();
   readonly #recoveryTasks = new Map<WhisperModelId, Promise<void>>();
   #beforeMutation: ((modelId: WhisperModelId) => Promise<void>) | null = null;
   #afterInstallValidation:
@@ -109,18 +87,10 @@ export class ModelManager {
   #shuttingDown = false;
 
   constructor(options: ModelManagerOptions) {
-    this.#modelsDirectory = resolve(options.modelsDirectory);
-    this.#temporaryDirectory = resolve(options.temporaryDirectory);
-    this.#fetch = options.fetch ?? fetch;
-    this.#availableBytes = options.availableBytes ?? defaultAvailableBytes;
-    this.#urlFor = options.urlFor ?? defaultModelUrl;
-    this.#validateRequestUrl = options.validateRequestUrl ?? defaultValidateRequestUrl;
-    this.#requestTimeoutMs = options.requestTimeoutMs ?? MODEL_DOWNLOAD_REQUEST_TIMEOUT_MS;
     this.#manifest = options.manifest ?? MODEL_MANIFEST;
     this.#access = options.accessCoordinator ?? new ModelAccessCoordinator();
-    this.#inspectFile = options.inspectFile ?? inspectFile;
-    this.#observeEgress = options.observeEgress ?? (() => undefined);
-    this.#rename = options.rename ?? rename;
+    this.#transport = new ModelDownloadTransport(options);
+    this.#repository = new ModelRepository(options);
   }
 
   subscribe(listener: (event: ModelProgress) => void): () => void {
@@ -151,6 +121,7 @@ export class ModelManager {
   }
 
   async status(modelId: WhisperModelId, verify = false): Promise<ModelStatus> {
+    if (verify && this.#shuttingDown) throw shuttingDownError();
     const model = this.#getModel(modelId);
     await this.#ensureRecovered(model);
     if (this.#active?.modelId === modelId) {
@@ -161,18 +132,20 @@ export class ModelManager {
   }
 
   async verifyForUse(modelId: WhisperModelId, signal?: AbortSignal): Promise<ModelStatus> {
+    if (this.#shuttingDown) throw shuttingDownError();
     const model = this.#getModel(modelId);
     await this.#ensureRecovered(model);
     return this.#verifyAuthoritatively(model, signal);
   }
 
   async acquireUse(modelId: WhisperModelId, signal?: AbortSignal): Promise<ModelUseGrant> {
+    if (this.#shuttingDown) throw shuttingDownError();
     const model = this.#getModel(modelId);
     await this.#ensureRecovered(model);
     let lease = await this.#access.acquireUse(modelId, signal);
     try {
       let status = await this.#metadataStatus(model);
-      const marker = await this.#readMarker(model);
+      const marker = await this.#repository.readCompletionMarker(model);
       if (
         !marker.present &&
         status.state === 'missing' &&
@@ -203,7 +176,7 @@ export class ModelManager {
     }
     if (this.#active !== null) {
       return this.#active.modelId === modelId
-        ? this.#active.settled
+        ? waitForModelTask(this.#active.settled, signal, 'Model download was cancelled.')
         : Promise.reject(new ModelManagerError('BUSY', 'Another model download is active.'));
     }
     const controller = new AbortController();
@@ -220,12 +193,25 @@ export class ModelManager {
     };
     if (signal?.aborted === true) onExternalAbort();
     else signal?.addEventListener('abort', onExternalAbort, { once: true });
-    const settled = this.#withModelMutation(modelId, () => this.#download(modelId, active)).finally(
-      () => {
+    const settled = this.#withModelMutation(
+      modelId,
+      () => this.#download(modelId, active),
+      active.controller.signal,
+    )
+      .catch((error: unknown) => {
+        if (
+          active.controller.signal.aborted &&
+          error instanceof ModelManagerError &&
+          error.code === 'CANCELLED'
+        ) {
+          return this.#finishCancelledDownload(this.#getModel(modelId), active);
+        }
+        throw error;
+      })
+      .finally(() => {
         signal?.removeEventListener('abort', onExternalAbort);
         if (this.#active === active) this.#active = null;
-      },
-    );
+      });
     Object.defineProperty(active, 'settled', { value: settled });
     this.#active = active;
     return settled;
@@ -246,17 +232,13 @@ export class ModelManager {
     }
     await this.#abortActive(modelId, 'cancelled');
     await this.#withModelMutation(modelId, async () => {
-      await rm(this.#temporaryModelDirectory(this.#getModel(modelId)), {
-        recursive: true,
-        force: true,
-      });
+      await this.#repository.removeTemporaryRevision(this.#getModel(modelId));
       this.#states.delete(modelId);
     });
     return this.status(modelId);
   }
 
   retry(modelId: WhisperModelId, signal?: AbortSignal): Promise<ModelStatus> {
-    this.#states.delete(modelId);
     return this.download(modelId, signal);
   }
 
@@ -275,13 +257,12 @@ export class ModelManager {
       return { outcome: 'in-use', status: await this.status(modelId) };
     }
     try {
-      await this.#recoverModelArtifacts(model);
+      await this.#recoverAndRemember(model);
       await this.#beforeMutation?.(modelId);
       await this.#deleteFiles(modelId);
     } finally {
       try {
-        await this.#recoverModelArtifacts(model);
-        this.#recoveryTasks.set(modelId, Promise.resolve());
+        await this.#recoverAndRemember(model);
       } finally {
         lease.release();
       }
@@ -297,82 +278,66 @@ export class ModelManager {
     if (active !== null) {
       active.intent = 'shutdown';
       active.controller.abort('shutdown');
-      await active.settled.catch(() => undefined);
     }
+    const verificationLifecycle = [...this.#verificationLifecycle];
+    for (const verification of verificationLifecycle) verification.controller.abort('shutdown');
+    await Promise.allSettled([
+      ...(active === null ? [] : [active.settled]),
+      ...verificationLifecycle.map((verification) => verification.promise),
+    ]);
   }
 
   async #download(modelId: WhisperModelId, active: ActiveDownload): Promise<ModelStatus> {
     const model = this.#getModel(modelId);
     this.#states.delete(modelId);
     try {
-      await ensureSafeDirectory(this.#modelsDirectory, this.#modelsDirectory);
-      await ensureSafeDirectory(this.#temporaryDirectory, this.#temporaryDirectory);
-      const installed = await this.#inspectModel(model, active.controller.signal, true);
+      await this.#repository.prepareRoots();
+      const installed = await this.#repository.inspectInstalled(
+        model,
+        active.controller.signal,
+        true,
+      );
       if (installed.valid) {
         active.state = 'verifying';
         this.#emit(model, 'verifying', null, model.totalBytes);
         await this.#afterInstallValidation?.(model.id, active.controller.signal);
         active.controller.signal.throwIfAborted();
-        await this.#commitVerification(model, installed.identities);
+        await this.#repository.commitVerification(model, installed.identities);
         this.#emit(model, 'ready', null, model.totalBytes);
         return makeStatus(model, 'ready', model.totalBytes, null, false);
       }
 
-      const stagedDirectory = this.#temporaryModelDirectory(model);
-      await ensureSafeDirectory(this.#temporaryDirectory, stagedDirectory);
-      const staged = await this.#inspectStagedModel(model, active.controller.signal, true);
+      await this.#repository.prepareStaging(model);
+      const stagedHardLinksInstalledFiles = await this.#repository.reuseInstalledFiles(
+        model,
+        installed.identities,
+        active.controller.signal,
+      );
+      const staged = await this.#repository.inspectStaging(model, active.controller.signal, true);
       let verified = staged;
       const completeStagingStillCurrent =
         staged.valid &&
-        (await this.#identityStillCurrent(
-          model,
-          staged.identities,
-          stagedDirectory,
-          this.#temporaryDirectory,
-        ));
+        (await this.#repository.stagedIdentityStillCurrent(model, staged.identities));
       if (!completeStagingStillCurrent) {
-        const partialBytes = await this.#partialBytes(model);
-        const remaining = Math.max(0, model.totalBytes - staged.validBytes - partialBytes);
-        const headroom = Math.max(
-          MODEL_DOWNLOAD_MINIMUM_HEADROOM_BYTES,
-          Math.ceil(remaining * MODEL_DOWNLOAD_HEADROOM_RATIO),
-        );
-        if (
-          remaining > 0 &&
-          (await this.#availableBytes(this.#modelsDirectory)) < remaining + headroom
-        ) {
-          throw new ModelManagerError(
-            'DISK_SPACE',
-            'Not enough disk space to download this model.',
-          );
-        }
-
+        await this.#repository.ensureDownloadCapacity(model, staged.identities);
         let completed = 0;
         for (const file of model.files) {
           active.controller.signal.throwIfAborted();
-          const stagedTarget = this.#stagedTargetPath(model, file);
           if (
-            (
-              await this.#inspectFile(
-                stagedTarget,
-                file.size,
-                file.sha256,
-                true,
-                active.controller.signal,
-              )
-            ).valid
+            (await this.#repository.inspectStagedFile(model, file, active.controller.signal, true))
+              .valid
           ) {
-            await rm(this.#partPath(model, file), { force: true });
+            await this.#repository.removePartial(model, file);
             completed += file.size;
             this.#emit(model, 'downloading', file, completed, file.size);
             continue;
           }
-          await rm(stagedTarget, { force: true });
+          await this.#repository.removeStagedFile(model, file);
           completed = await this.#downloadFile(model, file, completed, active);
         }
         active.state = 'verifying';
         this.#emit(model, 'verifying', null, model.totalBytes);
-        verified = await this.#inspectStagedModel(model, active.controller.signal, true);
+        verified = await this.#repository.inspectStaging(model, active.controller.signal, true);
         if (!verified.valid) {
           throw new ModelManagerError(
             'CORRUPT',
@@ -384,19 +349,35 @@ export class ModelManager {
         active.state = 'verifying';
         this.#emit(model, 'verifying', null, model.totalBytes);
       }
-      await this.#prepareStagedPublication(model, verified.identities);
+      await this.#repository.prepareStagedPublication(model, verified.identities);
       active.controller.signal.throwIfAborted();
       active.state = 'installing';
       this.#emit(model, 'installing', null, model.totalBytes);
-      const installedDirectory = this.#modelDirectory(model);
-      await publishRevisionDirectory(stagedDirectory, installedDirectory, this.#rename);
+      await this.#repository.publishStagedRevision(model);
       try {
-        await this.#assertOnlyManifestEntries(model, installedDirectory);
+        await this.#repository.assertPublishedManifestEntries(model);
       } catch (error: unknown) {
-        await rm(installedDirectory, { recursive: true, force: true });
+        await this.#repository.removeInstalledRevision(model);
         throw error;
       }
-      if (!(await this.#identityStillCurrent(model, verified.identities))) {
+      let installedIdentities = verified.identities;
+      if (stagedHardLinksInstalledFiles) {
+        const published = await this.#repository.inspectInstalled(
+          model,
+          active.controller.signal,
+          true,
+        );
+        if (!published.valid) {
+          throw new ModelManagerError(
+            'CORRUPT',
+            'Published model failed post-repair verification.',
+            true,
+          );
+        }
+        installedIdentities = published.identities;
+      } else if (
+        !(await this.#repository.installedIdentityStillCurrent(model, installedIdentities))
+      ) {
         throw new ModelManagerError(
           'CORRUPT',
           'Published model identity changed during installation.',
@@ -405,27 +386,17 @@ export class ModelManager {
       }
       await this.#afterInstallValidation?.(model.id, active.controller.signal);
       active.controller.signal.throwIfAborted();
-      await this.#commitVerification(model, verified.identities);
+      await this.#repository.commitVerification(model, installedIdentities);
       this.#states.delete(modelId);
       this.#emit(model, 'ready', null, model.totalBytes);
       return makeStatus(model, 'ready', model.totalBytes, null, false);
     } catch (error: unknown) {
       if (active.controller.signal.aborted) {
-        if (active.intent === 'external') {
-          throw new ModelManagerError('CANCELLED', 'Model download was cancelled.');
-        }
-        const state: ModelState = active.intent === 'paused' ? 'paused' : 'missing';
-        const detail = active.intent === 'paused' ? 'Download paused.' : 'Download cancelled.';
-        this.#states.set(modelId, { state, detail, repairable: false });
-        const status = await this.#statusFromDisk(model, state, detail, false, false);
-        this.#emit(model, state, null, status.downloadedBytes);
-        return status;
+        return this.#finishCancelledDownload(model, active);
       }
       const mapped = mapDownloadError(error, active.state);
       if (mapped.code === 'WORKER_VALIDATION') {
-        await rm(join(this.#modelDirectory(model), COMPLETION_MARKER), { force: true }).catch(
-          () => undefined,
-        );
+        await this.#repository.removeCompletionMarker(model).catch(() => undefined);
       }
       const state: ModelState =
         mapped.code === 'OFFLINE' ? 'offline' : mapped.code === 'CORRUPT' ? 'corrupt' : 'error';
@@ -446,48 +417,56 @@ export class ModelManager {
     }
   }
 
+  async #finishCancelledDownload(
+    model: ModelManifestEntry,
+    active: ActiveDownload,
+  ): Promise<ModelStatus> {
+    if (active.intent === 'external') {
+      throw new ModelManagerError('CANCELLED', 'Model download was cancelled.');
+    }
+    const state: ModelState = active.intent === 'paused' ? 'paused' : 'missing';
+    const detail = active.intent === 'paused' ? 'Download paused.' : 'Download cancelled.';
+    this.#states.set(model.id, { state, detail, repairable: false });
+    const status = await this.#statusFromDisk(model, state, detail, false, false);
+    this.#emit(model, state, null, status.downloadedBytes);
+    return status;
+  }
+
   async #downloadFile(
     model: ModelManifestEntry,
     file: ModelManifestFile,
     completedBeforeFile: number,
     active: ActiveDownload,
   ): Promise<number> {
-    const part = this.#partPath(model, file);
-    await ensureSafeDirectory(this.#temporaryDirectory, dirname(part));
-    let offset = await safeRegularFileSize(part);
+    await this.#repository.preparePartial(model, file);
+    let offset = await this.#repository.partialSize(model, file);
     let verifiedPartIdentity: Omit<VerifiedModelFileIdentity, 'path'> | null = null;
     if (offset > file.size) {
-      await rm(part, { force: true });
+      await this.#repository.removePartial(model, file);
       offset = 0;
     }
     if (offset === file.size) {
-      const inspection = await this.#inspectFile(
-        part,
-        file.size,
-        file.sha256,
-        true,
+      const inspection = await this.#repository.inspectPartial(
+        model,
+        file,
         active.controller.signal,
       );
       if (inspection.valid && inspection.identity !== null) {
         verifiedPartIdentity = inspection.identity;
       } else {
-        await rm(part, { force: true });
+        await this.#repository.removePartial(model, file);
         offset = 0;
       }
     }
     if (offset < file.size) {
-      const headers = {
-        'Accept-Encoding': 'identity',
-        ...(offset > 0 ? { Range: `bytes=${String(offset)}-` } : {}),
-      };
-      const response = await this.#fetchWithRedirects(this.#urlFor(model, file), headers, active);
+      const response = await this.#transport.request(model, file, offset, active.controller.signal);
       let completedByConcurrentWriter = false;
-      if (offset > 0 && response.status === 416 && validUnsatisfiedRange(response, file.size)) {
-        await cancelResponseBody(response);
-        const currentSize = await safeRegularFileSize(part);
+      if (offset > 0 && validUnsatisfiedRange(response, file.size)) {
+        await response.cancel();
+        const currentSize = await this.#repository.partialSize(model, file);
         const inspection =
           currentSize === file.size
-            ? await this.#inspectFile(part, file.size, file.sha256, true, active.controller.signal)
+            ? await this.#repository.inspectPartial(model, file, active.controller.signal)
             : null;
         if (inspection?.valid === true && inspection.identity !== null) {
           offset = file.size;
@@ -500,13 +479,18 @@ export class ModelManager {
           );
         }
       } else if (offset > 0 && response.status === 200) {
-        await rm(part, { force: true });
-        offset = 0;
+        try {
+          await this.#repository.removePartial(model, file);
+          offset = 0;
+        } catch (error: unknown) {
+          await response.cancel();
+          throw error;
+        }
       } else if (offset > 0 && !validContentRange(response, offset, file.size)) {
-        await cancelResponseBody(response);
+        await response.cancel();
         throw new ModelManagerError('PROTOCOL', 'Download server returned an invalid byte range.');
       } else if (offset === 0 && response.status !== 200) {
-        await cancelResponseBody(response);
+        await response.cancel();
         throw new ModelManagerError(
           'HTTP',
           `Model download failed with HTTP ${String(response.status)}.`,
@@ -514,20 +498,21 @@ export class ModelManager {
       }
       let written = offset;
       if (!completedByConcurrentWriter) {
-        if (response.body === null) {
+        if (!response.hasBody) {
           throw new ModelManagerError('PROTOCOL', 'Download response had no body.');
         }
-        const handle = await openSafePart(part, offset);
-        const reader = response.body.getReader();
+        let writer;
+        try {
+          writer = await this.#repository.openPartialWriter(model, file, offset);
+        } catch (error: unknown) {
+          await response.cancel();
+          throw error;
+        }
         let bodyComplete = false;
         try {
           for (;;) {
             active.controller.signal.throwIfAborted();
-            const next = await readWithInactivityTimeout(
-              reader,
-              this.#requestTimeoutMs,
-              active.controller.signal,
-            );
+            const next = await response.read();
             if (next.done) {
               bodyComplete = true;
               break;
@@ -536,159 +521,27 @@ export class ModelManager {
             if (written > file.size) {
               throw new ModelManagerError('PROTOCOL', 'Download exceeded its manifest size.');
             }
-            await writeAll(handle, next.value);
+            await writer.write(next.value);
             this.#emit(model, 'downloading', file, completedBeforeFile + written, written);
           }
-          await handle.sync();
+          await writer.sync();
         } finally {
-          if (!bodyComplete) await reader.cancel().catch(() => undefined);
-          await handle.close();
+          if (!bodyComplete) await response.cancel();
+          await writer.close();
         }
         if (written !== file.size) {
           throw new ModelManagerError('PROTOCOL', 'Download ended before the declared size.');
         }
       }
     }
-    if (verifiedPartIdentity === null) {
-      const inspection = await this.#inspectFile(
-        part,
-        file.size,
-        file.sha256,
-        true,
-        active.controller.signal,
-      );
-      if (!inspection.valid || inspection.identity === null) {
-        await rm(part, { force: true });
-        throw new ModelManagerError('CORRUPT', `Checksum failed for ${file.path}.`, true);
-      }
-      verifiedPartIdentity = inspection.identity;
-    }
-    if (!(await verifiedIdentityStillCurrent(part, verifiedPartIdentity))) {
-      await rm(part, { force: true });
-      throw new ModelManagerError('CORRUPT', `Verified file changed for ${file.path}.`, true);
-    }
-    const target = this.#stagedTargetPath(model, file);
-    await ensureSafeDirectory(this.#temporaryDirectory, dirname(target));
-    await publishStagedFile(part, target, this.#rename);
+    await this.#repository.publishVerifiedPartial(
+      model,
+      file,
+      verifiedPartIdentity,
+      active.controller.signal,
+    );
     this.#emit(model, 'downloading', file, completedBeforeFile + file.size, file.size);
     return completedBeforeFile + file.size;
-  }
-
-  async #fetchWithRedirects(
-    initialUrl: string,
-    headers: Readonly<Record<string, string>> | undefined,
-    active: ActiveDownload,
-  ): Promise<Response> {
-    let current = new URL(initialUrl);
-    for (let redirectCount = 0; redirectCount <= MODEL_DOWNLOAD_MAX_REDIRECTS; redirectCount += 1) {
-      if (!this.#validateRequestUrl(current.href)) {
-        throw new ModelManagerError('PROTOCOL', 'Model download destination is not trusted.');
-      }
-      const timeoutController = new AbortController();
-      const timeout = setTimeout(
-        () => timeoutController.abort('request timeout'),
-        this.#requestTimeoutMs,
-      );
-      timeout.unref();
-      const signal = AbortSignal.any([active.controller.signal, timeoutController.signal]);
-      let response: Response;
-      try {
-        this.#observeEgress('model-download');
-        response = await this.#fetch(current, {
-          ...(headers === undefined ? {} : { headers }),
-          redirect: 'manual',
-          signal,
-        });
-      } catch (error: unknown) {
-        if (timeoutController.signal.aborted && !active.controller.signal.aborted) {
-          throw new ModelManagerError('TIMEOUT', 'Model download request timed out.', true);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timeout);
-      }
-      if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-      const location = response.headers.get('location');
-      if (location === null) {
-        await cancelResponseBody(response);
-        throw new ModelManagerError('PROTOCOL', 'Model download redirect had no destination.');
-      }
-      if (redirectCount === MODEL_DOWNLOAD_MAX_REDIRECTS) {
-        await cancelResponseBody(response);
-        throw new ModelManagerError('PROTOCOL', 'Model download exceeded the redirect limit.');
-      }
-      const next = new URL(location, current);
-      await cancelResponseBody(response);
-      current = next;
-    }
-    throw new ModelManagerError('PROTOCOL', 'Model download redirect failed.');
-  }
-
-  #inspectModel(model: ModelManifestEntry, signal?: AbortSignal, hash = true) {
-    return this.#inspectModelDirectory(
-      model,
-      this.#modelDirectory(model),
-      this.#modelsDirectory,
-      signal,
-      hash,
-    );
-  }
-
-  #inspectStagedModel(model: ModelManifestEntry, signal?: AbortSignal, hash = true) {
-    return this.#inspectModelDirectory(
-      model,
-      this.#temporaryModelDirectory(model),
-      this.#temporaryDirectory,
-      signal,
-      hash,
-    );
-  }
-
-  async #inspectModelDirectory(
-    model: ModelManifestEntry,
-    directory: string,
-    managedRoot: string,
-    signal?: AbortSignal,
-    hash = true,
-  ) {
-    let validBytes = 0;
-    let existingBytes = 0;
-    let corrupt = false;
-    const identities: VerifiedModelFileIdentity[] = [];
-    try {
-      for (const file of model.files) {
-        const target = join(directory, ...file.path.split('/'));
-        await assertSafeExistingDirectoryChain(managedRoot, dirname(target));
-      }
-    } catch (error: unknown) {
-      if (error instanceof ModelManagerError && error.code === 'CORRUPT') {
-        return {
-          valid: false,
-          validBytes: 0,
-          existingBytes: 1,
-          corrupt: true,
-          identities,
-        } as const;
-      }
-      throw error;
-    }
-    for (const file of model.files) {
-      signal?.throwIfAborted();
-      const target = join(directory, ...file.path.split('/'));
-      const result = await this.#inspectFile(target, file.size, file.sha256, hash, signal);
-      if (result.exists) existingBytes += result.size;
-      if (result.valid) {
-        validBytes += file.size;
-        if (result.identity !== null) identities.push({ path: file.path, ...result.identity });
-      } else if (result.exists) corrupt = true;
-    }
-    return {
-      valid: validBytes === model.totalBytes && identities.length === model.files.length,
-      validBytes,
-      existingBytes,
-      corrupt,
-      identities,
-    } as const;
   }
 
   #verifyAuthoritatively(model: ModelManifestEntry, signal?: AbortSignal): Promise<ModelStatus> {
@@ -703,6 +556,7 @@ export class ModelManager {
       const promise = this.#runAuthoritativeVerification(model, controller.signal);
       verification = { controller, promise, waiters: new Set(), settled: false };
       this.#verificationTasks.set(model.id, verification);
+      this.#verificationLifecycle.add(verification);
       const current = verification;
       void promise.then(
         () => this.#finishSharedVerification(model.id, current),
@@ -718,19 +572,17 @@ export class ModelManager {
   ): Promise<ModelStatus> {
     const taskLease = await this.#access.acquireUse(model.id, signal);
     try {
-      const inspection = await this.#inspectModel(model, signal, true);
+      const inspection = await this.#repository.inspectInstalled(model, signal, true);
       signal.throwIfAborted();
       if (inspection.valid) {
         try {
           await this.#afterInstallValidation?.(model.id, signal);
           signal.throwIfAborted();
-          await this.#commitVerification(model, inspection.identities);
+          await this.#repository.commitVerification(model, inspection.identities);
         } catch (error: unknown) {
           const mapped = mapDownloadError(error, 'verifying');
           if (mapped.code === 'CANCELLED') throw mapped;
-          await rm(join(this.#modelDirectory(model), COMPLETION_MARKER), { force: true }).catch(
-            () => undefined,
-          );
+          await this.#repository.removeCompletionMarker(model).catch(() => undefined);
           this.#states.set(model.id, {
             state: 'error',
             detail: mapped.message,
@@ -741,7 +593,7 @@ export class ModelManager {
         this.#states.delete(model.id);
         return makeStatus(model, 'ready', model.totalBytes, null, false);
       }
-      await rm(join(this.#modelDirectory(model), COMPLETION_MARKER), { force: true });
+      await this.#repository.removeCompletionMarker(model);
       if (inspection.existingBytes > 0) {
         return makeStatus(
           model,
@@ -789,9 +641,11 @@ export class ModelManager {
         (error: unknown) =>
           finish(() =>
             reject(
-              error instanceof Error
-                ? error
-                : new ModelManagerError('IO', 'Model verification failed.', true),
+              verification.controller.signal.aborted
+                ? new ModelManagerError('CANCELLED', 'Model verification was cancelled.')
+                : error instanceof Error
+                  ? error
+                  : new ModelManagerError('IO', 'Model verification failed.', true),
             ),
           ),
       );
@@ -800,6 +654,7 @@ export class ModelManager {
 
   #finishSharedVerification(modelId: WhisperModelId, verification: SharedVerification): void {
     verification.settled = true;
+    this.#verificationLifecycle.delete(verification);
     if (this.#verificationTasks.get(modelId) === verification) {
       this.#verificationTasks.delete(modelId);
     }
@@ -808,20 +663,26 @@ export class ModelManager {
   async #metadataStatus(model: ModelManifestEntry): Promise<ModelStatus> {
     const override = this.#states.get(model.id);
     if (override !== undefined) {
-      const inspection = await this.#inspectModel(model, undefined, false);
+      const inspection = await this.#repository.inspectInstalled(model, undefined, false);
       return makeStatus(
         model,
         override.state,
-        Math.min(inspection.validBytes + (await this.#temporaryBytes(model)), model.totalBytes),
+        Math.min(
+          inspection.validBytes + (await this.#repository.temporaryBytes(model)),
+          model.totalBytes,
+        ),
         override.detail,
         override.repairable,
       );
     }
-    const marker = await this.#readMarker(model);
-    if (marker.identity !== null && (await this.#identityStillCurrent(model, marker.identity))) {
+    const marker = await this.#repository.readCompletionMarker(model);
+    if (
+      marker.identity !== null &&
+      (await this.#repository.installedIdentityStillCurrent(model, marker.identity))
+    ) {
       return makeStatus(model, 'ready', model.totalBytes, null, false);
     }
-    const inspection = await this.#inspectModel(model, undefined, false);
+    const inspection = await this.#repository.inspectInstalled(model, undefined, false);
     if (marker.present && inspection.existingBytes > 0) {
       return makeStatus(
         model,
@@ -834,7 +695,10 @@ export class ModelManager {
     return makeStatus(
       model,
       inspection.corrupt ? 'corrupt' : 'missing',
-      Math.min(inspection.validBytes + (await this.#temporaryBytes(model)), model.totalBytes),
+      Math.min(
+        inspection.validBytes + (await this.#repository.temporaryBytes(model)),
+        model.totalBytes,
+      ),
       inspection.corrupt ? 'Managed model files have invalid metadata.' : null,
       inspection.corrupt,
     );
@@ -847,223 +711,21 @@ export class ModelManager {
     repairable: boolean,
     hash: boolean,
   ): Promise<ModelStatus> {
-    const inspection = await this.#inspectModel(model, undefined, hash);
+    const inspection = await this.#repository.inspectInstalled(model, undefined, hash);
     return makeStatus(
       model,
       state,
-      Math.min(inspection.validBytes + (await this.#temporaryBytes(model)), model.totalBytes),
+      Math.min(
+        inspection.validBytes + (await this.#repository.temporaryBytes(model)),
+        model.totalBytes,
+      ),
       detail,
       repairable,
     );
   }
 
-  async #temporaryBytes(model: ModelManifestEntry): Promise<number> {
-    let total = 0;
-    for (const file of model.files) {
-      const staged = await safeRegularFileSize(this.#stagedTargetPath(model, file));
-      if (staged === file.size) total += file.size;
-      else total += Math.min(await safeRegularFileSize(this.#partPath(model, file)), file.size);
-    }
-    return total;
-  }
-
-  async #partialBytes(model: ModelManifestEntry): Promise<number> {
-    let total = 0;
-    for (const file of model.files) {
-      total += Math.min(await safeRegularFileSize(this.#partPath(model, file)), file.size);
-    }
-    return total;
-  }
-
-  async #commitVerification(
-    model: ModelManifestEntry,
-    identities: readonly VerifiedModelFileIdentity[],
-  ): Promise<void> {
-    if (identities.length !== model.files.length) {
-      throw new ModelManagerError('CORRUPT', 'Verified model identity was incomplete.', true);
-    }
-    await this.#writeMarkerAt(
-      model,
-      this.#modelDirectory(model),
-      identities,
-      this.#modelsDirectory,
-    );
-  }
-
-  async #writeMarkerAt(
-    model: ModelManifestEntry,
-    directory: string,
-    identities: readonly VerifiedModelFileIdentity[],
-    managedRoot: string,
-  ): Promise<void> {
-    await ensureSafeDirectory(managedRoot, directory);
-    const temporary = join(directory, `${COMPLETION_MARKER}.${randomUUID()}.tmp`);
-    await writeFile(
-      temporary,
-      `${JSON.stringify({ schemaVersion: 1, revision: model.revision, totalBytes: model.totalBytes, files: identities })}\n`,
-      { mode: 0o600, flag: 'wx' },
-    );
-    await publishAtomically(temporary, join(directory, COMPLETION_MARKER), this.#rename);
-  }
-
-  async #readMarker(model: ModelManifestEntry): Promise<{
-    readonly present: boolean;
-    readonly identity: readonly VerifiedModelFileIdentity[] | null;
-  }> {
-    const path = join(this.#modelDirectory(model), COMPLETION_MARKER);
-    let text: string;
-    try {
-      const before = await lstat(path);
-      if (!before.isFile() || before.isSymbolicLink() || before.size > 64 * 1024) {
-        return { present: true, identity: null };
-      }
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        const opened = await handle.stat();
-        if (!opened.isFile() || !sameOpenedFile(before, opened)) {
-          return { present: true, identity: null };
-        }
-        text = await handle.readFile('utf8');
-        const [afterHandle, afterPath] = await Promise.all([handle.stat(), lstat(path)]);
-        if (
-          afterPath.isSymbolicLink() ||
-          !afterPath.isFile() ||
-          !sameOpenedFile(opened, afterHandle) ||
-          !sameOpenedFile(afterHandle, afterPath)
-        ) {
-          return { present: true, identity: null };
-        }
-      } finally {
-        await handle.close();
-      }
-    } catch (error: unknown) {
-      if (hasCode(error, 'ENOENT')) return { present: false, identity: null };
-      return { present: true, identity: null };
-    }
-    try {
-      const value: unknown = JSON.parse(text);
-      if (typeof value !== 'object' || value === null) return { present: true, identity: null };
-      const record = value as Readonly<Record<string, unknown>>;
-      const files = VerifiedModelFileIdentitySchema.array()
-        .length(model.files.length)
-        .safeParse(record.files);
-      if (
-        record.schemaVersion !== 1 ||
-        record.revision !== model.revision ||
-        record.totalBytes !== model.totalBytes ||
-        !files.success ||
-        files.data.some((file, index) => file.path !== model.files[index]?.path)
-      ) {
-        return { present: true, identity: null };
-      }
-      return { present: true, identity: files.data };
-    } catch {
-      return { present: true, identity: null };
-    }
-  }
-
-  async #identityStillCurrent(
-    model: ModelManifestEntry,
-    identities: readonly VerifiedModelFileIdentity[],
-    directory = this.#modelDirectory(model),
-    managedRoot = this.#modelsDirectory,
-  ): Promise<boolean> {
-    for (const expected of identities) {
-      const file = model.files.find((candidate) => candidate.path === expected.path);
-      if (file?.size !== expected.size) return false;
-      const target = join(directory, ...file.path.split('/'));
-      try {
-        await assertSafeExistingDirectoryChain(managedRoot, dirname(target));
-      } catch {
-        return false;
-      }
-      try {
-        const metadata = await lstat(target);
-        if (
-          !metadata.isFile() ||
-          metadata.isSymbolicLink() ||
-          !sameVerifiedIdentity(expected, metadata)
-        ) {
-          return false;
-        }
-      } catch {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  async #prepareStagedPublication(
-    model: ModelManifestEntry,
-    identities: readonly VerifiedModelFileIdentity[],
-  ): Promise<void> {
-    await Promise.all(model.files.map((file) => rm(this.#partPath(model, file), { force: true })));
-    await this.#assertOnlyManifestEntries(model);
-    if (
-      !(await this.#identityStillCurrent(
-        model,
-        identities,
-        this.#temporaryModelDirectory(model),
-        this.#temporaryDirectory,
-      ))
-    ) {
-      throw new ModelManagerError('CORRUPT', 'Verified staging changed before publication.', true);
-    }
-  }
-
-  async #assertOnlyManifestEntries(
-    model: ModelManifestEntry,
-    rootDirectory = this.#temporaryModelDirectory(model),
-  ): Promise<void> {
-    const expectedFiles = new Set(model.files.map((file) => file.path));
-    const expectedDirectories = new Set<string>();
-    for (const file of model.files) {
-      const segments = file.path.split('/');
-      for (let index = 1; index < segments.length; index += 1) {
-        expectedDirectories.add(segments.slice(0, index).join('/'));
-      }
-    }
-
-    const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
-      const entries = await readdir(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        const relativePath =
-          relativeDirectory === '' ? entry.name : `${relativeDirectory}/${entry.name}`;
-        if (expectedFiles.has(relativePath)) {
-          if (!entry.isFile() || entry.isSymbolicLink()) {
-            throw new ModelManagerError(
-              'CORRUPT',
-              'Model staging contains an invalid manifest entry.',
-              true,
-            );
-          }
-          continue;
-        }
-        if (
-          expectedDirectories.has(relativePath) &&
-          entry.isDirectory() &&
-          !entry.isSymbolicLink()
-        ) {
-          await visit(join(directory, entry.name), relativePath);
-          continue;
-        }
-        throw new ModelManagerError(
-          'CORRUPT',
-          `Model staging contains unexpected entry: ${relativePath}.`,
-          true,
-        );
-      }
-    };
-
-    await visit(rootDirectory, '');
-  }
-
   async #deleteFiles(modelId: WhisperModelId): Promise<void> {
-    const model = this.#getModel(modelId);
-    await Promise.all([
-      rm(this.#modelDirectory(model), { recursive: true, force: true }),
-      rm(this.#temporaryModelDirectory(model), { recursive: true, force: true }),
-    ]);
+    await this.#repository.deleteArtifacts(this.#getModel(modelId));
     this.#states.delete(modelId);
   }
 
@@ -1078,59 +740,52 @@ export class ModelManager {
   async #withModelMutation<Value>(
     modelId: WhisperModelId,
     operation: () => Promise<Value>,
+    signal?: AbortSignal,
   ): Promise<Value> {
     const model = this.#getModel(modelId);
-    await this.#ensureRecovered(model);
-    return this.#access.withMutation(modelId, async () => {
-      await this.#recoverModelArtifacts(model);
-      await this.#beforeMutation?.(modelId);
-      try {
-        return await operation();
-      } finally {
-        await this.#recoverModelArtifacts(model);
-        this.#recoveryTasks.set(modelId, Promise.resolve());
-      }
-    });
+    await waitForModelTask(this.#ensureRecovered(model), signal, 'Model mutation was cancelled.');
+    return this.#access.withMutation(
+      modelId,
+      async () => {
+        await this.#recoverAndRemember(model);
+        await this.#beforeMutation?.(modelId);
+        try {
+          return await operation();
+        } finally {
+          await this.#recoverAndRemember(model);
+        }
+      },
+      signal,
+    );
   }
 
   #ensureRecovered(model: ModelManifestEntry): Promise<void> {
     const existing = this.#recoveryTasks.get(model.id);
     if (existing !== undefined) return existing;
-    const recovery = this.#access.withMutation(model.id, () => this.#recoverModelArtifacts(model));
+    const recovery = this.#access.withMutation(model.id, () =>
+      this.#repository.recoverArtifacts(model),
+    );
     this.#recoveryTasks.set(model.id, recovery);
+    void recovery.catch(() => {
+      if (this.#recoveryTasks.get(model.id) === recovery) this.#recoveryTasks.delete(model.id);
+    });
     return recovery;
   }
 
-  async #recoverModelArtifacts(model: ModelManifestEntry): Promise<void> {
-    const target = this.#modelDirectory(model);
-    await ensureSafeDirectory(this.#modelsDirectory, dirname(target));
-    await recoverRevisionDirectory(target);
-    await ensureSafeDirectory(
-      this.#temporaryDirectory,
-      dirname(this.#temporaryModelDirectory(model)),
-    );
+  async #recoverAndRemember(model: ModelManifestEntry): Promise<void> {
+    try {
+      await this.#repository.recoverArtifacts(model);
+      this.#recoveryTasks.set(model.id, Promise.resolve());
+    } catch (error: unknown) {
+      this.#recoveryTasks.delete(model.id);
+      throw error;
+    }
   }
 
   #getModel(modelId: WhisperModelId): ModelManifestEntry {
     const model = this.#manifest.models.find((candidate) => candidate.id === modelId);
     if (model === undefined) throw new Error(`Unsupported Whisper model: ${modelId}`);
     return model;
-  }
-
-  #stagedTargetPath(model: ModelManifestEntry, file: ModelManifestFile): string {
-    return join(this.#temporaryModelDirectory(model), ...file.path.split('/'));
-  }
-
-  #partPath(model: ModelManifestEntry, file: ModelManifestFile): string {
-    return `${this.#stagedTargetPath(model, file)}.part`;
-  }
-
-  #modelDirectory(model: ModelManifestEntry): string {
-    return join(this.#modelsDirectory, ...model.id.split('/'), model.revision);
-  }
-
-  #temporaryModelDirectory(model: ModelManifestEntry): string {
-    return join(this.#temporaryDirectory, ...model.id.split('/'), model.revision);
   }
 
   #emit(
@@ -1152,7 +807,13 @@ export class ModelManager {
         totalBytes: model.totalBytes,
       },
     });
-    for (const listener of this.#listeners) listener(event);
+    for (const listener of this.#listeners) {
+      try {
+        listener(event);
+      } catch {
+        // Progress observers must not alter model installation state.
+      }
+    }
   }
 }
 
@@ -1173,389 +834,63 @@ function makeStatus(
   });
 }
 
-async function ensureSafeDirectory(root: string, destination: string): Promise<void> {
-  const absoluteRoot = resolve(root);
-  const absoluteDestination = resolve(destination);
-  const suffix = relative(absoluteRoot, absoluteDestination);
-  if (
-    suffix.startsWith('..') ||
-    suffix.includes(`..${process.platform === 'win32' ? '\\' : '/'}`)
-  ) {
-    throw new ModelManagerError('PROTOCOL', 'Model path escaped its managed directory.');
-  }
-  await mkdir(absoluteRoot, { recursive: true, mode: 0o700 });
-  let current = absoluteRoot;
-  await assertDirectoryNotLink(current);
-  for (const segment of suffix.split(/[\\/]/).filter(Boolean)) {
-    current = join(current, segment);
-    try {
-      await mkdir(current, { mode: 0o700 });
-    } catch (error: unknown) {
-      if (!hasCode(error, 'EEXIST')) throw error;
-    }
-    await assertDirectoryNotLink(current);
-  }
+function shuttingDownError(): ModelManagerError {
+  return new ModelManagerError('CANCELLED', 'Model manager is shutting down.');
 }
 
-async function assertDirectoryNotLink(path: string): Promise<void> {
-  const metadata = await lstat(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new ModelManagerError('CORRUPT', 'Managed model directory contains a link.', true);
-  }
-}
-
-/** Validates existing parents without turning a read-only status check into a filesystem mutation. */
-async function assertSafeExistingDirectoryChain(root: string, destination: string): Promise<void> {
-  const absoluteRoot = resolve(root);
-  const suffix = relative(absoluteRoot, resolve(destination));
-  if (
-    suffix.startsWith('..') ||
-    suffix.includes(`..${process.platform === 'win32' ? '\\' : '/'}`)
-  ) {
-    throw new ModelManagerError('PROTOCOL', 'Model path escaped its managed directory.');
-  }
-  let current = absoluteRoot;
-  for (const segment of suffix.split(/[\\/]/).filter(Boolean)) {
-    current = join(current, segment);
-    try {
-      await assertDirectoryNotLink(current);
-    } catch (error: unknown) {
-      if (hasCode(error, 'ENOENT')) return;
-      throw error;
-    }
-  }
-}
-
-async function safeRegularFileSize(path: string): Promise<number> {
-  try {
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new ModelManagerError('CORRUPT', 'Managed model file is not a regular file.', true);
-    }
-    return metadata.size;
-  } catch (error: unknown) {
-    if (hasCode(error, 'ENOENT')) return 0;
-    throw error;
-  }
-}
-
-async function verifiedIdentityStillCurrent(
-  path: string,
-  expected: Omit<VerifiedModelFileIdentity, 'path'>,
-): Promise<boolean> {
-  try {
-    const metadata = await lstat(path);
-    return (
-      metadata.isFile() && !metadata.isSymbolicLink() && sameVerifiedIdentity(expected, metadata)
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function openSafePart(path: string, offset: number): Promise<FileHandle> {
-  const flags =
-    constants.O_WRONLY |
-    constants.O_CREAT |
-    constants.O_NOFOLLOW |
-    (offset === 0 ? constants.O_TRUNC : constants.O_APPEND);
-  const handle = await open(path, flags, 0o600);
-  const metadata = await handle.stat();
-  let pathMetadata: Stats;
-  try {
-    pathMetadata = await lstat(path);
-  } catch (error: unknown) {
-    await handle.close();
-    throw error;
-  }
-  if (
-    !metadata.isFile() ||
-    metadata.size !== offset ||
-    pathMetadata.isSymbolicLink() ||
-    !pathMetadata.isFile() ||
-    !sameOpenedFile(metadata, pathMetadata)
-  ) {
-    await handle.close();
-    throw new ModelManagerError(
-      'CORRUPT',
-      'Download staging path changed during secure open.',
-      true,
-    );
-  }
-  return handle;
-}
-
-async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const result = await handle.write(bytes, offset, bytes.byteLength - offset);
-    if (result.bytesWritten <= 0) throw new ModelManagerError('IO', 'Unable to write model data.');
-    offset += result.bytesWritten;
-  }
-}
-
-function readWithInactivityTimeout(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  timeoutMs: number,
-  signal: AbortSignal,
-): Promise<ReadableStreamReadResult<Uint8Array>> {
+function waitForModelTask<Value>(
+  operation: Promise<Value>,
+  signal: AbortSignal | undefined,
+  cancellationMessage: string,
+): Promise<Value> {
+  if (signal === undefined) return operation;
   if (signal.aborted) {
-    return Promise.reject(new ModelManagerError('CANCELLED', 'Model download was cancelled.'));
+    return Promise.reject(new ModelManagerError('CANCELLED', cancellationMessage));
   }
-  return new Promise((resolveRead, reject) => {
+  return new Promise<Value>((resolveTask, reject) => {
     let settled = false;
-    const finish = (operation: () => void) => {
+    const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-      operation();
+      signal.removeEventListener('abort', abort);
+      callback();
     };
-    const onAbort = () =>
-      finish(() => reject(new ModelManagerError('CANCELLED', 'Model download was cancelled.')));
-    const timer = setTimeout(
-      () =>
-        finish(() =>
-          reject(new ModelManagerError('TIMEOUT', 'Model download became inactive.', true)),
-        ),
-      timeoutMs,
-    );
-    timer.unref();
-    signal.addEventListener('abort', onAbort, { once: true });
-    void reader.read().then(
-      (result) => finish(() => resolveRead(result)),
+    const abort = (): void =>
+      finish(() => reject(new ModelManagerError('CANCELLED', cancellationMessage)));
+    signal.addEventListener('abort', abort, { once: true });
+    void operation.then(
+      (value) => finish(() => resolveTask(value)),
       (error: unknown) =>
         finish(() =>
-          reject(error instanceof Error ? error : new Error('Model response body failed.')),
+          reject(
+            error instanceof Error
+              ? error
+              : new ModelManagerError('IO', 'Model operation failed.', true),
+          ),
         ),
     );
   });
 }
 
-async function cancelResponseBody(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
-}
-
-async function publishStagedFile(
-  source: string,
-  target: string,
-  renameOperation: typeof rename,
-): Promise<void> {
-  await renameWithWindowsRetry(source, target, renameOperation);
-}
-
-async function publishRevisionDirectory(
-  source: string,
-  target: string,
-  renameOperation: typeof rename,
-): Promise<void> {
-  await recoverRevisionDirectory(target);
-  const backup = `${target}.${randomUUID()}.replaced`;
-  let movedExisting = false;
-  try {
-    try {
-      await renameWithWindowsRetry(target, backup, renameOperation);
-      movedExisting = true;
-    } catch (error: unknown) {
-      if (!hasCode(error, 'ENOENT')) throw error;
-    }
-    await renameWithWindowsRetry(source, target, renameOperation);
-  } catch (error: unknown) {
-    await renameWithWindowsRetry(backup, target, renameOperation).catch(() => undefined);
-    throw error;
-  }
-  if (movedExisting) {
-    await rm(backup, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function publishAtomically(
-  source: string,
-  target: string,
-  renameOperation: typeof rename,
-): Promise<void> {
-  if (process.platform !== 'win32') {
-    await renameOperation(source, target);
-    return;
-  }
-  await recoverPublicationTarget(target);
-  const backup = `${target}.${randomUUID()}.replaced`;
-  let movedExisting = false;
-  try {
-    try {
-      await renameWithWindowsRetry(target, backup, renameOperation);
-      movedExisting = true;
-    } catch (error: unknown) {
-      if (!hasCode(error, 'ENOENT')) throw error;
-    }
-    await renameWithWindowsRetry(source, target, renameOperation);
-  } catch (error: unknown) {
-    await renameWithWindowsRetry(backup, target, renameOperation).catch(() => undefined);
-    throw error;
-  }
-  // Publication already succeeded. A scanner holding the obsolete backup must not turn success
-  // into a false setup failure; startup recovery safely removes it later.
-  if (movedExisting) await rm(backup, { force: true }).catch(() => undefined);
-}
-
-async function renameWithWindowsRetry(
-  source: string,
-  target: string,
-  renameOperation: typeof rename,
-): Promise<void> {
-  const attempts = process.platform === 'win32' ? 7 : 1;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      await renameOperation(source, target);
-      return;
-    } catch (error: unknown) {
-      lastError = error;
-      if (!isTransientWindowsFileError(error) || attempt + 1 === attempts) throw error;
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * 2 ** attempt));
-    }
-  }
-  throw lastError;
-}
-
-async function recoverRevisionDirectory(target: string): Promise<void> {
-  const directory = dirname(target);
-  const name = basename(target);
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error: unknown) {
-    if (hasCode(error, 'ENOENT')) return;
-    throw error;
-  }
-  const backups = entries
-    .filter(
-      (entry) =>
-        entry.name === `${name}.replaced` ||
-        (entry.name.startsWith(`${name}.`) && entry.name.endsWith('.replaced')),
-    )
-    .map((entry) => join(directory, entry.name))
-    .sort();
-  if (backups.length === 0) return;
-  const targetMetadata = await safeLstatForRecovery(target);
-  if (targetMetadata !== null) {
-    await Promise.all(
-      backups.map((backup) => rm(backup, { recursive: true, force: true }).catch(() => undefined)),
-    );
-    return;
-  }
-  let restored = false;
-  for (const backup of backups) {
-    const metadata = await safeLstatForRecovery(backup);
-    if (!restored && metadata?.isDirectory() === true && !metadata.isSymbolicLink()) {
-      await rename(backup, target);
-      restored = true;
-    } else {
-      await rm(backup, { recursive: true, force: true });
-    }
-  }
-}
-
-async function recoverPublicationTarget(target: string): Promise<void> {
-  const directory = dirname(target);
-  const name = basename(target);
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error: unknown) {
-    if (hasCode(error, 'ENOENT')) return;
-    throw error;
-  }
-  const backups = entries
-    .filter(
-      (entry) =>
-        entry.name === `${name}.replaced` ||
-        (entry.name.startsWith(`${name}.`) && entry.name.endsWith('.replaced')),
-    )
-    .map((entry) => join(directory, entry.name))
-    .sort();
-  if (backups.length === 0) return;
-  const targetMetadata = await safeLstatForRecovery(target);
-  if (targetMetadata !== null) {
-    await Promise.all(
-      backups.map((backup) => rm(backup, { recursive: true, force: true }).catch(() => undefined)),
-    );
-    return;
-  }
-  let restored = false;
-  for (const backup of backups) {
-    const metadata = await safeLstatForRecovery(backup);
-    if (!restored && metadata?.isFile() === true && !metadata.isSymbolicLink()) {
-      await rename(backup, target);
-      restored = true;
-    } else {
-      await rm(backup, { recursive: true, force: true });
-    }
-  }
-}
-
-async function safeLstatForRecovery(path: string): Promise<Stats | null> {
-  try {
-    return await lstat(path);
-  } catch (error: unknown) {
-    if (hasCode(error, 'ENOENT')) return null;
-    throw error;
-  }
-}
-
-function sameOpenedFile(first: Stats, second: Stats): boolean {
-  return (
-    first.size === second.size &&
-    first.mtimeMs === second.mtimeMs &&
-    first.ctimeMs === second.ctimeMs &&
-    first.birthtimeMs === second.birthtimeMs &&
-    first.dev === second.dev &&
-    first.ino === second.ino
-  );
-}
-
-function validUnsatisfiedRange(response: Response, total: number): boolean {
+function validUnsatisfiedRange(response: ModelDownloadResponse, total: number): boolean {
   if (response.status !== 416) return false;
-  const match = /^bytes \*\/(\d+)$/.exec(response.headers.get('content-range') ?? '');
+  const match = /^bytes \*\/(\d+)$/.exec(response.header('content-range') ?? '');
   return match !== null && Number(match[1]) === total;
 }
 
-function validContentRange(response: Response, offset: number, total: number): boolean {
+function validContentRange(
+  response: ModelDownloadResponse,
+  offset: number,
+  total: number,
+): boolean {
   if (response.status !== 206) return false;
-  const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '');
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.header('content-range') ?? '');
   return (
     match !== null &&
     Number(match[1]) === offset &&
     Number(match[3]) === total &&
     Number(match[2]) === total - 1
   );
-}
-
-async function defaultAvailableBytes(path: string): Promise<number> {
-  const values = await statfs(path);
-  const available = BigInt(values.bavail) * BigInt(values.bsize);
-  return available > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(available);
-}
-
-function defaultModelUrl(model: ModelManifestEntry, file: ModelManifestFile): string {
-  const path = file.path.split('/').map(encodeURIComponent).join('/');
-  return `https://huggingface.co/${model.id}/resolve/${model.revision}/${path}`;
-}
-
-function defaultValidateRequestUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === 'https:' &&
-      (url.hostname === 'huggingface.co' ||
-        url.hostname === 'hf.co' ||
-        url.hostname.endsWith('.hf.co') ||
-        url.hostname.endsWith('.huggingface.co') ||
-        url.hostname.endsWith('.xethub.hf.co'))
-    );
-  } catch {
-    return false;
-  }
 }
 
 function mapDownloadError(
@@ -1599,10 +934,7 @@ function mapDownloadError(
       true,
     );
   }
-  if (
-    ['ENETUNREACH', 'ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN'].includes(code) ||
-    error instanceof TypeError
-  ) {
+  if (['ENETUNREACH', 'ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN'].includes(code)) {
     return new ModelManagerError(
       'OFFLINE',
       'The model host is unreachable. A completed cached model remains available offline.',

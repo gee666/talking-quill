@@ -26,17 +26,15 @@ export function validateExternalControls(
   if (repository.defaultBranchProtected !== true) {
     throw new Error('The canonical default branch is not protected.');
   }
+  if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(policy.releaseTag)) {
+    throw new Error('Release control policy requires a strict semver release tag.');
+  }
+  const releaseRef = `refs/tags/${policy.releaseTag}`;
   if (
     !Array.isArray(tagRulesets) ||
-    !tagRulesets.some(
-      (ruleset) =>
-        ruleset.target === 'tag' &&
-        ruleset.enforcement === 'active' &&
-        Array.isArray(ruleset.rules) &&
-        ruleset.rules.some((rule) => rule.type === 'creation'),
-    )
+    !tagRulesets.some((ruleset) => rulesetProtectsRef(ruleset, releaseRef))
   ) {
-    throw new Error('No active release-tag creation ruleset is configured.');
+    throw new Error(`No active creation ruleset protects the release tag: ${releaseRef}`);
   }
   const availableLabels = new Set(runnerLabels);
   for (const label of policy.runnerLabels) {
@@ -73,6 +71,47 @@ export function validateExternalControls(
         throw new Error(`Protected environment variable is missing: ${name}:${variable}`);
     }
   }
+}
+
+function rulesetProtectsRef(ruleset, releaseRef) {
+  if (
+    ruleset?.target !== 'tag' ||
+    ruleset.enforcement !== 'active' ||
+    !Array.isArray(ruleset.rules) ||
+    !ruleset.rules.some((rule) => rule.type === 'creation')
+  ) {
+    return false;
+  }
+  const condition = ruleset.conditions?.ref_name;
+  if (!Array.isArray(condition?.include) || !Array.isArray(condition.exclude)) return false;
+  const patterns = [...condition.include, ...condition.exclude];
+  if (patterns.some((pattern) => !isSupportedRefPattern(pattern))) return false;
+  return (
+    condition.include.some((pattern) => refPatternMatches(pattern, releaseRef)) &&
+    !condition.exclude.some((pattern) => refPatternMatches(pattern, releaseRef))
+  );
+}
+
+function isSupportedRefPattern(pattern) {
+  return (
+    pattern === '~ALL' ||
+    pattern === '~DEFAULT_BRANCH' ||
+    (typeof pattern === 'string' &&
+      pattern.startsWith('refs/tags/') &&
+      !['[', ']', '{', '}', '\\'].some((character) => pattern.includes(character)))
+  );
+}
+
+function refPatternMatches(pattern, releaseRef) {
+  if (pattern === '~ALL') return true;
+  if (typeof pattern !== 'string' || !pattern.startsWith('refs/tags/')) return false;
+  const expression = pattern
+    .replace(/[.+^${}()|[\]\\]/gu, '\\$&')
+    .replaceAll('**', '\u0000')
+    .replaceAll('*', '[^/]*')
+    .replaceAll('?', '[^/]')
+    .replaceAll('\u0000', '.*');
+  return new RegExp(`^${expression}$`, 'u').test(releaseRef);
 }
 
 async function githubJson(path, token) {
@@ -155,6 +194,7 @@ async function main() {
     {
       repository: config.repository,
       defaultBranch: repository.default_branch,
+      releaseTag: process.env.RELEASE_TAG,
       environments: environmentNames,
       runnerLabels: ['windows-11-arm', 'macos-15-intel', 'macos-15'],
       environmentSecrets: {

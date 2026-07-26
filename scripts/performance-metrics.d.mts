@@ -1,3 +1,5 @@
+export const MIB: number;
+
 export interface ProcessMemory {
   readonly role: string;
   readonly privateWorkingSetBytes: number;

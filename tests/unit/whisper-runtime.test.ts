@@ -133,9 +133,10 @@ describe('Whisper runtime', () => {
     );
     expect(result.text.match(/repeat/g)).toHaveLength(2);
     expect(result.text).not.toContain('duplicate-overlap');
+    expect(result.pipeline).toMatchObject({ loadCount: 1, reused: false });
   });
 
-  it('snapshots public pushes and reuses one inference-window scratch buffer', async () => {
+  it('takes ownership of pushed audio and reuses one inference-window scratch buffer', async () => {
     const windows: Float32Array[] = [];
     const starts: number[] = [];
     const pipeline = ((pcm: Float32Array) => {
@@ -155,7 +156,7 @@ describe('Whisper runtime', () => {
     for (const value of [0.2, 0.3, 0.4, 0.5]) {
       await runtime.pushSession('owned', new Float32Array(10 * 16_000).fill(value));
     }
-    expect(starts[0]).toBeCloseTo(0.1);
+    expect(starts[0]).toBeCloseTo(0.9);
     expect(starts[1]).toBeCloseTo(0.3);
     expect(windows).toHaveLength(2);
     expect(windows[0]).toBe(windows[1]);

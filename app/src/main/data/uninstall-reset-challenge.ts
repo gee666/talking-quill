@@ -47,7 +47,8 @@ export async function consumeUninstallResetChallenge(
     suffix.length === 0 ||
     suffix === '..' ||
     suffix.startsWith('../') ||
-    suffix.startsWith('..\\')
+    suffix.startsWith('..\\') ||
+    isAbsolute(suffix)
   ) {
     throw new Error('Uninstall reset challenge is outside the temporary directory.');
   }

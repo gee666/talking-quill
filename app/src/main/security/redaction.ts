@@ -15,9 +15,10 @@ const NETWORK_ERROR_HOST_PATTERN =
 
 export function redactText(value: string, secrets: readonly string[] = []): string {
   let redacted = value;
-  for (const secret of secrets) {
-    if (secret.length > 0) redacted = redacted.split(secret).join(REDACTED);
-  }
+  const orderedSecrets = [...new Set(secrets.filter((secret) => secret.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+  for (const secret of orderedSecrets) redacted = redacted.split(secret).join(REDACTED);
   return redacted
     .replace(NETWORK_ERROR_HOST_PATTERN, '$1 [REDACTED]')
     .replace(URL_PATTERN, REDACTED)
@@ -48,16 +49,6 @@ function redactValue(value: unknown, secrets: readonly string[], seen: WeakSet<o
     result[key] = SENSITIVE_KEY.test(key) ? REDACTED : redactValue(item, secrets, seen);
   }
   return result;
-}
-
-export function redactHeaders(
-  headers: Readonly<Record<string, string>>,
-): Readonly<Record<string, string>> {
-  const result: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers)) {
-    result[name] = SENSITIVE_KEY.test(name) ? REDACTED : redactText(value);
-  }
-  return Object.freeze(result);
 }
 
 function isIpv6Token(value: string): boolean {

@@ -5,10 +5,14 @@ import { lstat, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, parse, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { syncDirectory, writeJsonAtomic } from '../persistence/atomic-json';
+import {
+  APP_OWNERSHIP_ID,
+  decodeResetJournal,
+  RESET_JOURNAL_VERSION,
+  type ResetJournal,
+} from './reset-journal';
 
-const RESET_JOURNAL_VERSION = 4 as const;
 const OWNERSHIP_MARKER_VERSION = 1 as const;
-const APP_OWNERSHIP_ID = 'com.talkingquill.app' as const;
 const OwnershipMarkerSchema = z
   .object({
     schemaVersion: z.literal(OWNERSHIP_MARKER_VERSION),
@@ -16,43 +20,6 @@ const OwnershipMarkerSchema = z
     rootIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
-const LegacyV2ResetJournalSchema = z
-  .object({
-    schemaVersion: z.literal(2),
-    appId: z.literal(APP_OWNERSHIP_ID),
-    userDataRoot: z.string().min(1).max(32_768),
-    rootIdentity: z.string().regex(/^[a-f0-9]{64}$/),
-    requestedAt: z.number().int().nonnegative(),
-    nonce: z.uuid(),
-  })
-  .strict();
-const LegacyV3ResetJournalSchema = z
-  .object({
-    schemaVersion: z.literal(3),
-    appId: z.literal(APP_OWNERSHIP_ID),
-    userDataRoot: z.string().min(1).max(32_768),
-    rootIdentity: z.string().regex(/^[a-f0-9]{64}$/),
-    rootFileIdentity: z.string().regex(/^\d+:\d+$/),
-    tombstonePath: z.string().min(1).max(32_768),
-    requestedAt: z.number().int().nonnegative(),
-    nonce: z.uuid(),
-  })
-  .strict();
-const ResetJournalSchema = z
-  .object({
-    schemaVersion: z.literal(RESET_JOURNAL_VERSION),
-    appId: z.literal(APP_OWNERSHIP_ID),
-    userDataRoot: z.string().min(1).max(32_768),
-    rootIdentity: z.string().regex(/^[a-f0-9]{64}$/),
-    rootFileIdentity: z.string().regex(/^\d+:\d+$/),
-    tombstonePath: z.string().min(1).max(32_768),
-    disposalPath: z.string().min(1).max(32_768),
-    phase: z.enum(['rename-pending', 'disposal-pending']),
-    requestedAt: z.number().int().nonnegative(),
-    nonce: z.uuid(),
-  })
-  .strict();
-
 export type ResetFaultPhase =
   | 'after-journal-write'
   | 'before-live-rename'
@@ -122,10 +89,6 @@ export class DataLifecycleService {
 
   get journalPath(): string {
     return this.#journalPath;
-  }
-
-  get markerPath(): string {
-    return this.#markerPath;
   }
 
   async initializeOwnership(): Promise<void> {
@@ -363,7 +326,7 @@ export class DataLifecycleService {
     return this.#prepared;
   }
 
-  #validateJournalBinding(journal: z.infer<typeof ResetJournalSchema>): {
+  #validateJournalBinding(journal: ResetJournal): {
     tombstonePath: string;
     disposalPath: string;
   } {
@@ -474,7 +437,7 @@ export class DataLifecycleService {
     return OwnershipMarkerSchema.parse(JSON.parse(source) as unknown);
   }
 
-  async #readJournal(): Promise<z.infer<typeof ResetJournalSchema> | null> {
+  async #readJournal(): Promise<ResetJournal | null> {
     let source: string;
     try {
       source = await readFile(this.#journalPath, 'utf8');
@@ -482,10 +445,9 @@ export class DataLifecycleService {
       if (isNodeError(error) && error.code === 'ENOENT') return null;
       throw error;
     }
-    const value = JSON.parse(source) as unknown;
-    const legacyV2 = LegacyV2ResetJournalSchema.safeParse(value);
-    if (legacyV2.success) {
-      if (resolve(legacyV2.data.userDataRoot) !== this.#root) {
+    const decoded = decodeResetJournal(JSON.parse(source) as unknown);
+    if (decoded.kind === 'legacy-v2') {
+      if (resolve(decoded.value.userDataRoot) !== this.#root) {
         throw new Error('Legacy reset journal does not match the application data root');
       }
       // Version 2 authorized recursive deletion of the live root. Cancel it rather than migrate
@@ -494,29 +456,28 @@ export class DataLifecycleService {
       this.#prepared = false;
       return null;
     }
-    const legacyV3 = LegacyV3ResetJournalSchema.safeParse(value);
-    if (legacyV3.success) {
-      if (resolve(legacyV3.data.userDataRoot) !== this.#root) {
+    if (decoded.kind === 'legacy-v3') {
+      if (resolve(decoded.value.userDataRoot) !== this.#root) {
         throw new Error('Legacy reset journal does not match the application data root');
       }
       const disposalPath = resetDisposalPath(
         this.#root,
-        legacyV3.data.rootIdentity,
-        legacyV3.data.nonce,
+        decoded.value.rootIdentity,
+        decoded.value.nonce,
       );
       if ((await lstatOrNull(disposalPath)) !== null) {
         throw new Error('Cannot migrate reset journal while its disposal path is occupied');
       }
-      const migrated = {
-        ...legacyV3.data,
+      const migrated: ResetJournal = {
+        ...decoded.value,
         schemaVersion: RESET_JOURNAL_VERSION,
         disposalPath,
-        phase: 'rename-pending' as const,
+        phase: 'rename-pending',
       };
       await this.#writeResetJournal(this.#journalPath, migrated);
-      return ResetJournalSchema.parse(migrated);
+      return migrated;
     }
-    return ResetJournalSchema.parse(value);
+    return decoded.value;
   }
 }
 
@@ -546,7 +507,7 @@ export function resetJournalPath(userDataRoot: string): string {
   return resolve(dirname(root), `.talking-quill-reset-${identity}.json`);
 }
 
-export function resetTombstonePath(userDataRoot: string, identity: string, nonce: string): string {
+function resetTombstonePath(userDataRoot: string, identity: string, nonce: string): string {
   if (!/^[a-f0-9]{64}$/u.test(identity) || !z.uuid().safeParse(nonce).success) {
     throw new Error('Reset tombstone identity is invalid');
   }
@@ -557,7 +518,7 @@ export function resetTombstonePath(userDataRoot: string, identity: string, nonce
   );
 }
 
-export function resetDisposalPath(userDataRoot: string, identity: string, nonce: string): string {
+function resetDisposalPath(userDataRoot: string, identity: string, nonce: string): string {
   if (!/^[a-f0-9]{64}$/u.test(identity) || !z.uuid().safeParse(nonce).success) {
     throw new Error('Reset disposal identity is invalid');
   }

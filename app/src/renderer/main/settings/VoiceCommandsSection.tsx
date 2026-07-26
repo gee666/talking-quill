@@ -1,6 +1,7 @@
 import { useRef, useState, type SyntheticEvent } from 'react';
 import type { VoiceCommand } from '../../../shared/schemas/commands';
 import { Button, Card, EmptyState, Input, TextArea } from '../../design';
+import { publicErrorMessage } from '../public-error';
 
 export function VoiceCommandsSection({ commands }: { readonly commands: readonly VoiceCommand[] }) {
   const [editing, setEditing] = useState<VoiceCommand | null>(null);
@@ -10,6 +11,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
   const [preview, setPreview] = useState('');
   const [busy, setBusy] = useState(false);
   const triggerRef = useRef<HTMLInputElement>(null);
+  const previewGeneration = useRef(0);
 
   const reset = () => {
     setEditing(null);
@@ -27,22 +29,26 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
       reset();
       queueMicrotask(() => triggerRef.current?.focus());
     } catch (error: unknown) {
-      setMessage(error instanceof Error ? error.message : 'The voice command could not be saved.');
+      setMessage(publicErrorMessage(error, 'The voice command could not be saved.'));
     } finally {
       setBusy(false);
     }
   };
   const runPreview = async () => {
+    const generation = ++previewGeneration.current;
     setMessage('');
     try {
       const result = await window.talkingQuill.commands.preview(preview);
+      if (generation !== previewGeneration.current) return;
       setMessage(
         result === null
           ? 'No voice command matches the full transcript.'
           : `${result.kind === 'exact' ? 'Exact' : 'Fuzzy'} match: say “${result.command.trigger}” → get “${result.command.snippet}”.`,
       );
     } catch (error: unknown) {
-      setMessage(publicMessage(error, 'The match preview could not be completed.'));
+      if (generation === previewGeneration.current) {
+        setMessage(publicErrorMessage(error, 'The match preview could not be completed.'));
+      }
     }
   };
 
@@ -59,6 +65,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
             value={trigger}
             maxLength={200}
             required
+            disabled={busy}
             onChange={(event) => setTrigger(event.target.value)}
           />
           <TextArea
@@ -67,6 +74,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
             maxLength={100000}
             required
             rows={4}
+            disabled={busy}
             onChange={(event) => setSnippet(event.target.value)}
           />
           <div className="provider-actions">
@@ -74,7 +82,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
               {editing === null ? 'Add voice command' : 'Save voice command'}
             </Button>
             {editing === null ? null : (
-              <Button type="button" variant="secondary" onClick={reset}>
+              <Button type="button" variant="secondary" disabled={busy} onClick={reset}>
                 Cancel editing
               </Button>
             )}
@@ -97,6 +105,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
                 <div className="provider-actions">
                   <Button
                     variant="secondary"
+                    disabled={busy}
                     onClick={() => {
                       setEditing(command);
                       setTrigger(command.trigger);
@@ -109,6 +118,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
                   </Button>
                   <Button
                     variant="danger"
+                    disabled={busy}
                     onClick={async () => {
                       if (window.confirm(`Delete “${command.trigger}”?`)) {
                         try {
@@ -116,7 +126,7 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
                           setMessage('Voice command deleted.');
                         } catch (error: unknown) {
                           setMessage(
-                            publicMessage(error, 'The voice command could not be deleted.'),
+                            publicErrorMessage(error, 'The voice command could not be deleted.'),
                           );
                         }
                       }
@@ -136,7 +146,10 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
             value={preview}
             maxLength={10000}
             hint="Matching always uses the full transcript."
-            onChange={(event) => setPreview(event.target.value)}
+            onChange={(event) => {
+              previewGeneration.current += 1;
+              setPreview(event.target.value);
+            }}
           />
           <Button
             variant="secondary"
@@ -152,8 +165,4 @@ export function VoiceCommandsSection({ commands }: { readonly commands: readonly
       </div>
     </Card>
   );
-}
-
-function publicMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.length > 0 ? error.message : fallback;
 }

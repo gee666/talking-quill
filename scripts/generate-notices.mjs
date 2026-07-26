@@ -39,7 +39,7 @@ const [lock, cargoLocks, modelSource, anythingLlmMit] = await Promise.all([
 ]);
 
 const licenseReport = JSON.parse(
-  execSync('pnpm licenses list --prod --json', {
+  execSync('pnpm --config.ignore-pnpmfile=true licenses list --prod --json', {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
@@ -67,11 +67,14 @@ if (
   throw new Error('Expected the production Sharp replacement before excluding its optional graph.');
 }
 const deployment = JSON.parse(
-  execSync('pnpm --filter @talking-quill/app list --prod --json --depth Infinity', {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-  }),
+  execSync(
+    'pnpm --config.ignore-pnpmfile=true --filter @talking-quill/app list --prod --json --depth Infinity',
+    {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  ),
 )[0];
 if (deployment?.name !== '@talking-quill/app')
   throw new Error('Production app dependency graph unavailable.');

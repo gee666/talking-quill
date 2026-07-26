@@ -22,7 +22,7 @@ export const HistoryCreateSchema = z
     rawText: nullableText,
     processedText: nullableText,
     providerId: z.string().max(128).nullable(),
-    modelId: z.string().max(256).nullable(),
+    modelId: z.string().max(512).nullable(),
     fellBack: z.boolean(),
     errorCategory: z.string().max(128).nullable(),
     voiceTrigger: z.string().max(512).nullable(),

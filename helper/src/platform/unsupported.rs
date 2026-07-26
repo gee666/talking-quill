@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 
 use super::{
     CallbackGate, FrontApp, HookStatus, PasteFailure, PasteResult, PermissionState, Permissions,
-    Platform, PlatformError, TerminalSignal,
+    Platform, PlatformError, TerminalReason, TerminalSignal,
 };
 use crate::{keyboard::ActivationBindings, protocol::Outbound};
 
@@ -58,7 +58,8 @@ impl Platform for NativePlatform {
         }
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> Option<TerminalReason> {
         self.gate.close();
+        None
     }
 }

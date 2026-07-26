@@ -1,5 +1,5 @@
 use std::{
-    io::Cursor,
+    io::{Cursor, Read},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -36,6 +36,7 @@ struct FakeState {
     gate_was_closed_on_shutdown: AtomicBool,
     oversized_front_app: AtomicBool,
     fail_activation_config: AtomicBool,
+    terminal_on_shutdown: AtomicBool,
 }
 
 impl Default for FakeState {
@@ -50,6 +51,7 @@ impl Default for FakeState {
             gate_was_closed_on_shutdown: AtomicBool::new(false),
             oversized_front_app: AtomicBool::new(false),
             fail_activation_config: AtomicBool::new(false),
+            terminal_on_shutdown: AtomicBool::new(false),
         }
     }
 }
@@ -57,6 +59,22 @@ impl Default for FakeState {
 impl FakeState {
     fn record(&self, call: &'static str) {
         self.calls.lock().unwrap().push(call);
+    }
+}
+
+struct BlockingAfterData {
+    data: Cursor<Vec<u8>>,
+    release: Receiver<()>,
+}
+
+impl Read for BlockingAfterData {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.data.read(buffer)?;
+        if read > 0 {
+            return Ok(read);
+        }
+        let _ = self.release.recv();
+        Ok(0)
     }
 }
 
@@ -142,7 +160,7 @@ impl Platform for FakePlatform {
         }
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> Option<TerminalReason> {
         self.state.record("shutdown");
         if let Some(gate) = &self.gate {
             self.state
@@ -158,6 +176,10 @@ impl Platform for FakePlatform {
                 shift: false,
             }));
         }
+        self.state
+            .terminal_on_shutdown
+            .load(Ordering::Acquire)
+            .then_some(TerminalReason::OwnerThreadUnresponsive)
     }
 }
 
@@ -455,6 +477,35 @@ fn shutdown_response_is_enqueued_after_gate_close_and_hook_quiescence() {
 }
 
 #[test]
+fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof() {
+    let (mut server, receiver, state, gate) = setup_observable();
+    initialize(&mut server, &receiver);
+    state.terminal_on_shutdown.store(true, Ordering::Release);
+
+    assert!(!server.handle_payload(&request(2, "shutdown", json!({}))));
+    assert!(!gate.is_open());
+    assert!(receiver.try_recv().is_err());
+
+    let eof_state = Arc::new(FakeState::default());
+    eof_state
+        .terminal_on_shutdown
+        .store(true, Ordering::Release);
+    let result = run_framed_stream(
+        FakePlatform {
+            state: eof_state,
+            outbound: None,
+            gate: None,
+        },
+        Cursor::new(Vec::new()),
+        Vec::new(),
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::Terminal(TerminalReason::OwnerThreadUnresponsive))
+    ));
+}
+
+#[test]
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
@@ -497,6 +548,31 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
         run_framed_stream(fake_platform(), Cursor::new(truncated), Vec::new()),
         Err(RunError::Framing(_))
     ));
+}
+
+#[test]
+fn framed_runner_does_not_wait_for_eof_after_shutdown() {
+    let mut input = Vec::new();
+    for payload in [
+        request(1, "initialize", json!({"protocolVersion": 2})),
+        request(2, "shutdown", json!({})),
+    ] {
+        write_frame(&mut input, &payload).unwrap();
+    }
+    let (release_tx, release_rx) = bounded(1);
+    let started = std::time::Instant::now();
+    let result = run_framed_stream(
+        fake_platform(),
+        BlockingAfterData {
+            data: Cursor::new(input),
+            release: release_rx,
+        },
+        Vec::new(),
+    );
+    release_tx.send(()).unwrap();
+
+    assert!(result.is_ok());
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]

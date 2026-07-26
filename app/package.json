@@ -11,7 +11,7 @@
     "build:test": "electron-vite build --mode test && node ../scripts/build-preloads.mjs && node ../scripts/build-whisper-worker.mjs",
     "build:helper": "node ../scripts/build-helper.mjs",
     "dev": "node ../scripts/run-dev.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
     "rebuild:native": "electron-builder install-app-deps",
     "package:win": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.yml --win nsis --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
     "package:win:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && electron-builder --config ../build/electron-builder.yml --win nsis --arm64 && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",

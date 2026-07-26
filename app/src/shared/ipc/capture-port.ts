@@ -105,7 +105,7 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
       type: z.literal('stream:stopped'),
       requestId: RequestIdSchema.nullable(),
       captureId: CaptureIdSchema,
-      reason: z.enum(['requested', 'device-lost', 'replaced', 'page-unload', 'error']),
+      reason: z.enum(['requested', 'device-lost', 'error']),
     })
     .strict(),
   z

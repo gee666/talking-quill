@@ -53,6 +53,16 @@ describe('provider registry and presets', () => {
     expect(byId.lemonade?.defaultContextWindow).toBe(8_192);
     expect(byId.lmstudio?.defaultContextWindow).toBe(16_384);
     expect(byId.localai?.auth).toBe('optional-bearer');
+    expect(byId.textgenwebui?.fields.some(({ key }) => key === 'modelId')).toBe(false);
+    const catalog = new ProviderRegistry({ transport: noNetworkTransport() }).catalog();
+    const textgen = catalog.find(({ id }) => id === 'textgenwebui');
+    expect(textgen?.modelDiscovery).toBe('provider-managed');
+    expect(textgen?.description).toMatch(/model already loaded.*no model ID is required/i);
+    expect(catalog.find(({ id }) => id === 'bedrock')?.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'region', kind: 'text', defaultValue: 'us-west-2' }),
+      ]),
+    );
     expect(OPENAI_COMPATIBLE_PRESETS.map((preset) => preset.logo)).toEqual([
       'openai.png',
       'generic-openai.png',

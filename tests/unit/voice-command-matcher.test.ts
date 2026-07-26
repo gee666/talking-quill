@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VoiceCommand } from '../../app/src/shared/schemas/commands';
-import {
-  boundedLevenshteinDistance,
-  findTriggerConflict,
-  levenshteinDistance,
-  levenshteinRatio,
-  matchVoiceCommand,
-  normalizeCommandText,
-} from '../../app/src/main/commands/matcher';
+import { normalizeCommandText } from '../../app/src/shared/text/command-normalization';
+import { findTriggerConflict, matchVoiceCommand } from '../../app/src/main/commands/matcher';
 
 function command(id: string, trigger: string, snippet = 'result'): VoiceCommand {
   return { id, trigger, snippet, createdAt: 1, updatedAt: 1 };
@@ -25,6 +19,12 @@ describe('voice command matching', () => {
     ['turn---off', 'turnoff'],
   ])('normalizes punctuation, whitespace, case and diacritics', (input, expected) => {
     expect(normalizeCommandText(input)).toBe(expected);
+  });
+
+  it('preserves meaning-bearing marks in non-Latin scripts', () => {
+    const words = ['कल', 'काल', 'कुल', 'केल'];
+    expect(new Set(words.map(normalizeCommandText)).size).toBe(words.length);
+    expect(matchVoiceCommand('काल', [command(A, 'कल'), command(B, 'काल')])?.command.id).toBe(B);
   });
 
   it.each([
@@ -80,22 +80,6 @@ describe('voice command matching', () => {
     expect(matchVoiceCommand(belowThreshold, [command(A, '😀'.repeat(20))])).toBeNull();
   });
 
-  it('matches bounded distance to the unbounded reference across generated cases', () => {
-    const alphabet = ['a', 'b', 'é', '😀'];
-    const values = generatedStrings(alphabet, 3);
-    for (const left of values) {
-      for (const right of values) {
-        const reference = levenshteinDistance(left, right);
-        for (let limit = 0; limit <= 4; limit += 1) {
-          expect(
-            boundedLevenshteinDistance(left, right, limit),
-            `${left}/${right}/${String(limit)}`,
-          ).toBe(reference <= limit ? reference : limit + 1);
-        }
-      }
-    }
-  });
-
   it('preserves optimized matcher equivalence with the unbounded full-transcript reference', () => {
     const pairs = [
       ['hello world', 'hello worle'],
@@ -113,6 +97,23 @@ describe('voice command matching', () => {
       const match = matchVoiceCommand(transcript, [command(A, trigger)]);
       expect(match !== null, `${transcript}/${trigger}`).toBe(reference >= 0.85);
       if (match !== null) expect(match.score).toBe(reference);
+    }
+  });
+
+  it('matches the unbounded reference across generated positions around the threshold', () => {
+    const transcript = 'abcdefghijklmnopqrst';
+    for (let start = 0; start < transcript.length; start += 1) {
+      for (let edits = 0; edits <= 4; edits += 1) {
+        const points = Array.from(transcript);
+        for (let offset = 0; offset < edits; offset += 1) {
+          points[(start + offset) % points.length] = '0';
+        }
+        const trigger = points.join('');
+        const reference = levenshteinRatio(transcript, trigger);
+        const match = matchVoiceCommand(transcript, [command(A, trigger)]);
+        expect(match !== null, `${String(start)}/${String(edits)}`).toBe(reference >= 0.85);
+        if (match !== null) expect(match.score).toBe(reference);
+      }
     }
   });
 
@@ -142,12 +143,25 @@ describe('voice command matching', () => {
   });
 });
 
-function generatedStrings(alphabet: readonly string[], maximumLength: number): readonly string[] {
-  const values = [''];
-  let frontier = [''];
-  for (let length = 1; length <= maximumLength; length += 1) {
-    frontier = frontier.flatMap((prefix) => alphabet.map((character) => `${prefix}${character}`));
-    values.push(...frontier);
+function levenshteinDistance(left: string, right: string): number {
+  const leftPoints = Array.from(left);
+  const rightPoints = Array.from(right);
+  let previous = Array.from({ length: leftPoints.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= rightPoints.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= leftPoints.length; column += 1) {
+      current[column] = Math.min(
+        (current[column - 1] ?? 0) + 1,
+        (previous[column] ?? 0) + 1,
+        (previous[column - 1] ?? 0) + (leftPoints[column - 1] === rightPoints[row - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
   }
-  return values;
+  return previous[leftPoints.length] ?? 0;
+}
+
+function levenshteinRatio(left: string, right: string): number {
+  const maximum = Math.max(Array.from(left).length, Array.from(right).length);
+  return maximum === 0 ? 1 : 1 - levenshteinDistance(left, right) / maximum;
 }

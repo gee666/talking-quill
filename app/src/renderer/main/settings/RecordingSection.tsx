@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { SILENCE_PRESET_MS, SPEECH_ARMING_MS } from '../../../shared/constants/audio';
 import type { MicrophoneDeviceList, MicrophoneTestState } from '../../../shared/schemas/audio';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Button, Card, Progress, Select, Status, Toast } from '../../design';
@@ -25,6 +26,7 @@ export function RecordingSection({
   const [notice, setNotice] = useState<Notice | null>(null);
   const mounted = useRef(true);
   const operation = useRef(0);
+  const activeCaptureId = useRef<string | null>(null);
   const testing = testState.status === 'starting' || testState.status === 'active';
   const isCurrentOperation = (value: number) => mounted.current && operation.current === value;
 
@@ -35,23 +37,24 @@ export function RecordingSection({
       setDevices(next);
       const permission = next.permission;
       if (permission === 'denied' || permission === 'restricted') {
-        setTestState((current) =>
-          current.status === 'active' || current.status === 'starting'
-            ? current
-            : {
-                status: 'blocked',
-                permission,
-                reason: 'microphone-permission',
-              },
-        );
+        setTestState((current) => {
+          if (current.status === 'active' || current.status === 'starting') return current;
+          activeCaptureId.current = null;
+          return {
+            status: 'blocked',
+            permission,
+            reason: 'microphone-permission',
+          };
+        });
       }
     };
     const removeDevices = window.talkingQuill.recording.onDevicesChanged(applyDevices);
     const removeLevel = window.talkingQuill.recording.onTestLevel((next) => {
-      if (mounted.current) setLevel(next.rms);
+      if (mounted.current && activeCaptureId.current === next.captureId) setLevel(next.rms);
     });
     const removeState = window.talkingQuill.recording.onTestStateChanged((next) => {
       if (!mounted.current) return;
+      activeCaptureId.current = next.status === 'active' ? next.captureId : null;
       setTestState(next);
       if (next.status !== 'active') setLevel(0);
     });
@@ -65,6 +68,7 @@ export function RecordingSection({
     );
     return () => {
       mounted.current = false;
+      activeCaptureId.current = null;
       operation.current += 1;
       removeDevices();
       removeLevel();
@@ -80,6 +84,7 @@ export function RecordingSection({
     try {
       const next = await window.talkingQuill.recording.startTest();
       if (mounted.current && currentOperation === operation.current) {
+        activeCaptureId.current = next.status === 'active' ? next.captureId : null;
         setTestState(next);
       } else {
         await window.talkingQuill.recording.stopTest();
@@ -99,7 +104,10 @@ export function RecordingSection({
     ++operation.current;
     try {
       const next = await window.talkingQuill.recording.stopTest();
-      if (mounted.current) setTestState(next);
+      if (mounted.current) {
+        activeCaptureId.current = null;
+        setTestState(next);
+      }
     } finally {
       if (mounted.current) setLevel(0);
     }
@@ -114,6 +122,7 @@ export function RecordingSection({
       if (restart) {
         const stopped = await window.talkingQuill.recording.stopTest();
         if (!isCurrentOperation(currentOperation)) return;
+        activeCaptureId.current = null;
         setTestState(stopped);
         setLevel(0);
       }
@@ -125,6 +134,7 @@ export function RecordingSection({
       if (restart) {
         const restarted = await window.talkingQuill.recording.startTest();
         if (isCurrentOperation(currentOperation)) {
+          activeCaptureId.current = restarted.status === 'active' ? restarted.captureId : null;
           setTestState(restarted);
         } else {
           await window.talkingQuill.recording.stopTest();
@@ -247,20 +257,26 @@ export function RecordingSection({
       <div className="setting-divider" />
       <Select
         label="Silence detection"
-        hint="Quick Dictation can submit only after at least 300 ms of detected speech."
+        hint={`Quick Dictation can submit only after at least ${String(SPEECH_ARMING_MS)} ms of detected speech.`}
         value={settings.recording.silencePreset}
         disabled={saving}
         onChange={(event) =>
           void savePreset(event.currentTarget.value as Settings['recording']['silencePreset'])
         }
       >
-        <option value="aggressive">Aggressive — 1.0 seconds</option>
-        <option value="average">Average — 1.8 seconds</option>
-        <option value="relaxed">Relaxed — 3.0 seconds</option>
+        <option value="aggressive">
+          Aggressive — {formatSeconds(SILENCE_PRESET_MS.aggressive)}
+        </option>
+        <option value="average">Average — {formatSeconds(SILENCE_PRESET_MS.average)}</option>
+        <option value="relaxed">Relaxed — {formatSeconds(SILENCE_PRESET_MS.relaxed)}</option>
       </Select>
       {notice === null ? null : (
         <Toast tone={notice.tone} message={notice.message} onDismiss={() => setNotice(null)} />
       )}
     </Card>
   );
+}
+
+function formatSeconds(milliseconds: number): string {
+  return `${(milliseconds / 1_000).toFixed(1)} seconds`;
 }

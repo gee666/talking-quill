@@ -25,6 +25,12 @@ export interface ExternalControls {
   readonly tagRulesets: readonly {
     readonly target?: string;
     readonly enforcement?: string;
+    readonly conditions?: {
+      readonly ref_name?: {
+        readonly include?: readonly string[];
+        readonly exclude?: readonly string[];
+      };
+    };
     readonly rules?: readonly { readonly type?: string }[];
   }[];
   readonly runnerLabels: readonly string[];
@@ -35,6 +41,7 @@ export interface ExternalControls {
 export interface ExternalControlPolicy {
   readonly repository: string;
   readonly defaultBranch: string;
+  readonly releaseTag: string;
   readonly environments: readonly string[];
   readonly runnerLabels: readonly string[];
   readonly environmentSecrets: Readonly<Record<string, readonly string[]>>;

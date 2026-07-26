@@ -8,7 +8,7 @@ import {
   type VocabularyEntry,
 } from '../../shared/schemas/vocabulary';
 import { utf8ByteLength } from '../../shared/schemas/text-bounds';
-import { normalizeCommandText } from '../commands/matcher';
+import { normalizeCommandText } from '../../shared/text/command-normalization';
 import type { SettingsStore } from '../persistence/settings-store';
 import { PublicAppError } from '../security/public-error';
 

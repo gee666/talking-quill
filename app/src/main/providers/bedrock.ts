@@ -12,6 +12,7 @@ import {
   MAX_NATIVE_PAGES,
   boundedString,
   completionText,
+  credentialFingerprint,
   freezeModels,
   modelInfo,
   parseConfig,
@@ -27,6 +28,7 @@ export class BedrockProvider implements SmartProvider {
   readonly #transport: JsonTransport;
   readonly #override: string | undefined;
   readonly #capabilities = new Map<string, VisionCapability>();
+  readonly #preflightCapabilities = new Map<string, VisionCapability>();
 
   constructor(transport: JsonTransport, endpointOverride?: string) {
     this.#transport = transport;
@@ -56,6 +58,7 @@ export class BedrockProvider implements SmartProvider {
     signal: AbortSignal,
   ): Promise<readonly ModelInfo[]> {
     this.#validate(invocation);
+    const discoveredCapabilities = new Map<string, VisionCapability>();
     const controller = new AbortController();
     const operationSignal = AbortSignal.any([signal, controller.signal]);
     const cancelSiblingOnFailure = async <Value>(operation: Promise<Value>): Promise<Value> => {
@@ -67,7 +70,7 @@ export class BedrockProvider implements SmartProvider {
       }
     };
     const foundations = cancelSiblingOnFailure(
-      this.#listFoundationModels(invocation, operationSignal),
+      this.#listFoundationModels(invocation, operationSignal, discoveredCapabilities),
     );
     // Fetch the independent catalog families concurrently. Profile capability mapping waits for
     // foundation metadata, preserving authoritative vision derivation without serial latency.
@@ -79,12 +82,20 @@ export class BedrockProvider implements SmartProvider {
           () => undefined,
           () => undefined,
         ),
+        discoveredCapabilities,
       ),
     );
     try {
       const [models, inferenceProfiles] = await Promise.all([foundations, profiles]);
       models.push(...inferenceProfiles);
-      return freezeModels(models);
+      const catalog = freezeModels(models);
+      this.#replaceRegionCapabilities(
+        invocation.config,
+        discoveredCapabilities,
+        catalog,
+        credentialFingerprint(invocation),
+      );
+      return catalog;
     } catch (error: unknown) {
       // Do not return while a sibling request can continue pagination or mutate capability state.
       await Promise.allSettled([foundations, profiles]);
@@ -95,6 +106,22 @@ export class BedrockProvider implements SmartProvider {
 
   capabilities(config: ProviderConfig, modelId: string): VisionCapability {
     return this.#capabilities.get(this.#key(config, modelId)) ?? 'unknown';
+  }
+
+  async capabilityPreflight(
+    invocation: ProviderInvocationConfig,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<VisionCapability> {
+    this.#validate(invocation);
+    const requestedModel = requireModel(invocation.config, modelId);
+    const credentialScope = credentialFingerprint(invocation);
+    const cached = this.#preflightCapabilities.get(
+      this.#preflightKey(invocation.config, credentialScope, requestedModel),
+    );
+    if (cached !== undefined) return cached;
+    const models = await this.listModels(invocation, signal);
+    return models.find((model) => model.id === requestedModel)?.vision ?? 'unknown';
   }
 
   async cleanTranscript(
@@ -120,6 +147,7 @@ export class BedrockProvider implements SmartProvider {
   async #listFoundationModels(
     invocation: ProviderInvocationConfig,
     signal: AbortSignal,
+    capabilities: Map<string, VisionCapability>,
   ): Promise<ModelInfo[]> {
     const models: ModelInfo[] = [];
     let nextToken: string | null = null;
@@ -144,7 +172,7 @@ export class BedrockProvider implements SmartProvider {
           : input.length > 0
             ? 'unsupported'
             : 'unknown';
-        this.#capabilities.set(this.#key(invocation.config, id), vision);
+        capabilities.set(this.#key(invocation.config, id), vision);
         models.push(modelInfo(id, name, invocation.config.contextWindow ?? null, vision));
       }
       if (body.nextToken === undefined || body.nextToken === null) return models;
@@ -157,6 +185,7 @@ export class BedrockProvider implements SmartProvider {
     invocation: ProviderInvocationConfig,
     signal: AbortSignal,
     foundationMetadataReady: Promise<void>,
+    capabilities: Map<string, VisionCapability>,
   ): Promise<ModelInfo[]> {
     const profiles: ModelInfo[] = [];
     let nextToken: string | null = null;
@@ -178,12 +207,12 @@ export class BedrockProvider implements SmartProvider {
           typeof summary.inferenceProfileName === 'string'
             ? boundedString(summary.inferenceProfileName)
             : id;
-        const vision = this.#profileVision(invocation.config, summary.models);
-        this.#capabilities.set(this.#key(invocation.config, id), vision);
+        const vision = this.#profileVision(invocation.config, summary.models, capabilities);
+        capabilities.set(this.#key(invocation.config, id), vision);
         profiles.push(modelInfo(id, name, invocation.config.contextWindow ?? null, vision));
         const arn = readInferenceProfileArn(summary.inferenceProfileArn);
         if (arn !== null && arn !== id) {
-          this.#capabilities.set(this.#key(invocation.config, arn), vision);
+          capabilities.set(this.#key(invocation.config, arn), vision);
           const aliasName = `${name} (ARN)`;
           profiles.push(
             modelInfo(
@@ -201,14 +230,20 @@ export class BedrockProvider implements SmartProvider {
     throw new ProviderError('INVALID_RESPONSE');
   }
 
-  #profileVision(config: ProviderConfig, input: unknown): VisionCapability {
+  #profileVision(
+    config: ProviderConfig,
+    input: unknown,
+    capabilitiesByModel: ReadonlyMap<string, VisionCapability>,
+  ): VisionCapability {
     if (!Array.isArray(input) || input.length === 0 || input.length > 64) return 'unknown';
     const capabilities = input.map((item) => {
       const arn = boundedString(record(item).modelArn, 2_048);
       const marker = 'foundation-model/';
       const index = arn.indexOf(marker);
       if (index < 0) return 'unknown';
-      return this.capabilities(config, arn.slice(index + marker.length));
+      return (
+        capabilitiesByModel.get(this.#key(config, arn.slice(index + marker.length))) ?? 'unknown'
+      );
     });
     if (capabilities.some((capability) => capability === 'supported')) return 'supported';
     if (capabilities.every((capability) => capability === 'unsupported')) return 'unsupported';
@@ -287,6 +322,30 @@ export class BedrockProvider implements SmartProvider {
       return content.text;
     });
     return Object.freeze({ text: completionText(parts), destination: response.destination });
+  }
+
+  #replaceRegionCapabilities(
+    config: ProviderConfig,
+    discovered: ReadonlyMap<string, VisionCapability>,
+    models: readonly ModelInfo[],
+    credentialScope: string,
+  ): void {
+    const regionPrefix = `${requiredRegion(config)}\n`;
+    for (const key of this.#capabilities.keys()) {
+      if (key.startsWith(regionPrefix)) this.#capabilities.delete(key);
+    }
+    for (const [key, capability] of discovered) this.#capabilities.set(key, capability);
+    this.#preflightCapabilities.clear();
+    for (const model of models) {
+      this.#preflightCapabilities.set(
+        this.#preflightKey(config, credentialScope, model.id),
+        model.vision,
+      );
+    }
+  }
+
+  #preflightKey(config: ProviderConfig, credentialScope: string, modelId: string): string {
+    return `${requiredRegion(config)}\n${credentialScope}\n${modelId}`;
   }
 
   #validate(invocation: ProviderInvocationConfig): void {

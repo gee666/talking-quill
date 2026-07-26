@@ -140,7 +140,7 @@ export class MicrophonePermissionController {
   #matchingLease(request: MicrophonePermissionRequest): AuthorizationLease | null {
     const lease = this.#lease;
     if (lease === null) return null;
-    if (this.#now() > lease.expiresAt) {
+    if (this.#now() >= lease.expiresAt) {
       this.#lease = null;
       return null;
     }

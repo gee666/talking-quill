@@ -155,16 +155,7 @@ const api: MainApi = {
         source: null,
         errorCode: 'PI_NOT_FOUND',
       }),
-    browsePiInstallation: () =>
-      Promise.resolve({
-        mode: 'automatic',
-        state: 'not-found',
-        configuredPath: null,
-        path: null,
-        version: null,
-        source: null,
-        errorCode: 'PI_NOT_FOUND',
-      }),
+    browsePiInstallation: () => Promise.resolve(null),
     saveConfig: (config) =>
       Promise.resolve({
         settings: {
@@ -353,7 +344,11 @@ function deferred<Value>() {
   return { promise, resolve };
 }
 
-function renderShell(status: AppStatus = 'needs-setup', modelReady = status === 'ready') {
+function renderShell(
+  status: AppStatus = 'needs-setup',
+  modelReady = status === 'ready',
+  settings = structuredClone(DEFAULT_SETTINGS),
+) {
   return render(
     <AppShell
       bootstrap={{
@@ -361,9 +356,9 @@ function renderShell(status: AppStatus = 'needs-setup', modelReady = status === 
         platform: 'win32',
         state: { enabled: true, status, modelReady, helper: readyHelper },
         settings: {
-          ...structuredClone(DEFAULT_SETTINGS),
+          ...settings,
           welcome: {
-            ...structuredClone(DEFAULT_SETTINGS.welcome),
+            ...settings.welcome,
             completedAt: 1,
             lastStep: 6,
             microphoneTested: true,
@@ -446,9 +441,36 @@ describe('main application shell', () => {
     );
   });
 
+  it('reports provider-managed Text Generation WebUI as ready without a model ID', () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.smartProcessing.selectedProviderId = 'textgenwebui';
+    settings.smartProcessing.providers.textgenwebui = {
+      baseUrl: 'http://127.0.0.1:5000/v1',
+      contextWindow: 4_096,
+    };
+
+    renderShell('ready', true, settings);
+
+    expect(screen.getByText('textgenwebui uses its currently loaded model')).toBeVisible();
+    expect(screen.queryByText('Needs provider model setup')).not.toBeInTheDocument();
+  });
+
+  it('still reports missing required provider models as needing setup', () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.smartProcessing.selectedProviderId = 'ollama';
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: null,
+    };
+
+    renderShell('ready', true, settings);
+
+    expect(screen.getByText('Needs provider model setup')).toBeVisible();
+  });
+
   it('reports model readiness independently from the disabled aggregate status', () => {
     const first = renderShell('disabled', false);
-    expect(screen.getByText('Needs setup')).toBeVisible();
+    expect(screen.getAllByText('Needs setup')).toHaveLength(2);
     expect(screen.queryByText('Model available')).not.toBeInTheDocument();
 
     first.unmount();
@@ -460,7 +482,7 @@ describe('main application shell', () => {
     'renders the centralized %s status consistently',
     (status, presentation) => {
       renderShell(status as AppStatus);
-      expect(screen.getAllByText(presentation.label)).toHaveLength(3);
+      expect(screen.getAllByText(presentation.label)).toHaveLength(2);
     },
   );
 

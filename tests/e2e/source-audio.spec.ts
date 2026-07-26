@@ -95,6 +95,9 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
       ),
     ).toBe(fakeAudioFile);
     const { main, capture } = await rendererPages(application);
+    // rendererPages identifies role URLs before their initial navigation necessarily settles.
+    // Reload only after that navigation completes so instrumentation cannot race window startup.
+    await capture.waitForLoadState('load');
     await capture.addInitScript(() => {
       const streams: MediaStream[] = [];
       Reflect.set(globalThis, '__talkingQuillReturnedStreams', streams);
@@ -153,11 +156,10 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
         },
       });
     });
-    await capture.reload();
+    await capture.reload({ waitUntil: 'load' });
     await expect
       .poll(() => capture.evaluate(() => document.documentElement.dataset.ready))
       .toBe('true');
-    await capture.evaluate(() => window.talkingQuillCapture.ready());
     await expect
       .poll(() =>
         capture.evaluate(() => {

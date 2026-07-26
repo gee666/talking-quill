@@ -40,6 +40,37 @@ pub enum HookStatus {
     Stopped,
 }
 
+const ACTIVATION_ENABLED_MASK: u64 = 1_u64 << 63;
+
+pub(crate) const fn activation_config_value(enabled: bool, bindings: ActivationBindings) -> u64 {
+    bindings.bits() | if enabled { ACTIVATION_ENABLED_MASK } else { 0 }
+}
+
+pub(crate) const fn activation_config_from_value(value: u64) -> (bool, ActivationBindings) {
+    (
+        value & ACTIVATION_ENABLED_MASK != 0,
+        ActivationBindings::from_bits(value),
+    )
+}
+
+pub(crate) const fn hook_status_to_u8(status: HookStatus) -> u8 {
+    match status {
+        HookStatus::Ready => 0,
+        HookStatus::PermissionRequired => 1,
+        HookStatus::Unavailable => 2,
+        HookStatus::Stopped => 3,
+    }
+}
+
+pub(crate) const fn hook_status_from_u8(value: u8) -> HookStatus {
+    match value {
+        0 => HookStatus::Ready,
+        1 => HookStatus::PermissionRequired,
+        3 => HookStatus::Stopped,
+        _ => HookStatus::Unavailable,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
@@ -55,6 +86,21 @@ pub struct Permissions {
     pub accessibility: PermissionState,
     pub input_monitoring: PermissionState,
     pub event_post: PermissionState,
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const fn permissions_allow_native_input(permissions: Permissions) -> bool {
+    permission_satisfied(permissions.accessibility)
+        && permission_satisfied(permissions.input_monitoring)
+        && permission_satisfied(permissions.event_post)
+}
+
+#[cfg(any(target_os = "macos", test))]
+const fn permission_satisfied(permission: PermissionState) -> bool {
+    matches!(
+        permission,
+        PermissionState::Granted | PermissionState::NotApplicable
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -76,7 +122,7 @@ pub struct FrontApp {
 
 // Two fields at this escaped-content limit plus the worst valid request ID and
 // response envelope remain comfortably below the 16 KiB frame limit.
-const MAX_FRONT_APP_FIELD_ESCAPED_BYTES: usize = 7 * 1024;
+pub(crate) const MAX_FRONT_APP_FIELD_ESCAPED_BYTES: usize = 7 * 1024;
 
 impl FrontApp {
     pub(crate) fn bounded(self) -> Self {
@@ -406,7 +452,7 @@ pub trait Platform: Sized {
     fn inject_paste(&self) -> PasteResult;
     fn front_app(&self) -> Result<FrontApp, PlatformError>;
     fn permissions(&self) -> Permissions;
-    fn shutdown(&mut self);
+    fn shutdown(&mut self) -> Option<TerminalReason>;
 }
 
 #[cfg(test)]
@@ -601,6 +647,35 @@ mod tests {
             let terminal = TerminalSignal::new(gate, sender);
             terminal.trigger(reason);
             assert_eq!(terminal.reason(), Some(reason));
+        }
+    }
+
+    #[test]
+    fn native_input_permission_policy_fails_closed_on_denied_or_unknown_states() {
+        let granted = Permissions {
+            accessibility: PermissionState::Granted,
+            input_monitoring: PermissionState::Granted,
+            event_post: PermissionState::Granted,
+        };
+        assert!(permissions_allow_native_input(granted));
+        assert!(permissions_allow_native_input(Permissions {
+            accessibility: PermissionState::NotApplicable,
+            input_monitoring: PermissionState::NotApplicable,
+            event_post: PermissionState::NotApplicable,
+        }));
+        for denied in [PermissionState::Denied, PermissionState::Unknown] {
+            assert!(!permissions_allow_native_input(Permissions {
+                accessibility: denied,
+                ..granted
+            }));
+            assert!(!permissions_allow_native_input(Permissions {
+                input_monitoring: denied,
+                ..granted
+            }));
+            assert!(!permissions_allow_native_input(Permissions {
+                event_post: denied,
+                ..granted
+            }));
         }
     }
 

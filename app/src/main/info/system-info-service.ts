@@ -22,7 +22,7 @@ export class SystemInfoService {
 
   async openPermission(permission: InfoPermission): Promise<void> {
     if (permission === 'microphone') {
-      await this.#openMicrophoneSettings();
+      await mapOpenFailure(this.#openMicrophoneSettings);
       return;
     }
     if (process.platform !== 'darwin') {
@@ -31,17 +31,29 @@ export class SystemInfoService {
         message: 'This permission pane is unavailable.',
       });
     }
-    await shell.openExternal(MAC_PERMISSION_URLS[permission]);
+    await mapOpenFailure(() => shell.openExternal(MAC_PERMISSION_URLS[permission]));
   }
 
   async openLocation(location: InfoLocation): Promise<void> {
-    const error = await shell.openPath(location === 'data' ? this.#paths.root : this.#paths.logs);
-    if (error.length > 0) {
-      throw new PublicAppError({ code: 'UNAVAILABLE', message: 'The folder could not be opened.' });
-    }
+    await mapOpenFailure(async () => {
+      const error = await shell.openPath(location === 'data' ? this.#paths.root : this.#paths.logs);
+      if (error.length > 0) throw new Error('Electron could not open the folder');
+    });
   }
 
   async openRelease(value: string): Promise<void> {
-    await shell.openExternal(validateReleaseUrl(value));
+    const releaseUrl = validateReleaseUrl(value);
+    await mapOpenFailure(() => shell.openExternal(releaseUrl));
+  }
+}
+
+async function mapOpenFailure(operation: () => Promise<unknown>): Promise<void> {
+  try {
+    await operation();
+  } catch {
+    throw new PublicAppError({
+      code: 'UNAVAILABLE',
+      message: 'The requested system location could not be opened.',
+    });
   }
 }

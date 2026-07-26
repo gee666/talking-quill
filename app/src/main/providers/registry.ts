@@ -15,6 +15,7 @@ import { AzureOpenAIProvider } from './azure-openai';
 import { BedrockProvider } from './bedrock';
 import { CohereProvider } from './cohere';
 import { GeminiProvider } from './gemini';
+import { providerModelSelectionPolicy } from '../../shared/provider-model-selection';
 
 export interface ProviderRegistryOptions {
   readonly transport?: JsonTransport;
@@ -233,37 +234,12 @@ const bedrockFields = Object.freeze([
   Object.freeze({
     key: 'region' as const,
     label: 'AWS region',
-    kind: 'select' as const,
+    kind: 'text' as const,
     required: true,
     secret: false,
     defaultValue: 'us-west-2',
-    options: Object.freeze(
-      [
-        'us-east-1',
-        'us-east-2',
-        'us-west-1',
-        'us-west-2',
-        'ca-central-1',
-        'eu-north-1',
-        'eu-west-1',
-        'eu-west-2',
-        'eu-west-3',
-        'eu-central-1',
-        'eu-south-1',
-        'af-south-1',
-        'ap-northeast-1',
-        'ap-northeast-2',
-        'ap-northeast-3',
-        'ap-southeast-1',
-        'ap-southeast-2',
-        'ap-southeast-3',
-        'ap-east-1',
-        'ap-south-1',
-        'sa-east-1',
-        'me-south-1',
-        'me-central-1',
-      ].map((region) => Object.freeze({ value: region, label: region })),
-    ),
+    placeholder: 'us-west-2',
+    description: 'Enter a commercial AWS region where the selected Bedrock model is available.',
   }),
   Object.freeze({
     key: 'modelId' as const,
@@ -294,7 +270,10 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = deepFreeze([
       logo: preset.logo,
       destinationHint: preset.destinationHint,
       defaultModel: preset.defaultModel,
-      modelDiscovery: 'remote',
+      modelDiscovery:
+        providerModelSelectionPolicy(preset.id) === 'provider-managed'
+          ? 'provider-managed'
+          : 'remote',
       fields: preset.fields,
     }),
   ),
@@ -345,7 +324,7 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = deepFreeze([
     logo: 'azure.png',
     destinationHint: 'cloud',
     defaultModel: null,
-    modelDiscovery: 'configured',
+    modelDiscovery: 'azure-deployment',
     fields: azureFields,
   }),
   ProviderCatalogEntrySchema.parse({

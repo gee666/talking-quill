@@ -58,27 +58,6 @@ export async function inspectFile(
   }
 }
 
-export async function sha256File(path: string, signal?: AbortSignal): Promise<string> {
-  signal?.throwIfAborted();
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink()) throw new Error('File is not a regular file');
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const opened = await handle.stat();
-    if (!opened.isFile() || !sameFileIdentity(before, opened)) {
-      throw new Error('File identity changed during secure open');
-    }
-    const digest = await hashHandle(handle, signal);
-    const [afterHandle, afterPath] = await Promise.all([handle.stat(), lstat(path)]);
-    if (!sameFileIdentity(opened, afterHandle) || !sameFileIdentity(afterHandle, afterPath)) {
-      throw new Error('File identity changed during checksum verification');
-    }
-    return digest;
-  } finally {
-    await handle.close();
-  }
-}
-
 export function sameVerifiedIdentity(
   expected: Omit<VerifiedModelFileIdentity, 'path'>,
   actual: Stats,

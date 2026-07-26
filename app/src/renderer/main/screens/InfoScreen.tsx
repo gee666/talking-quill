@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { BootstrapData } from '../../../shared/bridge/api';
 import type { InfoStatus, UpdateCheckResult } from '../../../shared/schemas/info';
 import { Button, Card, Dialog, Status, Toast } from '../../design';
+import { publicErrorMessage } from '../public-error';
 
 let updateSequence = 0;
 export function InfoScreen({
@@ -71,7 +72,7 @@ export function InfoScreen({
       if (operation.current === id) {
         setUpdate(null);
         setNotice(
-          actionableMessage(
+          publicErrorMessage(
             cause,
             'Updates could not be checked. Verify the network connection and try again.',
           ),
@@ -292,13 +293,6 @@ export function InfoScreen({
     </div>
   );
 }
-function actionableMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof Error && cause.message.length > 0 && cause.message.length <= 240) {
-    return cause.message;
-  }
-  return fallback;
-}
-
 function PermissionRow({
   label,
   value,

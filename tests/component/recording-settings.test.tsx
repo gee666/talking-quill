@@ -113,6 +113,14 @@ describe('Recording settings', () => {
         '0.42',
       ),
     );
+    levelListener?.({
+      captureId: '11111111-1111-4111-8111-111111111111',
+      rms: 0.99,
+    });
+    expect(screen.getByRole('progressbar', { name: 'Microphone level' })).toHaveAttribute(
+      'value',
+      '0.42',
+    );
     await user.click(screen.getByRole('button', { name: 'Stop microphone test' }));
     expect(stopTest).toHaveBeenCalled();
     view.unmount();

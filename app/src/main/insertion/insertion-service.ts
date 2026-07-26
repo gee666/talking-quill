@@ -6,6 +6,7 @@ import type { HelperClient } from '../helper';
 export interface ClipboardSnapshot {
   readonly text: string;
   readonly html: string;
+  readonly rtf: string;
   readonly imagePng: Uint8Array | null;
 }
 
@@ -115,6 +116,7 @@ export class ElectronClipboardAdapter implements ClipboardAdapter {
     return {
       text: clipboard.readText(),
       html: clipboard.readHTML(),
+      rtf: clipboard.readRTF(),
       imagePng: image.isEmpty() ? null : Uint8Array.from(image.toPNG()),
     };
   }
@@ -127,6 +129,7 @@ export class ElectronClipboardAdapter implements ClipboardAdapter {
     clipboard.write({
       text: snapshot.text,
       ...(snapshot.html.length === 0 ? {} : { html: snapshot.html }),
+      ...(snapshot.rtf.length === 0 ? {} : { rtf: snapshot.rtf }),
       ...(snapshot.imagePng === null
         ? {}
         : { image: nativeImage.createFromBuffer(Buffer.from(snapshot.imagePng)) }),
@@ -138,9 +141,10 @@ export function clipboardFingerprint(snapshot: ClipboardSnapshot): string {
   const hash = createHash('sha256');
   updateFingerprintField(hash, 1, Buffer.from(snapshot.text, 'utf8'));
   updateFingerprintField(hash, 2, Buffer.from(snapshot.html, 'utf8'));
+  updateFingerprintField(hash, 3, Buffer.from(snapshot.rtf, 'utf8'));
   updateFingerprintField(
     hash,
-    3,
+    4,
     snapshot.imagePng === null ? null : Buffer.from(snapshot.imagePng),
   );
   return hash.digest('hex');

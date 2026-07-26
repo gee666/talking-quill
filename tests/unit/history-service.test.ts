@@ -300,11 +300,14 @@ describe('HistoryService', () => {
       }),
     });
     const entry = createScreenshotHistory(test, 'retry.jpg', 99);
+    const thumbnail = join(test.screenshotsDirectory, thumbnailFilename('retry.jpg'));
+    writeFileSync(thumbnail, 'private thumbnail');
     expect(test.service.deleteById(entry.id)).toMatchObject({
       deleted: true,
       screenshotCleanup: 'pending',
     });
     expect(existsSync(join(test.screenshotsDirectory, 'retry.jpg'))).toBe(true);
+    expect(existsSync(thumbnail)).toBe(false);
     fail = false;
     expect(test.service.pruneAtStartup()).toMatchObject({ screenshotCleanup: 'complete' });
     expect(existsSync(join(test.screenshotsDirectory, 'retry.jpg'))).toBe(false);
@@ -377,7 +380,6 @@ describe('HistoryService', () => {
         screenshotFilename: retained.filename,
       }),
     ).toBe(true);
-    retained.commit();
     const row = test.store.list().items[0];
     expect(row?.screenshotFilename).toBe(retained.filename);
     expect(existsSync(join(test.screenshotsDirectory, retained.filename))).toBe(true);
@@ -506,8 +508,6 @@ describe('HistoryService', () => {
 function createPendingScreenshot(directory: string): RetainedScreenshot {
   return new RetainedScreenshot(directory, {
     image: { mimeType: 'image/jpeg', base64: VALID_JPEG.toString('base64') },
-    width: 64,
-    height: 64,
   });
 }
 

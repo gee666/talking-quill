@@ -9,18 +9,15 @@ export interface NativeTreeEntry extends NativeArchitectureInspection {
 }
 
 export function readNativeArchitectures(path: string): Promise<NativeArchitectureInspection | null>;
-export function readNativeArchitecture(path: string, mac: boolean): Promise<NativeArchitecture>;
 export function parseNativeArchitectures(
   bytes: Buffer,
   path: string,
 ): NativeArchitectureInspection | null;
-export function parseNativeArchitecture(
-  bytes: Buffer,
-  path: string,
-  mac: boolean,
-): NativeArchitecture;
 export function inspectNativeTree(
   root: string,
-  expectedArchitecture: Exclude<NativeArchitecture, 'x86'>,
-  exceptions?: Readonly<Record<string, NativeArchitecture>>,
+  options: {
+    readonly platform: 'win' | 'mac';
+    readonly architecture: Exclude<NativeArchitecture, 'x86'>;
+    readonly exceptions?: Readonly<Record<string, NativeArchitecture>>;
+  },
 ): Promise<readonly NativeTreeEntry[]>;

@@ -1,6 +1,6 @@
 import { net, protocol, type Protocol } from 'electron';
-import { existsSync } from 'node:fs';
-import { extname, resolve, sep } from 'node:path';
+import { lstat, realpath } from 'node:fs/promises';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_PROTOCOL } from '../../shared/constants/app';
 import { CAPTURE_PRODUCTION_CSP, PRODUCTION_CSP } from './csp';
@@ -40,6 +40,7 @@ export function installApplicationProtocol(
 ): () => void {
   ACTIVE_PROTOCOL_HANDLERS.get(target)?.();
   const normalizedRoot = resolve(rendererRoot);
+  const canonicalRoot = realpath(normalizedRoot);
   const contentSecurityPolicy = allowWorkers ? CAPTURE_PRODUCTION_CSP : PRODUCTION_CSP;
   target.handle(APP_PROTOCOL, async (request) => {
     try {
@@ -48,9 +49,12 @@ export function installApplicationProtocol(
       const decoded = decodeURIComponent(url.pathname);
       if (decoded.includes('\\') || decoded.includes('\0')) return denied();
       const candidate = resolve(normalizedRoot, `.${decoded}`);
-      if (!candidate.startsWith(`${normalizedRoot}${sep}`) || !existsSync(candidate))
-        return denied();
-      const source = await net.fetch(pathToFileURL(candidate).toString());
+      if (!isContainedPath(normalizedRoot, candidate)) return denied();
+      const metadata = await lstat(candidate);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) return denied();
+      const [root, canonicalCandidate] = await Promise.all([canonicalRoot, realpath(candidate)]);
+      if (!isContainedPath(root, canonicalCandidate)) return denied();
+      const source = await net.fetch(pathToFileURL(canonicalCandidate).toString());
       const headers = new Headers(source.headers);
       headers.set('Content-Security-Policy', contentSecurityPolicy);
       headers.set('Cross-Origin-Opener-Policy', 'same-origin');
@@ -72,6 +76,11 @@ export function installApplicationProtocol(
   };
   ACTIVE_PROTOCOL_HANDLERS.set(target, dispose);
   return dispose;
+}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const suffix = relative(root, candidate);
+  return suffix !== '' && !/^\.\.(?:[\\/]|$)/u.test(suffix) && !isAbsolute(suffix);
 }
 
 function denied(): Response {

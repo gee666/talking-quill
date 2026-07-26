@@ -3,7 +3,6 @@ import { createHandlers, type HandlerDependencies } from '../../app/src/main/ipc
 import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
 
 const context = {
-  role: 'main' as const,
   webContentsId: 1,
   onDestroyed: () => () => undefined,
 };

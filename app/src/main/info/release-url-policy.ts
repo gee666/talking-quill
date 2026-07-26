@@ -14,6 +14,7 @@ export function validateReleaseUrl(value: string, expectedTag?: string): string 
   } catch {
     throw rejected();
   }
+  if (value !== url.toString()) throw rejected();
   const rawPath = url.pathname.toLowerCase();
   if (
     url.protocol !== 'https:' ||

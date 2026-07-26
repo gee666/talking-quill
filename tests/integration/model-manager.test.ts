@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  link,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inspectFile } from '../../app/src/main/transcription/model-integrity';
 import {
   ModelAccessCoordinator,
@@ -87,10 +97,12 @@ describe('ModelManager', () => {
       await writeFile(part, firstBody.subarray(0, 5));
       const progress: number[] = [];
       const states: string[] = [];
+      const fetchModel = vi.fn<typeof fetch>((input, init) => fetch(input, init));
       const manager = createManager(
         root,
         (file) =>
           `${server.origin}/${String(files.findIndex((candidate) => candidate.path === file.path))}`,
+        fetchModel,
       );
       manager.subscribe((event) => {
         progress.push(event.total.downloadedBytes);
@@ -130,12 +142,332 @@ describe('ModelManager', () => {
       await utimes(corruptPath, originalMetadata.atime, originalMetadata.mtime);
       expect((await manager.status('Xenova/whisper-small')).state).toBe('corrupt');
       expect((await manager.verifyForUse('Xenova/whisper-small')).state).toBe('corrupt');
+      fetchModel.mockClear();
       expect((await manager.retry('Xenova/whisper-small')).state).toBe('ready');
+      expect(fetchModel).toHaveBeenCalledOnce();
       expect((await manager.delete('Xenova/whisper-small')).state).toBe('missing');
       await manager.shutdown();
     } finally {
       await server.close();
     }
+  });
+
+  it('falls back to verified downloads when repair hard links are unavailable', async () => {
+    const root = await createTestDirectory('model-repair-link-fallback');
+    roots.push(root);
+    const server = await startRangeServer(
+      files.map((file, index) => ({
+        path: `/${String(index)}`,
+        body: bodies.get(file.path) ?? new Uint8Array(),
+      })),
+    );
+    const urlFor = (_model: unknown, file: ModelManifestFile) =>
+      `${server.origin}/${String(files.findIndex((candidate) => candidate.path === file.path))}`;
+    try {
+      await createManager(root, (file) => urlFor(undefined, file)).download('Xenova/whisper-small');
+      const first = files[0];
+      if (first === undefined) throw new Error('Fixture missing');
+      const installedFirst = join(
+        root,
+        'models',
+        'Xenova',
+        'whisper-small',
+        smallRevision,
+        first.path,
+      );
+      await writeFile(installedFirst, Buffer.alloc(first.size, 0x78));
+
+      let fetches = 0;
+      const unavailableLink = vi.fn<typeof link>(() =>
+        Promise.reject(
+          Object.assign(new Error('hard links disabled by policy'), { code: 'EPERM' }),
+        ),
+      );
+      const fetchModel: typeof fetch = async (input, init) => {
+        fetches += 1;
+        return fetch(input, init);
+      };
+      const lowSpace = new ModelManager({
+        modelsDirectory: join(root, 'models'),
+        temporaryDirectory: join(root, 'models', '.tmp'),
+        manifest,
+        availableBytes: () => Promise.resolve(0),
+        urlFor,
+        validateRequestUrl: (url) => url.startsWith(server.origin),
+        fetch: fetchModel,
+        link: unavailableLink,
+      });
+      await expect(lowSpace.retry('Xenova/whisper-small')).rejects.toMatchObject({
+        code: 'DISK_SPACE',
+      });
+      expect(fetches).toBe(0);
+      expect(unavailableLink).toHaveBeenCalledTimes(files.length - 1);
+
+      const repair = new ModelManager({
+        modelsDirectory: join(root, 'models'),
+        temporaryDirectory: join(root, 'models', '.tmp'),
+        manifest,
+        availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
+        urlFor,
+        validateRequestUrl: (url) => url.startsWith(server.origin),
+        fetch: fetchModel,
+        link: unavailableLink,
+      });
+      await expect(repair.retry('Xenova/whisper-small')).resolves.toMatchObject({ state: 'ready' });
+      expect(fetches).toBe(files.length);
+      await expect(repair.verifyForUse('Xenova/whisper-small')).resolves.toMatchObject({
+        state: 'ready',
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('recognizes hard links left by an interrupted repair before publication', async () => {
+    const root = await createTestDirectory('model-repair-staged-hard-links');
+    roots.push(root);
+    const server = await startRangeServer(
+      files.map((file, index) => ({
+        path: `/${String(index)}`,
+        body: bodies.get(file.path) ?? new Uint8Array(),
+      })),
+    );
+    try {
+      const urlFor = (file: ModelManifestFile) =>
+        `${server.origin}/${String(files.findIndex((candidate) => candidate.path === file.path))}`;
+      await createManager(root, urlFor).download('Xenova/whisper-small');
+      const first = files[0];
+      if (first === undefined) throw new Error('Fixture missing');
+      const installedDirectory = join(root, 'models', 'Xenova', 'whisper-small', smallRevision);
+      const stagedDirectory = join(
+        root,
+        'models',
+        '.tmp',
+        'Xenova',
+        'whisper-small',
+        smallRevision,
+      );
+      await writeFile(join(installedDirectory, first.path), Buffer.alloc(first.size, 0x78));
+      for (const file of files.slice(1)) {
+        const staged = join(stagedDirectory, ...file.path.split('/'));
+        await mkdir(join(staged, '..'), { recursive: true });
+        await link(join(installedDirectory, ...file.path.split('/')), staged);
+      }
+
+      let fetches = 0;
+      const repair = createManager(root, urlFor, async (input, init) => {
+        fetches += 1;
+        return fetch(input, init);
+      });
+      await expect(repair.retry('Xenova/whisper-small')).resolves.toMatchObject({ state: 'ready' });
+      expect(fetches).toBe(1);
+      await expect(repair.verifyForUse('Xenova/whisper-small')).resolves.toMatchObject({
+        state: 'ready',
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('does not commit repaired identities before replacement backup cleanup succeeds', async () => {
+    const root = await createTestDirectory('model-repair-backup-cleanup');
+    roots.push(root);
+    const server = await startRangeServer(
+      files.map((file, index) => ({
+        path: `/${String(index)}`,
+        body: bodies.get(file.path) ?? new Uint8Array(),
+      })),
+    );
+    try {
+      const urlFor = (_model: unknown, file: ModelManifestFile) =>
+        `${server.origin}/${String(files.findIndex((candidate) => candidate.path === file.path))}`;
+      await createManager(root, (file) => urlFor(undefined, file)).download('Xenova/whisper-small');
+      const first = files[0];
+      if (first === undefined) throw new Error('Fixture missing');
+      const installedDirectory = join(root, 'models', 'Xenova', 'whisper-small', smallRevision);
+      await writeFile(join(installedDirectory, first.path), Buffer.alloc(first.size, 0x78));
+
+      let cleanupAttempts = 0;
+      let fetches = 0;
+      const repair = new ModelManager({
+        modelsDirectory: join(root, 'models'),
+        temporaryDirectory: join(root, 'models', '.tmp'),
+        manifest,
+        availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
+        urlFor,
+        validateRequestUrl: (url) => url.startsWith(server.origin),
+        fetch: async (input, init) => {
+          fetches += 1;
+          return fetch(input, init);
+        },
+        removeRevisionBackup: async (path) => {
+          cleanupAttempts += 1;
+          if (cleanupAttempts <= 2) {
+            throw Object.assign(new Error('replacement backup is locked'), { code: 'EBUSY' });
+          }
+          await rm(path, { recursive: true, force: true });
+        },
+      });
+      await expect(repair.retry('Xenova/whisper-small')).rejects.toBeInstanceOf(Error);
+      await expect(
+        readFile(join(installedDirectory, '.talking-quill-complete.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(cleanupAttempts).toBe(2);
+      expect(fetches).toBe(1);
+
+      await expect(repair.verifyForUse('Xenova/whisper-small')).resolves.toMatchObject({
+        state: 'ready',
+      });
+      expect(cleanupAttempts).toBe(3);
+      expect(fetches).toBe(1);
+      await expect(repair.status('Xenova/whisper-small')).resolves.toMatchObject({
+        state: 'ready',
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('isolates progress listener failures from installation and other observers', async () => {
+    const root = await createTestDirectory('model-progress-listener');
+    roots.push(root);
+    const observed: string[] = [];
+    const manager = createManager(
+      root,
+      (file) =>
+        `https://trusted.example/${String(files.findIndex((candidate) => candidate.path === file.path))}`,
+      (input) => {
+        const value =
+          input instanceof URL ? input.href : input instanceof Request ? input.url : input;
+        const index = Number(new URL(value).pathname.slice(1));
+        const file = files[index];
+        const body = file === undefined ? undefined : bodies.get(file.path);
+        return Promise.resolve(
+          body === undefined ? new Response(null, { status: 404 }) : new Response(body),
+        );
+      },
+    );
+    manager.subscribe(() => {
+      throw new Error('observer failed');
+    });
+    manager.subscribe((event) => observed.push(event.state));
+
+    await expect(manager.download('Xenova/whisper-small')).resolves.toMatchObject({
+      state: 'ready',
+    });
+    expect(observed).toContain('ready');
+  });
+
+  it('cancels download waits promptly without releasing an active model-use lease', async () => {
+    const root = await createTestDirectory('model-download-lock-cancel');
+    roots.push(root);
+    const access = new ModelAccessCoordinator();
+    const fetchModel = vi.fn<typeof fetch>();
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      accessCoordinator: access,
+      fetch: fetchModel,
+      availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
+      urlFor: () => 'https://trusted.example/model',
+      validateRequestUrl: () => true,
+    });
+    await manager.initialize();
+    const use = await access.acquireUse('Xenova/whisper-small');
+    try {
+      const external = new AbortController();
+      const externallyCancelled = manager.download('Xenova/whisper-small', external.signal);
+      external.abort();
+      await expect(externallyCancelled).rejects.toMatchObject({ code: 'CANCELLED' });
+
+      const primary = manager.download('Xenova/whisper-small');
+      const followerController = new AbortController();
+      const follower = manager.download('Xenova/whisper-small', followerController.signal);
+      followerController.abort();
+      await expect(follower).rejects.toMatchObject({ code: 'CANCELLED' });
+      await expect(manager.pause('Xenova/whisper-small')).resolves.toMatchObject({
+        state: 'paused',
+      });
+      await expect(primary).resolves.toMatchObject({ state: 'paused' });
+
+      const shuttingDown = manager.download('Xenova/whisper-small');
+      await manager.shutdown();
+      await expect(shuttingDown).resolves.toMatchObject({ state: 'missing' });
+      expect(fetchModel).not.toHaveBeenCalled();
+    } finally {
+      use.release();
+    }
+  });
+
+  it('aborts and awaits shared verification work during shutdown', async () => {
+    const root = await createTestDirectory('model-verification-shutdown');
+    roots.push(root);
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolveStarted) => {
+      markStarted = resolveStarted;
+    });
+    const inspect = vi.fn<typeof inspectFile>(
+      (_path, _size, _sha256, _hash, signal) =>
+        new Promise((_resolve, reject) => {
+          markStarted();
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Verification cancelled', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+      inspectFile: inspect,
+    });
+    await manager.initialize();
+    const verification = manager.verifyForUse('Xenova/whisper-small');
+    await started;
+    await manager.shutdown();
+    await expect(verification).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(manager.verifyForUse('Xenova/whisper-small')).rejects.toMatchObject({
+      code: 'CANCELLED',
+    });
+  });
+
+  it('reclaims obsolete immutable installed and staged revisions during recovery', async () => {
+    const root = await createTestDirectory('model-obsolete-revisions');
+    roots.push(root);
+    const obsoleteRevision = 'b'.repeat(40);
+    const installed = join(root, 'models', 'Xenova', 'whisper-small', obsoleteRevision);
+    const staged = join(root, 'models', '.tmp', 'Xenova', 'whisper-small', obsoleteRevision);
+    await Promise.all([mkdir(installed, { recursive: true }), mkdir(staged, { recursive: true })]);
+    await Promise.all([
+      writeFile(join(installed, 'obsolete.bin'), 'obsolete'),
+      writeFile(join(staged, 'obsolete.part'), 'obsolete'),
+    ]);
+    const manager = new ModelManager({
+      modelsDirectory: join(root, 'models'),
+      temporaryDirectory: join(root, 'models', '.tmp'),
+      manifest,
+    });
+    await manager.initialize();
+    await expect(stat(installed)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(staged)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('can retry recovery after a transient filesystem failure', async () => {
+    const root = await createTestDirectory('model-recovery-retry');
+    roots.push(root);
+    const modelsDirectory = join(root, 'models');
+    await writeFile(modelsDirectory, 'temporarily blocks directory creation');
+    const manager = new ModelManager({
+      modelsDirectory,
+      temporaryDirectory: join(root, 'temporary-models'),
+      manifest,
+    });
+    await expect(manager.initialize()).rejects.toThrow();
+    await rm(modelsDirectory);
+    await expect(manager.initialize()).resolves.toBeUndefined();
   });
 
   it('restarts a ranged file safely when the server ignores Range with HTTP 200', async () => {
@@ -1489,11 +1821,16 @@ async function waitForCondition(condition: () => boolean): Promise<void> {
   }
 }
 
-function createManager(root: string, urlFor: (file: ModelManifestFile) => string): ModelManager {
+function createManager(
+  root: string,
+  urlFor: (file: ModelManifestFile) => string,
+  fetchModel?: typeof fetch,
+): ModelManager {
   return new ModelManager({
     modelsDirectory: join(root, 'models'),
     temporaryDirectory: join(root, 'models', '.tmp'),
     manifest,
+    ...(fetchModel === undefined ? {} : { fetch: fetchModel }),
     availableBytes: () => Promise.resolve(Number.MAX_SAFE_INTEGER),
     urlFor: (_model, file) => urlFor(file),
     validateRequestUrl: () => true,

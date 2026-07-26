@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHandlers, type HandlerDependencies } from '../../app/src/main/ipc/handlers';
 import { ProviderError } from '../../app/src/main/providers/errors';
+import { ModelManagerError } from '../../app/src/main/transcription/errors';
 import { authorizeIpc } from '../../app/src/main/security/ipc-authorization';
 import { toPublicError } from '../../app/src/main/security/public-error';
 import {
@@ -179,7 +180,7 @@ describe('typed IPC registry', () => {
     await expect(
       handlers['data:reset-all'](
         { confirmation: 'RESET TALKING QUILL' },
-        { role: 'main', webContentsId: 1, onDestroyed: () => () => undefined },
+        { webContentsId: 1, onDestroyed: () => () => undefined },
       ),
     ).resolves.toEqual({
       accepted: true,
@@ -188,7 +189,7 @@ describe('typed IPC registry', () => {
     expect(
       handlers['data:reset-renderer-ack'](
         { acknowledgementToken: RESET_ACKNOWLEDGEMENT_TOKEN },
-        { role: 'main', webContentsId: 1, onDestroyed: () => () => undefined },
+        { webContentsId: 1, onDestroyed: () => () => undefined },
       ),
     ).toEqual({ accepted: true });
     expect(requestDataReset).toHaveBeenCalledOnce();
@@ -212,7 +213,6 @@ describe('typed IPC registry', () => {
       providerMutations: { setSecret, deleteSecret },
     } as unknown as HandlerDependencies);
     const context = {
-      role: 'main' as const,
       webContentsId: 1,
       onDestroyed: () => () => undefined,
     };
@@ -251,7 +251,7 @@ describe('typed IPC registry', () => {
     await expect(
       handlers['model:delete'](
         { modelId: 'Xenova/whisper-small' },
-        { role: 'main', webContentsId: 1, onDestroyed: () => () => undefined },
+        { webContentsId: 1, onDestroyed: () => () => undefined },
       ),
     ).resolves.toEqual({ outcome: 'in-use', status });
     expect(remove).toHaveBeenCalledWith('Xenova/whisper-small');
@@ -306,6 +306,12 @@ describe('typed IPC registry', () => {
     expect(toPublicError(new ProviderError('AUTHENTICATION_FAILED'))).toEqual({
       code: 'AUTHENTICATION_FAILED',
       message: 'The provider rejected the credential.',
+    });
+    expect(
+      toPublicError(new ModelManagerError('CANCELLED', 'private cancellation detail')),
+    ).toEqual({
+      code: 'CANCELLED',
+      message: 'The operation was cancelled.',
     });
   });
 });

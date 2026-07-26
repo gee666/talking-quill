@@ -76,7 +76,7 @@ describe('application lifecycle hardening', () => {
     expect(calls).toEqual(['ipc:stop', 'ipc:drained', 'dependency']);
   });
 
-  it('attempts every cleanup and reports rejection and timeout without raw errors', async () => {
+  it('continues after settled rejection but stops dependent cleanup after timeout', async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
     const lifecycle = runBoundedLifecycle(
@@ -102,12 +102,38 @@ describe('application lifecycle hardening', () => {
 
     await vi.runAllTimersAsync();
     const diagnostics = await lifecycle;
-    expect(calls).toEqual(['recording', 'persistence']);
+    expect(calls).toEqual(['recording']);
     expect(diagnostics).toEqual([
       { phase: 'shutdown', step: 'recording', outcome: 'rejected' },
       { phase: 'shutdown', step: 'worker', outcome: 'timed-out' },
     ]);
     expect(JSON.stringify(diagnostics)).not.toMatch(/secret|https|Users|canary/i);
+  });
+
+  it('lets a step use the remaining aggregate deadline instead of an equal fraction', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const lifecycle = runBoundedLifecycle(
+      'shutdown',
+      [
+        {
+          name: 'producer',
+          run: () =>
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                calls.push('producer');
+                resolve();
+              }, 1_000);
+            }),
+        },
+        { name: 'dependent', run: () => void calls.push('dependent') },
+      ],
+      5_000,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(lifecycle).resolves.toEqual([]);
+    expect(calls).toEqual(['producer', 'dependent']);
   });
 
   it('distinguishes intentional startup cancellation from fatal startup failure', () => {

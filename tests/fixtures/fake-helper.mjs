@@ -3,6 +3,7 @@ const platform = process.platform === 'win32' ? 'windows' : 'macos';
 const architecture = process.arch === 'x64' ? 'x86_64' : 'aarch64';
 let pending = Buffer.alloc(0);
 let configured = false;
+let initialized = false;
 
 if (scenario === 'exit') process.exit(23);
 
@@ -26,18 +27,31 @@ function handle(request) {
   }
   const { id, method, params } = request;
   if (method === 'initialize') {
-    respond(id, {
-      protocolVersion: 2,
-      helperVersion: scenario === 'mismatch' ? '9.9.9' : '1.0.0',
-      platform,
-      architecture,
-      defaultActivationKey: 'Z',
-      hookStatus: 'ready',
-      permissions: permissions(),
-    });
+    const initialize = () => {
+      respond(id, {
+        protocolVersion: 2,
+        helperVersion: scenario === 'mismatch' ? '9.9.9' : '1.0.0',
+        platform,
+        architecture,
+        defaultActivationKey: 'Z',
+        hookStatus:
+          scenario === 'permission-required' || scenario === 'permission-recovers'
+            ? 'permission_required'
+            : 'ready',
+        permissions: permissions(),
+      });
+      initialized = true;
+    };
+    if (scenario === 'slow-initialize') setTimeout(initialize, 150);
+    else initialize();
     return;
   }
   if (method === 'activation.configure') {
+    if (
+      (scenario === 'permission-required' || scenario === 'permission-recovers') &&
+      params.enabled === true
+    )
+      process.exit(27);
     if (scenario === 'reject-default-config' && !configured && params.enabled === false) {
       process.exit(26);
     }
@@ -72,7 +86,13 @@ function handle(request) {
     respond(id, { processName: 'fixture-app', windowTitle: 'Fixture target', windowBounds: null });
   } else if (method === 'permissions.get') respond(id, permissions());
   else if (method === 'ping') {
-    respond(id, { ok: true, hookStatus: 'ready' });
+    respond(id, {
+      ok: true,
+      hookStatus:
+        scenario === 'permission-required' || scenario === 'permission-recovers'
+          ? 'permission_required'
+          : 'ready',
+    });
     if (scenario === 'notify') {
       notify('activation.event', { phase: 'down', key: 'Z', shift: false });
     }
@@ -88,7 +108,10 @@ function handle(request) {
 
 function permissions() {
   return {
-    accessibility: 'not_applicable',
+    accessibility:
+      scenario === 'permission-required' || (scenario === 'permission-recovers' && !initialized)
+        ? 'denied'
+        : 'not_applicable',
     inputMonitoring: 'not_applicable',
     eventPost: 'not_applicable',
   };

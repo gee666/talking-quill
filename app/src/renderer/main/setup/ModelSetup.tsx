@@ -29,12 +29,17 @@ export function ModelSetup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
+  const mounted = useRef(true);
 
   const refresh = useCallback(async (): Promise<ModelStatus | null> => {
     const generation = ++refreshGeneration.current;
     try {
       const next = await window.talkingQuill.models.status(modelId);
-      if (generation === refreshGeneration.current && next.modelId === modelId) setStatus(next);
+      if (generation === refreshGeneration.current && next.modelId === modelId) {
+        setStatus(next);
+        setError(null);
+      }
       return next.modelId === modelId ? next : null;
     } catch {
       if (generation === refreshGeneration.current) {
@@ -45,9 +50,18 @@ export function ModelSetup({
   }, [modelId]);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      selectionGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     const refreshTimer = setTimeout(() => void refresh(), 0);
     const unsubscribe = window.talkingQuill.models.onProgress((progress) => {
       if (progress.modelId !== modelId) return;
+      setError(null);
       setStatus((current) => ({
         modelId,
         state: progress.state,
@@ -69,16 +83,38 @@ export function ModelSetup({
     };
   }, [modelId, refresh]);
 
-  const perform = async (action: () => Promise<ModelStatus>) => {
+  const perform = async (
+    action: () => Promise<ModelStatus>,
+    fallback = 'The model action could not be completed. Retry to resume from safe existing files.',
+  ) => {
     setBusy(true);
     setError(null);
     try {
-      setStatus(await action());
-    } catch (cause: unknown) {
+      const next = await action();
+      if (mounted.current) setStatus(next);
+    } catch {
       const refreshed = await refresh();
-      setError(refreshed?.detail ?? modelActionError(cause));
+      if (mounted.current) setError(refreshed?.detail ?? fallback);
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const saveModelSelection = async (nextModelId: WhisperModelId) => {
+    const generation = ++selectionGeneration.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await window.talkingQuill.settings.update({
+        transcription: { modelId: nextModelId },
+      });
+      if (mounted.current && generation === selectionGeneration.current) onSettingsSaved(saved);
+    } catch {
+      if (mounted.current && generation === selectionGeneration.current) {
+        setError('The selected model could not be saved.');
+      }
+    } finally {
+      if (mounted.current && generation === selectionGeneration.current) setBusy(false);
     }
   };
 
@@ -113,17 +149,7 @@ export function ModelSetup({
         disabled={
           busy || state === 'downloading' || state === 'verifying' || state === 'installing'
         }
-        onChange={(event) => {
-          setError(null);
-          void window.talkingQuill.settings
-            .update({
-              transcription: {
-                modelId: event.currentTarget.value as WhisperModelId,
-              },
-            })
-            .then(onSettingsSaved)
-            .catch(() => setError('The selected model could not be saved.'));
-        }}
+        onChange={(event) => void saveModelSelection(event.currentTarget.value as WhisperModelId)}
       >
         <option value="onnx-community/whisper-large-v3-turbo">
           {modelOptionLabel('onnx-community/whisper-large-v3-turbo')}
@@ -166,6 +192,7 @@ export function ModelSetup({
               {state === 'downloading' ? (
                 <Button
                   variant="secondary"
+                  disabled={busy}
                   onClick={() => void perform(() => window.talkingQuill.models.cancel(modelId))}
                 >
                   Cancel download
@@ -173,6 +200,7 @@ export function ModelSetup({
               ) : state === 'verifying' || state === 'installing' ? (
                 <Button
                   variant="secondary"
+                  disabled={busy}
                   onClick={() => void perform(() => window.talkingQuill.models.pause(modelId))}
                 >
                   Pause model setup
@@ -183,12 +211,11 @@ export function ModelSetup({
                   variant="danger"
                   disabled={busy}
                   onClick={() =>
-                    void window.talkingQuill.models
-                      .delete(modelId)
-                      .then((result) => setStatus(result.status))
-                      .catch(() =>
-                        setError('The model is currently in use or could not be deleted.'),
-                      )
+                    void perform(
+                      () =>
+                        window.talkingQuill.models.delete(modelId).then((result) => result.status),
+                      'The model is currently in use or could not be deleted.',
+                    )
                   }
                 >
                   Delete model
@@ -239,9 +266,4 @@ function modelStateLabel(status: ModelStatus): string {
     case 'error':
       return 'Model setup failed';
   }
-}
-
-function modelActionError(cause: unknown): string {
-  if (cause instanceof Error && cause.message.trim() !== '') return cause.message;
-  return 'The model action could not be completed. Retry to resume from safe existing files.';
 }

@@ -1,8 +1,6 @@
 import type { InvokeChannel, InvokeRequest, InvokeResponse } from '../../shared/ipc/registry';
-import type { WindowRole } from '../../shared/constants/app';
 
 export interface AuthorizedIpcContext {
-  readonly role: WindowRole;
   readonly webContentsId: number;
   readonly onDestroyed: (listener: () => void) => () => void;
 }

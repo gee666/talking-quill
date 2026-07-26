@@ -8,6 +8,7 @@ export interface UpdateOperationOwner {
 /** Isolated from provider operations so cancellation and quotas cannot cross domains. */
 export class UpdateOperationCoordinator {
   readonly #operations = new Map<string, AbortController>();
+  readonly #activeOwners = new Set<number>();
   #disposed = false;
 
   async run<Result>(
@@ -17,7 +18,7 @@ export class UpdateOperationCoordinator {
   ): Promise<Result> {
     if (this.#disposed) throw unavailable();
     const key = `${String(owner.webContentsId)}:${operationId}`;
-    if (this.#operations.has(key)) {
+    if (this.#operations.has(key) || this.#activeOwners.has(owner.webContentsId)) {
       throw new PublicAppError({
         code: 'BAD_REQUEST',
         message: 'The update operation is invalid.',
@@ -25,12 +26,14 @@ export class UpdateOperationCoordinator {
     }
     const controller = new AbortController();
     this.#operations.set(key, controller);
+    this.#activeOwners.add(owner.webContentsId);
     const remove = owner.onDestroyed(() => controller.abort());
     try {
       return await operation(controller.signal);
     } finally {
       remove();
       this.#operations.delete(key);
+      this.#activeOwners.delete(owner.webContentsId);
     }
   }
 
@@ -46,6 +49,7 @@ export class UpdateOperationCoordinator {
     this.#disposed = true;
     for (const operation of this.#operations.values()) operation.abort();
     this.#operations.clear();
+    this.#activeOwners.clear();
   }
 }
 

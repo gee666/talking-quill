@@ -1,11 +1,7 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  inspectNativeTree,
-  parseNativeArchitecture,
-  parseNativeArchitectures,
-} from '../../scripts/native-architecture.mjs';
+import { inspectNativeTree, parseNativeArchitectures } from '../../scripts/native-architecture.mjs';
 
 const fixtureRoot = resolve('tmp', 'native-architecture-fixtures');
 
@@ -52,8 +48,6 @@ afterEach(async () => {
 
 describe('recursive native magic and architecture inspection', () => {
   it('recognizes x64 and arm64 PE binaries', () => {
-    expect(parseNativeArchitecture(pe(0x8664), 'native.node', false)).toBe('x64');
-    expect(parseNativeArchitecture(pe(0xaa64), 'native.node', false)).toBe('arm64');
     expect(parseNativeArchitectures(pe(0x8664), 'native.node')).toEqual({
       format: 'pe',
       architectures: ['x64'],
@@ -93,16 +87,20 @@ describe('recursive native magic and architecture inspection', () => {
       writeFile(resolve(fixtureRoot, 'readme.bin'), Buffer.from('not native')),
       writeFile(resolve(fixtureRoot, 'nested', 'substituted.payload'), pe(0xaa64)),
     ]);
-    await expect(inspectNativeTree(fixtureRoot, 'x64')).rejects.toThrow(
-      'nested/substituted.payload is arm64, expected x64',
-    );
+    await expect(
+      inspectNativeTree(fixtureRoot, { platform: 'win', architecture: 'x64' }),
+    ).rejects.toThrow('nested/substituted.payload is arm64, expected x64');
   });
 
   it('allows only an exact reviewed auxiliary architecture exception', async () => {
     await mkdir(resolve(fixtureRoot, 'resources'), { recursive: true });
     await writeFile(resolve(fixtureRoot, 'resources', 'elevate.exe'), pe(0x014c));
     await expect(
-      inspectNativeTree(fixtureRoot, 'x64', { 'resources/elevate.exe': 'x86' }),
+      inspectNativeTree(fixtureRoot, {
+        platform: 'win',
+        architecture: 'x64',
+        exceptions: { 'resources/elevate.exe': 'x86' },
+      }),
     ).resolves.toEqual([
       {
         path: 'resources/elevate.exe',
@@ -111,20 +109,34 @@ describe('recursive native magic and architecture inspection', () => {
       },
     ]);
     await expect(
-      inspectNativeTree(fixtureRoot, 'x64', { 'resources/other.exe': 'x86' }),
+      inspectNativeTree(fixtureRoot, {
+        platform: 'win',
+        architecture: 'x64',
+        exceptions: { 'resources/other.exe': 'x86' },
+      }),
     ).rejects.toThrow('resources/elevate.exe is x86, expected x64');
   });
 
   it('accepts a universal Mach-O containing the target slice', async () => {
     await mkdir(fixtureRoot, { recursive: true });
     await writeFile(resolve(fixtureRoot, 'universal'), fatMach([0x01000007, 0x0100000c], false));
-    await expect(inspectNativeTree(fixtureRoot, 'arm64')).resolves.toEqual([
+    await expect(
+      inspectNativeTree(fixtureRoot, { platform: 'mac', architecture: 'arm64' }),
+    ).resolves.toEqual([
       {
         path: 'universal',
         format: 'mach-o-fat',
         architectures: ['arm64', 'x64'],
       },
     ]);
+  });
+
+  it('rejects a native image for the wrong operating-system format', async () => {
+    await mkdir(fixtureRoot, { recursive: true });
+    await writeFile(resolve(fixtureRoot, 'substituted'), pe(0x8664));
+    await expect(
+      inspectNativeTree(fixtureRoot, { platform: 'mac', architecture: 'x64' }),
+    ).rejects.toThrow('is pe, expected mach-o');
   });
 
   it('rejects malformed and unsupported recognized native containers', () => {

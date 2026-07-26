@@ -9,25 +9,29 @@ import {
 class FakeClipboard implements ClipboardAdapter {
   value = 'before';
   html = '<b>before</b>';
+  rtf = '{\\rtf1 before}';
   imagePng: Uint8Array | null = Uint8Array.from([1, 2, 3]);
   restored: ClipboardSnapshot | null = null;
   readonly original: ClipboardSnapshot = {
     text: 'before',
     html: '<b>before</b>',
+    rtf: '{\\rtf1 before}',
     imagePng: Uint8Array.from([1, 2, 3]),
   };
   snapshot() {
-    return { text: this.value, html: this.html, imagePng: this.imagePng };
+    return { text: this.value, html: this.html, rtf: this.rtf, imagePng: this.imagePng };
   }
   writeText(text: string) {
     this.value = text;
     this.html = '';
+    this.rtf = '';
     this.imagePng = null;
   }
   restore(snapshot: ClipboardSnapshot) {
     this.restored = snapshot;
     this.value = snapshot.text;
     this.html = snapshot.html;
+    this.rtf = snapshot.rtf;
     this.imagePng = snapshot.imagePng;
   }
 }
@@ -37,24 +41,27 @@ describe('InsertionService', () => {
     const delimiterLeft = clipboardFingerprint({
       text: 'a\0b',
       html: 'c',
+      rtf: '',
       imagePng: null,
     });
     const delimiterRight = clipboardFingerprint({
       text: 'a',
       html: 'b\0c',
+      rtf: '',
       imagePng: null,
     });
-    const absentImage = clipboardFingerprint({ text: 'same', html: '', imagePng: null });
+    const absentImage = clipboardFingerprint({ text: 'same', html: '', rtf: '', imagePng: null });
     const emptyImage = clipboardFingerprint({
       text: 'same',
       html: '',
+      rtf: '',
       imagePng: new Uint8Array(),
     });
     expect(delimiterLeft).not.toBe(delimiterRight);
     expect(absentImage).not.toBe(emptyImage);
   });
 
-  it('swaps, pastes, waits 300 ms, and restores text/HTML/image', async () => {
+  it('swaps, pastes, waits 300 ms, and restores text/HTML/RTF/image', async () => {
     const clipboard = new FakeClipboard();
     const delay = vi.fn(() => Promise.resolve());
     const service = new InsertionService(
@@ -150,6 +157,12 @@ describe('InsertionService', () => {
       name: 'new rich HTML with the same text',
       change: (clipboard: FakeClipboard) => {
         clipboard.html = '<b>dictated text</b>';
+      },
+    },
+    {
+      name: 'new rich RTF with the same text',
+      change: (clipboard: FakeClipboard) => {
+        clipboard.rtf = '{\\rtf1 dictated text}';
       },
     },
     {

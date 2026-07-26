@@ -51,10 +51,7 @@ export class VoiceCommandStore {
 
   update(id: string, patch: VoiceCommandUpdate): Promise<VoiceCommand> {
     return this.#mutate(async () => {
-      const parsed = VoiceCommandUpdateSchema.parse({
-        ...(patch.trigger === undefined ? {} : { trigger: patch.trigger.trim() }),
-        ...(patch.snippet === undefined ? {} : { snippet: patch.snippet.replace(/\r\n?/gu, '\n') }),
-      });
+      const parsed = VoiceCommandUpdateSchema.parse(normalizeInput(patch));
       const commands = [...this.list()];
       const index = commands.findIndex((command) => command.id === id);
       if (index < 0) notFound();
@@ -94,11 +91,11 @@ export class VoiceCommandStore {
   }
 }
 
-function normalizeInput<Value extends { readonly trigger?: string; readonly snippet?: string }>(
-  input: Value,
-): Value {
+function normalizeInput(input: {
+  readonly trigger?: string | undefined;
+  readonly snippet?: string | undefined;
+}): { readonly trigger?: string; readonly snippet?: string } {
   return {
-    ...input,
     ...(input.trigger === undefined ? {} : { trigger: input.trigger.trim() }),
     ...(input.snippet === undefined ? {} : { snippet: input.snippet.replace(/\r\n?/gu, '\n') }),
   };

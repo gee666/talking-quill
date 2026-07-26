@@ -143,6 +143,9 @@ function assertEndpointPolicy(
   destination: Destination,
   options: Pick<EndpointPolicyOptions, 'credentialed' | 'fixedCloud'>,
 ): void {
+  if (destination === 'cloud' && url.protocol !== 'https:') {
+    throw new ProviderError('SECURITY_BLOCKED');
+  }
   if (options.credentialed && destination !== 'local' && url.protocol !== 'https:') {
     throw new ProviderError('SECURITY_BLOCKED');
   }

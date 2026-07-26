@@ -30,15 +30,13 @@ export class RetainedScreenshot {
       this.#writeAtomic(this.#pendingThumbnailFilename, thumbnail);
       active.set(registryKey(this.#directory, this.filename), this);
     } catch (error: unknown) {
-      this.#removeAll();
+      try {
+        this.#removeAll();
+      } catch {
+        // Preserve the write failure that caused cleanup.
+      }
       throw error;
     }
-  }
-
-  commit(): void {
-    // HistoryService owns the authoritative transition. This acknowledges controller ownership
-    // only after the row is known to exist; it must never promote files independently.
-    if (this.#state === 'row-committed') active.delete(registryKey(this.#directory, this.filename));
   }
 
   cleanup(): void {
@@ -69,7 +67,11 @@ export class RetainedScreenshot {
     } catch (error: unknown) {
       this.#state = 'disposed';
       active.delete(registryKey(this.#directory, this.filename));
-      this.#removeAll();
+      try {
+        this.#removeAll();
+      } catch {
+        // Preserve the promotion or database failure that initiated cleanup.
+      }
       throw error;
     }
   }
@@ -81,13 +83,21 @@ export class RetainedScreenshot {
   }
 
   #removeAll(): void {
+    let firstError: unknown;
     for (const filename of [
       this.#pendingFilename,
       this.#pendingThumbnailFilename,
       this.filename,
       thumbnailFilename(this.filename),
     ]) {
-      rmSync(join(this.#directory, filename), { force: true });
+      try {
+        rmSync(join(this.#directory, filename), { force: true });
+      } catch (error: unknown) {
+        firstError ??= error;
+      }
+    }
+    if (firstError !== undefined) {
+      throw firstError instanceof Error ? firstError : new Error('Screenshot cleanup failed');
     }
   }
 
