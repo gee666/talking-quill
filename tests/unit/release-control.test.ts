@@ -9,6 +9,7 @@ import { validatePublicRelease } from '../../scripts/verify-public-release.mjs';
 const policy = {
   repository: 'gee666/talking-quill',
   defaultBranch: 'main',
+  releaseTag: 'v1.0.2',
   environments: ['release-trust', 'release-signing', 'release-publication'],
   runnerLabels: ['release-runner'],
   environmentSecrets: { 'release-signing': ['SIGNING_KEY'] },
@@ -40,7 +41,14 @@ describe('release control-plane policy', () => {
         immutable_releases: true,
       },
       environments: Object.fromEntries(policy.environments.map((name) => [name, environment()])),
-      tagRulesets: [{ target: 'tag', enforcement: 'active', rules: [{ type: 'creation' }] }],
+      tagRulesets: [
+        {
+          target: 'tag',
+          enforcement: 'active',
+          conditions: { ref_name: { include: ['refs/tags/v*'], exclude: [] } },
+          rules: [{ type: 'creation' }],
+        },
+      ],
       runnerLabels: ['release-runner'],
       environmentSecrets: { 'release-signing': ['SIGNING_KEY'] },
       environmentVariables: { 'release-publication': ['APPROVAL'] },
@@ -73,6 +81,61 @@ describe('release control-plane policy', () => {
         policy,
       ),
     ).toThrow('Immutable releases');
+    expect(() =>
+      validateExternalControls(
+        {
+          ...controls,
+          tagRulesets: [
+            {
+              target: 'tag',
+              enforcement: 'active',
+              conditions: { ref_name: { include: ['refs/tags/internal-*'], exclude: [] } },
+              rules: [{ type: 'creation' }],
+            },
+          ],
+        },
+        policy,
+      ),
+    ).toThrow('protects the release tag');
+    expect(() =>
+      validateExternalControls(
+        {
+          ...controls,
+          tagRulesets: [
+            {
+              target: 'tag',
+              enforcement: 'active',
+              conditions: {
+                ref_name: { include: ['~ALL'], exclude: ['refs/tags/v*'] },
+              },
+              rules: [{ type: 'creation' }],
+            },
+          ],
+        },
+        policy,
+      ),
+    ).toThrow('protects the release tag');
+    expect(() =>
+      validateExternalControls(
+        {
+          ...controls,
+          tagRulesets: [
+            {
+              target: 'tag',
+              enforcement: 'active',
+              conditions: {
+                ref_name: { include: ['~ALL'], exclude: ['refs/tags/v[0-9]*'] },
+              },
+              rules: [{ type: 'creation' }],
+            },
+          ],
+        },
+        policy,
+      ),
+    ).toThrow('protects the release tag');
+    expect(() =>
+      validateExternalControls(controls, { ...policy, releaseTag: 'release-1.0.2' }),
+    ).toThrow('strict semver release tag');
     expect(() => validateExternalControls({ ...controls, runnerLabels: [] }, policy)).toThrow(
       'runner label',
     );

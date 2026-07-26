@@ -1,3 +1,4 @@
+import { CAPTURE_WORKLET_PROCESSOR_NAME } from '../../shared/constants/audio';
 import { StreamingPcmProcessor } from './audio-processing';
 
 class CaptureProcessor extends AudioWorkletProcessor {
@@ -33,4 +34,4 @@ function isFlushMessage(value: unknown): value is { readonly type: 'flush' } {
   return typeof value === 'object' && value !== null && Reflect.get(value, 'type') === 'flush';
 }
 
-registerProcessor('talking-quill-capture', CaptureProcessor);
+registerProcessor(CAPTURE_WORKLET_PROCESSOR_NAME, CaptureProcessor);

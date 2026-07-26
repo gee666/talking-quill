@@ -46,17 +46,36 @@ export async function prepareResetSafely(options: ResetPreparationOptions): Prom
     }
   } catch (error: unknown) {
     let restartWithoutReset = false;
+    const cleanupErrors: unknown[] = [];
     try {
       await options.journal.cancelPreparedReset();
       restartWithoutReset = true;
-    } finally {
+    } catch (cleanupError: unknown) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
       // The process is already atomically quiesced. It must terminate even if journal cleanup
       // failed; relaunch is safe only after the journal is definitely absent.
       options.onAbort(restartWithoutReset);
+    } catch (abortError: unknown) {
+      cleanupErrors.push(abortError);
     }
-    if (error instanceof ResetPreparationError) throw error;
-    throw new ResetPreparationError('Application data reset preparation failed.', [], {
-      cause: error,
+    if (cleanupErrors.length === 0) {
+      if (error instanceof ResetPreparationError) throw error;
+      throw new ResetPreparationError('Application data reset preparation failed.', [], {
+        cause: error,
+      });
+    }
+    const message =
+      error instanceof ResetPreparationError
+        ? error.message
+        : 'Application data reset preparation failed.';
+    const diagnostics = error instanceof ResetPreparationError ? error.diagnostics : [];
+    throw new ResetPreparationError(message, diagnostics, {
+      cause: new AggregateError(
+        [error, ...cleanupErrors],
+        'Reset preparation and abort cleanup both failed.',
+      ),
     });
   }
 }

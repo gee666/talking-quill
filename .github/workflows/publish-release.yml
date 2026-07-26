@@ -47,7 +47,7 @@ jobs:
         env: { EXPECTED_POLICY_SHA256: '${{ vars.RELEASE_POLICY_TREE_SHA256 }}' }
         run: |
           test "$EXPECTED_POLICY_SHA256" != ''
-          actual="$(git ls-tree HEAD -- .github/workflows/release.yml .github/workflows/publish-release.yml release.config.json package.json pnpm-lock.yaml pnpm-workspace.yaml app/package.json app/after-pack.cjs build/electron-builder.yml build/installer.nsh build/mac-sign.cjs scripts/release-control-preflight.mjs scripts/verify-trusted-candidate.mjs scripts/verify-release-tag.mjs scripts/artifact-provenance.mjs scripts/assemble-release.mjs scripts/release-checksums.mjs scripts/verify-draft-release.mjs scripts/verify-public-release.mjs scripts/verify-macos-release.mjs scripts/inspect-package.mjs scripts/package-policy.mjs | sha256sum | cut -d' ' -f1)"
+          actual="$(git ls-tree HEAD -- .npmrc .github/workflows/release.yml .github/workflows/publish-release.yml release.config.json package.json pnpm-lock.yaml pnpm-workspace.yaml app/package.json app/after-pack.cjs build/electron-builder.yml build/installer.nsh build/mac-sign.cjs scripts/release-control-preflight.mjs scripts/verify-trusted-candidate.mjs scripts/verify-release-tag.mjs scripts/artifact-provenance.mjs scripts/assemble-release.mjs scripts/release-checksums.mjs scripts/verify-draft-release.mjs scripts/verify-public-release.mjs scripts/verify-macos-release.mjs scripts/generate-notices.mjs scripts/inspect-package.mjs scripts/native-architecture.mjs scripts/package-policy.mjs scripts/release-config.mjs scripts/secret-rules.mjs | sha256sum | cut -d' ' -f1)"
           test "$actual" = "$EXPECTED_POLICY_SHA256"
       - run: node scripts/release-control-preflight.mjs
         if: ${{ !inputs.dry_run }}

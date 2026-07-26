@@ -7,7 +7,6 @@ import {
 } from '../../app/src/main/security/microphone-permission';
 import {
   getTrustedCaptureDocument,
-  isTrustedCaptureWebContents,
   secureSession,
 } from '../../app/src/main/security/session-policy';
 
@@ -168,12 +167,12 @@ describe('integrated Electron microphone session policy', () => {
   });
 
   it('denies the wrong role, URL, destroyed sender, missing lease, and non-media permission', () => {
-    expect(isTrustedCaptureWebContents(webContents(), roles())).toBe(true);
-    expect(isTrustedCaptureWebContents(webContents(), roles('main'))).toBe(false);
+    expect(getTrustedCaptureDocument(webContents(), roles())).not.toBeNull();
+    expect(getTrustedCaptureDocument(webContents(), roles('main'))).toBeNull();
     expect(
-      isTrustedCaptureWebContents(webContents(7, 'talking-quill://app/main/index.html'), roles()),
-    ).toBe(false);
-    expect(isTrustedCaptureWebContents(webContents(7, undefined, true), roles())).toBe(false);
+      getTrustedCaptureDocument(webContents(7, 'talking-quill://app/main/index.html'), roles()),
+    ).toBeNull();
+    expect(getTrustedCaptureDocument(webContents(7, undefined, true), roles())).toBeNull();
 
     const test = harness();
     const contents = webContents();

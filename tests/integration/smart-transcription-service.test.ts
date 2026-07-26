@@ -21,18 +21,34 @@ function createHarness(
     retain?: boolean;
     screenshotsDirectory?: string;
     manualVision?: boolean;
+    providerManagedModel?: boolean;
     preflightCapability?: 'supported' | 'unsupported' | 'unknown';
+    settingsUpdateGate?: Promise<void>;
+    retainScreenshot?: () => {
+      readonly filename: string;
+      cleanup(): void;
+    };
   } = {},
 ) {
-  const providerId = options.manualVision ? ('generic-openai' as const) : ('openai' as const);
-  const config = options.manualVision
+  const providerId = options.providerManagedModel
+    ? ('textgenwebui' as const)
+    : options.manualVision
+      ? ('generic-openai' as const)
+      : ('openai' as const);
+  const config = options.providerManagedModel
     ? {
         providerId,
-        baseUrl: 'http://127.0.0.1:8080/v1',
-        modelId: 'private-model',
+        baseUrl: 'http://127.0.0.1:5000/v1',
         maxOutputTokens: 9_999,
       }
-    : { providerId, modelId: 'gpt-4.1', maxOutputTokens: 9_999 };
+    : options.manualVision
+      ? {
+          providerId,
+          baseUrl: 'http://127.0.0.1:8080/v1',
+          modelId: 'private-model',
+          maxOutputTokens: 9_999,
+        }
+      : { providerId, modelId: 'gpt-4.1', maxOutputTokens: 9_999 };
   let settings: Settings = {
     ...structuredClone(DEFAULT_SETTINGS),
     smartProcessing: {
@@ -40,13 +56,18 @@ function createHarness(
       selectedProviderId: providerId,
       providers: {
         ...structuredClone(DEFAULT_SETTINGS.smartProcessing.providers),
-        [providerId]: options.manualVision
+        [providerId]: options.providerManagedModel
           ? {
-              baseUrl: 'http://127.0.0.1:8080/v1',
-              modelId: 'private-model',
+              baseUrl: 'http://127.0.0.1:5000/v1',
               maxOutputTokens: 9_999,
             }
-          : { modelId: 'gpt-4.1', maxOutputTokens: 9_999 },
+          : options.manualVision
+            ? {
+                baseUrl: 'http://127.0.0.1:8080/v1',
+                modelId: 'private-model',
+                maxOutputTokens: 9_999,
+              }
+            : { modelId: 'gpt-4.1', maxOutputTokens: 9_999 },
       },
       onScreenAwarenessEnabled: options.osa ?? false,
     },
@@ -59,7 +80,7 @@ function createHarness(
   const revisionListeners = new Set<(revision: number) => void>();
   const settingsListeners = new Set<(settings: Settings) => void>();
   const update = vi.fn(
-    (
+    async (
       patch: {
         smartProcessing?: Partial<Settings['smartProcessing']>;
         privacy?: Partial<Settings['privacy']>;
@@ -67,8 +88,12 @@ function createHarness(
       },
       signal?: AbortSignal,
     ) => {
-      if (signal?.aborted === true)
-        return Promise.reject(new DOMException('Cancelled', 'AbortError'));
+      const assertActive = (): void => {
+        if (signal?.aborted === true) throw new DOMException('Cancelled', 'AbortError');
+      };
+      assertActive();
+      await options.settingsUpdateGate;
+      assertActive();
       const smartChanged =
         patch.smartProcessing !== undefined || patch.customVocabulary !== undefined;
       settings = {
@@ -82,7 +107,7 @@ function createHarness(
         for (const listener of revisionListeners) listener(revision);
       }
       for (const listener of settingsListeners) listener(settings);
-      return Promise.resolve(settings);
+      return settings;
     },
   );
   const capturedRequests: ProviderCompletionRequest[] = [];
@@ -115,6 +140,7 @@ function createHarness(
       height: 50,
     }),
   );
+  const retainScreenshot = options.retainScreenshot;
   const service = new SmartTranscriptionService({
     settings: {
       get: () => settings,
@@ -158,8 +184,25 @@ function createHarness(
         }),
     },
     screenshotsDirectory: options.screenshotsDirectory ?? 'unused',
+    ...(retainScreenshot === undefined ? {} : { retainScreenshot: () => retainScreenshot() }),
   });
-  return { service, capturedRequests, cleanTranscript, capture, update };
+  const invalidateConfig = () => {
+    revision += 1;
+    for (const listener of revisionListeners) listener(revision);
+  };
+  const subscriptionCounts = () => ({
+    revision: revisionListeners.size,
+    settings: settingsListeners.size,
+  });
+  return {
+    service,
+    capturedRequests,
+    cleanTranscript,
+    capture,
+    update,
+    invalidateConfig,
+    subscriptionCounts,
+  };
 }
 
 describe('SmartTranscriptionService', () => {
@@ -173,9 +216,21 @@ describe('SmartTranscriptionService', () => {
     expect(capturedRequests[0]).toMatchObject({
       modelId: 'gpt-4.1',
       temperature: 0.2,
-      maxOutputTokens: 2_048,
+      maxOutputTokens: 9_999,
     });
     expect(capturedRequests[0]?.input).toContain('Untrusted transcript JSON:\n"raw words"');
+  });
+
+  it('processes provider-managed model sessions without inventing a model ID', async () => {
+    const { service, capturedRequests } = createHarness({ providerManagedModel: true });
+    const session = service.beginSession();
+
+    expect(session).toMatchObject({ providerId: 'textgenwebui', modelId: null });
+    await expect(session.process('raw words', new AbortController().signal)).resolves.toMatchObject(
+      { text: 'Clean result' },
+    );
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]).not.toHaveProperty('modelId');
   });
 
   it.each([
@@ -270,7 +325,40 @@ describe('SmartTranscriptionService', () => {
     await service.confirmManualVision(verification.verificationId, controller.signal);
     expect(update).toHaveBeenCalledOnce();
     expect(update.mock.calls[0]?.[0].smartProcessing?.visionOverrides).toHaveLength(1);
-    expect(update.mock.calls[0]?.[1]).toBe(controller.signal);
+    expect(update.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('rejects OSA consent when configuration changes while its settings write is queued', async () => {
+    const gate = deferred<undefined>();
+    const test = createHarness({ settingsUpdateGate: gate.promise });
+    const enabling = test.service.setOnScreenAwareness(true);
+    await vi.waitFor(() => expect(test.update).toHaveBeenCalledOnce());
+    test.invalidateConfig();
+    gate.resolve(undefined);
+    await expect(enabling).rejects.toMatchObject({ code: 'STALE_CONFIG' });
+    expect(test.subscriptionCounts()).toEqual({ revision: 0, settings: 0 });
+  });
+
+  it('rejects manual vision consent when configuration changes during its settings write', async () => {
+    const gate = deferred<undefined>();
+    const test = createHarness({
+      manualVision: true,
+      output: 'ECHO-1234',
+      settingsUpdateGate: gate.promise,
+    });
+    const verification = await test.service.verifyManualVision(
+      'ECHO-1234',
+      new AbortController().signal,
+    );
+    const confirmation = test.service.confirmManualVision(
+      verification.verificationId,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(test.update).toHaveBeenCalledOnce());
+    test.invalidateConfig();
+    gate.resolve(undefined);
+    await expect(confirmation).rejects.toMatchObject({ code: 'STALE_CONFIG' });
+    expect(test.subscriptionCounts()).toEqual({ revision: 0, settings: 0 });
   });
 
   it('does not save a late manual vision override after visible cancellation', async () => {
@@ -342,6 +430,56 @@ describe('SmartTranscriptionService', () => {
     await test.update({ smartProcessing: { onScreenAwarenessEnabled: false } });
     await test.update({ smartProcessing: { onScreenAwarenessEnabled: true } });
     await expect(processing).rejects.toMatchObject({ code: 'STALE_CONFIG' });
+    pending.resolve('late output');
+  });
+
+  it('keeps valid Smart output when optional screenshot retention cannot be created', async () => {
+    const test = createHarness({
+      osa: true,
+      retain: true,
+      retainScreenshot: () => {
+        throw new Error('retention unavailable');
+      },
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+    await session.prepare(signal);
+    await expect(session.process('raw', signal)).resolves.toEqual({
+      text: 'Clean result',
+      screenshotFilename: null,
+    });
+    session.cleanup();
+    expect(test.subscriptionCounts()).toEqual({ revision: 0, settings: 0 });
+  });
+
+  it('always disposes session subscriptions when retained screenshot cleanup throws', async () => {
+    const cleanup = vi.fn(() => {
+      throw new Error('cleanup failed');
+    });
+    const test = createHarness({
+      osa: true,
+      retain: true,
+      retainScreenshot: () => ({ filename: 'pending.jpg', cleanup }),
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+    await session.prepare(signal);
+    await expect(session.process('raw', signal)).resolves.toMatchObject({
+      screenshotFilename: 'pending.jpg',
+    });
+    expect(() => session.cleanup()).toThrow('cleanup failed');
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(test.subscriptionCounts()).toEqual({ revision: 0, settings: 0 });
+  });
+
+  it('maps internal session disposal to cancellation for an active provider operation', async () => {
+    const pending = deferred<string>();
+    const test = createHarness({ completion: () => pending.promise });
+    const session = test.service.beginSession();
+    const processing = session.process('raw', new AbortController().signal);
+    await vi.waitFor(() => expect(test.cleanTranscript).toHaveBeenCalledOnce());
+    session.cleanup();
+    await expect(processing).rejects.toMatchObject({ code: 'CANCELLED' });
     pending.resolve('late output');
   });
 

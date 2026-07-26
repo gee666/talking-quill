@@ -1,6 +1,7 @@
 import { useState, type SyntheticEvent } from 'react';
 import type { VocabularyEntry } from '../../../shared/schemas/vocabulary';
 import { Button, Card, EmptyState, Input } from '../../design';
+import { publicErrorMessage } from '../public-error';
 
 export function CustomVocabularySection({
   entries,
@@ -23,9 +24,7 @@ export function CustomVocabularySection({
       setEditing(null);
       setValue('');
     } catch (error: unknown) {
-      setMessage(
-        error instanceof Error ? error.message : 'The vocabulary entry could not be saved.',
-      );
+      setMessage(publicErrorMessage(error, 'The vocabulary entry could not be saved.'));
     } finally {
       setBusy(false);
     }
@@ -47,6 +46,7 @@ export function CustomVocabularySection({
             value={value}
             maxLength={200}
             required
+            disabled={busy}
             onChange={(event) => setValue(event.target.value)}
           />
           <Button type="submit" disabled={busy}>
@@ -55,6 +55,7 @@ export function CustomVocabularySection({
           {editing === null ? null : (
             <Button
               variant="secondary"
+              disabled={busy}
               onClick={() => {
                 setEditing(null);
                 setValue('');
@@ -76,9 +77,7 @@ export function CustomVocabularySection({
                     : `Imported ${String(result.count)} vocabulary entries.`,
                 );
               } catch (error: unknown) {
-                setMessage(
-                  error instanceof Error ? error.message : 'Vocabulary could not be imported.',
-                );
+                setMessage(publicErrorMessage(error, 'Vocabulary could not be imported.'));
               }
             }}
           >
@@ -95,9 +94,7 @@ export function CustomVocabularySection({
                     : `Exported ${String(result.count)} vocabulary entries.`,
                 );
               } catch (error: unknown) {
-                setMessage(
-                  error instanceof Error ? error.message : 'Vocabulary could not be exported.',
-                );
+                setMessage(publicErrorMessage(error, 'Vocabulary could not be exported.'));
               }
             }}
           >
@@ -120,6 +117,7 @@ export function CustomVocabularySection({
                 <div className="provider-actions">
                   <Button
                     variant="secondary"
+                    disabled={busy}
                     aria-label={`Edit ${entry.value}`}
                     onClick={() => {
                       setEditing(entry);
@@ -130,6 +128,7 @@ export function CustomVocabularySection({
                   </Button>
                   <Button
                     variant="danger"
+                    disabled={busy}
                     aria-label={`Delete ${entry.value}`}
                     onClick={async () => {
                       try {
@@ -137,9 +136,7 @@ export function CustomVocabularySection({
                         setMessage('Vocabulary entry deleted.');
                       } catch (error: unknown) {
                         setMessage(
-                          error instanceof Error
-                            ? error.message
-                            : 'The vocabulary entry could not be deleted.',
+                          publicErrorMessage(error, 'The vocabulary entry could not be deleted.'),
                         );
                       }
                     }}

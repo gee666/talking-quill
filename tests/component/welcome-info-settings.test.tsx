@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/require-await -- async mocks model the preload Promise API. */
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WelcomeWizard } from '../../app/src/renderer/main/welcome/WelcomeWizard';
 import { InfoScreen } from '../../app/src/renderer/main/screens/InfoScreen';
@@ -401,6 +402,28 @@ describe('Welcome, Info, and settings completion', () => {
     expect(update).toHaveBeenCalledWith({ transcription: { language: 'x' } });
     expect(await screen.findByText(/previous value was restored/i)).toBeVisible();
     expect(input).toHaveValue('en');
+  });
+
+  it('applies language saves after the StrictMode effect replay', async () => {
+    const configured = settings();
+    configured.transcription.language = 'en';
+    const saved = settings();
+    saved.transcription.language = 'fr';
+    const update = vi.fn(() => Promise.resolve(saved));
+    const onSettingsSaved = vi.fn();
+    (api.settings as { update: typeof update }).update = update;
+    render(
+      <StrictMode>
+        <TranscriptionLanguageSetting settings={configured} onSettingsSaved={onSettingsSaved} />
+      </StrictMode>,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Transcription language' });
+    fireEvent.change(input, { target: { value: 'fr' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
+
+    await waitFor(() => expect(onSettingsSaved).toHaveBeenCalledWith(saved));
+    expect(input).toHaveValue('fr');
   });
 
   it('keeps the newest authoritative language result when promises settle in reverse order', async () => {

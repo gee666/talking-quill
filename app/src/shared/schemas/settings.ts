@@ -10,10 +10,14 @@ import { DictationProfileListSchema, defaultDictationProfiles } from './dictatio
 import {
   AwsRegionSchema,
   AzureModelTypeSchema,
-  ProviderConfigSchema,
+  PersistedProviderBaseUrlSchema,
+  PersistedProviderConfigSchema,
+  ProviderBaseUrlSchema,
   ProviderIdSchema,
+  ProviderModelIdSchema,
   PiThinkingLevelSchema,
 } from './providers';
+import { TranscriptionLanguageSchema } from './transcription';
 
 export const SETTINGS_SCHEMA_VERSION = 19 as const;
 
@@ -55,14 +59,14 @@ export const RecordingSettingsSchema = z
 export const TranscriptionSettingsSchema = z
   .object({
     modelId: WhisperModelIdSchema,
-    language: z.string().trim().min(1).max(80).nullable(),
+    language: TranscriptionLanguageSchema.nullable(),
   })
   .strict();
 
 const ProviderDraftFieldsSchema = z
   .object({
-    baseUrl: z.url().max(2_048).optional(),
-    modelId: z.string().trim().min(1).max(512).nullable().optional(),
+    baseUrl: PersistedProviderBaseUrlSchema.optional(),
+    modelId: ProviderModelIdSchema.nullable().optional(),
     contextWindow: z.number().int().min(1).max(2_000_000).optional(),
     maxOutputTokens: z.number().int().min(1).max(16_384).optional(),
     timeoutMs: z.number().int().min(500).max(120_000).optional(),
@@ -86,7 +90,9 @@ const ProviderDraftFieldsSchema = z
 export const ProviderSettingsDraftSchema = ProviderDraftFieldsSchema;
 export type ProviderSettingsDraft = z.infer<typeof ProviderSettingsDraftSchema>;
 
-const ProviderSettingsPatchSchema = ProviderDraftFieldsSchema;
+const ProviderSettingsMutationSchema = ProviderDraftFieldsSchema.extend({
+  baseUrl: ProviderBaseUrlSchema.optional(),
+});
 const ProviderDraftsSchema = z
   .partialRecord(ProviderIdSchema, ProviderSettingsDraftSchema)
   .superRefine(validateProviderDrafts);
@@ -100,7 +106,7 @@ export const VisionOverrideSchema = z
   .object({
     providerId: z.enum(['generic-openai', 'litellm']),
     binding: z.string().min(1).max(2_048),
-    modelId: z.string().trim().min(1).max(512),
+    modelId: ProviderModelIdSchema,
     verifiedAt: z.number().int().nonnegative(),
   })
   .strict();
@@ -169,9 +175,9 @@ export const SettingsPatchSchema = z
     smartProcessing: z
       .object({
         selectedProviderId: ProviderIdSchema.optional(),
-        providers: z.partialRecord(ProviderIdSchema, ProviderSettingsPatchSchema).optional(),
+        providers: z.partialRecord(ProviderIdSchema, ProviderSettingsMutationSchema).optional(),
         providerReplacements: z
-          .partialRecord(ProviderIdSchema, ProviderSettingsDraftSchema)
+          .partialRecord(ProviderIdSchema, ProviderSettingsMutationSchema)
           .optional(),
         credentialEpochs: CredentialEpochsSchema.optional(),
         piInstallationPath: PiInstallationPathSchema.optional(),
@@ -185,19 +191,7 @@ export const SettingsPatchSchema = z
     welcome: WelcomeSettingsSchema.partial().optional(),
   })
   .strict()
-  .refine(
-    (patch) =>
-      patch.app !== undefined ||
-      patch.recording !== undefined ||
-      patch.transcription !== undefined ||
-      patch.dictationProfiles !== undefined ||
-      patch.privacy !== undefined ||
-      patch.smartProcessing !== undefined ||
-      patch.voiceCommands !== undefined ||
-      patch.customVocabulary !== undefined ||
-      patch.welcome !== undefined,
-    { message: 'A settings patch must contain at least one section' },
-  );
+  .refine(hasDefinedLeaf, { message: 'A settings patch must contain at least one setting' });
 
 export const PublicSettingsPatchSchema = z
   .object({
@@ -207,16 +201,7 @@ export const PublicSettingsPatchSchema = z
     privacy: PrivacySettingsPatchSchema.optional(),
   })
   .strict()
-  .refine(
-    (patch) =>
-      patch.app !== undefined ||
-      patch.recording !== undefined ||
-      patch.transcription !== undefined ||
-      patch.privacy !== undefined,
-    {
-      message: 'A settings patch must contain at least one public section',
-    },
-  );
+  .refine(hasDefinedLeaf, { message: 'A settings patch must contain at least one setting' });
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
@@ -282,7 +267,10 @@ function validateProviderDrafts(
   for (const [providerId, draft] of Object.entries(drafts)) {
     const parsedId = ProviderIdSchema.safeParse(providerId);
     if (!parsedId.success) continue;
-    const parsed = ProviderConfigSchema.safeParse({ providerId: parsedId.data, ...draft });
+    const parsed = PersistedProviderConfigSchema.safeParse({
+      providerId: parsedId.data,
+      ...draft,
+    });
     if (parsed.success) continue;
     for (const issue of parsed.error.issues) {
       context.addIssue({
@@ -292,6 +280,21 @@ function validateProviderDrafts(
       });
     }
   }
+}
+
+function hasDefinedLeaf(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (value === null || Array.isArray(value) || typeof value !== 'object') return true;
+  return Object.entries(value).some(([key, nested]) => {
+    if (key === 'providerReplacements' && isObject(nested)) {
+      return Object.keys(nested).length > 0;
+    }
+    return hasDefinedLeaf(nested);
+  });
+}
+
+function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function deepFreeze<Value>(value: Value): Value {

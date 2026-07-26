@@ -17,6 +17,7 @@ import { extractFile, listPackage, statFile } from '@electron/asar';
 import { FuseV1Options, getCurrentFuseWire } from '@electron/fuses';
 import {
   discoverFinalArtifactNames,
+  finalArtifactNamesForIdentity,
   normalizePackagePath,
   validateAsarEntries,
   validateSharedReleaseArtifacts,
@@ -156,11 +157,11 @@ const resourceEntries = await walkResources(resources);
 validateResourceEntries(resourceEntries, isMacBundle ? 'mac' : 'win');
 const physicalEntries = await inspectPhysicalTree(packageRoot, isMacBundle);
 validatePhysicalPackageEntries(physicalEntries, isMacBundle ? 'mac' : 'win');
-const unpackedNativeEntries = await inspectNativeTree(
-  packageRoot,
-  boundArch,
-  nativeArchitectureExceptions(isMacBundle),
-);
+const unpackedNativeEntries = await inspectNativeTree(packageRoot, {
+  platform: boundPlatform,
+  architecture: boundArch,
+  exceptions: nativeArchitectureExceptions(isMacBundle),
+});
 if (unpackedNativeEntries.length === 0) {
   throw new Error('No native executable images were discovered in the unpacked package');
 }
@@ -312,10 +313,11 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name);
   const artifactNames = discoverFinalArtifactNames(releaseFileNames);
-  const artifacts = artifactNames.map((name) => resolve(releaseDirectory, name));
   if (requirement !== undefined) {
     validateSharedReleaseArtifacts(artifactNames, requirement, expectedArtifact);
   }
+  const identityArtifactNames = finalArtifactNamesForIdentity(artifactNames, expectedArtifact);
+  const artifacts = identityArtifactNames.map((name) => resolve(releaseDirectory, name));
   if (artifacts.length === 0) {
     return {
       summary: '0/0 expected final artifacts (directory package inspected)',
@@ -413,11 +415,11 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
       throw new Error(`Extracted required runtime is not a ${expectedArch} native image: ${path}`);
     }
   }
-  const extractedNativeEntries = await inspectNativeTree(
-    root,
-    expectedArch,
-    nativeArchitectureExceptions(mac),
-  );
+  const extractedNativeEntries = await inspectNativeTree(root, {
+    platform: mac ? 'mac' : 'win',
+    architecture: expectedArch,
+    exceptions: nativeArchitectureExceptions(mac),
+  });
   if (extractedNativeEntries.length < requiredNativePaths.length) {
     throw new Error('Extracted artifact did not expose every required native runtime image');
   }

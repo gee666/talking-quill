@@ -1,13 +1,11 @@
 import { app, clipboard, safeStorage, session, shell } from 'electron';
 
-declare const __TALKING_QUILL_TASK6_TEST_HARNESS__: boolean;
-declare const __TALKING_QUILL_VOCABULARY_TEST_HARNESS__: boolean;
-declare const __TALKING_QUILL_PI_TEST_HARNESS__: boolean;
 declare const __TALKING_QUILL_SOURCE_REVISION__: string;
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { CAPTURE_PARTITION, UI_PARTITION } from '../../shared/constants/app';
+import type { InvokeChannel } from '../../shared/ipc/registry';
 import { CaptureWindowClient } from '../audio/capture-window-client';
 import { RecordingService } from '../audio/recording-service';
 import { EchoSessionController } from '../echo/echo-session-controller';
@@ -38,16 +36,8 @@ import {
   ensureAppDirectories,
   validateAppRootBeforeUse,
 } from '../persistence';
-import {
-  ProviderConfigService,
-  ProviderCredentialService,
-  ProviderMutationService,
-  ProviderOperationCoordinator,
-  ProviderRegistry,
-  PiInstallationService,
-  PinnedJsonTransport,
-  ProviderService,
-} from '../providers';
+import { ProviderOperationCoordinator, PinnedJsonTransport } from '../providers';
+import type { ProviderMutationService, ProviderService } from '../providers';
 import { MicrophonePermissionController } from '../security/microphone-permission';
 import { WelcomeService } from '../welcome/welcome-service';
 import { UpdateService } from '../info/update-service';
@@ -64,19 +54,25 @@ import { getTrustedCaptureDocument, secureSession } from '../security/session-po
 import {
   StartupCancelledError,
   StartupCleanupStack,
+  type LifecycleStep,
   reportLifecycleDiagnostics,
   runBoundedLifecycle,
   runSynchronousLifecycle,
 } from './lifecycle';
 import { AppStateService } from './app-state-service';
 import { LaunchAtLoginService } from './launch-at-login-service';
-import { applySelectedModelProgress } from './model-readiness-sync';
+import { ModelRuntimeCoordinator } from './model-runtime-coordinator';
+import { createProviderRuntime } from './provider-runtime';
 import { RendererLoader, selectDevelopmentRendererUrl } from './renderer-loader';
+import { createApplicationDrainSteps } from './shutdown-steps';
+import { SourceE2EHarness } from './source-e2e-harness';
 import { TrayController } from './tray-controller';
 import { WindowManager } from './window-manager';
+import { WidgetCaptureExclusion } from './widget-capture-exclusion';
 import { WindowRoleRegistry } from './window-role-registry';
 
 const LIFECYCLE_TIMEOUT_MS = 5_000;
+const RESET_ACKNOWLEDGEMENT_TIMEOUT_MS = 1_000;
 type ApplicationLifecycle = 'new' | 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
 
 export class TalkingQuillApplication {
@@ -123,6 +119,11 @@ export class TalkingQuillApplication {
   async #startInternal(): Promise<void> {
     const cleanup = new StartupCleanupStack();
     try {
+      const sourceHarness = new SourceE2EHarness({
+        isPackaged: app.isPackaged,
+        environment: process.env,
+        argv: process.argv,
+      });
       const paths = createAppPaths(app.getPath('userData'));
       const helperExecutablePath = this.#helperExecutablePath();
       const dataLifecycle = new DataLifecycleService(paths.root, {
@@ -171,13 +172,9 @@ export class TalkingQuillApplication {
       cleanup.add('history', () => history.close());
       const commands = new VoiceCommandStore(settings);
       const vocabulary = new VocabularyStore(settings);
+      const vocabularyDialogsLoader = sourceHarness.loadVocabularyDialogs(paths.root);
       const vocabularyDialogs =
-        __TALKING_QUILL_VOCABULARY_TEST_HARNESS__ && sourceVocabularyRuntimeEnabled()
-          ? await import('../vocabulary/source-test-dialogs').then(
-              ({ createSourceTestVocabularyDialogs }) =>
-                createSourceTestVocabularyDialogs(paths.root),
-            )
-          : undefined;
+        vocabularyDialogsLoader === undefined ? undefined : await vocabularyDialogsLoader;
       const vocabularyFiles = new VocabularyFileService(vocabulary, vocabularyDialogs);
 
       const vault = new CredentialVault(paths.credentialsFile, safeStorage);
@@ -186,59 +183,24 @@ export class TalkingQuillApplication {
       await vault.initialize();
       this.#assertStartupActive();
 
-      const providerCredentials = new ProviderCredentialService(vault);
-      const providerConfigs = new ProviderConfigService(settings);
-      // Electron resolves this from the signed-in interactive user's Windows known folder even
+      // Electron resolves these from the signed-in interactive user's Windows known folders even
       // when a packaged launch inherits a service-like PATH or incomplete environment.
-      const packagedTestAppData = process.env.TALKING_QUILL_TEST_INTERACTIVE_APPDATA;
-      const interactiveAppData =
-        process.platform !== 'win32'
-          ? undefined
-          : process.env.TALKING_QUILL_PACKAGED_TEST === '1' &&
-              packagedTestAppData !== undefined &&
-              isAbsolute(packagedTestAppData)
-            ? packagedTestAppData
-            : app.getPath('appData');
-      const packagedTestHome = process.env.TALKING_QUILL_TEST_INTERACTIVE_HOME;
-      const interactiveHome =
-        process.platform !== 'win32'
-          ? undefined
-          : process.env.TALKING_QUILL_PACKAGED_TEST === '1' &&
-              packagedTestHome !== undefined &&
-              isAbsolute(packagedTestHome)
-            ? packagedTestHome
-            : app.getPath('home');
-      const piInstallation = new PiInstallationService(settings, {
-        ...(interactiveAppData === undefined ? {} : { interactiveAppData }),
-        ...(interactiveHome === undefined ? {} : { interactiveHome }),
+      const resolvePiCli = sourceHarness.piResolverOverride();
+      const providerRuntime = createProviderRuntime({
+        settings,
+        vault,
+        workingDirectory: paths.root,
+        observeEgress,
+        platform: process.platform,
+        environment: process.env,
+        appData: app.getPath('appData'),
+        home: app.getPath('home'),
+        ...(resolvePiCli === undefined ? {} : { resolvePiCli }),
       });
-      const providers = new ProviderService(
-        new ProviderRegistry({
-          transport: new PinnedJsonTransport(undefined, {
-            category: 'provider',
-            observeEgress,
-          }),
-          pi: {
-            observeEgress,
-            workingDirectory: paths.root,
-            configuredPath: () => piInstallation.configuredPath(),
-            ...(interactiveAppData === undefined ? {} : { interactiveAppData }),
-            ...(interactiveHome === undefined ? {} : { interactiveHome }),
-            ...(__TALKING_QUILL_PI_TEST_HARNESS__ &&
-            process.env.TALKING_QUILL_PI_TEST_UNAVAILABLE === '1'
-              ? { resolveCli: () => Promise.reject(new Error('Pi unavailable test resolver')) }
-              : {}),
-          },
-        }),
-        providerCredentials,
-      );
+      const { configs: providerConfigs, piInstallation, providers } = providerRuntime;
       this.#providers = providers;
       cleanup.add('provider-service', () => providers.dispose());
-      const providerMutations = new ProviderMutationService(
-        providerConfigs,
-        providerCredentials,
-        providers,
-      );
+      const providerMutations = providerRuntime.createMutations();
       this.#providerMutations = providerMutations;
       cleanup.add('provider-mutations', async () => {
         providerMutations.stopAccepting();
@@ -293,7 +255,7 @@ export class TalkingQuillApplication {
 
       let windowTarget: WindowManager | null = null;
       const events = new IpcEventEmitter(this.#roles, () => windowTarget?.getWebContents() ?? []);
-      const testNow = sourceTestNow();
+      const testNow = sourceHarness.testNow();
       const historyService = new HistoryService({
         store: history,
         settings,
@@ -320,44 +282,13 @@ export class TalkingQuillApplication {
       });
       this.#whisper = whisper;
       cleanup.add('whisper-worker', () => whisper.close());
-      const runtimeValidatedModels = new Set<string>();
-      const runtimeValidationTasks = new Map<string, Promise<boolean>>();
-      const runtimeValidationKey = (modelId: Parameters<ModelManager['manifestRevision']>[0]) =>
-        `${modelId}\u0000${models.manifestRevision(modelId)}`;
-      models.setBeforeMutation(async (modelId) => {
-        runtimeValidatedModels.delete(runtimeValidationKey(modelId));
-        await whisper.unload(modelId);
-      });
-      models.setAfterInstallValidation(async (modelId, signal) => {
-        await whisper.checkWorkerModel(modelId, signal);
-        runtimeValidatedModels.add(runtimeValidationKey(modelId));
-      });
-      let stateTarget: AppStateService | null = null;
-      let echoTarget: EchoSessionController | null = null;
-      let welcomeTarget: WelcomeService | null = null;
-      const removeModelEvents = models.subscribe((progress) => {
-        events.send('model:progress', progress);
-        if (progress.state !== 'ready') {
-          runtimeValidatedModels.delete(runtimeValidationKey(progress.modelId));
-        }
-        const selectedModelId = settings.get().transcription.modelId;
-        applySelectedModelProgress(progress, selectedModelId, stateTarget, echoTarget);
-        if (
-          progress.modelId === selectedModelId &&
-          progress.state !== 'ready' &&
-          settings.get().welcome.modelEvidence != null
-        ) {
-          void welcomeTarget?.invalidateModelSelection();
-        }
-      });
+      const modelRuntime = new ModelRuntimeCoordinator({ settings, events, models, whisper });
+      const removeModelEvents = modelRuntime.subscribeProgress();
       this.#removeModelEvents = removeModelEvents;
       cleanup.add('model-events', removeModelEvents);
 
       const state = new AppStateService(settings, events);
-      stateTarget = state;
-      state.setModelReady(
-        (await models.status(settings.get().transcription.modelId)).state === 'ready',
-      );
+      state.setModelReady((await modelRuntime.bindState(state)).state === 'ready');
       const recording = new RecordingService(
         new CaptureWindowClient(),
         settings,
@@ -380,17 +311,8 @@ export class TalkingQuillApplication {
       if (helper === null) throw new Error('The native helper is unavailable on this platform');
       this.#helper = helper;
       cleanup.add('helper', () => helper.stop());
-      const task6Composition =
-        __TALKING_QUILL_TASK6_TEST_HARNESS__ && sourceTask6RuntimeEnabled()
-          ? await import('../../../../tests/e2e/support/task6-test-composition').then(
-              ({ createTask6TestComposition }) =>
-                createTask6TestComposition(
-                  history,
-                  settings,
-                  process.argv.includes('--talking-quill-task6-real-media') ? recording : undefined,
-                ),
-            )
-          : null;
+      const task6Loader = sourceHarness.loadTask6({ history, settings, recording });
+      const task6Composition = task6Loader === null ? null : await task6Loader;
       const helperStartPromise =
         task6Composition === null
           ? helper.start().finally(() => state.setHelperReadiness(helper.readiness))
@@ -401,6 +323,7 @@ export class TalkingQuillApplication {
       const echoHelper = task6Composition?.helper ?? helper;
       if (task6Composition !== null) state.setModelReady(true);
       state.setHelperReadiness(echoHelper.readiness);
+      let welcomeTarget: WelcomeService | null = null;
       let helperReadinessGeneration = 0;
       let previousHelperReadiness = echoHelper.readiness;
       const removeHelperReadiness = echoHelper.subscribeReadiness((readiness) => {
@@ -426,24 +349,13 @@ export class TalkingQuillApplication {
       this.#windows = windows;
       cleanup.add('windows', () => windows.destroyAll());
       windowTarget = windows;
-      let widgetCaptureExclusions = 0;
-      let restoreWidgetAfterCapture = false;
+      const widgetCaptureExclusion = new WidgetCaptureExclusion({
+        windows,
+        getWidgetSize: () => settings.get().app.widgetSize,
+        getFrontApp: () => echoHelper.getFrontApp(),
+      });
       const screenshots = new ScreenshotService({
-        setWidgetExcluded: async (excluded) => {
-          if (excluded) {
-            if (widgetCaptureExclusions === 0) {
-              restoreWidgetAfterCapture = windows.isWidgetVisible();
-              windows.hideWidget();
-            }
-            widgetCaptureExclusions += 1;
-            return;
-          }
-          widgetCaptureExclusions = Math.max(0, widgetCaptureExclusions - 1);
-          if (widgetCaptureExclusions > 0 || !restoreWidgetAfterCapture) return;
-          restoreWidgetAfterCapture = false;
-          const front = await echoHelper.getFrontApp().catch(() => null);
-          windows.showWidget(settings.get().app.widgetSize, front?.windowBounds ?? null);
-        },
+        setWidgetExcluded: widgetCaptureExclusion.setExcluded,
       });
       const smart = new SmartTranscriptionService({
         settings,
@@ -476,10 +388,7 @@ export class TalkingQuillApplication {
                 }),
       });
       this.#echo = echo;
-      echoTarget = echo;
-      cleanup.add('echo-model-readiness-target', () => {
-        echoTarget = null;
-      });
+      cleanup.add('echo-model-readiness-target', modelRuntime.bindEcho(echo));
       cleanup.add('echo-session', () => echo.shutdown());
       const welcome = new WelcomeService(settings, {
         microphoneReady: () =>
@@ -488,29 +397,11 @@ export class TalkingQuillApplication {
           task6Composition?.welcome.microphone
             ? { boundDeviceId: 'source-e2e-microphone', observedRms: 0.2, sampleCount: 3_200 }
             : recording.microphoneTestObservation(),
-        modelReady: async () => {
-          if (task6Composition !== null) return task6Composition.welcome.model;
-          const modelId = settings.get().transcription.modelId;
-          const key = runtimeValidationKey(modelId);
-          const metadata = await models.status(modelId);
-          if (metadata.state !== 'ready') {
-            runtimeValidatedModels.delete(key);
-            return false;
-          }
-          if (runtimeValidatedModels.has(key)) return true;
-          const existing = runtimeValidationTasks.get(key);
-          if (existing !== undefined) return existing;
-          const validation = models
-            .status(modelId, true)
-            .then((status) => {
-              if (status.state === 'ready') runtimeValidatedModels.add(key);
-              return status.state === 'ready';
-            })
-            .finally(() => runtimeValidationTasks.delete(key));
-          runtimeValidationTasks.set(key, validation);
-          return validation;
-        },
-        modelRevision: (modelId) => models.manifestRevision(modelId),
+        modelReady: () =>
+          task6Composition === null
+            ? modelRuntime.selectedModelReadyForWelcome()
+            : Promise.resolve(task6Composition.welcome.model),
+        modelRevision: (modelId) => modelRuntime.manifestRevision(modelId),
         helperReady: () =>
           task6Composition?.welcome.helper ?? state.getState().helper.status === 'ready',
         helperReadinessGeneration: () => helperReadinessGeneration,
@@ -531,6 +422,7 @@ export class TalkingQuillApplication {
         },
       });
       welcomeTarget = welcome;
+      const removeModelWelcomeTarget = modelRuntime.bindWelcome(welcome);
       recording.setWelcomeEvidenceInvalidator(() => {
         if (settings.get().welcome.microphoneEvidence != null) {
           void welcome.invalidateMicrophoneBinding();
@@ -538,34 +430,19 @@ export class TalkingQuillApplication {
       });
       cleanup.add('welcome-readiness-target', () => {
         welcomeTarget = null;
+        removeModelWelcomeTarget();
       });
       const removeEchoState = echo.subscribe((snapshot) => state.setSession(snapshot));
       this.#ownRuntimeDisposer(cleanup, 'echo-state', removeEchoState);
       if (task6Composition !== null) {
-        task6Composition.bind(echo);
-        const testDriverSymbol = Symbol.for('talking-quill:task6-test-driver');
-        Reflect.set(globalThis, testDriverSymbol, task6Composition.driver);
-        this.#ownRuntimeDisposer(cleanup, 'task6-test-driver', () => {
-          Reflect.deleteProperty(globalThis, testDriverSymbol);
-        });
+        this.#ownRuntimeDisposer(
+          cleanup,
+          'task6-test-driver',
+          sourceHarness.bindAndExposeTask6(task6Composition, echo),
+        );
       }
 
-      let selectedModelId = settings.get().transcription.modelId;
-      const removeSelectedModel = settings.subscribe((next) => {
-        if (next.transcription.modelId === selectedModelId) return;
-        selectedModelId = next.transcription.modelId;
-        if (task6Composition !== null) {
-          state.setModelReady(true);
-          echo.readinessChanged();
-          return;
-        }
-        void models.status(next.transcription.modelId).then((status) => {
-          if (settings.get().transcription.modelId === status.modelId) {
-            state.setModelReady(status.state === 'ready');
-            echo.readinessChanged();
-          }
-        });
-      });
+      const removeSelectedModel = modelRuntime.subscribeSelectedModel(task6Composition !== null);
       this.#ownRuntimeDisposer(cleanup, 'selected-model', removeSelectedModel);
 
       const tray = new TrayController(state, {
@@ -576,7 +453,11 @@ export class TalkingQuillApplication {
         },
       });
       this.#tray = tray;
-      cleanup.add('tray', () => tray.destroy());
+      cleanup.add('tray', async () => {
+        tray.stopAccepting();
+        await tray.drain();
+        tray.destroy();
+      });
       let trayEnabled = settings.get().app.enabled;
       const removeTraySettings = settings.subscribe((next) => {
         if (next.app.enabled === trayEnabled) return;
@@ -585,20 +466,7 @@ export class TalkingQuillApplication {
       });
       this.#ownRuntimeDisposer(cleanup, 'tray-settings', removeTraySettings);
 
-      const packagedMediaReadyRoles = new Set<'capture' | 'widget'>();
-      let packagedMediaActivated = false;
-      const packagedMediaReady =
-        task6Composition !== null &&
-        app.isPackaged &&
-        process.env.TALKING_QUILL_PACKAGED_MEDIA_HARNESS === '1' &&
-        process.argv.includes('--talking-quill-task6-real-media')
-          ? (role: 'capture' | 'widget'): void => {
-              packagedMediaReadyRoles.add(role);
-              if (packagedMediaReadyRoles.size < 2 || packagedMediaActivated) return;
-              packagedMediaActivated = true;
-              task6Composition.startPackagedMedia();
-            }
-          : undefined;
+      const packagedMediaReady = sourceHarness.createPackagedMediaReady(task6Composition);
 
       const ipc = registerIpcTransport(
         this.#roles,
@@ -699,26 +567,14 @@ export class TalkingQuillApplication {
     await prepareResetSafely({
       journal: this.#dataLifecycle,
       quiesce: () => this.#quiesce(true),
-      criticalSteps: [
-        { name: 'ipc-drain', run: () => this.#ipc?.drain(['data:reset-all']) },
-        { name: 'provider-mutations', run: () => this.#providerMutations?.drain() },
-        { name: 'echo-session', run: () => this.#echo?.shutdown() },
-        { name: 'recording', run: () => this.#recording?.shutdown() },
-        { name: 'models', run: () => this.#models?.shutdown() },
-        { name: 'whisper-worker', run: () => this.#whisper?.close() },
-        { name: 'helper', run: () => this.#helper?.stop() },
-        { name: 'history', run: () => this.#history?.close() },
-        { name: 'settings', run: () => this.#settings?.flush() },
-        { name: 'vault', run: () => this.#vault?.flush() },
-        { name: 'diagnostic-logger', run: () => this.#diagnostics?.dispose() },
-      ],
+      criticalSteps: this.#createDrainSteps(['data:reset-all']),
       timeoutMs: LIFECYCLE_TIMEOUT_MS,
       onAbort: (restartWithoutReset) => this.#abortAfterFailedReset(restartWithoutReset),
     });
     if (!this.#resetRestartScheduled) {
       this.#resetRestartScheduled = true;
       // Bound the renderer paint/ack window. Relaunch is forced even if the renderer is hung.
-      setTimeout(() => this.#completeResetRelaunch(), 1_000);
+      setTimeout(() => this.#completeResetRelaunch(), RESET_ACKNOWLEDGEMENT_TIMEOUT_MS);
     }
     return acknowledgementToken;
   }
@@ -803,21 +659,12 @@ export class TalkingQuillApplication {
     }
     const diagnostics = await runBoundedLifecycle(
       'shutdown',
-      [
-        { name: 'ipc-drain', run: () => this.#ipc?.drain() },
-        { name: 'provider-mutations', run: () => this.#providerMutations?.drain() },
-        { name: 'echo-session', run: () => this.#echo?.shutdown() },
-        { name: 'recording', run: () => this.#recording?.shutdown() },
-        { name: 'models', run: () => this.#models?.shutdown() },
-        { name: 'whisper-worker', run: () => this.#whisper?.close() },
-        { name: 'helper', run: () => this.#helper?.stop() },
-        { name: 'history', run: () => this.#history?.close() },
-        { name: 'settings', run: () => this.#settings?.flush() },
-        { name: 'vault', run: () => this.#vault?.flush() },
-        { name: 'diagnostic-logger', run: () => this.#diagnostics?.dispose() },
-      ],
+      this.#createDrainSteps(),
       LIFECYCLE_TIMEOUT_MS,
     );
+    if (diagnostics.some(({ outcome }) => outcome === 'timed-out')) {
+      this.#skipDependentShutdown = true;
+    }
     reportLifecycleDiagnostics(diagnostics);
     this.#quitAllowed = true;
     app.quit();
@@ -845,12 +692,33 @@ export class TalkingQuillApplication {
 
   #quiesce(preserveResetAcknowledgement = false): void {
     this.#windows?.beginQuit();
+    this.#tray?.stopAccepting();
     this.#ipc?.stopAccepting(preserveResetAcknowledgement ? ['data:reset-renderer-ack'] : []);
     this.#providerMutations?.stopAccepting();
     this.#providerOperations?.dispose();
     this.#updateOperations?.dispose();
     this.#providers?.dispose();
     this.#echo?.abort('shutdown');
+  }
+
+  #createDrainSteps(excludedIpcChannels: readonly InvokeChannel[] = []): readonly LifecycleStep[] {
+    return createApplicationDrainSteps(
+      {
+        ipc: this.#ipc,
+        tray: this.#tray,
+        providerMutations: this.#providerMutations,
+        echo: this.#echo,
+        recording: this.#recording,
+        models: this.#models,
+        whisper: this.#whisper,
+        helper: this.#helper,
+        history: this.#history,
+        settings: this.#settings,
+        vault: this.#vault,
+        diagnostics: this.#diagnostics,
+      },
+      excludedIpcChannels,
+    );
   }
 
   #assertStartupActive(): void {
@@ -936,32 +804,4 @@ function egressProofRuntimeEnabled(): boolean {
     process.env.TALKING_QUILL_PACKAGED_TEST === '1' &&
     process.argv.some((argument) => argument.startsWith('--remote-debugging-port='))
   );
-}
-
-function sourceVocabularyRuntimeEnabled(): boolean {
-  return (
-    !app.isPackaged &&
-    process.env.NODE_ENV === 'test' &&
-    process.argv.includes('--talking-quill-vocabulary-test')
-  );
-}
-
-function sourceTask6RuntimeEnabled(): boolean {
-  const requested =
-    process.argv.includes('--talking-quill-task6-test') ||
-    process.argv.includes('--talking-quill-task6-real-media');
-  return (
-    requested &&
-    ((!app.isPackaged && process.env.NODE_ENV === 'test') ||
-      (app.isPackaged && process.env.TALKING_QUILL_PACKAGED_MEDIA_HARNESS === '1'))
-  );
-}
-
-function sourceTestNow(): (() => number) | null {
-  if (!__TALKING_QUILL_TASK6_TEST_HARNESS__ || !sourceTask6RuntimeEnabled()) return null;
-  const argument = process.argv.find((value) => value.startsWith('--talking-quill-test-now='));
-  if (argument === undefined) return null;
-  const value = Number(argument.slice('--talking-quill-test-now='.length));
-  if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid test clock');
-  return () => value;
 }

@@ -17,11 +17,15 @@ interface PendingStart {
   readonly captureId: string;
 }
 
+type CapturePhase = 'idle' | 'starting' | 'prepared' | 'activating' | 'active' | 'stopping';
+
 export class CapturePortController {
   readonly #port: MessagePort;
   readonly #engine: CaptureEngine;
   #captureId: string | null = null;
+  #phase: CapturePhase = 'idle';
   #pendingStart: PendingStart | null = null;
+  #stopPromise: Promise<void> | null = null;
   #sequence = 0;
   #closed = false;
 
@@ -42,7 +46,9 @@ export class CapturePortController {
     this.#port.removeEventListener('messageerror', this.#onMessageError);
     this.#port.removeEventListener('close', this.#onPortClose);
     this.#captureId = null;
+    this.#phase = 'idle';
     this.#pendingStart = null;
+    this.#stopPromise = null;
     this.#port.close();
     this.#engine.disposeImmediately();
   }
@@ -70,6 +76,8 @@ export class CapturePortController {
     const captureId = this.#captureId;
     if (captureId === null) return;
     this.#captureId = null;
+    this.#phase = 'idle';
+    this.#pendingStart = null;
     this.#send({ type: 'stream:stopped', requestId: null, captureId, reason });
   }
 
@@ -108,22 +116,26 @@ export class CapturePortController {
     captureId: string,
     preferredMicrophoneId: string | null,
   ): Promise<void> {
+    if (this.#phase !== 'idle') {
+      this.#sendError(requestId, captureId, 'capture-failed');
+      return;
+    }
     const pending = { requestId, captureId };
     this.#captureId = captureId;
+    this.#phase = 'starting';
     this.#pendingStart = pending;
     this.#sequence = 0;
     try {
       const result = await this.#engine.start(preferredMicrophoneId);
-      if (this.#pendingStart !== pending || this.#captureId !== captureId || this.#closed) {
-        await this.#engine.stop();
-        return;
-      }
+      if (this.#pendingStart !== pending || !this.#isCaptureInPhase(captureId, 'starting')) return;
       this.#pendingStart = null;
+      this.#phase = 'prepared';
       this.#send({ type: 'stream:started', requestId, captureId, ...result });
     } catch (error: unknown) {
-      if (this.#pendingStart !== pending) return;
+      if (this.#pendingStart !== pending || !this.#isCaptureInPhase(captureId, 'starting')) return;
       this.#pendingStart = null;
-      if (this.#captureId === captureId) this.#captureId = null;
+      this.#captureId = null;
+      this.#phase = 'idle';
       this.#sendError(
         requestId,
         captureId,
@@ -133,15 +145,26 @@ export class CapturePortController {
   }
 
   async #activate(requestId: string, captureId: string): Promise<void> {
-    if (this.#captureId !== captureId) {
+    if (this.#captureId !== captureId || this.#phase !== 'prepared') {
       this.#sendError(requestId, captureId, 'capture-failed');
       return;
     }
+    this.#phase = 'activating';
     try {
       await this.#engine.activate();
+      if (this.#closed) return;
+      if (!this.#isCaptureInPhase(captureId, 'activating')) {
+        this.#sendError(requestId, captureId, 'capture-failed');
+        return;
+      }
+      this.#phase = 'active';
       this.#send({ type: 'stream:activated', requestId, captureId });
     } catch (error: unknown) {
-      if (this.#captureId === captureId) this.#captureId = null;
+      if (this.#closed) return;
+      if (this.#isCaptureInPhase(captureId, 'activating')) {
+        this.#captureId = null;
+        this.#phase = 'idle';
+      }
       this.#sendError(
         requestId,
         captureId,
@@ -151,16 +174,32 @@ export class CapturePortController {
   }
 
   async #stop(requestId: string, captureId: string): Promise<void> {
-    const pendingStart = this.#pendingStart?.captureId === captureId ? this.#pendingStart : null;
-    if (this.#captureId !== captureId && pendingStart === null) {
+    if (this.#captureId !== captureId || this.#phase === 'idle') {
       this.#send({ type: 'stream:stopped', requestId, captureId, reason: 'requested' });
       return;
     }
-    if (this.#pendingStart === pendingStart) this.#pendingStart = null;
+    if (this.#phase === 'stopping') {
+      try {
+        await this.#stopPromise;
+        this.#send({ type: 'stream:stopped', requestId, captureId, reason: 'requested' });
+      } catch {
+        this.#sendError(requestId, captureId, 'capture-failed');
+      }
+      return;
+    }
+
+    const pendingStart = this.#pendingStart;
+    this.#pendingStart = null;
+    this.#phase = 'stopping';
+    const stopping = this.#engine.stop();
+    this.#stopPromise = stopping;
     try {
       // Keep routing frames until the worklet flush completed inside engine.stop().
-      await this.#engine.stop();
-      if (this.#captureId === captureId) this.#captureId = null;
+      await stopping;
+      if (this.#isCaptureInPhase(captureId, 'stopping')) {
+        this.#captureId = null;
+        this.#phase = 'idle';
+      }
       if (pendingStart !== null) {
         this.#sendError(pendingStart.requestId, captureId, 'capture-failed');
       }
@@ -168,7 +207,13 @@ export class CapturePortController {
     } catch {
       this.#sendError(requestId, captureId, 'capture-failed');
       this.close();
+    } finally {
+      if (this.#stopPromise === stopping) this.#stopPromise = null;
     }
+  }
+
+  #isCaptureInPhase(captureId: string, phase: CapturePhase): boolean {
+    return !this.#closed && this.#captureId === captureId && this.#phase === phase;
   }
 
   #sendError(

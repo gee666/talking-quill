@@ -5,6 +5,7 @@ import {
   type CaptureFrame,
   type CaptureStarted,
   type CaptureWindowClient,
+  type UnexpectedCaptureStopReason,
 } from '../../app/src/main/audio/capture-window-client';
 import type { MicrophoneDevice } from '../../app/src/shared/schemas/audio';
 import { RecordingService } from '../../app/src/main/audio/recording-service';
@@ -37,7 +38,7 @@ class FakeCaptureClient {
   readonly dispose = vi.fn();
   frameListener: ((frame: CaptureFrame) => void) | null = null;
   deviceListener: ((devices: readonly MicrophoneDevice[]) => void) | null = null;
-  stopListener: ((captureId: string) => void) | null = null;
+  stopListener: ((captureId: string, reason: UnexpectedCaptureStopReason) => void) | null = null;
 
   onFrame(listener: (frame: CaptureFrame) => void): () => void {
     this.frameListener = listener;
@@ -53,7 +54,9 @@ class FakeCaptureClient {
     };
   }
 
-  onUnexpectedStop(listener: (captureId: string) => void): () => void {
+  onUnexpectedStop(
+    listener: (captureId: string, reason: UnexpectedCaptureStopReason) => void,
+  ): () => void {
     this.stopListener = listener;
     return () => {
       this.stopListener = null;
@@ -557,6 +560,175 @@ describe('RecordingService ownership', () => {
     await test.service.shutdown();
   });
 
+  it('does not let stale dictation cleanup stop an active microphone test', async () => {
+    const test = harness();
+    const dictation = await test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await test.service.stopDictation(dictation.captureId);
+    const owner = new FakeOwner();
+    await expect(
+      test.service.startTest(owner as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'active' });
+    const stopCalls = test.capture.stop.mock.calls.length;
+
+    await test.service.stopDictation();
+    await test.service.stopDictation(dictation.captureId);
+
+    expect(test.capture.stop).toHaveBeenCalledTimes(stopCalls);
+    expect(test.service.getState()).toMatchObject({ status: 'active' });
+    expect(test.service.microphoneTestObservation()).not.toBeNull();
+    await test.service.shutdown();
+  });
+
+  it('coalesces stale draining-dictation cleanup without cancelling the next test', async () => {
+    const test = harness();
+    const dictation = await test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    const stopped = deferred<undefined>();
+    test.capture.stop.mockReturnValueOnce(stopped.promise);
+
+    const firstStop = test.service.stopDictation(dictation.captureId);
+    const owner = new FakeOwner();
+    const startingTest = test.service.startTest(owner as unknown as Electron.WebContents);
+    const staleStop = test.service.stopDictation(dictation.captureId);
+    stopped.resolve(undefined);
+
+    await Promise.all([firstStop, staleStop]);
+    await expect(startingTest).resolves.toMatchObject({ status: 'active' });
+    expect(test.capture.start).toHaveBeenCalledTimes(2);
+    expect(test.service.getState()).toMatchObject({ status: 'active' });
+    await test.service.shutdown();
+  });
+
+  it('protects a queued dictation while the previous microphone test is stopping', async () => {
+    const test = harness();
+    const firstOwner = new FakeOwner();
+    const activeTest = await test.service.startTest(firstOwner as unknown as Electron.WebContents);
+    if (activeTest.status !== 'active') throw new Error('Expected an active test');
+    const stopped = deferred<undefined>();
+    test.capture.stop.mockReturnValueOnce(stopped.promise);
+
+    const startingDictation = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await vi.waitFor(() => expect(test.capture.stop).toHaveBeenCalledWith(activeTest.captureId));
+    await expect(
+      test.service.startTest(new FakeOwner() as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'unavailable', reason: 'capture-unavailable' });
+    await test.service.stopTest();
+
+    stopped.resolve(undefined);
+    const dictation = await startingDictation;
+    expect(test.capture.start).toHaveBeenCalledTimes(2);
+    await test.service.stopDictation(dictation.captureId);
+    await test.service.shutdown();
+  });
+
+  it('cancels a queued dictation without disturbing the microphone-test stop', async () => {
+    const test = harness();
+    const owner = new FakeOwner();
+    const activeTest = await test.service.startTest(owner as unknown as Electron.WebContents);
+    if (activeTest.status !== 'active') throw new Error('Expected an active test');
+    const stopped = deferred<undefined>();
+    test.capture.stop.mockReturnValueOnce(stopped.promise);
+
+    const startingDictation = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await vi.waitFor(() => expect(test.capture.stop).toHaveBeenCalledWith(activeTest.captureId));
+    const cancelDictation = test.service.stopDictation();
+    stopped.resolve(undefined);
+    await cancelDictation;
+
+    await expect(startingDictation).rejects.toMatchObject({ code: 'capture-unavailable' });
+    expect(test.capture.start).toHaveBeenCalledOnce();
+    expect(test.service.getState()).toMatchObject({ status: 'idle' });
+    await test.service.shutdown();
+  });
+
+  it('cancels a replacement dictation queued behind the previous dictation drain', async () => {
+    const test = harness();
+    const first = await test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    const stopped = deferred<undefined>();
+    test.capture.stop.mockReturnValueOnce(stopped.promise);
+
+    const replacement = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await vi.waitFor(() => expect(test.capture.stop).toHaveBeenCalledWith(first.captureId));
+    const cancelReplacement = test.service.stopDictation();
+    stopped.resolve(undefined);
+    await cancelReplacement;
+
+    await expect(replacement).rejects.toMatchObject({ code: 'capture-unavailable' });
+    expect(test.capture.start).toHaveBeenCalledOnce();
+    await test.service.shutdown();
+  });
+
+  it('does not let microphone-test APIs preempt a pending dictation startup', async () => {
+    const test = harness();
+    const pending = deferred<CaptureStarted>();
+    test.capture.start.mockReturnValueOnce(pending.promise);
+    const starting = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await vi.waitFor(() => expect(test.capture.start).toHaveBeenCalledOnce());
+    const captureId = test.capture.start.mock.calls[0]?.[1] ?? '';
+
+    await expect(
+      test.service.startTest(new FakeOwner() as unknown as Electron.WebContents),
+    ).resolves.toMatchObject({ status: 'unavailable', reason: 'capture-unavailable' });
+    await expect(test.service.stopTest()).resolves.toMatchObject({ status: 'idle' });
+    expect(test.capture.stop).not.toHaveBeenCalled();
+
+    pending.resolve({
+      captureId,
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+      sampleRate: 16_000,
+      channelCount: 1,
+    });
+    await expect(starting).resolves.toMatchObject({ captureId });
+    await test.service.stopDictation(captureId);
+    await test.service.shutdown();
+  });
+
+  it('still cancels an ownerless pending dictation startup', async () => {
+    const test = harness();
+    const pending = deferred<CaptureStarted>();
+    test.capture.start.mockReturnValueOnce(pending.promise);
+    const starting = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop: vi.fn(),
+    });
+    await vi.waitFor(() => expect(test.capture.start).toHaveBeenCalledOnce());
+    const captureId = test.capture.start.mock.calls[0]?.[1] ?? '';
+
+    await test.service.stopDictation();
+    expect(test.capture.stop).toHaveBeenCalledWith(captureId);
+    pending.resolve({
+      captureId,
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+      sampleRate: 16_000,
+      channelCount: 1,
+    });
+
+    await expect(starting).rejects.toMatchObject({ code: 'capture-unavailable' });
+    await test.service.shutdown();
+  });
+
   it('reports an unexpected dictation capture loss to its session owner', async () => {
     const test = harness();
     const onUnexpectedStop = vi.fn();
@@ -564,8 +736,28 @@ describe('RecordingService ownership', () => {
       onFrame: vi.fn(),
       onUnexpectedStop,
     });
-    test.capture.stopListener?.(dictation.captureId);
+    test.capture.stopListener?.(dictation.captureId, 'device-unavailable');
     expect(onUnexpectedStop).toHaveBeenCalledWith('device-unavailable');
+    await test.service.shutdown();
+  });
+
+  it('does not return a dictation capture that stopped while activation was pending', async () => {
+    const test = harness();
+    const activation = deferred<undefined>();
+    const onUnexpectedStop = vi.fn();
+    test.capture.activate.mockReturnValueOnce(activation.promise);
+
+    const starting = test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop,
+    });
+    await vi.waitFor(() => expect(test.capture.activate).toHaveBeenCalledOnce());
+    const captureId = test.capture.activate.mock.calls[0]?.[0] ?? '';
+    test.capture.stopListener?.(captureId, 'capture-unavailable');
+    activation.resolve(undefined);
+
+    await expect(starting).rejects.toMatchObject({ code: 'capture-unavailable' });
+    expect(onUnexpectedStop).toHaveBeenCalledWith('capture-unavailable');
     await test.service.shutdown();
   });
 
@@ -574,10 +766,10 @@ describe('RecordingService ownership', () => {
     const owner = new FakeOwner();
     const state = await test.service.startTest(owner as unknown as Electron.WebContents);
     if (state.status !== 'active') throw new Error('Expected an active test');
-    test.capture.stopListener?.(state.captureId);
+    test.capture.stopListener?.(state.captureId, 'capture-unavailable');
     expect(test.service.getState()).toMatchObject({
       status: 'unavailable',
-      reason: 'device-unavailable',
+      reason: 'capture-unavailable',
     });
     expect(owner.listenerCount('destroyed')).toBe(0);
     await test.service.shutdown();

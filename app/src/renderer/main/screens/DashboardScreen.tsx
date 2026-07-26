@@ -1,4 +1,6 @@
 import { useState, type RefObject } from 'react';
+import { ECHO_HOLD_THRESHOLD_MS } from '../../../shared/constants/echo-session';
+import { providerModelSelectionPolicy } from '../../../shared/provider-model-selection';
 import type { AppState } from '../../../shared/schemas/app-state';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Card, Status, Toast, Toggle } from '../../design';
@@ -37,8 +39,8 @@ const STATUS_COPY: Record<
   },
   processing: {
     heading: 'Preparing your text',
-    introduction: 'Talking Quill is processing captured speech on this device.',
-    readiness: 'Local text processing is in progress.',
+    introduction: 'Talking Quill is processing captured speech in the selected dictation mode.',
+    readiness: 'Text processing is in progress.',
   },
 };
 
@@ -58,6 +60,14 @@ export function DashboardScreen({
   const status = presentAppStatus(state.status);
   const copy = STATUS_COPY[state.status];
   const helper = presentHelperReadiness(state.helper.status);
+  const smartProviderId = settings.smartProcessing.selectedProviderId;
+  const smartProviderConfig = settings.smartProcessing.providers[smartProviderId];
+  const smartProviderReadiness =
+    providerModelSelectionPolicy(smartProviderId) === 'provider-managed'
+      ? `${smartProviderId} uses its currently loaded model`
+      : smartProviderConfig?.modelId
+        ? `${smartProviderId} model selected`
+        : 'Needs provider model setup';
 
   const updateEnabled = async (enabled: boolean) => {
     setSavingEnabled(true);
@@ -128,12 +138,7 @@ export function DashboardScreen({
             </div>
             <div>
               <dt>Smart provider</dt>
-              <dd>
-                {settings.smartProcessing.providers[settings.smartProcessing.selectedProviderId]
-                  ?.modelId
-                  ? `${settings.smartProcessing.selectedProviderId} configured`
-                  : 'Needs provider model setup'}
-              </dd>
+              <dd>{smartProviderReadiness}</dd>
             </div>
           </dl>
         </Card>
@@ -150,9 +155,10 @@ export function DashboardScreen({
             />
           </label>
           <p className="body-copy">
-            Release quickly for Quick Dictation; hold for 600 ms for Extended Dictation. Press
-            Enter, press the shortcut again, or use the widget Stop button to submit. Press Escape
-            to cancel. Each profile shortcut uses its configured Raw or Smart mode.
+            Release quickly for Quick Dictation; hold for {String(ECHO_HOLD_THRESHOLD_MS)} ms for
+            Extended Dictation. Press Enter, press the shortcut again, or use the widget Stop button
+            to submit. Press Escape to cancel. Each profile shortcut uses its configured Raw or
+            Smart mode.
           </p>
         </Card>
         <Card title="Current readiness" description={copy.readiness}>
@@ -168,7 +174,9 @@ export function DashboardScreen({
             <p className="body-copy readiness-note">{helperReadinessDetail(state)}</p>
             <div className="readiness-row">
               <span>Local transcription model</span>
-              <Status tone={status.tone}>{status.label}</Status>
+              <Status tone={state.modelReady ? 'success' : 'warning'}>
+                {state.modelReady ? 'Available' : 'Needs setup'}
+              </Status>
             </div>
           </div>
         </Card>

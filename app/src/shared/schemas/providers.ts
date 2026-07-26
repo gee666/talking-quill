@@ -105,96 +105,42 @@ export const AwsRegionSchema = z
 const configurableProviderIds = new Set<ProviderId>(CONFIGURABLE_PROVIDER_IDS);
 const timeoutProviderIds = new Set<ProviderId>(['openrouter', 'novita', 'cometapi']);
 
-export const ProviderConfigSchema = z
-  .object({
-    providerId: ProviderIdSchema,
-    baseUrl: z.url().max(2_048).optional(),
-    modelId: z.string().trim().min(1).max(512).nullable().optional(),
-    contextWindow: z.number().int().min(1).max(2_000_000).optional(),
-    maxOutputTokens: z.number().int().min(1).max(16_384).optional(),
-    timeoutMs: z.number().int().min(500).max(120_000).optional(),
-    keepAlive: z
-      .union([
-        z.number().int().min(-1).max(86_400),
-        z
-          .string()
-          .trim()
-          .min(1)
-          .max(32)
-          .regex(/^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+$/u),
-      ])
-      .optional(),
-    region: AwsRegionSchema.optional(),
-    modelType: AzureModelTypeSchema.optional(),
-    thinking: PiThinkingLevelSchema.optional(),
-  })
-  .strict()
-  .superRefine((config, context) => {
-    if (config.baseUrl !== undefined && URL.canParse(config.baseUrl)) {
-      const endpoint = new URL(config.baseUrl);
-      if (
-        endpoint.username.length > 0 ||
-        endpoint.password.length > 0 ||
-        endpoint.search.length > 0 ||
-        endpoint.hash.length > 0
-      ) {
-        context.addIssue({
-          code: 'custom',
-          path: ['baseUrl'],
-          message: 'Provider endpoints cannot contain credentials, queries, or fragments.',
-        });
-      }
-    }
-    if (configurableProviderIds.has(config.providerId) && config.baseUrl === undefined) {
+const CredentialFreeProviderUrlSchema = z
+  .url()
+  .max(2_048)
+  .superRefine((value, context) => {
+    if (!URL.canParse(value)) return;
+    const endpoint = new URL(value);
+    if (
+      endpoint.username.length > 0 ||
+      endpoint.password.length > 0 ||
+      endpoint.search.length > 0 ||
+      endpoint.hash.length > 0
+    ) {
       context.addIssue({
         code: 'custom',
-        path: ['baseUrl'],
-        message: 'A provider endpoint is required.',
-      });
-    }
-    if (!configurableProviderIds.has(config.providerId) && config.baseUrl !== undefined) {
-      context.addIssue({
-        code: 'custom',
-        path: ['baseUrl'],
-        message: 'Fixed providers do not accept endpoint overrides.',
-      });
-    }
-    if (config.keepAlive !== undefined && config.providerId !== 'ollama') {
-      context.addIssue({
-        code: 'custom',
-        path: ['keepAlive'],
-        message: 'Keep alive is only supported by Ollama.',
-      });
-    }
-    if (config.timeoutMs !== undefined && !timeoutProviderIds.has(config.providerId)) {
-      context.addIssue({
-        code: 'custom',
-        path: ['timeoutMs'],
-        message: 'A custom timeout is not supported by this provider.',
-      });
-    }
-    if ((config.region !== undefined) !== (config.providerId === 'bedrock')) {
-      context.addIssue({
-        code: 'custom',
-        path: ['region'],
-        message: 'Region is required only for AWS Bedrock.',
-      });
-    }
-    if (config.modelType !== undefined && config.providerId !== 'azure') {
-      context.addIssue({
-        code: 'custom',
-        path: ['modelType'],
-        message: 'Model type is supported only by Azure OpenAI.',
-      });
-    }
-    if (config.thinking !== undefined && config.providerId !== 'pi') {
-      context.addIssue({
-        code: 'custom',
-        path: ['thinking'],
-        message: 'Thinking level is required only for Pi.',
+        message: 'Provider endpoints cannot contain credentials, queries, or fragments.',
       });
     }
   });
+
+// Version 19 settings accepted any URL protocol. Keep that persisted contract readable while all
+// new provider configuration must use a transport-supported HTTP endpoint.
+export const PersistedProviderBaseUrlSchema = CredentialFreeProviderUrlSchema;
+export const ProviderBaseUrlSchema = CredentialFreeProviderUrlSchema.refine((value) => {
+  if (!URL.canParse(value)) return false;
+  const endpoint = new URL(value);
+  return (
+    (endpoint.protocol === 'http:' || endpoint.protocol === 'https:') &&
+    endpoint.hostname.length > 0
+  );
+}, 'Provider endpoints must use HTTP or HTTPS and include a hostname.');
+export const ProviderModelIdSchema = z.string().trim().min(1).max(512);
+
+export const PersistedProviderConfigSchema = createProviderConfigSchema(
+  PersistedProviderBaseUrlSchema,
+);
+export const ProviderConfigSchema = createProviderConfigSchema(ProviderBaseUrlSchema);
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RunnableProviderConfig = Omit<ProviderConfig, 'providerId'> & {
   readonly providerId: RunnableProviderId;
@@ -210,9 +156,87 @@ export const RunnableProviderConfigSchema = ProviderConfigSchema.pipe(
   ),
 );
 
+function createProviderConfigSchema(baseUrlSchema: z.ZodType<string>) {
+  return z
+    .object({
+      providerId: ProviderIdSchema,
+      baseUrl: baseUrlSchema.optional(),
+      modelId: ProviderModelIdSchema.nullable().optional(),
+      contextWindow: z.number().int().min(1).max(2_000_000).optional(),
+      maxOutputTokens: z.number().int().min(1).max(16_384).optional(),
+      timeoutMs: z.number().int().min(500).max(120_000).optional(),
+      keepAlive: z
+        .union([
+          z.number().int().min(-1).max(86_400),
+          z
+            .string()
+            .trim()
+            .min(1)
+            .max(32)
+            .regex(/^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+$/u),
+        ])
+        .optional(),
+      region: AwsRegionSchema.optional(),
+      modelType: AzureModelTypeSchema.optional(),
+      thinking: PiThinkingLevelSchema.optional(),
+    })
+    .strict()
+    .superRefine((config, context) => {
+      if (configurableProviderIds.has(config.providerId) && config.baseUrl === undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: ['baseUrl'],
+          message: 'A provider endpoint is required.',
+        });
+      }
+      if (!configurableProviderIds.has(config.providerId) && config.baseUrl !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: ['baseUrl'],
+          message: 'Fixed providers do not accept endpoint overrides.',
+        });
+      }
+      if (config.keepAlive !== undefined && config.providerId !== 'ollama') {
+        context.addIssue({
+          code: 'custom',
+          path: ['keepAlive'],
+          message: 'Keep alive is only supported by Ollama.',
+        });
+      }
+      if (config.timeoutMs !== undefined && !timeoutProviderIds.has(config.providerId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['timeoutMs'],
+          message: 'A custom timeout is not supported by this provider.',
+        });
+      }
+      if ((config.region !== undefined) !== (config.providerId === 'bedrock')) {
+        context.addIssue({
+          code: 'custom',
+          path: ['region'],
+          message: 'Region is required only for AWS Bedrock.',
+        });
+      }
+      if (config.modelType !== undefined && config.providerId !== 'azure') {
+        context.addIssue({
+          code: 'custom',
+          path: ['modelType'],
+          message: 'Model type is supported only by Azure OpenAI.',
+        });
+      }
+      if (config.thinking !== undefined && config.providerId !== 'pi') {
+        context.addIssue({
+          code: 'custom',
+          path: ['thinking'],
+          message: 'Thinking level is required only for Pi.',
+        });
+      }
+    });
+}
+
 export const ModelInfoSchema = z
   .object({
-    id: z.string().trim().min(1).max(512),
+    id: ProviderModelIdSchema,
     name: z.string().trim().min(1).max(512),
     contextWindow: z.number().int().positive().max(2_000_000).nullable(),
     vision: VisionCapabilitySchema,
@@ -247,7 +271,7 @@ export const ProviderCompletionRequestSchema = z
         (value) => new TextEncoder().encode(value).byteLength <= MAX_PROVIDER_INPUT_UTF8_BYTES,
         'Provider input exceeds the UTF-8 byte limit.',
       ),
-    modelId: z.string().trim().min(1).max(512).optional(),
+    modelId: ProviderModelIdSchema.optional(),
     temperature: z.number().min(0).max(2).default(0.2),
     maxOutputTokens: z.number().int().min(1).max(16_384).optional(),
     image: ProviderImageSchema.optional(),
@@ -309,8 +333,8 @@ export const ProviderCatalogEntrySchema = z
     description: z.string().min(1).max(240),
     logo: z.string().regex(/^[a-z0-9-]+\.(?:png|jpeg)$/),
     destinationHint: DestinationSchema,
-    defaultModel: z.string().trim().min(1).max(512).nullable(),
-    modelDiscovery: z.enum(['remote', 'configured']),
+    defaultModel: ProviderModelIdSchema.nullable(),
+    modelDiscovery: z.enum(['remote', 'provider-managed', 'azure-deployment']),
     fields: z.array(ProviderFieldSchema).max(8),
   })
   .strict();

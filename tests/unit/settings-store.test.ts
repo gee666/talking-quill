@@ -12,12 +12,55 @@ import {
   DEFAULT_SETTINGS,
   PublicSettingsPatchSchema,
   SETTINGS_SCHEMA_VERSION,
+  SettingsPatchSchema,
   SettingsSchema,
 } from '../../app/src/shared/schemas/settings';
-import { PROVIDER_IDS } from '../../app/src/shared/schemas/providers';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 const directories: string[] = [];
+const LEGACY_PROVIDER_ENDPOINTS = [
+  'file:///legacy/provider',
+  'ftp://legacy.example/models',
+] as const;
+const LEGACY_V14_PROVIDER_IDS = [
+  'openai',
+  'generic-openai',
+  'lmstudio',
+  'localai',
+  'koboldcpp',
+  'textgenwebui',
+  'docker-model-runner',
+  'lemonade',
+  'foundry',
+  'omlx',
+  'groq',
+  'openrouter',
+  'togetherai',
+  'fireworksai',
+  'deepseek',
+  'perplexity',
+  'mistral',
+  'novita',
+  'cometapi',
+  'ppio',
+  'apipie',
+  'sambanova',
+  'cerebras',
+  'giteeai',
+  'minimax',
+  'moonshotai',
+  'zai',
+  'xai',
+  'nvidia-nim',
+  'privatemode',
+  'litellm',
+  'ollama',
+  'anthropic',
+  'gemini',
+  'azure',
+  'bedrock',
+  'cohere',
+] as const;
 afterEach(async () => {
   await Promise.all(directories.splice(0).map(removeTestDirectory));
 });
@@ -280,8 +323,8 @@ describe('SettingsStore', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
   });
 
-  it.each([7, 8] as const)(
-    'migrates schema-v%s byte-oversized Task 7/8 data without resetting unrelated settings',
+  it.each([7, 8, 9] as const)(
+    'migrates schema-v%s byte-oversized Task 7-9 data without resetting unrelated settings',
     async (version) => {
       const path = await testPath();
       const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
@@ -344,7 +387,7 @@ describe('SettingsStore', () => {
     expect(store.getDiagnostic()).toBeNull();
   });
 
-  it.each(PROVIDER_IDS.filter((providerId) => providerId !== 'pi'))(
+  it.each(LEGACY_V14_PROVIDER_IDS)(
     'migrates historical v14 provider selection %s without reinterpretation',
     async (providerId) => {
       const path = await testPath();
@@ -374,6 +417,201 @@ describe('SettingsStore', () => {
     );
     expect(store.getDiagnostic()).toMatchObject({ reason: 'migration' });
   });
+
+  it.each(LEGACY_PROVIDER_ENDPOINTS)(
+    'preserves an inert v14 provider endpoint and unrelated settings until repaired: %s',
+    async (baseUrl) => {
+      const path = await testPath();
+      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      legacy.schemaVersion = 14;
+      legacy.app = {
+        ...structuredClone(DEFAULT_SETTINGS.app),
+        enabled: false,
+        soundsEnabled: false,
+      };
+      legacy.privacy = {
+        ...structuredClone(DEFAULT_SETTINGS.privacy),
+        historyEnabled: false,
+        retainSmartScreenshots: true,
+      };
+      legacy.transcription = {
+        ...structuredClone(DEFAULT_SETTINGS.transcription),
+        language: 'x',
+      };
+      legacy.smartProcessing = {
+        ...structuredClone(DEFAULT_SETTINGS.smartProcessing),
+        selectedProviderId: 'generic-openai',
+        providers: {
+          ...structuredClone(DEFAULT_SETTINGS.smartProcessing.providers),
+          'generic-openai': { baseUrl, modelId: 'legacy-model' },
+        },
+      };
+      legacy.customVocabulary = [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          value: 'Retained vocabulary',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ];
+      await writeFile(path, JSON.stringify(legacy), 'utf8');
+      const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+
+      await store.initialize();
+
+      expect(store.getDiagnostic()).toBeNull();
+      expect(store.get()).toMatchObject({
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        app: { enabled: false, soundsEnabled: false },
+        privacy: { historyEnabled: false, retainSmartScreenshots: true },
+        transcription: { language: 'x' },
+        smartProcessing: {
+          selectedProviderId: 'generic-openai',
+          providers: { 'generic-openai': { baseUrl, modelId: 'legacy-model' } },
+        },
+        customVocabulary: [{ value: 'Retained vocabulary' }],
+      });
+      const configs = new ProviderConfigService(store);
+      expect(() => configs.get('generic-openai')).toThrow();
+
+      await store.update({ app: { launchAtLogin: true } });
+      expect(store.get().smartProcessing.providers['generic-openai']?.baseUrl).toBe(baseUrl);
+      await configs.save({
+        providerId: 'generic-openai',
+        baseUrl: 'https://api.example.test/v1',
+        modelId: 'replacement-model',
+      });
+
+      const restarted = new SettingsStore(path);
+      await restarted.initialize();
+      expect(restarted.getDiagnostic()).toBeNull();
+      expect(restarted.get()).toMatchObject({
+        app: { enabled: false, soundsEnabled: false, launchAtLogin: true },
+        privacy: { historyEnabled: false, retainSmartScreenshots: true },
+        transcription: { language: 'x' },
+        smartProcessing: {
+          providers: {
+            'generic-openai': {
+              baseUrl: 'https://api.example.test/v1',
+              modelId: 'replacement-model',
+            },
+          },
+        },
+        customVocabulary: [{ value: 'Retained vocabulary' }],
+      });
+    },
+  );
+
+  it.each(LEGACY_PROVIDER_ENDPOINTS)(
+    'loads a current v19 legacy endpoint and permits unrelated updates without making it runnable: %s',
+    async (baseUrl) => {
+      const path = await testPath();
+      const current = structuredClone(DEFAULT_SETTINGS);
+      current.app.enabled = false;
+      current.privacy.historyEnabled = false;
+      current.smartProcessing.selectedProviderId = 'generic-openai';
+      current.smartProcessing.providers['generic-openai'] = {
+        baseUrl,
+        modelId: 'legacy-model',
+      };
+      await writeFile(path, JSON.stringify(current), 'utf8');
+      const store = new SettingsStore(path);
+
+      await store.initialize();
+
+      expect(store.getDiagnostic()).toBeNull();
+      expect(() => new ProviderConfigService(store).get('generic-openai')).toThrow();
+      await store.update({ app: { closeToTray: false } });
+      expect(store.get()).toMatchObject({
+        app: { enabled: false, closeToTray: false },
+        privacy: { historyEnabled: false },
+        smartProcessing: {
+          providers: { 'generic-openai': { baseUrl, modelId: 'legacy-model' } },
+        },
+      });
+    },
+  );
+
+  it.each(LEGACY_PROVIDER_ENDPOINTS)(
+    'keeps persisted legacy endpoint parsing separate from strict provider mutations: %s',
+    (baseUrl) => {
+      const persisted = structuredClone(DEFAULT_SETTINGS);
+      persisted.smartProcessing.selectedProviderId = 'generic-openai';
+      persisted.smartProcessing.providers['generic-openai'] = {
+        baseUrl,
+        modelId: 'legacy-model',
+      };
+
+      expect(SettingsSchema.safeParse(persisted).success).toBe(true);
+      for (const field of ['providers', 'providerReplacements'] as const) {
+        expect(
+          SettingsPatchSchema.safeParse({
+            smartProcessing: {
+              [field]: {
+                'generic-openai': { baseUrl, modelId: 'legacy-model' },
+              },
+            },
+          }).success,
+        ).toBe(false);
+      }
+      expect(
+        SettingsPatchSchema.safeParse({
+          smartProcessing: {
+            providerReplacements: {
+              'generic-openai': {
+                baseUrl: 'https://repaired.example.test/v1',
+                modelId: 'legacy-model',
+              },
+            },
+          },
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  it.each([13, 15, 16, 17, 18] as const)(
+    'preserves a legacy provider endpoint through the v%s current-shape migration',
+    async (version) => {
+      const path = await testPath();
+      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      legacy.schemaVersion = version;
+      legacy.app = { ...structuredClone(DEFAULT_SETTINGS.app), enabled: false };
+      legacy.smartProcessing = {
+        ...structuredClone(DEFAULT_SETTINGS.smartProcessing),
+        selectedProviderId: 'generic-openai',
+        providers: {
+          'generic-openai': {
+            baseUrl: 'ftp://legacy.example/models',
+            modelId: 'legacy-model',
+          },
+        },
+        ...(version === 17 ? { piExtensionsEnabled: false } : {}),
+      };
+      if (version === 13) {
+        delete (legacy.privacy as Record<string, unknown>).diagnosticLoggingEnabled;
+      }
+      await writeFile(path, JSON.stringify(legacy), 'utf8');
+      const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+
+      await store.initialize();
+
+      expect(store.getDiagnostic()).toBeNull();
+      expect(store.get()).toMatchObject({
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        app: { enabled: false },
+        smartProcessing: {
+          selectedProviderId: 'generic-openai',
+          providers: {
+            'generic-openai': {
+              baseUrl: 'ftp://legacy.example/models',
+              modelId: 'legacy-model',
+            },
+          },
+        },
+      });
+      expect(() => new ProviderConfigService(store).get('generic-openai')).toThrow();
+    },
+  );
 
   it('migrates v14 settings without losing provider state', async () => {
     const path = await testPath();
@@ -694,6 +932,39 @@ describe('SettingsStore', () => {
       smartProcessing: fixture.expectedProvider,
     });
   });
+
+  it.each(LEGACY_PROVIDER_ENDPOINTS)(
+    'migrates a v2 legacy provider endpoint without resetting application preferences: %s',
+    async (baseUrl) => {
+      const path = await testPath();
+      await writeFile(
+        path,
+        JSON.stringify({
+          schemaVersion: 2,
+          app: { enabled: false, closeToTray: false },
+          smartProcessing: {
+            selectedProviderId: 'generic-openai',
+            providers: { 'generic-openai': { baseUrl, modelId: 'legacy-model' } },
+          },
+        }),
+        'utf8',
+      );
+      const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+
+      await store.initialize();
+
+      expect(store.getDiagnostic()).toBeNull();
+      expect(store.get()).toMatchObject({
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        app: { enabled: false, closeToTray: false },
+        smartProcessing: {
+          selectedProviderId: 'generic-openai',
+          providers: { 'generic-openai': { baseUrl, modelId: 'legacy-model' } },
+        },
+      });
+      expect(() => new ProviderConfigService(store).get('generic-openai')).toThrow();
+    },
+  );
 
   it('migrates v3 Bedrock drafts with a safe default region without losing settings', async () => {
     const path = await testPath();

@@ -125,22 +125,14 @@ export class WhisperRuntime {
     });
   }
 
-  pushSession(sessionId: string, pcm: Float32Array): Promise<void> {
-    return this.#pushSession(sessionId, pcm, false);
-  }
-
-  pushOwnedSession(sessionId: string, pcm: Float32Array): Promise<void> {
-    return this.#pushSession(sessionId, pcm, true);
-  }
-
-  async #pushSession(sessionId: string, pcm: Float32Array, takeOwnership: boolean): Promise<void> {
+  async pushSession(sessionId: string, pcm: Float32Array): Promise<void> {
     validatePcm(pcm, WHISPER_MAX_PUSH_SAMPLES);
     const state = this.#getSession(sessionId);
     if (state.totalSamples + pcm.length > WHISPER_MAX_SAMPLES) {
       throw new Error('PCM exceeds maximum session duration.');
     }
     state.totalSamples += pcm.length;
-    state.audio.append(pcm, takeOwnership);
+    state.audio.append(pcm);
     const windowSamples = WHISPER_SAMPLE_RATE * WHISPER_CHUNK_SECONDS;
     const hopSamples = WHISPER_SAMPLE_RATE * WHISPER_HOP_SECONDS;
     while (state.audio.length >= windowSamples) {
@@ -150,7 +142,7 @@ export class WhisperRuntime {
       const call = await this.#withPipeline(state.options.modelId, (pipeline) =>
         pipeline(window, streamingArguments(state.options)),
       );
-      state.pipelineMetadata = call.metadata;
+      state.pipelineMetadata = mergePipelineMetadata(state.pipelineMetadata, call.metadata);
       state.textParts.push(
         selectCentralTranscript(
           call.value,
@@ -172,7 +164,7 @@ export class WhisperRuntime {
       const call = await this.#withPipeline(state.options.modelId, (pipeline) =>
         pipeline(state.audio.takeAll(), streamingArguments(state.options)),
       );
-      state.pipelineMetadata = call.metadata;
+      state.pipelineMetadata = mergePipelineMetadata(state.pipelineMetadata, call.metadata);
       state.textParts.push(
         selectCentralTranscript(
           call.value,
@@ -359,10 +351,9 @@ class PcmQueue {
     return this.#length;
   }
 
-  append(pcm: Float32Array, takeOwnership: boolean): void {
-    const chunk = takeOwnership ? pcm : pcm.slice();
-    this.#chunks.push(chunk);
-    this.#length += chunk.length;
+  append(pcm: Float32Array): void {
+    this.#chunks.push(pcm);
+    this.#length += pcm.length;
   }
 
   copyTo(output: Float32Array): void {
@@ -414,6 +405,21 @@ class PcmQueue {
     this.#length = 0;
     return output;
   }
+}
+
+function mergePipelineMetadata(
+  current: PipelineReuseMetadata | null,
+  next: PipelineReuseMetadata,
+): PipelineReuseMetadata {
+  if (current === null) return next;
+  return {
+    loadCount: next.loadCount,
+    reused: current.reused && next.reused,
+    loadDurationMs:
+      current.loadCount === next.loadCount
+        ? current.loadDurationMs
+        : current.loadDurationMs + next.loadDurationMs,
+  };
 }
 
 function transcriptionArguments(

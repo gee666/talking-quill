@@ -1,4 +1,6 @@
 import {
+  CAPTURE_WORKLET_FLUSH_TIMEOUT_MS,
+  CAPTURE_WORKLET_PROCESSOR_NAME,
   DEVICE_CHANGE_DEBOUNCE_MS,
   MAX_MICROPHONE_DEVICES,
   MAX_MICROPHONE_ID_LENGTH,
@@ -110,15 +112,17 @@ export class CaptureEngine {
     const generation = ++this.#generation;
     await this.#teardownActive(false);
     if (generation !== this.#generation) throw new CaptureEngineError('capture-failed');
-    let preferredUnavailable = false;
-    let acquisitionDeviceId = preferredMicrophoneId;
+    const preferredDeviceId =
+      preferredMicrophoneId === null ? null : sanitizeDeviceId(preferredMicrophoneId);
+    let preferredUnavailable = preferredMicrophoneId !== null && preferredDeviceId === null;
+    let acquisitionDeviceId = preferredDeviceId;
 
     let stream: MediaStream;
     try {
-      stream = await this.#acquireStream(preferredMicrophoneId);
+      stream = await this.#acquireStream(preferredDeviceId);
     } catch (error: unknown) {
       if (generation !== this.#generation) throw new CaptureEngineError('capture-failed');
-      if (preferredMicrophoneId === null || !isPreferredDeviceRace(error)) {
+      if (preferredDeviceId === null || !isPreferredDeviceRace(error)) {
         throw new CaptureEngineError(mapCaptureError(error));
       }
       preferredUnavailable = true;
@@ -328,7 +332,7 @@ export class CaptureEngine {
       };
       active.worklet.port.addEventListener('message', onMessage);
       active.flushResolver = finish;
-      timer = this.#environment.setTimeout(finish, 100);
+      timer = this.#environment.setTimeout(finish, CAPTURE_WORKLET_FLUSH_TIMEOUT_MS);
       active.worklet.port.postMessage({ type: 'flush' });
     });
   }
@@ -373,8 +377,10 @@ export class CaptureEngine {
     }
     active.startupFailure = reason;
     if (active.phase !== 'active') return;
-    ++this.#generation;
-    void this.#teardownActive(false).finally(() => this.#callbacks.onUnexpectedStop(reason));
+    const failureGeneration = ++this.#generation;
+    void this.#teardownActive(false).finally(() => {
+      if (this.#generation === failureGeneration) this.#callbacks.onUnexpectedStop(reason);
+    });
   }
 
   readonly #onDeviceChange = () => {
@@ -395,7 +401,7 @@ export function createBrowserCaptureEnvironment(workletModuleUrl: string): Captu
     mediaDevices: navigator.mediaDevices,
     createAudioContext: () => new AudioContext({ latencyHint: 'interactive' }),
     createWorkletNode: (context) =>
-      new AudioWorkletNode(context, 'talking-quill-capture', {
+      new AudioWorkletNode(context, CAPTURE_WORKLET_PROCESSOR_NAME, {
         numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [1],
@@ -415,7 +421,7 @@ function sanitizeDeviceId(deviceId: string): string | null {
   if (
     deviceId.trim().length === 0 ||
     deviceId.length > MAX_MICROPHONE_ID_LENGTH ||
-    hasControlCharacter(deviceId)
+    /\p{Cc}/u.test(deviceId)
   ) {
     return null;
   }
@@ -435,16 +441,8 @@ function sanitizeDeviceLabel(label: string, anonymousIndex: number): string {
   return sanitized || `Microphone ${String(anonymousIndex)}`;
 }
 
-function hasControlCharacter(value: string): boolean {
-  for (const character of value) {
-    if (isControlCharacter(character)) return true;
-  }
-  return false;
-}
-
 function isControlCharacter(value: string): boolean {
-  const code = value.charCodeAt(0);
-  return code <= 31 || code === 127;
+  return /\p{Cc}/u.test(value);
 }
 
 function hasNormalizedSamples(samples: Float32Array): boolean {

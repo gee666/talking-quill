@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -25,15 +25,14 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
 
   it('keeps every production networking primitive in the reviewed closed inventory', async () => {
     const inventory = await verifyNetworkBoundary();
-    expect(inventory).toHaveLength(10);
+    expect(inventory).toHaveLength(9);
     expect(Object.keys(APPROVED_NETWORK_BOUNDARIES)).toEqual(
       expect.arrayContaining([
         'app/src/main/providers/json-transport.ts',
-        'app/src/main/transcription/model-manager.ts',
+        'app/src/main/transcription/model-download-transport.ts',
         'app/src/workers/whisper/network-guard.ts',
         'app/src/main/helper/helper-client.ts',
-        'app/src/main/providers/pi-discovery.ts',
-        'app/src/main/providers/pi.ts',
+        'app/src/main/providers/pi-process-runtime.ts',
       ]),
     );
     for (const [path, approval] of Object.entries(APPROVED_NETWORK_BOUNDARIES)) {
@@ -111,7 +110,68 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
         globalThis[mutableFetch]('/mutable');
       `),
     ).toEqual(['fetch-call']);
+    expect(
+      detectNetworkTokens(`
+        const moduleName = 'node:' + 'https';
+        const dynamic = await import(moduleName);
+        dynamic.request('https://example.com');
+        const load = require;
+        const udp = load('node:dgram');
+        udp.createSocket('udp4');
+        process.getBuiltinModule('node:http').request('https://example.com');
+        const reflected = Reflect.get(globalThis, 'fetch');
+        reflected('https://example.com');
+        const getFetch = () => globalThis.fetch;
+        getFetch()('https://example.com');
+      `),
+    ).toEqual(['direct-socket-call', 'fetch-call', 'node:dgram', 'node:http', 'node:https']);
+    expect(
+      detectNetworkTokens(`
+        function local(require: unknown, fetch: () => void) { fetch(); }
+        require('node:https').request('https://example.com');
+        fetch('https://example.com');
+      `),
+    ).toEqual(['direct-socket-call', 'fetch-call', 'node:https']);
+    expect(
+      detectNetworkTokens(`
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        const udp = require('node:dgram');
+        udp.createSocket('udp4');
+      `),
+    ).toEqual(['node:dgram']);
+    expect(
+      detectNetworkTokens(`
+        import * as moduleApi from 'node:module';
+        const require = moduleApi.createRequire(import.meta.url);
+        require('node:https').request('https://example.com');
+      `),
+    ).toEqual(['direct-socket-call', 'node:https']);
+    expect(
+      detectNetworkTokens(`
+        const moduleApi = await import('node:module');
+        const require = moduleApi.createRequire(import.meta.url);
+        require('node:dgram').createSocket('udp4');
+      `),
+    ).toEqual(['node:dgram']);
+    expect(
+      detectNetworkTokens(`
+        for (let fetch = () => {}; false;) { fetch(); }
+        fetch('/after-loop');
+        try {} catch (fetch) { fetch(); }
+        fetch('/after-catch');
+        switch (1) { case 1: let fetch = () => {}; fetch(); }
+        fetch('/after-switch');
+      `),
+    ).toEqual(['fetch-call']);
     expect(detectNetworkTokens(`const fetch = () => 'local value'; fetch();`)).toEqual([]);
+  });
+
+  it('scans TypeScript module extensions instead of silently omitting them', async () => {
+    await writeFile(resolve(temporary, 'unapproved-boundary.mts'), "import 'node:dgram';\n");
+    await expect(verifyNetworkBoundary(temporary)).rejects.toThrow(
+      'unapproved-boundary.mts: node:dgram',
+    );
   });
 
   it('records category only and blocks deterministic proof traffic before socket I/O', async () => {

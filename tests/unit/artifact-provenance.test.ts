@@ -1,9 +1,10 @@
-import { readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   artifactProvenanceManifestPath,
   artifactUploadPaths,
+  validateArtifactProvenanceManifest,
   verifyArtifactProvenanceManifest,
   writeArtifactProvenanceManifest,
 } from '../../scripts/artifact-provenance.mjs';
@@ -72,6 +73,40 @@ describe('canonical artifact provenance manifest', () => {
     await writeFile(artifactProvenanceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await expect(verifyArtifactProvenanceManifest()).rejects.toThrow(
       'stale for the current source tree',
+    );
+  });
+
+  it('rejects absolute or repository-escaping manifest paths', async () => {
+    const manifest = await writeManifest();
+    const absolute = {
+      ...structuredClone(manifest),
+      package: {
+        ...manifest.package,
+        root: process.platform === 'win32' ? 'C:/outside' : '/outside',
+      },
+    };
+    expect(() => validateArtifactProvenanceManifest(absolute)).toThrow(
+      'escapes the canonical repository root',
+    );
+
+    const escaping = {
+      ...structuredClone(manifest),
+      entries: manifest.entries.map((entry, index) =>
+        index === 0 ? { ...entry, path: '../outside' } : entry,
+      ),
+    };
+    expect(() => validateArtifactProvenanceManifest(escaping)).toThrow(
+      'escapes the canonical repository root',
+    );
+  });
+
+  it('rejects a package root replaced by a filesystem redirect after inspection', async () => {
+    await writeManifest();
+    const original = resolve(root, 'original-package');
+    await rename(packageRoot, original);
+    await symlink(original, packageRoot, process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(verifyArtifactProvenanceManifest()).rejects.toThrow(
+      'package root is not a canonical physical path',
     );
   });
 

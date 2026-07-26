@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ActivationKey } from '../../../shared/helper/protocol';
+import { ActivationKeySchema, type ActivationKey } from '../../../shared/helper/protocol';
 import {
   GENERAL_PROFILE_ID,
   RESERVED_DICTATION_BINDING_ERROR,
@@ -7,8 +7,6 @@ import {
 } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Button, Card, Select, Status } from '../../design';
-
-const KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('') as ActivationKey[];
 
 export function GeneralShortcutSetup({
   settings,
@@ -62,7 +60,7 @@ export function GeneralShortcutSetup({
           disabled={disabled || busy}
           onChange={(event) => setActivationKey(event.currentTarget.value as ActivationKey)}
         >
-          {KEYS.map((key) => (
+          {ActivationKeySchema.options.map((key) => (
             <option key={key} value={key}>
               {key}
             </option>

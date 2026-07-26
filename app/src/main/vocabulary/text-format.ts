@@ -5,7 +5,7 @@ import {
   VocabularyValueSchema,
 } from '../../shared/schemas/vocabulary';
 import { utf8ByteLength } from '../../shared/schemas/text-bounds';
-import { normalizeCommandText } from '../commands/matcher';
+import { normalizeCommandText } from '../../shared/text/command-normalization';
 import { PublicAppError } from '../security/public-error';
 
 export function parseVocabularyText(bytes: Uint8Array): readonly string[] {

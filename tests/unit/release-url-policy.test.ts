@@ -16,6 +16,9 @@ describe('release URL policy', () => {
     'https://github.com/gee666/talking-quill-lookalike/releases/tag/v1.2.3',
     'https://github.com/gee666/talking-quill/releases/tag/v1.2.3?next=evil',
     'https://github.com/gee666/talking-quill/releases/tag/v1.2.3#fragment',
+    ' https://github.com/gee666/talking-quill/releases/tag/v1.2.3',
+    'https://github.com\\gee666\\talking-quill\\releases\\tag\\v1.2.3',
+    'https://github.com/gee666/talking-quill/ignored/../releases/tag/v1.2.3',
     'https://github.com/gee666/talking-quill/releases%2ftag%2fv1.2.3',
     'https://github.com/gee666/talking-quill/releases/latest',
   ])('rejects %s', (url) => {

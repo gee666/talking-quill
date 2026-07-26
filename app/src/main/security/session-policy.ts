@@ -1,4 +1,5 @@
 import type { Session, WebContents } from 'electron';
+import { APP_PROTOCOL } from '../../shared/constants/app';
 import { developmentCsp } from './csp';
 import type { WindowRoleRegistry } from '../app/window-role-registry';
 import type { MicrophonePermissionController } from './microphone-permission';
@@ -76,7 +77,7 @@ export function secureSession(
   target.webRequest.onBeforeRequest((details, callback) => {
     const url = new URL(details.url);
     if (
-      url.protocol === 'talking-quill:' ||
+      url.protocol === `${APP_PROTOCOL}:` ||
       (developmentOrigin !== null && url.protocol === 'devtools:')
     ) {
       callback({ cancel: false });
@@ -132,13 +133,6 @@ export function getTrustedCaptureDocument(
     url: registration.expectedUrl,
     origin: securityOrigin(registration.expectedUrl),
   };
-}
-
-export function isTrustedCaptureWebContents(
-  webContents: WebContents | null,
-  roles: WindowRoleRegistry,
-): boolean {
-  return getTrustedCaptureDocument(webContents, roles) !== null;
 }
 
 export function readPermissionRequestMediaTypes(details: unknown): readonly string[] {

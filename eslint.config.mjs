@@ -29,18 +29,7 @@ export default tseslint.config(
       'coverage/**',
       'tmp/**',
       'pnpm-lock.yaml',
-      'scripts/package-policy.d.mts',
-      'scripts/artifact-provenance.d.mts',
-      'scripts/network-boundary-policy.d.mts',
-      'scripts/native-architecture.d.mts',
-      'scripts/nsis-uninstall-policy.d.mts',
-      'scripts/os-packet-capture.d.mts',
-      'scripts/performance-metrics.d.mts',
-      'scripts/reference-independence.d.mts',
-      'scripts/release-control-preflight.d.mts',
-      'scripts/secret-history-schema.d.mts',
-      'scripts/verify-trusted-candidate.d.mts',
-      'scripts/verify-public-release.d.mts',
+      'scripts/**/*.d.mts',
     ],
   },
   eslint.configs.recommended,
@@ -128,9 +117,15 @@ export default tseslint.config(
     },
   },
   {
-    files: ['app/src/main/ipc/transport.ts', 'app/src/shared/ipc/registry.ts'],
+    files: ['app/src/main/ipc/transport.ts'],
     rules: {
       'no-restricted-imports': ['error', { patterns: restrictedReferencePatterns }],
+      '@typescript-eslint/no-unnecessary-type-parameters': 'off',
+    },
+  },
+  {
+    files: ['app/src/shared/ipc/registry.ts'],
+    rules: {
       '@typescript-eslint/no-unnecessary-type-parameters': 'off',
     },
   },
@@ -159,7 +154,15 @@ export default tseslint.config(
   {
     files: ['app/src/preload/transport.ts'],
     rules: {
-      'no-restricted-imports': ['error', { patterns: restrictedReferencePatterns }],
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            ...restrictedReferencePatterns,
+            { group: ['**/main/**', '**/renderer/**'], message: 'Preload boundary violation.' },
+          ],
+        },
+      ],
     },
   },
   {

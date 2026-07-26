@@ -1,6 +1,7 @@
 import { freemem, totalmem } from 'node:os';
 import rawManifest from '../../../../scripts/model-manifest.json';
-import { ModelManifestSchema } from '../../shared/schemas/model-manifest';
+import { WHISPER_MAX_SAMPLES } from '../../shared/constants/whisper';
+import { ModelManifestSchema, type WhisperModelId } from '../../shared/schemas/model-manifest';
 import {
   WhisperWorkerRequestSchema,
   WhisperWorkerResponseSchema,
@@ -8,9 +9,13 @@ import {
   type WhisperWorkerRequest,
   type WhisperWorkerResponse,
 } from '../../shared/schemas/whisper-protocol';
+import { WhisperRequestQueue } from './request-queue';
 import { WhisperRuntime, type WhisperPipeline } from './runtime';
 import { WorkerModelVerificationError, verifyModelFiles } from './verify-model';
 
+const MAX_PENDING_WORKER_REQUESTS = 64;
+const RESERVED_CONTROL_REQUESTS = 8;
+const MAX_PENDING_PCM_BYTES = WHISPER_MAX_SAMPLES * Float32Array.BYTES_PER_ELEMENT;
 const networkGuard = readNetworkGuardState();
 
 void startWorker().catch(() => {
@@ -38,17 +43,14 @@ async function startWorker(): Promise<void> {
     revisions,
     ...(idleUnloadMs === undefined ? {} : { idleUnloadMs }),
     verify: async (modelId, revision, cache) => {
-      const model = models.get(modelId);
-      if (model?.revision !== revision) {
-        throw new WorkerModelVerificationError('MODEL_CORRUPT');
-      }
-      await verifyModelFiles(cache, model);
+      await verifyModelFiles(cache, readManifestModel(models, modelId, revision));
     },
     factory: async (modelId, revision, cache) => {
+      const model = readManifestModel(models, modelId, revision);
       const loaded: unknown = await pipeline('automatic-speech-recognition', modelId, {
         cache_dir: cache,
         revision,
-        dtype: 'q8',
+        dtype: model.dtype,
         local_files_only: true,
       });
       if (typeof loaded !== 'function') throw new Error('Whisper pipeline did not load.');
@@ -61,12 +63,42 @@ async function startWorker(): Promise<void> {
   }, 30_000);
   pressureTimer.unref();
 
-  let queue = Promise.resolve();
+  const deferredSessionCleanup = new Set<string>();
+  let sessionCleanupScheduled = false;
+  const queue = new WhisperRequestQueue({
+    maximumRequests: MAX_PENDING_WORKER_REQUESTS,
+    maximumControlRequests: RESERVED_CONTROL_REQUESTS,
+    maximumPcmBytes: MAX_PENDING_PCM_BYTES,
+    execute: (request) =>
+      handleRequest(request, runtime, models, pressureTimer, networkGuard.probeCompleted),
+    rejectOverload: (request) => {
+      if (request.type === 'session-cancel' || request.type === 'session-finish') {
+        runtime.cancelSession(request.sessionId);
+        deferredSessionCleanup.add(request.sessionId);
+        if (!sessionCleanupScheduled) {
+          sessionCleanupScheduled = true;
+          queue.afterPending(() => {
+            for (const sessionId of deferredSessionCleanup) runtime.cancelSession(sessionId);
+            deferredSessionCleanup.clear();
+            sessionCleanupScheduled = false;
+          });
+        }
+      }
+      postFailure(
+        request.requestId,
+        'INFERENCE_FAILED',
+        'The local transcription worker is at capacity.',
+      );
+    },
+  });
   process.parentPort.on('message', (event) => {
     const raw: unknown = event.data;
-    queue = queue
-      .then(() => handleRaw(raw, runtime, models, pressureTimer, networkGuard.probeCompleted))
-      .catch(() => undefined);
+    const parsed = WhisperWorkerRequestSchema.safeParse(raw);
+    if (parsed.success) {
+      queue.enqueue(parsed.data);
+    } else {
+      postFailure(readRequestId(raw), 'PROTOCOL_ERROR', 'The worker request was invalid.');
+    }
   });
 
   process.parentPort.postMessage(
@@ -83,19 +115,13 @@ async function startWorker(): Promise<void> {
   );
 }
 
-async function handleRaw(
-  raw: unknown,
+async function handleRequest(
+  request: WhisperWorkerRequest,
   runtime: WhisperRuntime,
   models: ReadonlyMap<string, ReturnType<typeof ModelManifestSchema.parse>['models'][number]>,
   pressureTimer: ReturnType<typeof setInterval>,
   networkProbeCompleted: boolean,
 ): Promise<void> {
-  const parsed = WhisperWorkerRequestSchema.safeParse(raw);
-  if (!parsed.success) {
-    postFailure(readRequestId(raw), 'PROTOCOL_ERROR', 'The worker request was invalid.');
-    return;
-  }
-  const request = parsed.data;
   try {
     const response = await execute(request, runtime, models, pressureTimer, networkProbeCompleted);
     process.parentPort.postMessage(WhisperWorkerResponseSchema.parse(response));
@@ -127,7 +153,7 @@ async function execute(
       runtime.openSession(request.sessionId, request.options);
       return { ...base, result: { type: 'acknowledged', operation: 'session-open' } };
     case 'session-push':
-      await runtime.pushOwnedSession(request.sessionId, new Float32Array(request.pcm));
+      await runtime.pushSession(request.sessionId, new Float32Array(request.pcm));
       return { ...base, result: { type: 'acknowledged', operation: 'session-push' } };
     case 'session-finish':
       return {
@@ -159,6 +185,16 @@ async function execute(
       await runtime.shutdown();
       return { ...base, result: { type: 'acknowledged', operation: 'shutdown' } };
   }
+}
+
+function readManifestModel(
+  models: ReadonlyMap<string, ReturnType<typeof ModelManifestSchema.parse>['models'][number]>,
+  modelId: WhisperModelId,
+  revision: string,
+): ReturnType<typeof ModelManifestSchema.parse>['models'][number] {
+  const model = models.get(modelId);
+  if (model?.revision !== revision) throw new WorkerModelVerificationError('MODEL_CORRUPT');
+  return model;
 }
 
 function postFailure(requestId: string, code: WhisperWorkerErrorCode, message: string): void {

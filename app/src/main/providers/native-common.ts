@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ModelInfoSchema,
   ProviderCompletionRequestSchema,
@@ -51,6 +52,10 @@ export function requireCredential(invocation: ProviderInvocationConfig): string 
   )
     throw new ProviderError('INVALID_CONFIG');
   return credential;
+}
+
+export function credentialFingerprint(invocation: ProviderInvocationConfig): string {
+  return createHash('sha256').update(requireCredential(invocation), 'utf8').digest('base64url');
 }
 
 export function requireModel(config: ProviderConfig, requestModel?: string): string {

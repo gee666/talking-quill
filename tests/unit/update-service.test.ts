@@ -52,6 +52,15 @@ describe('manual update checking', () => {
     });
   });
 
+  it('rejects an invalid current version before starting a network request', async () => {
+    const mock = transport({});
+    await expect(
+      new UpdateService(mock).check('1.0.0\r\nInjected: value', new AbortController().signal),
+    ).rejects.toThrow('release version was invalid');
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(mock.request).not.toHaveBeenCalled();
+  });
+
   it('rejects prereleases, malformed versions, and non-GitHub release links', async () => {
     for (const body of [
       {

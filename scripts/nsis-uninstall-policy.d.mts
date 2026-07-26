@@ -5,4 +5,3 @@ export interface NsisUninstallSources {
 }
 
 export function validateNsisUninstallPolicy(sources: NsisUninstallSources): void;
-export function validateInstalledNsisTemplates(): Promise<void>;

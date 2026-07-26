@@ -21,6 +21,7 @@ import type { UpdateService } from '../info/update-service';
 import type { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
 import type { SystemInfoService } from '../info/system-info-service';
 import type { NoticesService } from '../info/notices-service';
+import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
 import type { InvokeHandlerMap } from './types';
 
 export interface HandlerDependencies {
@@ -54,6 +55,16 @@ export interface HandlerDependencies {
 }
 
 export function createHandlers(dependencies: HandlerDependencies): InvokeHandlerMap {
+  let settingsMutationQueue: Promise<void> = Promise.resolve();
+  const serializeSettingsMutation = <Result>(operation: () => Promise<Result>): Promise<Result> => {
+    const mutation = settingsMutationQueue.then(operation);
+    settingsMutationQueue = mutation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return mutation;
+  };
+
   return {
     'bootstrap:get': () => ({
       appVersion: dependencies.appVersion,
@@ -93,10 +104,11 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       dependencies.echo.startActivationTest(context.webContentsId, context.onDestroyed),
     'activation-test:stop': (_request, context) =>
       dependencies.echo.stopActivationTest(context.webContentsId),
-    'app:set-enabled': async ({ enabled }) => {
-      await dependencies.echo.updateGeneral({ app: { enabled } });
-      return dependencies.state.getState();
-    },
+    'app:set-enabled': ({ enabled }) =>
+      serializeSettingsMutation(async () => {
+        await updateSettings(dependencies, { app: { enabled } });
+        return dependencies.state.getState();
+      }),
     'data:reset-all': async () => ({
       accepted: true,
       acknowledgementToken: await dependencies.requestDataReset(),
@@ -105,36 +117,8 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       dependencies.acknowledgeDataReset(acknowledgementToken);
       return { accepted: true };
     },
-    'settings:update': async (patch) => {
-      const before = dependencies.state.getSettings();
-      if (
-        patch.app?.launchAtLogin !== undefined &&
-        patch.app.launchAtLogin !== before.app.launchAtLogin
-      ) {
-        dependencies.launchAtLogin.set(patch.app.launchAtLogin);
-      }
-      if (patch.app?.enabled !== undefined) {
-        await dependencies.echo.updateGeneral(patch);
-      } else {
-        await dependencies.state.updateSettings(patch);
-      }
-      if (
-        patch.recording?.preferredMicrophoneId !== undefined &&
-        patch.recording.preferredMicrophoneId !== before.recording.preferredMicrophoneId
-      ) {
-        await dependencies.welcome.invalidateMicrophoneBinding();
-      }
-      if (
-        patch.transcription?.modelId !== undefined &&
-        patch.transcription.modelId !== before.transcription.modelId
-      ) {
-        await dependencies.welcome.invalidateModelSelection();
-      }
-      if (patch.app?.enabled !== undefined && patch.app.enabled !== before.app.enabled) {
-        await dependencies.welcome.invalidateActivationBinding();
-      }
-      return dependencies.state.getSettings();
-    },
+    'settings:update': (patch) =>
+      serializeSettingsMutation(() => updateSettings(dependencies, patch)),
     'profile:create': (input) => dependencies.echo.createProfile(input),
     'profile:update': ({ id, patch }) => dependencies.echo.updateProfile(id, patch),
     'profile:delete': ({ id }) => dependencies.echo.deleteProfile(id),
@@ -142,10 +126,10 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
     'provider:catalog': () => ({ providers: [...dependencies.providers.catalog()] }),
     'provider:pi-installation-status': () => dependencies.piInstallation.status(),
     'provider:pi-installation-save': ({ path }) => dependencies.piInstallation.save(path),
-    'provider:pi-installation-browse': (_request, context) => {
+    'provider:pi-installation-browse': async (_request, context) => {
       const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
       if (owner === null) throw new Error('Pi installation dialog owner is unavailable');
-      return dependencies.piInstallation.browse(owner);
+      return { path: await dependencies.piInstallation.browse(owner) };
     },
     'provider:config-save': ({ config }) =>
       dependencies.providerMutations.saveConfigWithCredentialState(config),
@@ -213,7 +197,7 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       return { maximized: window?.isMaximized() ?? false };
     },
     'window:close': async (_request, context) => {
-      await dependencies.windows.closeByWebContentsId(context.webContentsId);
+      await dependencies.windows.closeMainByWebContentsId(context.webContentsId);
       return { accepted: true };
     },
     'widget:ready': () => {
@@ -271,4 +255,46 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       return dependencies.vocabularyFiles.exportFile(owner);
     },
   };
+}
+
+async function updateSettings(
+  dependencies: HandlerDependencies,
+  patch: PublicSettingsPatch,
+): Promise<Settings> {
+  const before = dependencies.state.getSettings();
+  const microphoneChanged =
+    patch.recording?.preferredMicrophoneId !== undefined &&
+    patch.recording.preferredMicrophoneId !== before.recording.preferredMicrophoneId;
+  const modelChanged =
+    patch.transcription?.modelId !== undefined &&
+    patch.transcription.modelId !== before.transcription.modelId;
+  const enabledChanged =
+    patch.app?.enabled !== undefined && patch.app.enabled !== before.app.enabled;
+  const requestedLaunchAtLogin = patch.app?.launchAtLogin;
+
+  // Evidence is derived from the values being replaced. Clear it before committing so a failed
+  // invalidation can be retried with the same patch instead of becoming invisible after commit.
+  if (microphoneChanged) await dependencies.welcome.invalidateMicrophoneBinding();
+  if (modelChanged) await dependencies.welcome.invalidateModelSelection();
+  if (enabledChanged) await dependencies.welcome.invalidateActivationBinding();
+
+  // Reconcile every explicit request, even when it matches persisted settings. This repairs an OS
+  // state whose compensation failed after an earlier settings write failure.
+  if (requestedLaunchAtLogin !== undefined) {
+    dependencies.launchAtLogin.set(requestedLaunchAtLogin);
+  }
+  try {
+    if (patch.app?.enabled !== undefined) await dependencies.echo.updateGeneral(patch);
+    else await dependencies.state.updateSettings(patch);
+  } catch (error: unknown) {
+    if (requestedLaunchAtLogin !== undefined) {
+      try {
+        dependencies.launchAtLogin.set(before.app.launchAtLogin);
+      } catch {
+        // Preserve the settings failure. A later mutation/restart reconciliation retries the OS state.
+      }
+    }
+    throw error;
+  }
+  return dependencies.state.getSettings();
 }

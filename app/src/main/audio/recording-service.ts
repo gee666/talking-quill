@@ -29,7 +29,6 @@ interface ActiveDictation extends DictationCapture {
 }
 
 interface StopInFlight {
-  readonly captureId: string;
   readonly promise: Promise<boolean>;
 }
 
@@ -43,6 +42,8 @@ export class RecordingService {
   readonly #removeStopListener: () => void;
   #captureWebContents: WebContents | null = null;
   #activeCaptureId: string | null = null;
+  #activeCaptureKind: 'dictation' | 'test' | null = null;
+  #pendingDictationGeneration: number | null = null;
   #dictation: ActiveDictation | null = null;
   #drainingDictation: ActiveDictation | null = null;
   #stopInFlight: StopInFlight | null = null;
@@ -110,26 +111,31 @@ export class RecordingService {
       this.#devices = devices;
       const preferred = this.#settings.get().recording.preferredMicrophoneId;
       if (preferred !== null && !devices.some((device) => device.deviceId === preferred)) {
-        this.#onMicrophoneUnavailable?.();
+        this.#notifyMicrophoneUnavailable();
       }
       this.#publishDeviceSnapshot();
     });
-    this.#removeStopListener = capture.onUnexpectedStop((captureId) => {
+    this.#removeStopListener = capture.onUnexpectedStop((captureId, reason) => {
       if (captureId !== this.#activeCaptureId) return;
       const dictation = this.#dictation;
       this.#activeCaptureId = null;
+      this.#activeCaptureKind = null;
       this.#dictation = null;
       this.#clearOwner();
       this.#permission.release(captureId);
-      this.#onMicrophoneUnavailable?.();
+      if (reason === 'device-unavailable') this.#notifyMicrophoneUnavailable();
       if (dictation !== null) {
-        dictation.callbacks.onUnexpectedStop('device-unavailable');
+        try {
+          dictation.callbacks.onUnexpectedStop(reason);
+        } catch {
+          // Local capture ownership is already released; consumer failure cannot undo cleanup.
+        }
         return;
       }
       this.#setState({
         status: 'unavailable',
         permission: this.#permission.getStatus(),
-        reason: 'device-unavailable',
+        reason,
       });
     });
   }
@@ -168,7 +174,11 @@ export class RecordingService {
   }
 
   async startTest(ownerWebContents: WebContents | null): Promise<MicrophoneTestState> {
-    if (this.#dictation !== null) {
+    if (
+      this.#pendingDictationGeneration !== null ||
+      this.#activeCaptureKind === 'dictation' ||
+      this.#dictation !== null
+    ) {
       return {
         status: 'unavailable',
         permission: this.#permission.getStatus(),
@@ -205,6 +215,7 @@ export class RecordingService {
       const captureId = randomUUID();
       const preferredMicrophoneId = this.#settings.get().recording.preferredMicrophoneId;
       this.#activeCaptureId = captureId;
+      this.#activeCaptureKind = 'test';
       this.#permission.authorize(
         captureWebContents.id,
         captureId,
@@ -219,15 +230,12 @@ export class RecordingService {
           await this.#stopActive();
           return;
         }
-        await this.#activateWithDeviceRefresh(
+        const activated = await this.#activateWithDeviceRefresh(
           captureWebContents.id,
           captureId,
           operationGeneration,
         );
-        if (
-          operationGeneration !== this.#operationGeneration ||
-          !this.#hasOwner(ownerWebContents.id)
-        ) {
+        if (!activated || !this.#hasOwner(ownerWebContents.id)) {
           await this.#stopActive();
           return;
         }
@@ -255,85 +263,120 @@ export class RecordingService {
 
   async startDictation(callbacks: DictationCaptureCallbacks): Promise<DictationCapture> {
     const operationGeneration = ++this.#operationGeneration;
+    this.#pendingDictationGeneration = operationGeneration;
     const previousStop = this.#stopActive();
     const result: { value: DictationCapture | null } = { value: null };
-    await this.#enqueue(async () => {
-      if (this.#disposed || operationGeneration !== this.#operationGeneration) return;
-      if (!(await previousStop) || operationGeneration !== this.#operationGeneration) return;
-      if (this.#state.status === 'active' || this.#state.status === 'starting') {
-        this.#setState({ status: 'idle', permission: this.#permission.getStatus() });
-      }
-      const captureWebContents = this.#captureWebContents;
-      if (captureWebContents === null || captureWebContents.isDestroyed()) {
-        throw new CaptureClientError('capture-unavailable');
-      }
-      const status = this.#permission.getStatus();
-      if (status === 'denied' || status === 'restricted') {
-        throw new CaptureClientError('permission-denied');
-      }
-      const captureId = randomUUID();
-      const preferredMicrophoneId = this.#settings.get().recording.preferredMicrophoneId;
-      this.#activeCaptureId = captureId;
-      this.#permission.authorize(
-        captureWebContents.id,
-        captureId,
-        preferredMicrophoneId === null ? 1 : 2,
-      );
-      try {
-        const started = await this.#capture.start(preferredMicrophoneId, captureId);
-        if (operationGeneration !== this.#operationGeneration) {
-          await this.#stopActive();
-          return;
+    try {
+      await this.#enqueue(async () => {
+        if (this.#disposed || operationGeneration !== this.#operationGeneration) return;
+        if (!(await previousStop) || operationGeneration !== this.#operationGeneration) return;
+        if (this.#state.status === 'active' || this.#state.status === 'starting') {
+          this.#setState({ status: 'idle', permission: this.#permission.getStatus() });
         }
-        const dictation: ActiveDictation = {
-          captureId,
-          activeMicrophoneId: started.activeMicrophoneId,
-          callbacks,
-        };
-        this.#dictation = dictation;
-        await this.#activateWithDeviceRefresh(
-          captureWebContents.id,
-          captureId,
-          operationGeneration,
-        );
-        if (operationGeneration !== this.#operationGeneration) {
-          await this.#stopActive();
-          return;
-        }
-        result.value = { captureId, activeMicrophoneId: started.activeMicrophoneId };
-      } catch (error: unknown) {
-        const policyDenied =
-          error instanceof CaptureClientError &&
-          error.code === 'permission-denied' &&
-          this.#permission.takePolicyDenial(captureId);
-        await this.#stopActive();
-        if (policyDenied) {
-          console.error('Talking Quill microphone request rejected by application policy', {
-            code: 'MICROPHONE_POLICY_DENIED',
-          });
+        const captureWebContents = this.#captureWebContents;
+        if (captureWebContents === null || captureWebContents.isDestroyed()) {
           throw new CaptureClientError('capture-unavailable');
         }
-        throw error;
+        const status = this.#permission.getStatus();
+        if (status === 'denied' || status === 'restricted') {
+          throw new CaptureClientError('permission-denied');
+        }
+        const captureId = randomUUID();
+        const preferredMicrophoneId = this.#settings.get().recording.preferredMicrophoneId;
+        this.#activeCaptureId = captureId;
+        this.#activeCaptureKind = 'dictation';
+        this.#permission.authorize(
+          captureWebContents.id,
+          captureId,
+          preferredMicrophoneId === null ? 1 : 2,
+        );
+        try {
+          const started = await this.#capture.start(preferredMicrophoneId, captureId);
+          if (operationGeneration !== this.#operationGeneration) {
+            await this.#stopActive();
+            return;
+          }
+          const dictation: ActiveDictation = {
+            captureId,
+            activeMicrophoneId: started.activeMicrophoneId,
+            callbacks,
+          };
+          this.#dictation = dictation;
+          const activated = await this.#activateWithDeviceRefresh(
+            captureWebContents.id,
+            captureId,
+            operationGeneration,
+          );
+          if (!activated || this.#dictation !== dictation) {
+            await this.#stopActive();
+            return;
+          }
+          result.value = { captureId, activeMicrophoneId: started.activeMicrophoneId };
+        } catch (error: unknown) {
+          const policyDenied =
+            error instanceof CaptureClientError &&
+            error.code === 'permission-denied' &&
+            this.#permission.takePolicyDenial(captureId);
+          await this.#stopActive();
+          if (policyDenied) {
+            console.error('Talking Quill microphone request rejected by application policy', {
+              code: 'MICROPHONE_POLICY_DENIED',
+            });
+            throw new CaptureClientError('capture-unavailable');
+          }
+          throw error;
+        }
+      });
+    } finally {
+      if (this.#pendingDictationGeneration === operationGeneration) {
+        this.#pendingDictationGeneration = null;
       }
-    });
+    }
     if (result.value === null) throw new CaptureClientError('capture-unavailable');
     return result.value;
   }
 
   async stopDictation(captureId?: string): Promise<void> {
-    if (
-      captureId !== undefined &&
-      this.#dictation?.captureId !== captureId &&
-      this.#drainingDictation?.captureId !== captureId
-    ) {
+    const activeDictationId =
+      this.#activeCaptureKind === 'dictation' ? this.#activeCaptureId : null;
+    const drainingDictationId = this.#drainingDictation?.captureId ?? null;
+    if (captureId !== undefined) {
+      if (captureId === drainingDictationId) {
+        await this.#stopInFlight?.promise;
+        return;
+      }
+      if (captureId !== activeDictationId) return;
+    } else if (activeDictationId === null) {
+      if (this.#pendingDictationGeneration !== null) {
+        const priorStop = this.#stopInFlight?.promise;
+        const cancellationGeneration = ++this.#operationGeneration;
+        this.#pendingDictationGeneration = null;
+        const safelyStopped = priorStop === undefined || (await priorStop);
+        if (
+          safelyStopped &&
+          cancellationGeneration === this.#operationGeneration &&
+          (this.#state.status === 'active' || this.#state.status === 'starting')
+        ) {
+          this.#setState({ status: 'idle', permission: this.#permission.getStatus() });
+        }
+      } else if (drainingDictationId !== null) {
+        await this.#stopInFlight?.promise;
+      }
       return;
     }
     ++this.#operationGeneration;
+    this.#pendingDictationGeneration = null;
     await this.#stopActive();
   }
 
   async stopTest(ownerWebContentsId?: number): Promise<MicrophoneTestState> {
-    if (this.#dictation !== null) return this.getState();
+    if (
+      this.#pendingDictationGeneration !== null ||
+      this.#activeCaptureKind === 'dictation' ||
+      this.#dictation !== null
+    ) {
+      return this.getState();
+    }
     if (
       ownerWebContentsId !== undefined &&
       this.#ownerWebContents !== null &&
@@ -374,7 +417,7 @@ export class RecordingService {
     webContentsId: number,
     captureId: string,
     operationGeneration: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.#permission.seal(captureId);
     await this.#capture.activate(captureId);
     if (
@@ -382,7 +425,7 @@ export class RecordingService {
       operationGeneration !== this.#operationGeneration ||
       captureId !== this.#activeCaptureId
     ) {
-      return;
+      return false;
     }
     this.#permission.authorizeEnumeration(webContentsId, captureId);
     this.#authorizedDeviceRefreshCaptureId = captureId;
@@ -392,6 +435,7 @@ export class RecordingService {
       }
       this.#permission.seal(captureId);
     });
+    return true;
   }
 
   async #refreshDevices(
@@ -425,6 +469,7 @@ export class RecordingService {
     if (inFlight !== null) return inFlight.promise;
     const captureId = this.#activeCaptureId;
     const dictation = this.#dictation;
+    this.#activeCaptureKind = null;
     this.#dictation = null;
     this.#clearOwner();
     if (captureId === null) return Promise.resolve(true);
@@ -433,7 +478,7 @@ export class RecordingService {
     this.#permission.release(captureId);
 
     const promise = this.#stopCapture(captureId);
-    const stop = { captureId, promise };
+    const stop = { promise };
     this.#stopInFlight = stop;
     const clearStop = () => {
       if (this.#stopInFlight === stop) this.#stopInFlight = null;
@@ -479,6 +524,7 @@ export class RecordingService {
       }
     }
     this.#activeCaptureId = null;
+    this.#activeCaptureKind = null;
     this.#dictation = null;
     this.#drainingDictation = null;
     this.#clearOwner();
@@ -585,9 +631,21 @@ export class RecordingService {
     });
   }
 
+  #notifyMicrophoneUnavailable(): void {
+    try {
+      this.#onMicrophoneUnavailable?.();
+    } catch {
+      // Evidence invalidation is ancillary to releasing the failed capture.
+    }
+  }
+
   #setState(state: MicrophoneTestState): void {
     this.#state = state;
-    this.#events.send('recording:test-state-changed', state);
+    try {
+      this.#events.send('recording:test-state-changed', state);
+    } catch {
+      // State remains authoritative if its renderer disappeared during publication.
+    }
   }
 
   async #enqueue(operation: () => Promise<void>): Promise<void> {

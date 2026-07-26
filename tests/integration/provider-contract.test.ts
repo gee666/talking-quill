@@ -176,13 +176,15 @@ describe('OpenAI-compatible provider contract', () => {
       const start = server.requests.length;
       const credential = preset.auth === 'none' ? null : `key-${preset.id}`;
       const selectedModel =
-        preset.modelList.kind === 'static'
-          ? (preset.defaultModel ?? preset.modelList.models[0]?.id ?? 'gpt-test')
-          : 'gpt-test';
+        preset.id === 'textgenwebui'
+          ? null
+          : preset.modelList.kind === 'static'
+            ? (preset.defaultModel ?? preset.modelList.models[0]?.id ?? 'gpt-test')
+            : 'gpt-test';
       const config: ProviderConfig = {
         providerId: preset.id,
         ...(preset.endpoint.kind === 'configurable' ? { baseUrl: server.origin } : {}),
-        modelId: selectedModel,
+        ...(selectedModel === null ? {} : { modelId: selectedModel }),
       };
       const provider = registry.get(preset.id);
       const validationConfig: ProviderConfig = config;
@@ -196,7 +198,12 @@ describe('OpenAI-compatible provider contract', () => {
       await expect(
         provider.cleanTranscript(
           { config, credential },
-          { input: 'raw transcript', modelId: 'gpt-test', temperature: 0.2, maxOutputTokens: 512 },
+          {
+            input: 'raw transcript',
+            ...(preset.id === 'textgenwebui' ? {} : { modelId: 'gpt-test' }),
+            temperature: 0.2,
+            maxOutputTokens: 512,
+          },
           AbortSignal.timeout(2_000),
         ),
       ).resolves.toBe('clean response');
@@ -214,6 +221,7 @@ describe('OpenAI-compatible provider contract', () => {
         expect(completion?.body).toHaveProperty('max_completion_tokens');
         expect(completion?.body).not.toHaveProperty('max_tokens');
       }
+      if (preset.id === 'textgenwebui') expect(completion?.body).not.toHaveProperty('model');
       if (preset.auth === 'none') expect(completion?.headers.authorization).toBeUndefined();
       else expect(completion?.headers.authorization).toBe(`Bearer key-${preset.id}`);
       const modelRequest = captured.find((request) => request.method === 'GET');
@@ -225,6 +233,61 @@ describe('OpenAI-compatible provider contract', () => {
         }
       }
     }
+  });
+
+  it('keeps Text Generation WebUI model-less while accepting explicit legacy overrides', async () => {
+    const server = await startMockProviderServer((_request, response) =>
+      sendJson(response, {
+        choices: [{ finish_reason: 'stop', message: { content: 'clean response' } }],
+      }),
+    );
+    servers.push(server);
+    const provider = new ProviderRegistry({
+      transport: new PinnedJsonTransport(),
+      endpointOverrides: { textgenwebui: server.origin },
+    }).get('textgenwebui');
+    const invocation = {
+      config: { providerId: 'textgenwebui' as const, baseUrl: server.origin },
+      credential: null,
+    };
+
+    await expect(provider.validate(invocation, AbortSignal.timeout(2_000))).resolves.toMatchObject({
+      ok: true,
+      destination: 'local',
+      modelCount: 0,
+    });
+    expect(server.requests.at(-1)?.body).not.toHaveProperty('model');
+    await expect(
+      provider.cleanTranscript(
+        invocation,
+        { input: 'raw', modelId: 'manual-override' },
+        AbortSignal.timeout(2_000),
+      ),
+    ).resolves.toBe('clean response');
+    expect(server.requests.at(-1)?.body).toMatchObject({ model: 'manual-override' });
+  });
+
+  it('does not let preset defaults bypass required model selection', async () => {
+    const server = await startMockProviderServer((_request, response) =>
+      sendJson(response, { data: [{ id: 'gpt-4.1-nano', owned_by: 'openai' }] }),
+    );
+    servers.push(server);
+    const provider = new ProviderRegistry({
+      transport: new PinnedJsonTransport(),
+      endpointOverrides: { openai: server.origin },
+    }).get('openai');
+    const invocation = {
+      config: { providerId: 'openai' as const },
+      credential: 'test-secret',
+    };
+
+    await expect(provider.validate(invocation, AbortSignal.timeout(2_000))).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+    await expect(
+      provider.cleanTranscript(invocation, { input: 'raw' }, AbortSignal.timeout(2_000)),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    expect(server.requests.every(({ method }) => method === 'GET')).toBe(true);
   });
 
   it('uses the OpenAI Responses API shape and the declarative endpoint normalizers', async () => {
@@ -375,6 +438,70 @@ describe('OpenAI-compatible provider contract', () => {
     ).resolves.toBe('cleaned transcript');
   });
 
+  it('accepts Responses token exhaustion only for connection validation', async () => {
+    const server = await startMockProviderServer((request, response) => {
+      if (request.method === 'GET') {
+        sendJson(response, { data: [{ id: 'gpt-5-test', owned_by: 'openai' }] });
+      } else {
+        sendJson(response, {
+          status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' },
+          output: [],
+        });
+      }
+    });
+    servers.push(server);
+    const provider = new ProviderRegistry({
+      transport: new PinnedJsonTransport(),
+      endpointOverrides: { openai: server.origin },
+    }).get('openai');
+    const invocation = {
+      config: { providerId: 'openai' as const, modelId: 'gpt-5-test' },
+      credential: 'test-secret',
+    };
+
+    await expect(provider.validate(invocation, AbortSignal.timeout(2_000))).resolves.toMatchObject({
+      ok: true,
+      destination: 'local',
+    });
+    await expect(
+      provider.cleanTranscript(invocation, { input: 'raw' }, AbortSignal.timeout(2_000)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('rejects explicitly truncated chat-completions output', async () => {
+    const server = await startMockProviderServer((_request, response) =>
+      sendJson(response, {
+        choices: [
+          {
+            finish_reason: 'length',
+            message: { role: 'assistant', content: 'partial transcript' },
+          },
+        ],
+      }),
+    );
+    servers.push(server);
+    const provider = new ProviderRegistry({
+      transport: new PinnedJsonTransport(),
+      endpointOverrides: { 'generic-openai': server.origin },
+    }).get('generic-openai');
+
+    await expect(
+      provider.cleanTranscript(
+        {
+          config: {
+            providerId: 'generic-openai',
+            baseUrl: server.origin,
+            modelId: 'gpt-test',
+          },
+          credential: null,
+        },
+        { input: 'raw' },
+        AbortSignal.timeout(2_000),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
   it('normalizes provider-specific model-list shapes and filters declaratively', async () => {
     await expect(
       listModelsFromMock('lmstudio', {
@@ -429,6 +556,12 @@ describe('OpenAI-compatible provider contract', () => {
         vision: 'unknown',
       },
     ]);
+    await expect(
+      listModelsFromMock('docker-model-runner', [
+        { tags: Array.from({ length: 6_000 }, (_, index) => `first/model-${String(index)}`) },
+        { tags: Array.from({ length: 6_000 }, (_, index) => `second/model-${String(index)}`) },
+      ]),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
     await expect(
       listModelsFromMock('lemonade', {
         data: [

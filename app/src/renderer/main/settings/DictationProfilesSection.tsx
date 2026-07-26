@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ActivationKey } from '../../../shared/helper/protocol';
+import { ActivationKeySchema, type ActivationKey } from '../../../shared/helper/protocol';
 import {
   GENERAL_PROFILE_ID,
   MAX_DICTATION_PROFILES,
@@ -12,8 +12,6 @@ import {
 } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Button, Card, Input, Select, Status, TextArea } from '../../design';
-
-const KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('') as ActivationKey[];
 
 export function DictationProfilesSection({
   settings,
@@ -157,7 +155,7 @@ function ProfileEditor({
           setDraft({ ...draft, activationKey: event.currentTarget.value as ActivationKey })
         }
       >
-        {KEYS.map((key) => (
+        {ActivationKeySchema.options.map((key) => (
           <option key={key} value={key}>
             {key}
           </option>
@@ -253,7 +251,7 @@ function withoutId(profile: DictationProfile): DictationProfileCreate {
 
 function firstAvailableKey(profiles: readonly DictationProfile[]): ActivationKey {
   return (
-    KEYS.find(
+    ActivationKeySchema.options.find(
       (key) => !profiles.some((profile) => profile.activationKey === key && !profile.shift),
     ) ?? 'A'
   );

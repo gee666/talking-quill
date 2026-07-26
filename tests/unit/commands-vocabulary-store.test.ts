@@ -34,8 +34,15 @@ describe('commands and vocabulary persistence', () => {
     await expect(
       commands.create({ trigger: 'launch dashboart', snippet: 'other' }),
     ).rejects.toThrow('too similar');
-    const updated = await commands.update(created.id, { snippet: 'new text' });
-    expect(commands.match('LAUNCH DASHBOARD!')?.command.snippet).toBe('new text');
+    await commands.update(created.id, { snippet: 'new text' });
+    const updated = await commands.update(created.id, {
+      trigger: undefined,
+      snippet: 'explicit undefined stays omitted',
+    });
+    expect(updated.trigger).toBe('Launch dashboard');
+    expect(commands.match('LAUNCH DASHBOARD!')?.command.snippet).toBe(
+      'explicit undefined stays omitted',
+    );
     await settings.flush();
     expect(settings.get().voiceCommands).toEqual([updated]);
     expect(await commands.delete(created.id)).toBe(true);

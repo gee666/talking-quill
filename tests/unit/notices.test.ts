@@ -1,7 +1,8 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NoticesService } from '../../app/src/main/info/notices-service';
+import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 describe('third-party notices', () => {
   it('ships bounded generated dependency, model, and MIT attribution', async () => {
@@ -33,5 +34,34 @@ describe('third-party notices', () => {
     expect(text).not.toContain('No separate LICENSE/NOTICE file was present');
     expect(text).not.toContain('absence requires legal review');
     expect(await readFile(path, 'utf8')).toBe(text);
+  });
+
+  it('deduplicates and caches concurrent reads of the immutable notices resource', async () => {
+    const directory = await createTestDirectory('notices-cache');
+    try {
+      const path = join(directory, 'notices.txt');
+      await writeFile(path, 'first notice');
+      const service = new NoticesService(path);
+      await expect(Promise.all([service.read(), service.read(), service.read()])).resolves.toEqual([
+        'first notice',
+        'first notice',
+        'first notice',
+      ]);
+      await writeFile(path, 'modified after immutable read');
+      await expect(service.read()).resolves.toBe('first notice');
+    } finally {
+      await removeTestDirectory(directory);
+    }
+  });
+
+  it('rejects a notices resource larger than the actual read bound', async () => {
+    const directory = await createTestDirectory('notices-bound');
+    try {
+      const path = join(directory, 'notices.txt');
+      await writeFile(path, Buffer.alloc(2_000_001, 97));
+      await expect(new NoticesService(path).read()).rejects.toThrow('Notices resource is invalid');
+    } finally {
+      await removeTestDirectory(directory);
+    }
   });
 });

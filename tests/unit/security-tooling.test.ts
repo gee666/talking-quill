@@ -95,7 +95,15 @@ describe('reproducible security gate policy', () => {
     expect(trustVerifier).toContain("['rev-parse', `origin/${defaultBranch}^{commit}`]");
     expect(trustVerifier).toContain('must equal the protected default-branch head');
     expect(candidate).toContain('--prepackaged');
-    expect(candidate).toContain('Do not execute candidate code after signing credentials');
+    expect(candidate).toContain("NODE_OPTIONS: ''");
+    expect(
+      candidate.indexOf(
+        'node scripts/artifact-provenance.mjs --verify',
+        candidate.indexOf('\n  package:'),
+      ),
+    ).toBeLessThan(
+      candidate.indexOf('Verify Windows Authenticode chain', candidate.indexOf('\n  package:')),
+    );
     expect(trustVerifier).toContain("['status', '--porcelain=v1', '--untracked-files=normal']");
     expect(trustVerifier).toContain("['verify-tag', '--raw', rawTag]");
   });
@@ -121,10 +129,10 @@ describe('reproducible security gate policy', () => {
   });
 
   it('wires exact final-artifact requirements for package and directory-only gates', async () => {
-    const [releaseWorkflow, directoryWorkflow, packageRunner] = await Promise.all([
+    const [releaseWorkflow, directoryWorkflow, { createPackagePlan }] = await Promise.all([
       readFile('.github/workflows/packaged-smoke.yml', 'utf8'),
       readFile('.github/workflows/packaged-gate.yml', 'utf8'),
-      readFile('scripts/run-package.mjs', 'utf8'),
+      import('../../scripts/run-package.mjs'),
     ]);
     expect(releaseWorkflow.match(/artifactRequirement: nsis/gu)).toHaveLength(2);
     expect(releaseWorkflow.match(/artifactRequirement: dmg-zip/gu)).toHaveLength(2);
@@ -136,11 +144,21 @@ describe('reproducible security gate policy', () => {
     expect(releaseWorkflow).not.toContain('Talking-Quill-*');
     expect(releaseWorkflow).not.toContain('path: release/*');
     expect(directoryWorkflow).toContain('TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: none');
-    expect(packageRunner).toContain("'win-dir': 'none'");
-    expect(packageRunner).toContain("'win-arm64': 'nsis'");
-    expect(packageRunner).toContain("'mac-arm64': 'dmg-zip'");
-    expect(packageRunner).toContain('TALKING_QUILL_PACKAGE_TARGET: packagePlatforms[target]');
-    expect(packageRunner).toContain('TALKING_QUILL_PACKAGE_ARCH: packageArchitectures[target]');
+    expect(createPackagePlan('win-dir')).toMatchObject({
+      artifactRequirement: 'none',
+      platform: 'win',
+      architecture: 'x64',
+    });
+    expect(createPackagePlan('win-arm64')).toMatchObject({
+      artifactRequirement: 'nsis',
+      platform: 'win',
+      architecture: 'arm64',
+    });
+    expect(createPackagePlan('mac-arm64')).toMatchObject({
+      artifactRequirement: 'dmg-zip',
+      platform: 'mac',
+      architecture: 'arm64',
+    });
   });
 
   it('keeps dependency policy explicit and forbids advisory-ignore flags', async () => {
@@ -153,6 +171,13 @@ describe('reproducible security gate policy', () => {
     expect(nodeAudit).toContain('counts.high + counts.critical');
     expect(rustAudit).toContain("'--deny', 'warnings'");
     expect(rustAudit).not.toContain("'--ignore'");
+    const { CARGO_AUDIT_VERSION, isExpectedCargoAuditVersion } =
+      await import('../../scripts/security-tool-versions.mjs');
+    expect(CARGO_AUDIT_VERSION).toBe('0.22.2');
+    expect(isExpectedCargoAuditVersion('cargo-audit-audit 0.22.2\n')).toBe(true);
+    expect(isExpectedCargoAuditVersion('cargo-audit 0.22.2')).toBe(false);
+    expect(isExpectedCargoAuditVersion('not-cargo-audit 0.22.2')).toBe(false);
+    expect(isExpectedCargoAuditVersion('cargo-audit 1.0.22.2')).toBe(false);
     expect(JSON.parse(manifest)).toMatchObject({
       packageManager: 'pnpm@11.13.0',
       scripts: {
@@ -172,6 +197,10 @@ describe('reproducible security gate policy', () => {
       "$ExpectedSha256 = 'DA6458E8864AF553807DE1C46A7A8EAC0880BD6B99BA56288E87E86A45AF884F'",
     );
     expect(runner).toContain("--log-opts='--all'");
+    expect(runner).toContain('Remove-Item -Path $Executable');
+    expect(runner.indexOf('Get-FileHash $Archive')).toBeLessThan(
+      runner.indexOf('Expand-Archive -Path $Archive'),
+    );
     expect(workflow).toContain('run: ./scripts/run-gitleaks.ps1');
     expect(config).not.toMatch(/paths\s*=|commits\s*=/u);
     expect(config).toContain(['^sk', 'myApiKeyToAccessMyChromaInstance$'].join('-'));
@@ -185,11 +214,15 @@ describe('reproducible security gate policy', () => {
     ) as { schemaVersion: number; entries: Record<string, unknown>[] };
     expect(() => validateSecretHistoryAllowlist(allowlist)).not.toThrow();
     expect(allowlist.schemaVersion).toBe(2);
-    expect(allowlist.entries).toHaveLength(35);
+    expect(allowlist.entries).toHaveLength(2);
+    expect(allowlist.entries[0]).toMatchObject({
+      path: 'scripts/secret-rules.mjs',
+      classification: 'reviewed-nonsecret',
+    });
     expect(
       new Set(allowlist.entries.map(({ blobOid, rule }) => `${String(blobOid)}:${String(rule)}`))
         .size,
-    ).toBe(35);
+    ).toBe(2);
 
     const extra = structuredClone(allowlist);
     const first = extra.entries[0];

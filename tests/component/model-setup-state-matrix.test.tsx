@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable @typescript-eslint/require-await -- async mocks model the preload Promise API. */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModelSetup } from '../../app/src/renderer/main/setup/ModelSetup';
 import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
@@ -58,6 +59,87 @@ describe('model setup state matrix', () => {
         expect(screen.getByRole('button', { name: 'Retry download' })).toBeVisible();
     },
   );
+
+  it('prevents a cancel action from overlapping a pending pause', async () => {
+    const downloading = {
+      modelId: 'onnx-community/whisper-large-v3-turbo' as const,
+      state: 'downloading' as const,
+      downloadedBytes: 5,
+      totalBytes: 10,
+      detail: null,
+      repairable: false,
+    };
+    const paused = { ...downloading, state: 'paused' as const };
+    let resolvePause!: (status: typeof paused) => void;
+    const pause = vi.fn(
+      () =>
+        new Promise<typeof paused>((resolve) => {
+          resolvePause = resolve;
+        }),
+    );
+    const cancel = vi.fn();
+    Object.defineProperty(window, 'talkingQuill', {
+      configurable: true,
+      value: {
+        models: {
+          status: vi.fn(async () => downloading),
+          onProgress: vi.fn(() => () => undefined),
+          download: vi.fn(),
+          pause,
+          cancel,
+          retry: vi.fn(),
+          delete: vi.fn(),
+        },
+        settings: { update: vi.fn() },
+      },
+    });
+
+    render(<ModelSetup settings={structuredClone(DEFAULT_SETTINGS)} onSettingsSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause download' }));
+    expect(screen.getByRole('button', { name: 'Cancel download' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel download' }));
+    expect(cancel).not.toHaveBeenCalled();
+    await act(async () => resolvePause(paused));
+    expect(await screen.findByText('Download paused')).toBeVisible();
+  });
+
+  it('continues applying model actions after the StrictMode effect replay', async () => {
+    const status = {
+      modelId: 'onnx-community/whisper-large-v3-turbo' as const,
+      state: 'missing' as const,
+      downloadedBytes: 0,
+      totalBytes: 10,
+      detail: null,
+      repairable: false,
+    };
+    const ready = { ...status, state: 'ready' as const, downloadedBytes: 10 };
+    const download = vi.fn(async () => ready);
+    Object.defineProperty(window, 'talkingQuill', {
+      configurable: true,
+      value: {
+        models: {
+          status: vi.fn(async () => status),
+          onProgress: vi.fn(() => () => undefined),
+          download,
+          pause: vi.fn(),
+          cancel: vi.fn(),
+          retry: vi.fn(),
+          delete: vi.fn(),
+        },
+        settings: { update: vi.fn() },
+      },
+    });
+
+    render(
+      <StrictMode>
+        <ModelSetup settings={structuredClone(DEFAULT_SETTINGS)} onSettingsSaved={vi.fn()} />
+      </StrictMode>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Download model' }));
+
+    expect(await screen.findByText('Model ready for offline transcription')).toBeVisible();
+    expect(download).toHaveBeenCalledOnce();
+  });
 
   it('shows the safe phase-specific status detail instead of generic connection advice', async () => {
     const status = vi

@@ -115,7 +115,7 @@ describe('CaptureWindowClient', () => {
       rms: 0.1,
     });
     expect(test.port1.close).toHaveBeenCalledOnce();
-    expect(stopped).toHaveBeenCalledWith(captureId);
+    expect(stopped).toHaveBeenCalledWith(captureId, 'capture-unavailable');
   });
 
   it('fails closed on an invalid active PCM sample', async () => {
@@ -143,7 +143,62 @@ describe('CaptureWindowClient', () => {
       rms: 0.1,
     });
     expect(test.port1.close).toHaveBeenCalledOnce();
-    expect(stopped).toHaveBeenCalledWith(captureId);
+    expect(stopped).toHaveBeenCalledWith(captureId, 'capture-unavailable');
+  });
+
+  it('rejects a start whose capture stopped before its acknowledgement arrived', async () => {
+    const test = harness();
+    const captureId = randomUUID();
+    const stopped = vi.fn();
+    test.client.onUnexpectedStop(stopped);
+    const starting = test.client.start(null, captureId);
+    const command = lastCommand(test.port1);
+
+    test.port1.receive({
+      type: 'stream:stopped',
+      requestId: null,
+      captureId,
+      reason: 'error',
+    });
+    test.port1.receive({
+      type: 'stream:started',
+      requestId: command.requestId,
+      captureId,
+      sampleRate: 16_000,
+      channelCount: 1,
+      activeMicrophoneId: null,
+      preferredUnavailable: false,
+    });
+
+    await expect(starting).rejects.toMatchObject({ code: 'capture-unavailable' });
+    expect(stopped).toHaveBeenCalledWith(captureId, 'capture-unavailable');
+  });
+
+  it('maps device loss distinctly from renderer and transport failures', async () => {
+    const test = harness();
+    const captureId = randomUUID();
+    const stopped = vi.fn();
+    test.client.onUnexpectedStop(stopped);
+    const starting = test.client.start(null, captureId);
+    const command = lastCommand(test.port1);
+    test.port1.receive({
+      type: 'stream:started',
+      requestId: command.requestId,
+      captureId,
+      sampleRate: 16_000,
+      channelCount: 1,
+      activeMicrophoneId: null,
+      preferredUnavailable: false,
+    });
+    await starting;
+
+    test.port1.receive({
+      type: 'stream:stopped',
+      requestId: null,
+      captureId,
+      reason: 'device-lost',
+    });
+    expect(stopped).toHaveBeenCalledWith(captureId, 'device-unavailable');
   });
 
   it('forwards a final partial PCM frame before acknowledging stop', async () => {
@@ -210,10 +265,31 @@ describe('CaptureWindowClient', () => {
     await expect(pending).resolves.toEqual([]);
   });
 
-  it('rejects pending requests when the capture port closes', async () => {
+  it('rejects pending requests and notifies every observer when the capture port closes', async () => {
     const test = harness();
+    const captureId = randomUUID();
+    const starting = test.client.start(null, captureId);
+    const startCommand = lastCommand(test.port1);
+    test.port1.receive({
+      type: 'stream:started',
+      requestId: startCommand.requestId,
+      captureId,
+      sampleRate: 16_000,
+      channelCount: 1,
+      activeMicrophoneId: null,
+      preferredUnavailable: false,
+    });
+    await starting;
+    const laterObserver = vi.fn();
+    test.client.onUnexpectedStop(() => {
+      throw new Error('observer failed');
+    });
+    test.client.onUnexpectedStop(laterObserver);
     const pending = test.client.listDevices();
+
     test.port1.emit('close');
+
     await expect(pending).rejects.toBeInstanceOf(CaptureClientError);
+    expect(laterObserver).toHaveBeenCalledWith(captureId, 'capture-unavailable');
   });
 });

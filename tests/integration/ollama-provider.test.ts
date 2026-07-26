@@ -43,6 +43,7 @@ describe('native Ollama provider', () => {
       if (request.url === '/api/chat') {
         sendJson(response, {
           done: true,
+          done_reason: 'stop',
           message: { role: 'assistant', content: 'clean transcript' },
         });
         return;
@@ -134,6 +135,49 @@ describe('native Ollama provider', () => {
     expect(maximumActive).toBeGreaterThan(1);
     expect(maximumActive).toBeLessThanOrEqual(4);
     expect(models.map(({ id }) => id)).toEqual(names);
+  });
+
+  it('bypasses cached model details during explicit model refresh', async () => {
+    let showCalls = 0;
+    let contextWindow = 8_192;
+    const server = await startMockProviderServer((request, response) => {
+      if (request.url === '/api/tags') {
+        sendJson(response, { models: [{ name: 'refreshable-model' }] });
+      } else if (request.url === '/api/show') {
+        showCalls += 1;
+        sendJson(response, {
+          capabilities: ['completion'],
+          model_info: { 'model.context_length': contextWindow },
+        });
+      } else {
+        sendJson(response, {}, 404);
+      }
+    });
+    servers.push(server);
+    const provider = new OllamaProvider(new PinnedJsonTransport(), {
+      endpointOverride: server.origin,
+    });
+    const invocation = {
+      config: { providerId: 'ollama' as const, baseUrl: server.origin },
+      credential: null,
+    };
+
+    await expect(provider.listModels(invocation, AbortSignal.timeout(2_000))).resolves.toEqual([
+      {
+        id: 'refreshable-model',
+        name: 'refreshable-model',
+        contextWindow: 8_192,
+        vision: 'unsupported',
+      },
+    ]);
+    contextWindow = 32_768;
+    await expect(provider.listModels(invocation, AbortSignal.timeout(2_000))).resolves.toEqual([
+      expect.objectContaining({ contextWindow: 8_192 }),
+    ]);
+    await expect(
+      provider.listModels({ ...invocation, refreshModels: true }, AbortSignal.timeout(2_000)),
+    ).resolves.toEqual([expect.objectContaining({ contextWindow: 32_768 })]);
+    expect(showCalls).toBe(2);
   });
 
   it('aborts and drains peer detail requests before returning the first failure', async () => {
@@ -302,6 +346,14 @@ describe('native Ollama provider', () => {
     const invalidEnvelopes: readonly [string, unknown][] = [
       ['missing done', { message: { role: 'assistant', content: 'text' } }],
       ['done false', { done: false, message: { role: 'assistant', content: 'text' } }],
+      [
+        'explicit truncation',
+        {
+          done: true,
+          done_reason: 'length',
+          message: { role: 'assistant', content: 'partial text' },
+        },
+      ],
       ['wrong role', { done: true, message: { role: 'user', content: 'text' } }],
       ['missing message', { done: true }],
       ['malformed message', { done: true, message: 'assistant' }],

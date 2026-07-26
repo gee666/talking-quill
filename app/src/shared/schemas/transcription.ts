@@ -58,11 +58,13 @@ export const ModelProgressSchema = z
   })
   .strict();
 
+export const TranscriptionLanguageSchema = z.string().trim().min(1).max(80);
+
 export const TranscriptionOptionsSchema = z
   .object({
     modelId: WhisperModelIdSchema,
     sampleRate: z.literal(WHISPER_SAMPLE_RATE).default(WHISPER_SAMPLE_RATE),
-    language: z.string().trim().min(2).max(80).optional(),
+    language: TranscriptionLanguageSchema.optional(),
   })
   .strict();
 

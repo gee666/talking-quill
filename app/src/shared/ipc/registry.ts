@@ -54,7 +54,9 @@ import { WhisperModelIdSchema } from '../schemas/model-manifest';
 import {
   DestinationSchema,
   ModelInfoSchema,
+  PROVIDER_IDS,
   ProviderCatalogEntrySchema,
+  ProviderModelIdSchema,
   ProviderOperationIdSchema,
   RunnableProviderConfigSchema,
   ProviderValidationResultSchema,
@@ -74,6 +76,7 @@ import {
   isReservedBindingForAnotherProfile,
 } from '../schemas/dictation-profiles';
 import {
+  PiInstallationBrowseResultSchema,
   PiInstallationSaveRequestSchema,
   PiInstallationStatusSchema,
 } from '../schemas/pi-installation';
@@ -87,6 +90,13 @@ import { CapturePortDescriptorSchema } from './capture-port';
 
 const emptyRequest = z.object({}).strict();
 const acknowledgement = z.object({ accepted: z.literal(true) }).strict();
+const ProviderCatalogSchema = z
+  .array(ProviderCatalogEntrySchema)
+  .length(PROVIDER_IDS.length)
+  .refine(
+    (providers) => providers.every((provider, index) => provider.id === PROVIDER_IDS[index]),
+    'Provider catalog must contain every provider in canonical order',
+  );
 
 const defineInvoke = <
   const Roles extends readonly WindowRole[],
@@ -228,7 +238,7 @@ export const invokeRegistry = Object.freeze({
   'provider:catalog': defineInvoke({
     roles: ['main'] as const,
     request: emptyRequest,
-    response: z.object({ providers: z.array(ProviderCatalogEntrySchema).length(38) }).strict(),
+    response: z.object({ providers: ProviderCatalogSchema }).strict(),
   }),
   'provider:pi-installation-status': defineInvoke({
     roles: ['main'] as const,
@@ -243,7 +253,7 @@ export const invokeRegistry = Object.freeze({
   'provider:pi-installation-browse': defineInvoke({
     roles: ['main'] as const,
     request: emptyRequest,
-    response: PiInstallationStatusSchema,
+    response: PiInstallationBrowseResultSchema,
   }),
   'provider:config-save': defineInvoke({
     roles: ['main'] as const,
@@ -322,7 +332,7 @@ export const invokeRegistry = Object.freeze({
     response: z
       .object({
         providerId: RunnableProviderIdSchema,
-        modelId: z.string().min(1).max(512).nullable(),
+        modelId: ProviderModelIdSchema.nullable(),
         capability: VisionCapabilitySchema,
         manualTestAllowed: z.boolean(),
         screenPermission: z.enum(['granted', 'denied', 'unknown']),

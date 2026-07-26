@@ -19,11 +19,11 @@ export interface ArtifactProvenanceLink {
 export interface ArtifactProvenanceManifest {
   readonly schemaVersion: 1;
   readonly sourceCommit: string;
+  readonly sourceTreeSha256: string;
   readonly package: ArtifactIdentity & { readonly root: string };
   readonly entries: readonly (ArtifactProvenanceFile | ArtifactProvenanceLink)[];
 }
 
-export const repositoryRoot: string;
 export const artifactProvenanceManifestPath: string;
 export function writeArtifactProvenanceManifest(
   options: ArtifactIdentity & {
@@ -32,4 +32,7 @@ export function writeArtifactProvenanceManifest(
   },
 ): Promise<ArtifactProvenanceManifest>;
 export function verifyArtifactProvenanceManifest(): Promise<ArtifactProvenanceManifest>;
+export function validateArtifactProvenanceManifest(
+  manifest: unknown,
+): asserts manifest is ArtifactProvenanceManifest;
 export function artifactUploadPaths(manifest: ArtifactProvenanceManifest): readonly string[];

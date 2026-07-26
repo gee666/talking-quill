@@ -2,6 +2,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import logoDark from '../../../../assets/logo-dark.png';
 import logoLight from '../../../../assets/logo-light.png';
+import { ECHO_HOLD_THRESHOLD_MS } from '../../../shared/constants/echo-session';
 import type { AppState } from '../../../shared/schemas/app-state';
 import { GENERAL_PROFILE_ID } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
@@ -11,6 +12,7 @@ import { GeneralSection } from '../settings/GeneralSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { ModelSetup } from '../setup/ModelSetup';
 import { GeneralShortcutSetup } from './GeneralShortcutSetup';
+import { publicErrorMessage } from '../public-error';
 
 const SmartProcessingSection = lazy(async () => {
   const module = await import('../SmartProcessingSection');
@@ -83,7 +85,7 @@ export function WelcomeWizard({
         setOptimisticStep({ step: saved.lastStep, source: settings.welcome });
       }
     } catch (cause: unknown) {
-      setError(actionableMessage(cause, 'Welcome progress could not be saved.'));
+      setError(publicErrorMessage(cause, 'Welcome progress could not be saved.'));
     } finally {
       setSaving(false);
     }
@@ -101,7 +103,7 @@ export function WelcomeWizard({
         setOptimisticStep({ step: welcome.lastStep, source: settings.welcome });
       }
     } catch (cause: unknown) {
-      setError(actionableMessage(cause, 'Raw processing preference could not be saved.'));
+      setError(publicErrorMessage(cause, 'Raw processing preference could not be saved.'));
     } finally {
       setSaving(false);
     }
@@ -113,7 +115,7 @@ export function WelcomeWizard({
       const welcome = await window.talkingQuill.welcome.complete();
       onComplete(welcome);
     } catch (cause: unknown) {
-      setError(actionableMessage(cause, 'Setup completion could not be saved.'));
+      setError(publicErrorMessage(cause, 'Setup completion could not be saved.'));
     } finally {
       setSaving(false);
     }
@@ -323,7 +325,7 @@ export function WelcomeWizard({
         </p>
         <ul>
           <li>Release quickly for Quick Dictation.</li>
-          <li>Hold for 600 ms for Extended Dictation.</li>
+          <li>Hold for {String(ECHO_HOLD_THRESHOLD_MS)} ms for Extended Dictation.</li>
           <li>Enter submits; Escape cancels; each profile uses its configured mode.</li>
         </ul>
         <Status tone={state.modelReady && state.helper.status === 'ready' ? 'success' : 'warning'}>
@@ -334,11 +336,4 @@ export function WelcomeWizard({
       </Card>
     );
   }
-}
-
-function actionableMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof Error && cause.message.length > 0 && cause.message.length <= 240) {
-    return cause.message;
-  }
-  return fallback;
 }

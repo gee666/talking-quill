@@ -280,6 +280,29 @@ describe('WelcomeService', () => {
     expect(store.get().welcome.microphoneEvidence).toBeNull();
   });
 
+  it('revalidates persisted microphone evidence against the current policy at completion', async () => {
+    const root = await createTestDirectory('welcome-evidence-policy');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    const service = new WelcomeService(store, ready());
+    for (const step of [2, 3, 4, 5, 6] as const) await service.setStep(step);
+    const evidence = store.get().welcome.microphoneEvidence;
+    if (evidence == null) throw new Error('Expected microphone evidence');
+    await store.update({
+      welcome: {
+        microphoneEvidence: {
+          ...evidence,
+          observedRms: 0.001,
+          usableThreshold: 0.000_1,
+        },
+      },
+    });
+
+    await expect(service.complete()).rejects.toThrow('Microphone setup');
+    expect(service.state().completedAt).toBeNull();
+  });
+
   it('rejects invalid step values before writing', async () => {
     const root = await createTestDirectory('welcome-invalid');
     roots.push(root);

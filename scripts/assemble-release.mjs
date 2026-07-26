@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
+import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
 import { parseReleaseTag, releaseConfig, repositoryRoot } from './release-config.mjs';
 
 const args = process.argv.slice(2).filter((argument) => argument !== '--');
@@ -40,12 +41,16 @@ for (const name of actualInputs) {
 const provenance = provenanceNames.map((name) => {
   const value = JSON.parse(readFileSync(resolve(directory, name), 'utf8'));
   const expectedIdentity = /^provenance-(win|mac)-(x64|arm64)\.json$/u.exec(name);
+  try {
+    validateArtifactProvenanceManifest(value);
+  } catch (error) {
+    throw new Error(`Provenance schema mismatch: ${name}`, { cause: error });
+  }
   if (
-    value?.schemaVersion !== 1 ||
     value.sourceCommit !== commit ||
-    value.package?.version !== version ||
-    value.package?.platform !== expectedIdentity?.[1] ||
-    value.package?.arch !== expectedIdentity?.[2]
+    value.package.version !== version ||
+    value.package.platform !== expectedIdentity?.[1] ||
+    value.package.arch !== expectedIdentity?.[2]
   )
     throw new Error(`Provenance identity mismatch: ${name}`);
   const entries = value.entries.filter((entry) => entry.role === 'final-artifact');

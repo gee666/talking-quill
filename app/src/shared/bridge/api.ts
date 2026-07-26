@@ -131,7 +131,7 @@ export interface MainApi {
     catalog(): Promise<readonly ProviderCatalogEntry[]>;
     piInstallationStatus(): Promise<PiInstallationStatus>;
     savePiInstallation(path: string | null): Promise<PiInstallationStatus>;
-    browsePiInstallation(): Promise<PiInstallationStatus>;
+    browsePiInstallation(): Promise<string | null>;
     saveConfig(config: RunnableProviderConfig): Promise<{
       readonly settings: Settings;
       readonly credentialState: ProviderCredentialState;

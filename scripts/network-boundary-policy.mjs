@@ -12,9 +12,9 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     reason: 'Pinned DNS/SSRF-validated JSON transport; caller assigns provider or update category.',
     tokens: Object.freeze(['node:http', 'node:https', 'node:net']),
   }),
-  'app/src/main/transcription/model-manager.ts': Object.freeze({
+  'app/src/main/transcription/model-download-transport.ts': Object.freeze({
     category: 'model-download',
-    reason: 'Manifest-pinned, checksum-verified Hugging Face model downloader.',
+    reason: 'Manifest-pinned, checksum-verified Hugging Face model download transport.',
     tokens: Object.freeze(['fetch-call']),
   }),
   'app/src/main/security/protocol.ts': Object.freeze({
@@ -30,6 +30,7 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
       'node:https',
       'node:http2',
       'node:net',
+      'node:dgram',
       'node:tls',
       'node:dns',
       'node:dns/promises',
@@ -42,16 +43,10 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     reason: 'Uses DNS lookup plus node:net isIP for pinned endpoint validation.',
     tokens: Object.freeze(['node:dns/promises', 'node:net']),
   }),
-  'app/src/main/providers/pi-discovery.ts': Object.freeze({
-    category: 'local-command-locator-only',
-    reason:
-      'Executes only canonical SystemRoot/System32/where.exe with fixed pi.cmd arguments, no shell, bounded output, and candidate revalidation.',
-    tokens: Object.freeze(['node:child_process']),
-  }),
-  'app/src/main/providers/pi.ts': Object.freeze({
+  'app/src/main/providers/pi-process-runtime.ts': Object.freeze({
     category: 'provider-cli-process-only',
     reason:
-      'Launches only the package-identity-validated Pi JavaScript entry with fixed hardened arguments and bounded stdio.',
+      'Runs trusted System32 discovery tools and identity-validated Pi executables with fixed hardened arguments, bounded stdio, and process-tree cleanup.',
     tokens: Object.freeze(['node:child_process']),
   }),
   'app/src/main/helper/helper-client.ts': Object.freeze({
@@ -77,6 +72,7 @@ const NETWORK_MODULES = new Set([
   'https',
   'http2',
   'net',
+  'dgram',
   'tls',
   'dns',
   'dns/promises',
@@ -98,8 +94,9 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
   /** @type {Map<string, ReadonlySet<string>>} */
   const symbols = new Map();
   const constantStrings = new Map();
-  const declared = new Set();
+  const declarations = new Map();
   const globals = new Map([
+    ['require', new Set(['module-loader'])],
     ['fetch', new Set(['fetch-call'])],
     ['WebSocket', new Set(['websocket'])],
     ['EventSource', new Set(['websocket'])],
@@ -113,6 +110,10 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
         : `node:${normalized}`
       : null;
   };
+  const moduleOrigin = (token) =>
+    ['node:dgram', 'node:net', 'node:tls', 'node:http', 'node:https', 'undici'].includes(token)
+      ? `module:socket:${token}`
+      : `module:${token}`;
   const merge = (name, origins) => {
     if (origins.size === 0) return false;
     const previous = symbols.get(name) ?? new Set();
@@ -121,6 +122,36 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
     symbols.set(name, next);
     return true;
   };
+  const declarationScope = (declaration) => {
+    if (ts.isParameter(declaration)) {
+      for (let owner = declaration.parent; owner !== undefined; owner = owner.parent)
+        if (ts.isFunctionLike(owner)) return owner;
+    }
+    if (ts.isVariableDeclaration(declaration)) {
+      const blockScoped = (declaration.parent.flags & ts.NodeFlags.BlockScoped) !== 0;
+      for (let owner = declaration.parent; owner !== undefined; owner = owner.parent) {
+        if (ts.isCatchClause(owner)) return owner.block;
+        if (ts.isSourceFile(owner) || ts.isFunctionLike(owner)) return owner;
+        if (
+          blockScoped &&
+          (ts.isBlock(owner) ||
+            ts.isCaseBlock(owner) ||
+            ts.isForStatement(owner) ||
+            ts.isForInStatement(owner) ||
+            ts.isForOfStatement(owner))
+        )
+          return owner;
+      }
+    }
+    for (let owner = declaration.parent; owner !== undefined; owner = owner.parent)
+      if (ts.isBlock(owner) || ts.isCaseBlock(owner) || ts.isSourceFile(owner)) return owner;
+    return sourceFile;
+  };
+  const isLocallyDeclared = (identifier) =>
+    (declarations.get(identifier.text) ?? []).some((declaration) => {
+      const scope = declarationScope(declaration);
+      return identifier.pos >= scope.pos && identifier.end <= scope.end;
+    });
   const propertyName = (expression) => {
     if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
     if (ts.isElementAccessExpression(expression) && expression.argumentExpression !== undefined) {
@@ -136,8 +167,34 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
     }
     return null;
   };
+  const constantStringOf = (expression) => {
+    if (ts.isParenthesizedExpression(expression)) return constantStringOf(expression.expression);
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
+      return expression.text;
+    if (ts.isIdentifier(expression)) return constantStrings.get(expression.text);
+    if (
+      ts.isBinaryExpression(expression) &&
+      expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ) {
+      const left = constantStringOf(expression.left);
+      const right = constantStringOf(expression.right);
+      return left === undefined || right === undefined ? undefined : left + right;
+    }
+    return undefined;
+  };
   const originsOf = (expression) => {
-    if (ts.isParenthesizedExpression(expression)) return originsOf(expression.expression);
+    if (ts.isParenthesizedExpression(expression) || ts.isAwaitExpression(expression))
+      return originsOf(expression.expression);
+    if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+      if (!ts.isBlock(expression.body)) return originsOf(expression.body);
+      return new Set(
+        expression.body.statements.flatMap((statement) =>
+          ts.isReturnStatement(statement) && statement.expression !== undefined
+            ? [...originsOf(statement.expression)]
+            : [],
+        ),
+      );
+    }
     if (ts.isBinaryExpression(expression))
       return new Set([...originsOf(expression.left), ...originsOf(expression.right)]);
     if (ts.isObjectLiteralExpression(expression))
@@ -151,7 +208,7 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
     if (ts.isIdentifier(expression))
       return (
         symbols.get(expression.text) ??
-        (declared.has(expression.text) ? new Set() : globals.get(expression.text)) ??
+        (isLocallyDeclared(expression) ? new Set() : globals.get(expression.text)) ??
         new Set()
       );
     if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
@@ -161,6 +218,9 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
       const ownerOrigins = originsOf(ownerExpression);
       const expressionKey = expression.pos >= 0 ? expression.getText(sourceFile) : null;
       const found = new Set(expressionKey === null ? [] : (symbols.get(expressionKey) ?? []));
+      if (property === 'createRequire' && ownerOrigins.has('module-loader-namespace')) {
+        found.add('module-loader-factory');
+      }
       if (property !== null && property.replace(/^#/u, '').toLowerCase().includes('fetch')) {
         found.add(
           ownerOrigins.has('electron-net') || ownerText === 'net'
@@ -192,50 +252,61 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
     }
     if (ts.isCallExpression(expression)) {
       const args = expression.arguments;
+      const calleeOrigins = originsOf(expression.expression);
+      if (calleeOrigins.has('module-loader-factory')) return new Set(['module-loader']);
       if (
-        expression.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        args[0] !== undefined &&
-        ts.isStringLiteral(args[0])
+        expression.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        calleeOrigins.has('module-loader') ||
+        (propertyName(expression.expression) === 'getBuiltinModule' &&
+          expression.expression.expression.getText(sourceFile) === 'process')
       ) {
-        const token = moduleToken(args[0].text);
-        return token === null
-          ? new Set()
-          : new Set([
-              ['node:net', 'node:tls', 'node:http', 'node:https', 'undici'].includes(token)
-                ? `module:socket:${token}`
-                : `module:${token}`,
-            ]);
+        const specifier = args[0] === undefined ? undefined : constantStringOf(args[0]);
+        if (specifier === 'node:module' || specifier === 'module')
+          return new Set(['module-loader-namespace']);
+        const token = specifier === undefined ? null : moduleToken(specifier);
+        if (token !== null) return new Set([moduleOrigin(token)]);
       }
       if (
-        ts.isIdentifier(expression.expression) &&
-        expression.expression.text === 'require' &&
+        ts.isPropertyAccessExpression(expression.expression) &&
+        expression.expression.expression.getText(sourceFile) === 'Reflect' &&
+        expression.expression.name.text === 'get' &&
         args[0] !== undefined &&
-        ts.isStringLiteral(args[0])
+        args[1] !== undefined
       ) {
-        const token = moduleToken(args[0].text);
-        return token === null
-          ? new Set()
-          : new Set([
-              ['node:net', 'node:tls', 'node:http', 'node:https', 'undici'].includes(token)
-                ? `module:socket:${token}`
-                : `module:${token}`,
-            ]);
+        const owner = args[0].getText(sourceFile);
+        const property = constantStringOf(args[1]);
+        if (owner === 'globalThis' || owner === 'window') {
+          if (property === 'fetch') return new Set(['fetch-call']);
+          if (property !== undefined && BROWSER_NETWORK_CONSTRUCTORS.has(property))
+            return new Set(['websocket']);
+        }
       }
-      return originsOf(expression.expression);
+      return calleeOrigins;
     }
     return new Set();
   };
 
-  // The declaration inventory gives local symbols precedence over similarly named browser globals.
+  // Resolve global shadowing against each declaration's lexical scope. A file-wide name set
+  // would let an unrelated local parameter hide a real global networking capability.
+  const recordDeclaration = (name, declaration) => {
+    const values = declarations.get(name) ?? [];
+    values.push(declaration);
+    declarations.set(name, values);
+  };
+  const recordBinding = (name, declaration) => {
+    if (ts.isIdentifier(name)) recordDeclaration(name.text, declaration);
+    else
+      for (const element of name.elements)
+        if (ts.isBindingElement(element)) recordBinding(element.name, declaration);
+  };
   const recordDeclarations = (node) => {
-    if (ts.isVariableDeclaration(node)) {
-      if (ts.isIdentifier(node.name)) declared.add(node.name.text);
-      else for (const element of node.name.elements) declared.add(element.name.getText(sourceFile));
-    }
-    if (ts.isFunctionDeclaration(node) && node.name !== undefined) declared.add(node.name.text);
-    if (ts.isParameter(node) && ts.isIdentifier(node.name)) declared.add(node.name.text);
-    if (ts.isImportClause(node) && node.name !== undefined) declared.add(node.name.text);
-    if (ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) declared.add(node.name.text);
+    if (ts.isVariableDeclaration(node)) recordBinding(node.name, node);
+    if (ts.isFunctionDeclaration(node) && node.name !== undefined)
+      recordDeclaration(node.name.text, node);
+    if (ts.isParameter(node)) recordBinding(node.name, node);
+    if (ts.isImportClause(node) && node.name !== undefined) recordDeclaration(node.name.text, node);
+    if (ts.isImportSpecifier(node) || ts.isNamespaceImport(node))
+      recordDeclaration(node.name.text, node);
     ts.forEachChild(node, recordDeclarations);
   };
   recordDeclarations(sourceFile);
@@ -248,6 +319,17 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
       const token = moduleToken(specifier);
       if (token !== null) tokens.add(token);
       const clause = statement.importClause;
+      if (specifier === 'node:module' || specifier === 'module') {
+        if (clause?.name !== undefined)
+          merge(clause.name.text, new Set(['module-loader-namespace']));
+        if (clause?.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings))
+          merge(clause.namedBindings.name.text, new Set(['module-loader-namespace']));
+        if (clause?.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings)) {
+          for (const element of clause.namedBindings.elements)
+            if ((element.propertyName ?? element.name).text === 'createRequire')
+              merge(element.name.text, new Set(['module-loader-factory']));
+        }
+      }
       if (
         specifier === 'electron' &&
         clause?.namedBindings !== undefined &&
@@ -258,16 +340,9 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
             merge(element.name.text, new Set(['electron-net']));
       }
       if (token !== null && clause?.namedBindings !== undefined) {
-        const moduleOrigin =
-          token === 'node:net' ||
-          token === 'node:tls' ||
-          token === 'node:http' ||
-          token === 'node:https' ||
-          token === 'undici'
-            ? `module:socket:${token}`
-            : `module:${token}`;
+        const origin = moduleOrigin(token);
         if (ts.isNamespaceImport(clause.namedBindings))
-          merge(clause.namedBindings.name.text, new Set([moduleOrigin]));
+          merge(clause.namedBindings.name.text, new Set([origin]));
         if (ts.isNamedImports(clause.namedBindings))
           for (const element of clause.namedBindings.elements) {
             const imported = (element.propertyName ?? element.name).text;
@@ -298,13 +373,7 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
       if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
         bind(node.name, node.initializer);
         if (ts.isIdentifier(node.name)) {
-          const value =
-            ts.isStringLiteral(node.initializer) ||
-            ts.isNoSubstitutionTemplateLiteral(node.initializer)
-              ? node.initializer.text
-              : ts.isIdentifier(node.initializer)
-                ? constantStrings.get(node.initializer.text)
-                : undefined;
+          const value = constantStringOf(node.initializer);
           if (value !== undefined && constantStrings.get(node.name.text) !== value) {
             constantStrings.set(node.name.text, value);
             changed = true;
@@ -341,12 +410,7 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
       ) {
         changed = merge(node.left.getText(sourceFile), originsOf(node.right)) || changed;
         if (ts.isIdentifier(node.left)) {
-          const value =
-            ts.isStringLiteral(node.right) || ts.isNoSubstitutionTemplateLiteral(node.right)
-              ? node.right.text
-              : ts.isIdentifier(node.right)
-                ? constantStrings.get(node.right.text)
-                : undefined;
+          const value = constantStringOf(node.right);
           if (value === undefined) constantStrings.delete(node.left.text);
           else if (constantStrings.get(node.left.text) !== value) {
             constantStrings.set(node.left.text, value);
@@ -391,17 +455,41 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
       if (
         ts.isCallExpression(node) &&
         node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        node.arguments[0] !== undefined &&
-        ts.isStringLiteral(node.arguments[0])
+        node.arguments[0] !== undefined
       ) {
-        const token = moduleToken(node.arguments[0].text);
+        const specifier = constantStringOf(node.arguments[0]);
+        const token = specifier === undefined ? null : moduleToken(specifier);
         if (token !== null) tokens.add(token);
       }
+      for (const origin of originsOf(node)) {
+        if (origin.startsWith('module:')) tokens.add(origin.replace(/^module:(?:socket:)?/u, ''));
+        else if (
+          origin !== 'electron-net' &&
+          origin !== 'module-loader' &&
+          origin !== 'module-loader-factory' &&
+          origin !== 'module-loader-namespace'
+        )
+          tokens.add(origin);
+      }
       for (const origin of originsOf(node.expression))
-        if (!origin.startsWith('module:') && origin !== 'electron-net') tokens.add(origin);
+        if (
+          !origin.startsWith('module:') &&
+          origin !== 'electron-net' &&
+          origin !== 'module-loader' &&
+          origin !== 'module-loader-factory' &&
+          origin !== 'module-loader-namespace'
+        )
+          tokens.add(origin);
       for (const argument of node.arguments ?? [])
         for (const origin of originsOf(argument))
-          if (!origin.startsWith('module:') && origin !== 'electron-net') tokens.add(origin);
+          if (
+            !origin.startsWith('module:') &&
+            origin !== 'electron-net' &&
+            origin !== 'module-loader' &&
+            origin !== 'module-loader-factory' &&
+            origin !== 'module-loader-namespace'
+          )
+            tokens.add(origin);
       if (
         ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
@@ -422,7 +510,7 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
 export async function verifyNetworkBoundary(root = SOURCE_ROOT) {
   const findings = [];
   for (const absolute of await walk(root)) {
-    if (!/\.(?:ts|tsx|js|cjs|mjs)$/u.test(absolute)) continue;
+    if (!/\.(?:ts|tsx|cts|mts|js|cjs|mjs)$/u.test(absolute)) continue;
     const source = await readFile(absolute, 'utf8');
     const path = normalize(relative(ROOT, absolute));
     findings.push(...detectNetworkTokens(source, path).map((token) => ({ path, token })));

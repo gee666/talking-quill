@@ -415,6 +415,72 @@ fn delivered_session_down_forces_matching_up_swallow_on_delivery_failure() {
 }
 
 #[test]
+fn fail_open_balances_all_delivered_downs_and_clears_stale_sequences() {
+    let mut reducer = KeyboardReducer::default();
+    let activation_key = PhysicalKey::Letter(ActivationKey::A);
+    assert!(
+        step_with_activation(
+            &mut reducer,
+            input(activation_key, KeyPhase::Down, true, false, false),
+            ActivationKey::A,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert!(
+        step_with_activation(
+            &mut reducer,
+            input(PhysicalKey::Escape, KeyPhase::Down, false, false, false),
+            ActivationKey::A,
+            true,
+            true,
+            true,
+        )
+        .1
+    );
+
+    assert_eq!(
+        reducer.fail_open_balancing_events(),
+        [
+            Some(HelperEvent::Activation {
+                key: ActivationKey::A,
+                phase: EventPhase::Up,
+                shift: false,
+            }),
+            Some(HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Up,
+            }),
+            None,
+        ]
+    );
+    assert_eq!(
+        step_with_activation(
+            &mut reducer,
+            input(activation_key, KeyPhase::Up, false, false, false),
+            ActivationKey::A,
+            false,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(
+        step_with_activation(
+            &mut reducer,
+            input(PhysicalKey::Escape, KeyPhase::Up, false, false, false),
+            ActivationKey::A,
+            false,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+}
+
+#[test]
 fn session_capture_is_independent_of_activation_modifiers_and_enablement() {
     let mut reducer = KeyboardReducer::default();
     let mut escape = input(PhysicalKey::Escape, KeyPhase::Down, true, true, false);

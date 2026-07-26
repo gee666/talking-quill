@@ -115,7 +115,8 @@ async function invokeChannel<Channel extends InvokeChannel>(
         message: 'The application is shutting down.',
       });
     }
-    const context = authorize(event, allowedRoles, roles);
+    authorize(event, allowedRoles, roles);
+    const context = createContext(event);
     const request = invokeRegistry[channel].request.parse(input) as InvokeRequest<Channel>;
     const output = await handlers[channel](request, context);
     const parsedResponse = invokeRegistry[channel].response.safeParse(output);
@@ -141,18 +142,20 @@ function authorize(
   event: IpcMainInvokeEvent,
   allowedRoles: readonly WindowRole[],
   roles: WindowRoleRegistry,
-) {
+): void {
   const registered = roles.get(event.sender.id);
   const frame = event.senderFrame;
-  const role = authorizeIpc({
+  authorizeIpc({
     registeredRole: registered?.role ?? null,
     allowedRoles,
     isMainFrame: !event.sender.isDestroyed() && frame !== null && frame === event.sender.mainFrame,
     frameUrl: frame?.url ?? '',
     expectedUrl: registered?.expectedUrl ?? null,
   });
+}
+
+function createContext(event: IpcMainInvokeEvent) {
   return {
-    role,
     webContentsId: event.sender.id,
     onDestroyed: (listener: () => void) => {
       event.sender.once('destroyed', listener);

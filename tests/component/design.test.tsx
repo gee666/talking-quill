@@ -12,6 +12,7 @@ import {
   Progress,
   Select,
   Status,
+  TextArea,
   Toast,
   Toggle,
 } from '../../app/src/renderer/design';
@@ -26,6 +27,7 @@ describe('design primitives', () => {
       <div>
         <Button disabled>Save</Button>
         <Input label="Name" error="Required" />
+        <TextArea label="Notes" required />
         <Select label="Mode" defaultValue="raw">
           <option value="raw">Raw</option>
         </Select>
@@ -39,6 +41,8 @@ describe('design primitives', () => {
     );
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     expect(screen.getByLabelText('Name')).toHaveAccessibleDescription('Required');
+    expect(screen.getByRole('textbox', { name: 'Notes' })).toBeRequired();
+    expect(document.querySelector('.me-field__required')).toHaveTextContent('*');
     expect(screen.getByRole('progressbar', { name: 'Download' })).toHaveAttribute('value', '30');
     expect(screen.getByText('Needs Setup')).toBeVisible();
     expect(screen.getByRole('status')).toHaveTextContent('Saved');

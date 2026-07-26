@@ -19,7 +19,10 @@ export class TrayController {
   readonly #state: AppStateService;
   readonly #actions: TrayActions;
   readonly #tray: Tray;
+  readonly #pendingMutations = new Set<Promise<void>>();
   #notice: string | null = null;
+  #accepting = true;
+  #destroyed = false;
 
   constructor(state: AppStateService, actions: TrayActions) {
     this.#state = state;
@@ -31,6 +34,7 @@ export class TrayController {
   }
 
   refresh(clearNotice = false): void {
+    if (this.#destroyed) return;
     if (clearNotice) this.#notice = null;
     const enabled = this.#state.getState().enabled;
     this.#tray.setContextMenu(
@@ -39,7 +43,8 @@ export class TrayController {
         { type: 'separator' },
         {
           label: enabled ? 'Disable' : 'Enable',
-          click: () => void this.#setEnabled(!enabled),
+          enabled: this.#accepting,
+          click: () => this.#startSetEnabled(!enabled),
         },
         {
           label: this.#notice ?? '',
@@ -52,8 +57,30 @@ export class TrayController {
     );
   }
 
+  stopAccepting(): void {
+    if (!this.#accepting) return;
+    this.#accepting = false;
+    this.refresh();
+  }
+
+  async drain(): Promise<void> {
+    while (this.#pendingMutations.size > 0) {
+      await Promise.allSettled([...this.#pendingMutations]);
+    }
+  }
+
   destroy(): void {
+    if (this.#destroyed) return;
+    this.#accepting = false;
+    this.#destroyed = true;
     this.#tray.destroy();
+  }
+
+  #startSetEnabled(enabled: boolean): void {
+    if (!this.#accepting || this.#destroyed) return;
+    const mutation = this.#setEnabled(enabled);
+    this.#pendingMutations.add(mutation);
+    void mutation.finally(() => this.#pendingMutations.delete(mutation));
   }
 
   async #setEnabled(enabled: boolean): Promise<void> {

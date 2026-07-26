@@ -60,15 +60,23 @@ export class DiagnosticLogger {
     if (this.#initialized || this.#disposed) return;
     this.#initialized = true;
     this.#enabled = this.#settings.get().privacy.diagnosticLoggingEnabled;
-    if (this.#enabled) await mkdir(this.#directory, { recursive: true, mode: 0o700 });
-    this.#unsubscribe = this.#settings.subscribe((settings) => {
-      this.#enabled = settings.privacy.diagnosticLoggingEnabled;
-      if (this.#enabled) {
-        void this.#enqueue(() => mkdir(this.#directory, { recursive: true, mode: 0o700 })).catch(
-          () => undefined,
-        );
-      }
-    });
+    try {
+      this.#unsubscribe = this.#settings.subscribe((settings) => {
+        this.#enabled = settings.privacy.diagnosticLoggingEnabled;
+        if (this.#enabled) {
+          void this.#enqueue(() => mkdir(this.#directory, { recursive: true, mode: 0o700 })).catch(
+            () => undefined,
+          );
+        }
+      });
+      if (this.#enabled) await mkdir(this.#directory, { recursive: true, mode: 0o700 });
+    } catch (error: unknown) {
+      this.#unsubscribe?.();
+      this.#unsubscribe = null;
+      this.#enabled = false;
+      this.#initialized = false;
+      throw error;
+    }
   }
 
   record(event: DiagnosticEvent, metadata: DiagnosticMetadata = {}): Promise<void> {

@@ -23,6 +23,9 @@ export function toPublicError(error: unknown): PublicError {
     return { code: 'UNAVAILABLE', message: 'Secure credential storage is unavailable.' };
   }
   if (error instanceof ModelManagerError) {
+    if (error.code === 'CANCELLED') {
+      return { code: 'CANCELLED', message: 'The operation was cancelled.' };
+    }
     if (
       ['OFFLINE', 'TIMEOUT', 'HTTP', 'FILE_LOCKED', 'IO', 'WORKER_VALIDATION'].includes(error.code)
     ) {

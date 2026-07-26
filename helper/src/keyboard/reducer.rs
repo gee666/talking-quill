@@ -207,6 +207,31 @@ impl KeyboardReducer {
         }
     }
 
+    /// Abandons every captured native sequence while returning synthetic
+    /// balancing notifications for downs that were already delivered. Native
+    /// backends use this when a policy transaction makes the current event pass
+    /// through before normal reducer planning can run.
+    pub fn fail_open_balancing_events(&mut self) -> [Option<HelperEvent>; 3] {
+        let activation = self
+            .active_activation
+            .map(|active| HelperEvent::Activation {
+                key: active.key,
+                phase: EventPhase::Up,
+                shift: active.shift,
+            });
+        let escape =
+            (self.escape == SequenceState::Suppressed).then_some(HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Up,
+            });
+        let enter = (self.enter == SequenceState::Suppressed).then_some(HelperEvent::SessionKey {
+            key: SessionKey::Enter,
+            phase: EventPhase::Up,
+        });
+        *self = Self::default();
+        [activation, escape, enter]
+    }
+
     /// Applies a planned transition and returns whether the native event must
     /// be swallowed. `delivered` is ignored when the plan has no notification.
     /// A failed initial down remains fail-open, while the matching up of an

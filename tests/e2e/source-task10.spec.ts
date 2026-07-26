@@ -161,7 +161,12 @@ test('Task 10 Smart success, OSA one-image request, fallback, and cancellation a
     mode = 'failure';
     await quickSubmit(application, 2);
     await expect.poll(async () => (await snapshot(application)).session.phase).toBe('completed');
-    await expect(widget.getByText('Falling back to raw', { exact: true })).toBeVisible();
+    await expect(widget.getByText('Done', { exact: true })).toBeVisible();
+    await expect(
+      widget.getByText('The raw transcript was used. Check the provider in Settings.', {
+        exact: true,
+      }),
+    ).toBeVisible();
     expect((await snapshot(application)).insertion.targetText).toBe('deterministic transcript');
     expect((await snapshot(application)).history.at(0)).toMatchObject({
       outcome: 'smart-fallback',

@@ -362,6 +362,118 @@ describe('capture MessagePort contracts', () => {
     controller.close();
   });
 
+  it('rejects duplicate activation without losing ownership of the active engine', async () => {
+    const port = new FakeCapturePort();
+    const activate = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error('already active'));
+    const stop = vi.fn(() => Promise.resolve());
+    const engine = {
+      start: vi.fn(() =>
+        Promise.resolve({
+          activeMicrophoneId: 'default',
+          preferredUnavailable: false,
+          sampleRate: 16_000,
+          channelCount: 1,
+        }),
+      ),
+      stop,
+      activate,
+      listDevices: vi.fn(() => Promise.resolve([])),
+      disposeImmediately: vi.fn(),
+    } as unknown as CaptureEngine;
+    const controller = new CapturePortController(port as unknown as MessagePort, engine);
+    const captureId = randomUUID();
+    port.emit({
+      type: 'stream:start',
+      requestId: randomUUID(),
+      captureId,
+      preferredMicrophoneId: null,
+    });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:started', captureId }),
+      ),
+    );
+
+    port.emit({ type: 'stream:activate', requestId: randomUUID(), captureId });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:activated', captureId }),
+      ),
+    );
+    const duplicateRequestId = randomUUID();
+    port.emit({ type: 'stream:activate', requestId: duplicateRequestId, captureId });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'request:error',
+        requestId: duplicateRequestId,
+        captureId,
+        code: 'capture-failed',
+      }),
+    );
+
+    port.emit({ type: 'stream:stop', requestId: randomUUID(), captureId });
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(activate).toHaveBeenCalledOnce();
+    controller.close();
+  });
+
+  it('rejects activation during startup without orphaning the pending start', async () => {
+    const port = new FakeCapturePort();
+    const pending = deferred<{
+      activeMicrophoneId: string | null;
+      preferredUnavailable: boolean;
+      sampleRate: 16_000;
+      channelCount: 1;
+    }>();
+    const activate = vi.fn(() => Promise.reject(new Error('not prepared')));
+    const stop = vi.fn(() => Promise.resolve());
+    const engine = {
+      start: vi.fn(() => pending.promise),
+      stop,
+      activate,
+      listDevices: vi.fn(() => Promise.resolve([])),
+      disposeImmediately: vi.fn(),
+    } as unknown as CaptureEngine;
+    const controller = new CapturePortController(port as unknown as MessagePort, engine);
+    const captureId = randomUUID();
+    const startRequestId = randomUUID();
+    port.emit({
+      type: 'stream:start',
+      requestId: startRequestId,
+      captureId,
+      preferredMicrophoneId: null,
+    });
+    const activationRequestId = randomUUID();
+    port.emit({ type: 'stream:activate', requestId: activationRequestId, captureId });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'request:error',
+        requestId: activationRequestId,
+        captureId,
+        code: 'capture-failed',
+      }),
+    );
+    expect(activate).not.toHaveBeenCalled();
+
+    pending.resolve({
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+      sampleRate: 16_000,
+      channelCount: 1,
+    });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:started', requestId: startRequestId, captureId }),
+      ),
+    );
+    port.emit({ type: 'stream:stop', requestId: randomUUID(), captureId });
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    controller.close();
+  });
+
   it('closes the controller and engine when response validation fails', async () => {
     const port = new FakeCapturePort();
     const disposeImmediately = vi.fn();

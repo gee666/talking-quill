@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { validateNsisUninstallPolicy } from '../../scripts/nsis-uninstall-policy.mjs';
 import {
   discoverFinalArtifactNames,
+  finalArtifactNamesForIdentity,
+  ONNX_RUNTIME_PATHS,
   PROVIDER_LOGO_BASENAMES,
   validateAsarEntries,
   validateExpectedFinalArtifacts,
@@ -17,6 +19,8 @@ import {
   validateRuntimeContent,
   validateSharedReleaseArtifacts,
 } from '../../scripts/package-policy.mjs';
+
+const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
 const validAsar = [
   'out',
@@ -39,17 +43,17 @@ const validAsar = [
   'out/renderer/assets/capture-valid.js',
   'out/renderer/assets/capture.worklet-valid.js',
   'out/renderer/assets/audio-valid.js',
-  'out/renderer/assets/status-presentation-valid.js',
-  'out/renderer/assets/status-presentation-valid.css',
-  'out/renderer/assets/theme-valid.js',
-  'out/renderer/assets/theme-valid.css',
+  'out/renderer/assets/echo-session-valid.js',
+  'out/renderer/assets/echo-session-valid.css',
   'out/renderer/assets/InfoScreen-valid.js',
   'out/renderer/assets/SettingsScreen-valid.js',
   'out/renderer/assets/SmartProcessingSection-valid.js',
   'out/renderer/assets/schemas-valid.js',
   'out/renderer/assets/logo-light-valid.png',
   'out/renderer/assets/logo-dark-valid.png',
-  ...PROVIDER_LOGO_BASENAMES.map((name) => `out/renderer/assets/${name}-valid.png`),
+  ...PROVIDER_LOGO_BASENAMES.map(
+    (name) => `out/renderer/assets/${name}-valid.${jpegProviderLogos.has(name) ? 'jpeg' : 'png'}`,
+  ),
   'package.json',
   'node_modules',
   'node_modules/better-sqlite3',
@@ -80,6 +84,7 @@ const validAsar = [
   'node_modules/onnxruntime-common/dist/cjs',
   'node_modules/onnxruntime-common/dist/cjs/package.json',
   'node_modules/onnxruntime-common/dist/cjs/index.js',
+  ...ONNX_RUNTIME_PATHS,
 ];
 
 const commonResources = [
@@ -95,17 +100,27 @@ const commonResources = [
   'app.asar.unpacked/node_modules/onnxruntime-node',
   'app.asar.unpacked/node_modules/onnxruntime-node/bin',
   'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3',
-  'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
   'helper',
 ];
 
-const validResources = (target: 'win' | 'mac') => [
-  ...commonResources,
-  target === 'win' ? 'helper/talking-quill-helper.exe' : 'helper/talking-quill-helper',
-];
+const validResources = (target: 'win' | 'mac') => {
+  const platform = target === 'mac' ? 'darwin' : 'win32';
+  const architectureRoot = `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${platform}/x64`;
+  return [
+    ...commonResources,
+    `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${platform}`,
+    architectureRoot,
+    ...(target === 'mac'
+      ? [`${architectureRoot}/libonnxruntime.1.21.0.dylib`]
+      : [`${architectureRoot}/DirectML.dll`, `${architectureRoot}/onnxruntime.dll`]),
+    `${architectureRoot}/onnxruntime_binding.node`,
+    target === 'win' ? 'helper/talking-quill-helper.exe' : 'helper/talking-quill-helper',
+  ];
+};
 
 describe('packaged runtime allowlist', () => {
   it('accepts only the expected runtime ASAR and native resource paths', () => {
+    expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(53);
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
     expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();
@@ -115,13 +130,22 @@ describe('packaged runtime allowlist', () => {
     expect(() =>
       validateAsarEntries(validAsar.filter((entry) => entry !== 'out/workers/whisper-payload.cjs')),
     ).toThrow('Required runtime file is missing');
+    for (const requiredOnnxPath of [
+      'node_modules/onnxruntime-node/dist/binding.js',
+      'node_modules/onnxruntime-common/dist/cjs/tensor.js',
+      'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
+    ]) {
+      expect(() =>
+        validateAsarEntries(validAsar.filter((entry) => entry !== requiredOnnxPath)),
+      ).toThrow('Required ONNX runtime path is missing');
+    }
     expect(PROVIDER_LOGO_BASENAMES).toHaveLength(38);
     await Promise.all(
       PROVIDER_LOGO_BASENAMES.map((name) =>
         access(
           resolve(
             'app/assets/provider-logos',
-            `${name}${['fireworksai', 'localai', 'mistral', 'openrouter'].includes(name) ? '.jpeg' : '.png'}`,
+            `${name}${jpegProviderLogos.has(name) ? '.jpeg' : '.png'}`,
           ),
         ),
       ),
@@ -131,11 +155,21 @@ describe('packaged runtime allowlist', () => {
         validAsar.filter((entry) => entry !== 'out/renderer/assets/widget-valid.js'),
       ),
     ).toThrow('Required renderer asset is missing');
-    expect(() =>
-      validateAsarEntries(
-        validAsar.filter((entry) => entry !== 'out/renderer/assets/audio-valid.js'),
-      ),
-    ).toThrow('Required renderer asset is missing');
+    for (const requiredAsset of [
+      'out/renderer/assets/audio-valid.js',
+      'out/renderer/assets/echo-session-valid.js',
+      'out/renderer/assets/echo-session-valid.css',
+      'out/renderer/assets/InfoScreen-valid.js',
+      'out/renderer/assets/SettingsScreen-valid.js',
+      'out/renderer/assets/SmartProcessingSection-valid.js',
+      'out/renderer/assets/schemas-valid.js',
+      'out/renderer/assets/logo-light-valid.png',
+      'out/renderer/assets/logo-dark-valid.png',
+    ]) {
+      expect(() =>
+        validateAsarEntries(validAsar.filter((entry) => entry !== requiredAsset)),
+      ).toThrow('Required renderer asset is missing');
+    }
     expect(() =>
       validateAsarEntries(
         validAsar.filter((entry) => entry !== 'out/renderer/assets/openai-valid.png'),
@@ -199,9 +233,32 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateAsarEntries([...validAsar, 'node_modules/aws4/aws4.js'])).toThrow(
       'Unexpected ASAR',
     );
-    expect(() => validateAsarEntries([...validAsar, 'out/renderer/assets/rogue.js'])).toThrow(
-      'Unexpected ASAR',
+    for (const unexpectedOnnxFile of [
+      'node_modules/onnxruntime-node/dist/rogue.js',
+      'node_modules/onnxruntime-common/dist/cjs/rogue.js',
+      'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/rogue.dll',
+    ]) {
+      expect(() => validateAsarEntries([...validAsar, unexpectedOnnxFile])).toThrow(
+        'Unexpected ASAR',
+      );
+    }
+    for (const unexpectedAsset of [
+      'out/renderer/assets/rogue.js',
+      'out/renderer/assets/status-presentation-valid.js',
+      'out/renderer/assets/theme-valid.css',
+      'out/renderer/assets/audio-valid.css',
+      'out/renderer/assets/InfoScreen-valid.css',
+      'out/renderer/assets/app-icon-valid.png',
+      'out/renderer/assets/anthropic-valid.jpeg',
+    ]) {
+      expect(() => validateAsarEntries([...validAsar, unexpectedAsset])).toThrow('Unexpected ASAR');
+    }
+    expect(() => validateAsarEntries([...validAsar, 'out/renderer/assets/main-stale.js'])).toThrow(
+      'Required renderer asset count is not one',
     );
+    expect(() =>
+      validateAsarEntries([...validAsar, 'out/renderer/assets/anthropic-stale.png']),
+    ).toThrow('Required provider logo count is not one');
     expect(() =>
       validateAsarEntries([...validAsar, 'node_modules/better-sqlite3/lib/test_extension.node']),
     ).toThrow('Forbidden packaged files');
@@ -395,19 +452,19 @@ describe('packaged runtime allowlist', () => {
     );
   });
 
-  it('retains and validates both mac architectures in a shared release directory', () => {
-    expect(() =>
-      validateSharedReleaseArtifacts(
-        [
-          'Talking-Quill-1.0.1-mac-x64.dmg',
-          'Talking-Quill-1.0.1-mac-x64.zip',
-          'Talking-Quill-1.0.1-mac-arm64.dmg',
-          'Talking-Quill-1.0.1-mac-arm64.zip',
-        ],
-        'dmg-zip',
-        { version: '1.0.1', platform: 'mac', arch: 'arm64' },
-      ),
-    ).not.toThrow();
+  it('retains both mac architectures globally but scopes inspection and provenance by identity', () => {
+    const names = [
+      'Talking-Quill-1.0.1-mac-x64.dmg',
+      'Talking-Quill-1.0.1-mac-x64.zip',
+      'Talking-Quill-1.0.1-mac-arm64.dmg',
+      'Talking-Quill-1.0.1-mac-arm64.zip',
+    ];
+    const identity = { version: '1.0.1', platform: 'mac', arch: 'arm64' } as const;
+    expect(() => validateSharedReleaseArtifacts(names, 'dmg-zip', identity)).not.toThrow();
+    expect(finalArtifactNamesForIdentity(names, identity)).toEqual([
+      'Talking-Quill-1.0.1-mac-arm64.dmg',
+      'Talking-Quill-1.0.1-mac-arm64.zip',
+    ]);
   });
 
   it('requires recursive magic-based architecture probes for unpacked and extracted native images', async () => {
@@ -420,8 +477,12 @@ describe('packaged runtime allowlist', () => {
     ]) {
       expect(inspector).toContain(native);
     }
-    expect(inspector).toMatch(/inspectNativeTree\(\s*packageRoot,\s*boundArch,/u);
-    expect(inspector).toMatch(/inspectNativeTree\(\s*root,\s*expectedArch,/u);
+    expect(inspector).toMatch(
+      /inspectNativeTree\(packageRoot, \{\s*platform: boundPlatform,\s*architecture: boundArch,/u,
+    );
+    expect(inspector).toMatch(
+      /inspectNativeTree\(root, \{\s*platform: mac \? 'mac' : 'win',\s*architecture: expectedArch,/u,
+    );
     expect(inspector).toContain('writeArtifactProvenanceManifest');
   });
 
@@ -529,5 +590,28 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateResourceEntries([...validResources('mac'), 'elevate.exe'], 'mac')).toThrow(
       'Unexpected packaged resources',
     );
+    expect(() =>
+      validateResourceEntries(
+        [
+          ...validResources('mac'),
+          'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
+        ],
+        'mac',
+      ),
+    ).toThrow('Unexpected packaged resources');
+    expect(() =>
+      validateResourceEntries(
+        validResources('win').filter((entry) => !entry.endsWith('/DirectML.dll')),
+        'win',
+      ),
+    ).toThrow('Required ONNX resource path is missing');
+    for (const rogue of [
+      'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/rogue.dll',
+      'app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/rogue.dat',
+    ]) {
+      expect(() => validateResourceEntries([...validResources('win'), rogue], 'win')).toThrow(
+        'Unexpected packaged resources',
+      );
+    }
   });
 });

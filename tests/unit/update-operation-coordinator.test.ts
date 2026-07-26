@@ -18,7 +18,7 @@ function owner(id: number) {
 }
 
 describe('UpdateOperationCoordinator', () => {
-  it('rejects duplicate owner IDs without affecting another owner', async () => {
+  it('allows only one active operation per owner without affecting another owner', async () => {
     const coordinator = new UpdateOperationCoordinator();
     const first = owner(1);
     let release!: () => void;
@@ -35,10 +35,16 @@ describe('UpdateOperationCoordinator', () => {
       'update operation',
     );
     await expect(
+      coordinator.run(first.value, 'different', () => Promise.resolve()),
+    ).rejects.toThrow('update operation');
+    await expect(
       coordinator.run(owner(2).value, 'same', () => Promise.resolve('ok')),
     ).resolves.toBe('ok');
     release();
     await pending;
+    await expect(
+      coordinator.run(first.value, 'after-settlement', () => Promise.resolve('reused')),
+    ).resolves.toBe('reused');
   });
 
   it('isolates cancellation and aborts on owner destruction and shutdown', async () => {

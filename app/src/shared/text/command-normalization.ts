@@ -16,16 +16,20 @@ const COMPATIBILITY_LETTERS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 export function normalizeCommandText(value: string): string {
-  return Array.from(value)
-    .map((character) => COMPATIBILITY_LETTERS[character] ?? character)
-    .join('')
-    .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
-    .toLocaleLowerCase('en-US')
-    .replace(/[\p{Pd}'’ʼ]+/gu, '')
-    .replace(/\p{P}+/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  return (
+    Array.from(value)
+      .map((character) => COMPATIBILITY_LETTERS[character] ?? character)
+      .join('')
+      .normalize('NFKD')
+      // Accent-insensitive matching is useful for Latin text, but marks carry vowel and other
+      // lexical information in many scripts and must remain part of the command.
+      .replace(/(?<=\p{Script=Latin})\p{M}+/gu, '')
+      .toLocaleLowerCase('en-US')
+      .replace(/[\p{Pd}'’ʼ]+/gu, '')
+      .replace(/\p{P}+/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+  );
 }
 
 export function isMeaningfulCommandText(value: string): boolean {

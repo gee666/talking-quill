@@ -64,11 +64,6 @@ export class AppStateService {
     this.#publishStateChange();
   }
 
-  async setEnabled(enabled: boolean): Promise<AppState> {
-    await this.updateSettings({ app: { enabled } });
-    return this.getState();
-  }
-
   async updateSettings(patch: PublicSettingsPatch): Promise<Settings> {
     return this.#settings.update(PublicSettingsPatchSchema.parse(patch));
   }

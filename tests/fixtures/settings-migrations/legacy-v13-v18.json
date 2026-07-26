@@ -1,0 +1,443 @@
+{
+  "v13": {
+    "schemaVersion": 13,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false,
+      "launchAtLogin": true
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v13",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v13"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "ftp://legacy.example/provider-v13",
+          "modelId": "fixture-model-v13"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 13
+      },
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": []
+    },
+    "voiceCommands": [
+      {
+        "id": "00000013-0013-4013-8013-000000000013",
+        "trigger": "fixture command v13",
+        "snippet": "fixture snippet v13",
+        "createdAt": 13,
+        "updatedAt": 13
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000013-0013-4013-8013-000000000013",
+        "value": "Fixture vocabulary v13",
+        "createdAt": 13,
+        "updatedAt": 13
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 13,
+        "observedAt": 13
+      },
+      "modelEvidence": {
+        "modelId": "Xenova/whisper-large",
+        "manifestRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verified": true,
+        "verifiedAt": 13
+      },
+      "revision": 13
+    }
+  },
+  "v14": {
+    "schemaVersion": 14,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v14",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v14"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "file:///legacy/provider-v14",
+          "modelId": "fixture-model-v14"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 14
+      },
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": []
+    },
+    "voiceCommands": [
+      {
+        "id": "00000014-0014-4014-8014-000000000014",
+        "trigger": "fixture command v14",
+        "snippet": "fixture snippet v14",
+        "createdAt": 14,
+        "updatedAt": 14
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000014-0014-4014-8014-000000000014",
+        "value": "Fixture vocabulary v14",
+        "createdAt": 14,
+        "updatedAt": 14
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 14,
+        "observedAt": 14
+      },
+      "modelEvidence": null,
+      "revision": 14
+    }
+  },
+  "v15": {
+    "schemaVersion": 15,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v15",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v15"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "ftp://legacy.example/provider-v15",
+          "modelId": "fixture-model-v15"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 15
+      },
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": []
+    },
+    "voiceCommands": [
+      {
+        "id": "00000015-0015-4015-8015-000000000015",
+        "trigger": "fixture command v15",
+        "snippet": "fixture snippet v15",
+        "createdAt": 15,
+        "updatedAt": 15
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000015-0015-4015-8015-000000000015",
+        "value": "Fixture vocabulary v15",
+        "createdAt": 15,
+        "updatedAt": 15
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 15,
+        "observedAt": 15
+      },
+      "modelEvidence": null,
+      "revision": 15
+    }
+  },
+  "v16": {
+    "schemaVersion": 16,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v16",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v16"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "file:///legacy/provider-v16",
+          "modelId": "fixture-model-v16"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 16
+      },
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": []
+    },
+    "voiceCommands": [
+      {
+        "id": "00000016-0016-4016-8016-000000000016",
+        "trigger": "fixture command v16",
+        "snippet": "fixture snippet v16",
+        "createdAt": 16,
+        "updatedAt": 16
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000016-0016-4016-8016-000000000016",
+        "value": "Fixture vocabulary v16",
+        "createdAt": 16,
+        "updatedAt": 16
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 16,
+        "observedAt": 16
+      },
+      "modelEvidence": null,
+      "revision": 16
+    }
+  },
+  "v17": {
+    "schemaVersion": 17,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v17",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v17"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "ftp://legacy.example/provider-v17",
+          "modelId": "fixture-model-v17"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 17
+      },
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": [],
+      "piExtensionsEnabled": false
+    },
+    "voiceCommands": [
+      {
+        "id": "00000017-0017-4017-8017-000000000017",
+        "trigger": "fixture command v17",
+        "snippet": "fixture snippet v17",
+        "createdAt": 17,
+        "updatedAt": 17
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000017-0017-4017-8017-000000000017",
+        "value": "Fixture vocabulary v17",
+        "createdAt": 17,
+        "updatedAt": 17
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 17,
+        "observedAt": 17
+      },
+      "modelEvidence": null,
+      "revision": 17
+    }
+  },
+  "v18": {
+    "schemaVersion": 18,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false
+    },
+    "recording": {
+      "preferredMicrophoneId": "fixture-mic-v18",
+      "silencePreset": "relaxed"
+    },
+    "transcription": {
+      "modelId": "Xenova/whisper-large",
+      "language": "fixture-v18"
+    },
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "generic-openai",
+      "providers": {
+        "generic-openai": {
+          "baseUrl": "file:///legacy/provider-v18",
+          "modelId": "fixture-model-v18"
+        }
+      },
+      "credentialEpochs": {
+        "generic-openai": 18
+      },
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": true,
+      "visionOverrides": []
+    },
+    "voiceCommands": [
+      {
+        "id": "00000018-0018-4018-8018-000000000018",
+        "trigger": "fixture command v18",
+        "snippet": "fixture snippet v18",
+        "createdAt": 18,
+        "updatedAt": 18
+      }
+    ],
+    "customVocabulary": [
+      {
+        "id": "10000018-0018-4018-8018-000000000018",
+        "value": "Fixture vocabulary v18",
+        "createdAt": 18,
+        "updatedAt": 18
+      }
+    ],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 4,
+      "microphoneTested": true,
+      "activationTested": true,
+      "microphoneEvidence": null,
+      "activationEvidence": {
+        "activationKey": "Q",
+        "enabled": true,
+        "helperProtocol": 2,
+        "readinessGeneration": 18,
+        "observedAt": 18
+      },
+      "modelEvidence": null,
+      "revision": 18
+    }
+  }
+}

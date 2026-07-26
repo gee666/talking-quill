@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DiagnosticLogger } from '../../app/src/main/security/diagnostic-logger';
@@ -47,6 +47,24 @@ describe('DiagnosticLogger', () => {
     });
     const after = await stat(join(logs, 'diagnostic.jsonl'));
     expect(after.size).toBe(before.size);
+    await logger.dispose();
+  });
+
+  it('fails closed when initialization cannot create the log directory', async () => {
+    const root = await createTestDirectory('diagnostic-init-failure');
+    owned.push(root);
+    const settings = new SettingsStore(join(root, 'settings.json'));
+    await settings.initialize();
+    await settings.update({ privacy: { diagnosticLoggingEnabled: true } });
+    const logs = join(root, 'logs');
+    await writeFile(logs, 'blocks directory creation');
+    const logger = new DiagnosticLogger(settings, logs);
+    await expect(logger.initialize()).rejects.toThrow();
+
+    await settings.update({ privacy: { diagnosticLoggingEnabled: false } });
+    await rm(logs);
+    await logger.record('application.started', { component: 'application', outcome: 'ready' });
+    await expect(readdir(logs)).rejects.toMatchObject({ code: 'ENOENT' });
     await logger.dispose();
   });
 

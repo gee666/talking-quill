@@ -50,6 +50,7 @@ export class ProviderOperationCoordinator {
     const hardDeadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
         controller.abort();
+        cleanup();
         reject(timeout());
       }, PROVIDER_IPC_HARD_TIMEOUT_MS);
     });

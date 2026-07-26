@@ -16,18 +16,22 @@ import type { SettingsPatch } from '../../shared/schemas/settings';
 
 const USABLE_RMS_THRESHOLD = 0.005;
 const MIN_OBSERVED_SAMPLES = 1_600;
+const MICROPHONE_STEP = 2 satisfies WelcomeStep;
+const MODEL_STEP = 3 satisfies WelcomeStep;
+const ACTIVATION_STEP = 4 satisfies WelcomeStep;
+const FINAL_STEP = 6 satisfies WelcomeStep;
 
 export interface WelcomePrerequisites {
   readonly microphoneReady: () => boolean;
-  readonly microphoneObservation?: () => {
+  readonly microphoneObservation: () => {
     readonly boundDeviceId: string | null;
     readonly observedRms: number;
     readonly sampleCount: number;
   } | null;
   readonly modelReady: () => Promise<boolean>;
-  readonly modelRevision?: (modelId: WhisperModelId) => string;
+  readonly modelRevision: (modelId: WhisperModelId) => string;
   readonly helperReady: () => boolean;
-  readonly helperReadinessGeneration?: () => number;
+  readonly helperReadinessGeneration: () => number;
   readonly activationGestureRecognized: () => {
     readonly profileId: DictationProfileId;
     readonly activationKey: ActivationKey;
@@ -60,18 +64,18 @@ export class WelcomeService {
   }
 
   async invalidateMicrophoneBinding(): Promise<void> {
-    await this.#invalidate(2, {
+    await this.#invalidate(MICROPHONE_STEP, {
       microphoneTested: false,
       microphoneEvidence: null,
     });
   }
 
   async invalidateModelSelection(): Promise<void> {
-    await this.#invalidate(3, { modelEvidence: null });
+    await this.#invalidate(MODEL_STEP, { modelEvidence: null });
   }
 
   async invalidateActivationBinding(): Promise<void> {
-    await this.#invalidate(4, {
+    await this.#invalidate(ACTIVATION_STEP, {
       activationTested: false,
       activationEvidence: null,
     });
@@ -130,7 +134,7 @@ export class WelcomeService {
     return this.#serialize(async () => {
       const currentWelcome = this.#settings.get().welcome;
       if (currentWelcome.completedAt !== null) return this.state();
-      if (currentWelcome.lastStep !== 6) {
+      if (currentWelcome.lastStep !== FINAL_STEP) {
         throw prerequisiteError('Complete every Welcome step before finishing setup.');
       }
 
@@ -149,7 +153,7 @@ export class WelcomeService {
           await this.#settings.update(
             {
               welcome: {
-                lastStep: 6,
+                lastStep: FINAL_STEP,
                 completedAt: Math.max(0, Math.floor(this.#now())),
                 revision: revision + 1,
               },
@@ -199,14 +203,9 @@ export class WelcomeService {
   }
 
   async #evidenceForLeaving(step: WelcomeStep): Promise<NonNullable<SettingsPatch['welcome']>> {
-    if (step === 2) {
-      const observation = this.#prerequisites.microphoneObservation?.() ?? null;
-      if (
-        !this.#prerequisites.microphoneReady() ||
-        observation === null ||
-        observation.observedRms < USABLE_RMS_THRESHOLD ||
-        observation.sampleCount < MIN_OBSERVED_SAMPLES
-      ) {
+    if (step === MICROPHONE_STEP) {
+      const observation = this.#prerequisites.microphoneObservation();
+      if (!this.#prerequisites.microphoneReady() || !isUsableMicrophoneEvidence(observation)) {
         throw prerequisiteError('Speak during the microphone test before continuing.');
       }
       return {
@@ -218,15 +217,12 @@ export class WelcomeService {
         },
       };
     }
-    if (step === 3) {
+    if (step === MODEL_STEP) {
       if (!(await this.#prerequisites.modelReady())) {
         throw prerequisiteError('Finish and verify the selected Whisper model before continuing.');
       }
       const modelId = this.#settings.get().transcription.modelId;
-      const manifestRevision = this.#prerequisites.modelRevision?.(modelId);
-      if (manifestRevision === undefined) {
-        throw prerequisiteError('The selected model manifest could not be verified.');
-      }
+      const manifestRevision = this.#prerequisites.modelRevision(modelId);
       return {
         modelEvidence: {
           modelId,
@@ -236,7 +232,7 @@ export class WelcomeService {
         },
       };
     }
-    if (step === 4) {
+    if (step === ACTIVATION_STEP) {
       if (!this.#prerequisites.helperReady()) {
         throw prerequisiteError('Finish keyboard helper and permission setup before continuing.');
       }
@@ -264,7 +260,7 @@ export class WelcomeService {
           shift: testedProfile.shift,
           enabled: true,
           helperProtocol: HELPER_PROTOCOL_VERSION,
-          readinessGeneration: this.#prerequisites.helperReadinessGeneration?.() ?? 0,
+          readinessGeneration: this.#prerequisites.helperReadinessGeneration(),
           observedAt: Math.max(0, Math.floor(this.#now())),
         },
       };
@@ -278,7 +274,8 @@ export class WelcomeService {
     if (
       !this.#prerequisites.microphoneReady() ||
       microphone == null ||
-      microphone.observedRms < microphone.usableThreshold
+      microphone.observedRms < USABLE_RMS_THRESHOLD ||
+      microphone.sampleCount < MIN_OBSERVED_SAMPLES
     ) {
       throw prerequisiteError('Microphone setup is no longer ready. Return to step 2.');
     }
@@ -289,13 +286,13 @@ export class WelcomeService {
     const selectedModel = this.#settings.get().transcription.modelId;
     if (
       model?.modelId !== selectedModel ||
-      model.manifestRevision !== this.#prerequisites.modelRevision?.(selectedModel)
+      model.manifestRevision !== this.#prerequisites.modelRevision(selectedModel)
     ) {
       throw prerequisiteError('The selected model evidence is stale. Return to step 3.');
     }
     const current = this.#settings.get();
     const activation = current.welcome.activationEvidence;
-    const readinessGeneration = this.#prerequisites.helperReadinessGeneration?.() ?? 0;
+    const readinessGeneration = this.#prerequisites.helperReadinessGeneration();
     const activatedProfile =
       activation === null || activation === undefined
         ? undefined
@@ -326,6 +323,16 @@ export class WelcomeService {
     );
     return result;
   }
+}
+
+function isUsableMicrophoneEvidence(
+  observation: ReturnType<WelcomePrerequisites['microphoneObservation']>,
+): observation is NonNullable<ReturnType<WelcomePrerequisites['microphoneObservation']>> {
+  return (
+    observation !== null &&
+    observation.observedRms >= USABLE_RMS_THRESHOLD &&
+    observation.sampleCount >= MIN_OBSERVED_SAMPLES
+  );
 }
 
 function setupChangedError(): PublicAppError {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OpenAICompatibleProviderId } from '../../app/src/shared/schemas/providers';
+import { providerModelSelectionPolicy } from '../../app/src/shared/provider-model-selection';
 import {
   OPENAI_COMPATIBLE_PRESETS,
   type EndpointNormalization,
@@ -269,6 +270,14 @@ describe('provider preset fidelity matrix', () => {
       const credential = preset.fields.find(({ key }) => key === 'credential');
       expect(credential?.required ?? false, `${preset.id} credential requirement`).toBe(
         preset.auth === 'required-bearer',
+      );
+      const modelSelection = providerModelSelectionPolicy(preset.id);
+      expect(
+        preset.fields.some(({ key, required }) => key === 'modelId' && required),
+        `${preset.id} model requirement`,
+      ).toBe(modelSelection === 'required');
+      expect(preset.modelList.kind === 'none', `${preset.id} provider-managed model`).toBe(
+        modelSelection === 'provider-managed',
       );
       expect(preset.fields.every((field) => field.secret === (field.key === 'credential'))).toBe(
         true,

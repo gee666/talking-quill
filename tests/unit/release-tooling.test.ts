@@ -38,10 +38,17 @@ beforeEach(() => {
         schemaVersion: 1,
         sourceCommit: commit,
         sourceTreeSha256: 'a'.repeat(64),
-        package: { version: '1.0.0', platform, arch },
+        package: {
+          version: '1.0.0',
+          platform,
+          arch,
+          root: `release/${platform}-${arch}-unpacked`,
+        },
         entries: names.map((name) => ({
           role: 'final-artifact',
           path: `release/${name}`,
+          kind: 'file',
+          size: readFileSync(resolve(fixture, name)).length,
           sha256: sha256(resolve(fixture, name)),
         })),
       }),
@@ -107,6 +114,27 @@ describe('release assembly tooling', () => {
     wrongManifest.sourceCommit = 'b'.repeat(40);
     writeFileSync(manifestPath, JSON.stringify(wrongManifest));
     expect(() => run('scripts/verify-draft-release.mjs', verifyArguments)).toThrow();
+  });
+
+  it('rejects provenance that omits canonical source-tree or file evidence', () => {
+    for (const name of [
+      'provenance-win-x64.json',
+      'provenance-win-arm64.json',
+      'provenance-mac-x64.json',
+      'provenance-mac-arm64.json',
+    ]) {
+      const path = resolve(fixture, name);
+      const provenance = JSON.parse(readFileSync(path, 'utf8')) as {
+        sourceTreeSha256?: string;
+      };
+      delete provenance.sourceTreeSha256;
+      writeFileSync(path, JSON.stringify(provenance));
+    }
+    expect(() =>
+      run('scripts/assemble-release.mjs', ['v1.0.0', fixture], {
+        TALKING_QUILL_RELEASE_COMMIT: commit,
+      }),
+    ).toThrow('Provenance schema mismatch');
   });
 
   it('rejects unexpected assets, wrong repositories, and public-latest draft confusion', () => {

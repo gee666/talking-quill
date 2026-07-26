@@ -23,7 +23,9 @@ const entry = {
 
 function installApi() {
   const createCommand = vi.fn(() => Promise.resolve(command));
-  const preview = vi.fn(() => Promise.resolve({ command, kind: 'exact' as const, score: 1 }));
+  const preview = vi.fn<MainApi['commands']['preview']>(() =>
+    Promise.resolve({ command, kind: 'exact' as const, score: 1 }),
+  );
   const deleteCommand = vi.fn(() => Promise.resolve(true));
   const createVocabulary = vi.fn(() => Promise.resolve(entry));
   const deleteVocabulary = vi.fn(() => Promise.resolve(true));
@@ -63,7 +65,7 @@ describe('Task 8 settings', () => {
     expect(screen.getByText(/Say “send report”/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Edit send report' })).toBeVisible();
     await user.type(screen.getByLabelText(/Trigger phrase/), 'archive project');
-    await user.type(screen.getByLabelText('Snippet'), 'Archived');
+    await user.type(screen.getByRole('textbox', { name: 'Snippet' }), 'Archived');
     await user.click(screen.getByRole('button', { name: 'Add voice command' }));
     expect(api.createCommand).toHaveBeenCalledWith({
       trigger: 'archive project',
@@ -73,6 +75,24 @@ describe('Task 8 settings', () => {
     await user.click(screen.getByRole('button', { name: 'Preview match' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Exact match');
     expect(api.preview).toHaveBeenCalledWith('send report');
+  });
+
+  it('ignores a preview result after the transcript changes', async () => {
+    const api = installApi();
+    const pending = deferred<Awaited<ReturnType<MainApi['commands']['preview']>>>();
+    api.preview.mockReturnValueOnce(pending.promise);
+    const user = userEvent.setup();
+    render(<VoiceCommandsSection commands={[command]} />);
+
+    const transcript = screen.getByLabelText('Match preview transcript');
+    await user.type(transcript, 'send report');
+    await user.click(screen.getByRole('button', { name: 'Preview match' }));
+    await user.clear(transcript);
+    await user.type(transcript, 'archive project');
+    pending.resolve(null);
+
+    await waitForMicrotasks();
+    expect(screen.queryByText('No voice command matches the full transcript.')).toBeNull();
   });
 
   it('announces preview and command delete IPC failures', async () => {
@@ -111,3 +131,16 @@ describe('Task 8 settings', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Vocabulary delete unavailable.');
   });
 });
+
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function waitForMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}

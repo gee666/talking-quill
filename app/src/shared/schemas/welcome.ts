@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ActivationKeySchema } from '../helper/protocol';
+import { MicrophoneIdSchema } from './audio';
 import { DictationProfileIdSchema } from './dictation-profiles';
 import { WhisperModelIdSchema } from './model-manifest';
 
@@ -14,7 +15,7 @@ export const WelcomeStepSchema = z.union([
 
 export const MicrophoneEvidenceSchema = z
   .object({
-    boundDeviceId: z.string().min(1).max(512).nullable(),
+    boundDeviceId: MicrophoneIdSchema.nullable(),
     observedRms: z.number().positive().max(1),
     usableThreshold: z.number().positive().max(1),
     sampleCount: z.number().int().positive(),

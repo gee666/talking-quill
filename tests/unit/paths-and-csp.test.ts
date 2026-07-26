@@ -83,6 +83,7 @@ describe('security and paths foundations', () => {
 
   it('defines the exact approved colors, AA pairings, and reduced-motion fallback', async () => {
     const tokens = await readFile(resolve('app/src/renderer/design/tokens.css'), 'utf8');
+    const components = await readFile(resolve('app/src/renderer/design/components.css'), 'utf8');
     const global = await readFile(resolve('app/src/renderer/design/global.css'), 'utf8');
     for (const color of [
       // Light theme.
@@ -144,6 +145,9 @@ describe('security and paths foundations', () => {
     }
     expect(tokens).toContain("[data-theme='light']");
     expect(tokens).toContain("[data-theme='dark']");
+    expect(components).toContain(
+      '.me-field__control::placeholder {\n  color: var(--color-secondary);\n}',
+    );
     expect(global).toContain('prefers-reduced-motion: reduce');
   });
 

@@ -14,6 +14,11 @@ export interface LifecycleStep {
   readonly run: () => void | Promise<void>;
 }
 
+export interface SynchronousLifecycleStep {
+  readonly name: string;
+  readonly run: () => void;
+}
+
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 
 export class StartupCancelledError extends Error {
@@ -46,16 +51,12 @@ export class StartupCleanupStack {
 
 export function runSynchronousLifecycle(
   phase: LifecyclePhase,
-  steps: readonly LifecycleStep[],
+  steps: readonly SynchronousLifecycleStep[],
 ): readonly LifecycleDiagnostic[] {
   const diagnostics: LifecycleDiagnostic[] = [];
   for (const step of steps) {
     try {
-      const result = step.run();
-      if (result instanceof Promise) {
-        void result.catch(() => undefined);
-        diagnostics.push({ phase, step: step.name, outcome: 'rejected' });
-      }
+      step.run();
     } catch {
       diagnostics.push({ phase, step: step.name, outcome: 'rejected' });
     }
@@ -71,16 +72,14 @@ export async function runBoundedLifecycle(
 ): Promise<readonly LifecycleDiagnostic[]> {
   const diagnostics: LifecycleDiagnostic[] = [];
   const deadline = Date.now() + Math.max(1, timeoutMs);
-  for (let index = 0; index < steps.length; index += 1) {
-    const step = steps[index];
-    if (step === undefined) continue;
-    const remainingSteps = steps.length - index;
+  for (const step of steps) {
     const remainingMs = Math.max(1, deadline - Date.now());
-    const stepBudgetMs = Math.max(1, Math.floor(remainingMs / remainingSteps));
-    const outcome = await settleBounded(step.run, stepBudgetMs);
+    const outcome = await settleBounded(step.run, remainingMs);
     if (outcome !== null) {
       diagnostics.push({ phase, step: step.name, outcome });
-      if (options.stopOnFailure === true) break;
+      // A rejected task has settled and cannot race later cleanup. A timed-out task is still
+      // running because Promise.race cannot cancel it, so dependent teardown must not begin.
+      if (options.stopOnFailure === true || outcome === 'timed-out') break;
     }
   }
   return Object.freeze(diagnostics);

@@ -11,7 +11,7 @@ import {
   validateProviderEndpoint,
   type EndpointResolver,
 } from '../../app/src/main/security/provider-endpoint-policy';
-import { redactHeaders, redactSensitive, redactText } from '../../app/src/main/security/redaction';
+import { redactSensitive, redactText } from '../../app/src/main/security/redaction';
 import {
   sendJson,
   startMockProviderServer,
@@ -94,7 +94,7 @@ describe('provider endpoint policy', () => {
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
   });
 
-  it('allows cleartext credentials only on loopback and constrains fixed cloud endpoints', async () => {
+  it('allows cleartext only off cloud, limits credentials, and constrains fixed cloud endpoints', async () => {
     const loopback = await validateProviderEndpoint('http://127.0.0.1:1234', undefined, {
       credentialed: true,
       signal: liveSignal(),
@@ -109,6 +109,12 @@ describe('provider endpoint policy', () => {
     await expect(
       validateProviderEndpoint('http://cloud.test', resolverFor('8.8.8.8'), {
         credentialed: true,
+        signal: liveSignal(),
+      }),
+    ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
+    await expect(
+      validateProviderEndpoint('http://cloud.test', resolverFor('8.8.8.8'), {
+        credentialed: false,
         signal: liveSignal(),
       }),
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
@@ -486,7 +492,7 @@ describe('safe errors and redaction', () => {
     [403, 'AUTHENTICATION_FAILED'],
     [404, 'MODEL_NOT_FOUND'],
     [408, 'TIMEOUT'],
-    [413, 'RESPONSE_TOO_LARGE'],
+    [413, 'REQUEST_TOO_LARGE'],
     [429, 'RATE_LIMITED'],
     [500, 'UNAVAILABLE'],
     [400, 'REMOTE_FAILURE'],
@@ -526,10 +532,9 @@ describe('safe errors and redaction', () => {
     expect(
       redactText(`failed at (fd00:ec2::254), api.example from 8.8.8.8 using ${secret}`, [secret]),
     ).not.toMatch(/fd00:ec2|api\.example|8\.8\.8\.8|sk-secret/);
-    expect(redactHeaders({ authorization: `Bearer ${secret}`, accept: 'api.example' })).toEqual({
-      authorization: '[REDACTED]',
-      accept: '[REDACTED]',
-    });
+    expect(redactText('prefix-long-secret-suffix', ['long', 'long-secret'])).toBe(
+      'prefix-[REDACTED]-suffix',
+    );
     expect(
       JSON.stringify(redactSensitive(new Error('getaddrinfo ENOTFOUND internal-provider'))),
     ).not.toContain('internal-provider');

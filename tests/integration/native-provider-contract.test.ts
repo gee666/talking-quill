@@ -170,6 +170,128 @@ describe('native cloud provider contracts', () => {
     }
   });
 
+  it('preflights cold catalog-backed vision capabilities and caches completed discovery', async () => {
+    const { server, service } = await fixture();
+    for (const config of configs.filter(
+      (candidate) => candidate.providerId === 'bedrock' || candidate.providerId === 'cohere',
+    )) {
+      expect(service.capabilities(config, config.modelId)).toBe('unknown');
+      await expect(
+        service.preflightCapability(config, config.modelId, AbortSignal.timeout(2_000)),
+      ).resolves.toBe('supported');
+      const requestCount = server.requests.length;
+      await expect(
+        service.preflightCapability(config, config.modelId, AbortSignal.timeout(2_000)),
+      ).resolves.toBe('supported');
+      expect(server.requests).toHaveLength(requestCount);
+    }
+  });
+
+  it('does not reuse catalog-backed capability caches across credentials', async () => {
+    let cohereCredential = 'credential-account-a';
+    let bedrockCredential = awsCredential;
+    const secondAwsCredential = serializeAwsCredentials({
+      accessKeyId: 'AKIDACCOUNTB123456',
+      secretAccessKey: 'second-account-secret-access-key',
+    });
+    const server = await startMockProviderServer((request, response) => {
+      if (request.url.startsWith('/v1/models?')) {
+        sendJson(response, {
+          models: [
+            {
+              name: 'account-model',
+              endpoints: ['chat'],
+              features:
+                request.headers.authorization === 'Bearer credential-account-a'
+                  ? ['vision']
+                  : ['chat'],
+            },
+          ],
+        });
+      } else if (request.url.startsWith('/foundation-models')) {
+        sendJson(response, {
+          modelSummaries: [
+            {
+              modelId: 'account-model',
+              inputModalities: request.headers.authorization?.includes('AKIDACCOUNTB123456')
+                ? ['TEXT']
+                : ['TEXT', 'IMAGE'],
+              outputModalities: ['TEXT'],
+              inferenceTypesSupported: ['ON_DEMAND'],
+            },
+          ],
+        });
+      } else if (request.url.startsWith('/inference-profiles')) {
+        sendJson(response, { inferenceProfileSummaries: [] });
+      } else {
+        sendJson(response, {}, 404);
+      }
+    });
+    servers.push(server);
+    const service = new ProviderService(
+      new ProviderRegistry({
+        endpointOverrides: { bedrock: server.origin, cohere: server.origin },
+      }),
+      {
+        getCredential: (providerId) =>
+          providerId === 'bedrock' ? bedrockCredential : cohereCredential,
+      },
+    );
+    const cohereConfig = { providerId: 'cohere' as const, modelId: 'account-model' };
+    const bedrockConfig = {
+      providerId: 'bedrock' as const,
+      region: 'us-west-2',
+      modelId: 'account-model',
+    };
+
+    await expect(
+      service.preflightCapability(cohereConfig, cohereConfig.modelId, AbortSignal.timeout(2_000)),
+    ).resolves.toBe('supported');
+    cohereCredential = 'credential-account-b';
+    await expect(
+      service.preflightCapability(cohereConfig, cohereConfig.modelId, AbortSignal.timeout(2_000)),
+    ).resolves.toBe('unsupported');
+
+    await expect(
+      service.preflightCapability(bedrockConfig, bedrockConfig.modelId, AbortSignal.timeout(2_000)),
+    ).resolves.toBe('supported');
+    bedrockCredential = secondAwsCredential;
+    await expect(
+      service.preflightCapability(bedrockConfig, bedrockConfig.modelId, AbortSignal.timeout(2_000)),
+    ).resolves.toBe('unsupported');
+  });
+
+  it('does not publish Cohere capabilities from a failed paginated discovery', async () => {
+    const server = await startMockProviderServer((request, response) => {
+      const url = new URL(request.url, server.origin);
+      if (url.searchParams.get('page_token') === null) {
+        sendJson(response, {
+          models: [
+            {
+              name: 'partially-discovered-model',
+              endpoints: ['chat'],
+              features: ['vision'],
+            },
+          ],
+          next_page_token: 'next',
+        });
+      } else {
+        sendJson(response, { models: 'malformed' });
+      }
+    });
+    servers.push(server);
+    const service = new ProviderService(
+      new ProviderRegistry({ endpointOverrides: { cohere: server.origin } }),
+      { getCredential: () => credential },
+    );
+    const config = { providerId: 'cohere' as const, modelId: 'partially-discovered-model' };
+
+    await expect(
+      service.preflightCapability(config, config.modelId, AbortSignal.timeout(2_000)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    expect(service.capabilities(config, config.modelId)).toBe('unknown');
+  });
+
   it('encodes optional images in each provider-native request shape', async () => {
     const { server, service } = await fixture();
     const image = { mimeType: 'image/jpeg' as const, base64: '/9j/2Q==' };
@@ -276,7 +398,7 @@ describe('native cloud provider contracts', () => {
     ]);
     expect(server.requests).toHaveLength(0);
     expect(new ProviderRegistry().catalog().find(({ id }) => id === 'azure')?.modelDiscovery).toBe(
-      'configured',
+      'azure-deployment',
     );
   });
 
@@ -390,7 +512,16 @@ describe('native cloud provider contracts', () => {
   it('rejects malformed Bedrock inference-profile ARN aliases', async () => {
     const server = await startMockProviderServer((request, response) => {
       if (request.url.startsWith('/foundation-models')) {
-        sendJson(response, { modelSummaries: [] });
+        sendJson(response, {
+          modelSummaries: [
+            {
+              modelId: 'foundation-before-failure',
+              inputModalities: ['TEXT', 'IMAGE'],
+              outputModalities: ['TEXT'],
+              inferenceTypesSupported: ['ON_DEMAND'],
+            },
+          ],
+        });
         return;
       }
       sendJson(response, {
@@ -409,12 +540,11 @@ describe('native cloud provider contracts', () => {
       new ProviderRegistry({ endpointOverrides: { bedrock: server.origin } }),
       { getCredential: () => awsCredential },
     );
-    await expect(
-      service.listModels(
-        { providerId: 'bedrock', region: 'us-west-2', modelId: 'profile-id' },
-        AbortSignal.timeout(2_000),
-      ),
-    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    const config = { providerId: 'bedrock' as const, region: 'us-west-2', modelId: 'profile-id' };
+    await expect(service.listModels(config, AbortSignal.timeout(2_000))).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+    });
+    expect(service.capabilities(config, 'foundation-before-failure')).toBe('unknown');
   });
 
   it('omits Bedrock temperature for incompatible models while retaining output bounds', async () => {

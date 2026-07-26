@@ -4,6 +4,7 @@ import type { SettingsStore } from '../persistence/settings-store';
 import type { ProviderConfigService } from '../providers/provider-config-service';
 import type { ProviderService } from '../providers/provider-service';
 import { ProviderError } from '../providers/errors';
+import { providerModelSelectionPolicy } from '../../shared/provider-model-selection';
 import { resolveVisionCapability } from '../providers/vision-capabilities';
 import type { CapturedScreenshot, ScreenshotService } from '../screenshot/screenshot-service';
 import { MANUAL_VISION_PROVIDER_IDS } from '../providers/vision-capabilities';
@@ -15,7 +16,7 @@ import type {
 import { RetainedScreenshot } from '../screenshot/screenshot-retention';
 import {
   buildSmartCleanupPrompt,
-  SMART_MAX_OUTPUT_TOKENS,
+  SMART_DEFAULT_OUTPUT_TOKENS,
   SMART_TEMPERATURE,
 } from './prompt-builder';
 import { normalizeSmartOutput } from './output-processing';
@@ -42,6 +43,11 @@ export interface SmartTranscriptProcessor {
   beginSession(profile?: Readonly<DictationProfile>): FrozenSmartTranscriptSession;
 }
 
+interface RetainedScreenshotHandle {
+  readonly filename: string;
+  cleanup(): void;
+}
+
 export class SmartTranscriptionService implements SmartTranscriptProcessor {
   readonly #settings: SettingsStore;
   readonly #configs: ProviderConfigService;
@@ -49,6 +55,10 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
   readonly #screenshots: ScreenshotService;
   readonly #helper: Pick<HelperClient, 'getFrontApp'>;
   readonly #screenshotsDirectory: string;
+  readonly #retainScreenshot: (
+    directory: string,
+    screenshot: CapturedScreenshot,
+  ) => RetainedScreenshotHandle;
   readonly #pendingVision = new Map<
     string,
     {
@@ -67,6 +77,10 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     readonly screenshots: ScreenshotService;
     readonly helper: Pick<HelperClient, 'getFrontApp'>;
     readonly screenshotsDirectory: string;
+    readonly retainScreenshot?: (
+      directory: string,
+      screenshot: CapturedScreenshot,
+    ) => RetainedScreenshotHandle;
   }) {
     this.#settings = options.settings;
     this.#configs = options.configs;
@@ -74,6 +88,9 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     this.#screenshots = options.screenshots;
     this.#helper = options.helper;
     this.#screenshotsDirectory = options.screenshotsDirectory;
+    this.#retainScreenshot =
+      options.retainScreenshot ??
+      ((directory, screenshot) => new RetainedScreenshot(directory, screenshot));
   }
 
   status(): {
@@ -87,7 +104,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     const providerId = settings.smartProcessing.selectedProviderId;
     const config = this.#configs.get(providerId);
     const modelId = config.modelId ?? null;
-    const binding = `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[providerId] ?? 0)}`;
+    const binding = this.#visionBinding(config, settings, providerId);
     const capability =
       modelId === null
         ? 'unknown'
@@ -110,31 +127,42 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
   }
 
   async setOnScreenAwareness(enabled: boolean): Promise<ReturnType<SettingsStore['get']>> {
-    if (enabled) {
-      const revision = this.#configs.smartRevision();
+    if (!enabled) {
+      return this.#settings.update({
+        smartProcessing: { onScreenAwarenessEnabled: false },
+      });
+    }
+    const revision = this.#configs.smartRevision();
+    const operation = revisionBoundOperation(this.#configs, revision, new AbortController().signal);
+    try {
       const settings = this.#settings.get();
       const providerId = settings.smartProcessing.selectedProviderId;
       const config = this.#configs.get(providerId);
       const modelId = config.modelId;
       if (modelId === undefined || modelId === null) throw new ProviderError('INVALID_CONFIG');
-      const binding = `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[providerId] ?? 0)}`;
+      const binding = this.#visionBinding(config, settings, providerId);
       const capability = resolveVisionCapability({
         providerCapability: await this.#providers.preflightCapability(
           config,
           modelId,
-          AbortSignal.timeout(30_000),
+          operation.signal,
         ),
         providerId,
         modelId,
         binding,
         overrides: settings.smartProcessing.visionOverrides,
       });
-      if (revision !== this.#configs.smartRevision()) throw new ProviderError('STALE_CONFIG');
+      operation.assertActive();
       if (capability !== 'supported') throw new ProviderError('INVALID_CONFIG');
+      return await this.#settings.update(
+        { smartProcessing: { onScreenAwarenessEnabled: true } },
+        operation.signal,
+      );
+    } catch (error: unknown) {
+      throw operation.normalize(error);
+    } finally {
+      operation.dispose();
     }
-    return this.#settings.update({
-      smartProcessing: { onScreenAwarenessEnabled: enabled },
-    });
   }
 
   async verifyManualVision(nonce: string, signal: AbortSignal): Promise<VisionVerification> {
@@ -172,7 +200,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
       operation.dispose();
     }
     if (revision !== this.#configs.smartRevision()) throw new ProviderError('STALE_CONFIG');
-    const binding = `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[providerId] ?? 0)}`;
+    const binding = this.#visionBinding(config, settings, providerId);
     this.#scavengePendingVision();
     if (this.#pendingVision.size >= 16) throw new ProviderError('UNAVAILABLE');
     const verificationId = randomUUID();
@@ -199,36 +227,51 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     ) {
       throw new ProviderError('INVALID_CONFIG');
     }
-    assertNotAborted(signal);
-    const settings = this.#settings.get();
-    const config = this.#configs.get(pending.providerId);
-    const binding = `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[pending.providerId] ?? 0)}`;
-    if (
-      settings.smartProcessing.selectedProviderId !== pending.providerId ||
-      binding !== pending.binding ||
-      config.modelId !== pending.modelId
-    ) {
-      throw new ProviderError('STALE_CONFIG');
-    }
-    const retained = settings.smartProcessing.visionOverrides.filter(
-      (item) => item.providerId !== pending.providerId || item.modelId !== pending.modelId,
-    );
-    return this.#settings.update(
-      {
-        smartProcessing: {
-          visionOverrides: [
-            ...retained,
-            {
-              providerId: pending.providerId,
-              binding: pending.binding,
-              modelId: pending.modelId,
-              verifiedAt: Date.now(),
-            },
-          ],
+    const operation = revisionBoundOperation(this.#configs, pending.revision, signal);
+    try {
+      operation.assertActive();
+      const settings = this.#settings.get();
+      const config = this.#configs.get(pending.providerId);
+      const binding = this.#visionBinding(config, settings, pending.providerId);
+      if (
+        settings.smartProcessing.selectedProviderId !== pending.providerId ||
+        binding !== pending.binding ||
+        config.modelId !== pending.modelId
+      ) {
+        throw new ProviderError('STALE_CONFIG');
+      }
+      const retained = settings.smartProcessing.visionOverrides.filter(
+        (item) => item.providerId !== pending.providerId || item.modelId !== pending.modelId,
+      );
+      return await this.#settings.update(
+        {
+          smartProcessing: {
+            visionOverrides: [
+              ...retained,
+              {
+                providerId: pending.providerId,
+                binding: pending.binding,
+                modelId: pending.modelId,
+                verifiedAt: Date.now(),
+              },
+            ],
+          },
         },
-      },
-      signal,
-    );
+        operation.signal,
+      );
+    } catch (error: unknown) {
+      throw operation.normalize(error);
+    } finally {
+      operation.dispose();
+    }
+  }
+
+  #visionBinding(
+    config: Parameters<ProviderService['credentialBinding']>[0],
+    settings: ReturnType<SettingsStore['get']>,
+    providerId: RunnableProviderId,
+  ): string {
+    return `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[providerId] ?? 0)}`;
   }
 
   #scavengePendingVision(): void {
@@ -247,13 +290,14 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     const providerId = settings.smartProcessing.selectedProviderId;
     const config = structuredClone(this.#configs.get(providerId));
     const modelId = config.modelId ?? null;
+    const modelSelectionPolicy = providerModelSelectionPolicy(providerId);
     const vocabulary = Object.freeze(
       settings.customVocabulary.map((entry) => Object.freeze(entry)),
     );
-    const binding = `${this.#providers.credentialBinding(config)}\n${String(settings.smartProcessing.credentialEpochs[providerId] ?? 0)}`;
+    const binding = this.#visionBinding(config, settings, providerId);
     const osaRequested = settings.smartProcessing.onScreenAwarenessEnabled;
     let retainAllowed = settings.privacy.historyEnabled && settings.privacy.retainSmartScreenshots;
-    let retained: RetainedScreenshot | null = null;
+    let retained: RetainedScreenshotHandle | null = null;
     let preparedScreenshot: CapturedScreenshot | null = null;
     let preparationError: unknown = null;
     let prepared = false;
@@ -269,8 +313,13 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     const removePrivacy = this.#settings.subscribe((next) => {
       if (next.privacy.historyEnabled && next.privacy.retainSmartScreenshots) return;
       retainAllowed = false;
-      retained?.cleanup();
+      const revoked = retained;
       retained = null;
+      try {
+        revoked?.cleanup();
+      } catch {
+        // Privacy revocation is irreversible even if filesystem cleanup needs later scavenging.
+      }
     });
     const disposeSession = (): void => {
       if (disposed) return;
@@ -341,7 +390,9 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
         );
         try {
           operation.assertActive();
-          if (modelId === null) throw new ProviderError('INVALID_CONFIG');
+          if (modelId === null && modelSelectionPolicy === 'required') {
+            throw new ProviderError('INVALID_CONFIG');
+          }
           if (!prepared) {
             if (osaRequested) throw new ProviderError('INVALID_CONFIG');
             prepared = true;
@@ -357,12 +408,9 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
             config,
             {
               input: buildSmartCleanupPrompt(text, vocabulary, profilePrompt),
-              modelId,
+              ...(modelId === null ? {} : { modelId }),
               temperature: SMART_TEMPERATURE,
-              maxOutputTokens: Math.min(
-                config.maxOutputTokens ?? SMART_MAX_OUTPUT_TOKENS,
-                SMART_MAX_OUTPUT_TOKENS,
-              ),
+              maxOutputTokens: config.maxOutputTokens ?? SMART_DEFAULT_OUTPUT_TOKENS,
               ...(screenshot === null ? {} : { image: screenshot.image }),
             },
             operation.signal,
@@ -377,7 +425,11 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
             currentPrivacy.historyEnabled &&
             currentPrivacy.retainSmartScreenshots
           ) {
-            retained = new RetainedScreenshot(this.#screenshotsDirectory, screenshot);
+            try {
+              retained = this.#retainScreenshot(this.#screenshotsDirectory, screenshot);
+            } catch {
+              retained = null;
+            }
           }
           operation.assertActive();
           return Object.freeze({
@@ -392,27 +444,29 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
       },
       commitScreenshot: () => {
         if (disposed) return;
-        const privacy = this.#settings.get().privacy;
-        if (retainAllowed && privacy.historyEnabled && privacy.retainSmartScreenshots) {
-          retained?.commit();
-        } else {
-          retained?.cleanup();
-          retained = null;
+        const current = retained;
+        retained = null;
+        try {
+          const privacy = this.#settings.get().privacy;
+          if (!(retainAllowed && privacy.historyEnabled && privacy.retainSmartScreenshots)) {
+            current?.cleanup();
+          }
+        } finally {
+          disposeSession();
         }
-        disposeSession();
       },
       cleanup: () => {
-        retained?.cleanup();
+        const current = retained;
         retained = null;
         preparedScreenshot = null;
-        disposeSession();
+        try {
+          current?.cleanup();
+        } finally {
+          disposeSession();
+        }
       },
     });
   }
-}
-
-function assertNotAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw new ProviderError('CANCELLED');
 }
 
 interface RevisionBoundOperation {
@@ -466,6 +520,7 @@ function sessionOperation(
     normalize: (error) => {
       if (callerSignal.aborted) return new ProviderError('CANCELLED');
       if (stale()) return new ProviderError('STALE_CONFIG');
+      if (controller.signal.aborted) return new ProviderError('CANCELLED');
       return error;
     },
     dispose: () => {

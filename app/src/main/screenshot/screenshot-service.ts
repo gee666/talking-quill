@@ -9,12 +9,12 @@ export const SCREENSHOT_JPEG_QUALITY = 80;
 
 export interface CapturedScreenshot {
   readonly image: ProviderImage;
-  readonly width: number;
-  readonly height: number;
 }
 
 export class ScreenshotService {
   readonly #setWidgetExcluded: (excluded: boolean) => void | Promise<void>;
+  #captureTail: Promise<void> = Promise.resolve();
+  #nativeCaptureSettled: Promise<void> | null = null;
 
   constructor(
     options: {
@@ -38,8 +38,29 @@ export class ScreenshotService {
     targetBounds: HelperFrontApp['windowBounds'],
     signal: AbortSignal,
   ): Promise<CapturedScreenshot> {
-    if (signal.aborted) throw new ProviderError('CANCELLED');
+    const precedingCapture = this.#captureTail;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    this.#captureTail = precedingCapture.then(() => turn);
+    try {
+      await waitForAbort(precedingCapture, signal);
+      return await this.#captureExclusive(targetBounds, signal);
+    } finally {
+      releaseTurn();
+    }
+  }
+
+  async #captureExclusive(
+    targetBounds: HelperFrontApp['windowBounds'],
+    signal: AbortSignal,
+  ): Promise<CapturedScreenshot> {
+    assertNotAborted(signal);
     if (this.permissionStatus() === 'denied') throw new ProviderError('UNAVAILABLE');
+    if (this.#nativeCaptureSettled !== null) {
+      await waitForAbort(this.#nativeCaptureSettled, signal);
+    }
     const bounds = this.#targetBounds(targetBounds);
     if (bounds === null) throw new ProviderError('UNAVAILABLE');
     const display = screen.getDisplayMatching(bounds);
@@ -53,7 +74,18 @@ export class ScreenshotService {
     await this.#setWidgetExcluded(true);
     try {
       await abortableDelay(34, signal);
-      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize });
+      const nativeCapture = desktopCapturer.getSources({ types: ['screen'], thumbnailSize });
+      const nativeCaptureSettled = nativeCapture.then(
+        () => undefined,
+        () => undefined,
+      );
+      this.#nativeCaptureSettled = nativeCaptureSettled;
+      void nativeCaptureSettled.then(() => {
+        if (this.#nativeCaptureSettled === nativeCaptureSettled) {
+          this.#nativeCaptureSettled = null;
+        }
+      });
+      const sources = await waitForAbort(nativeCapture, signal);
       assertNotAborted(signal);
       const source = sources.find((candidate) => candidate.display_id === String(display.id));
       if (source === undefined) throw new ProviderError('UNAVAILABLE');
@@ -81,11 +113,8 @@ export class ScreenshotService {
       if (jpeg.length === 0 || jpeg.length > MAX_PROVIDER_IMAGE_BYTES) {
         throw new ProviderError('REQUEST_TOO_LARGE');
       }
-      const finalSize = image.getSize();
       return Object.freeze({
         image: Object.freeze({ mimeType: 'image/jpeg' as const, base64: jpeg.toString('base64') }),
-        width: finalSize.width,
-        height: finalSize.height,
       });
     } finally {
       await this.#setWidgetExcluded(false);
@@ -102,6 +131,23 @@ export class ScreenshotService {
 
 function assertNotAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new ProviderError('CANCELLED');
+}
+
+function waitForAbort<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
+  assertNotAborted(signal);
+  return new Promise<Value>((resolve, reject) => {
+    const finish = (callback: () => void): void => {
+      signal.removeEventListener('abort', abort);
+      callback();
+    };
+    const abort = (): void => finish(() => reject(new ProviderError('CANCELLED')));
+    signal.addEventListener('abort', abort, { once: true });
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) =>
+        finish(() => reject(error instanceof Error ? error : new ProviderError('UNAVAILABLE'))),
+    );
+  });
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

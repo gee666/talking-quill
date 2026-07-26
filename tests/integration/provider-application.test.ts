@@ -399,6 +399,10 @@ describe('provider application integration', () => {
     ).rejects.toMatchObject({ publicError: { code: 'TIMEOUT' } });
     await vi.advanceTimersByTimeAsync(120_000);
     await hardTimeout;
+    expect(destroyedListeners.size).toBe(0);
+    await expect(
+      coordinator.run(owner, 'operation-hard-timeout', () => Promise.resolve('reused')),
+    ).resolves.toBe('reused');
     vi.useRealTimers();
 
     coordinator.dispose();

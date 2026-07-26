@@ -36,7 +36,7 @@ export function validateNsisUninstallPolicy({ custom, assisted, uninstaller }) {
   }
 }
 
-export async function validateInstalledNsisTemplates() {
+async function validateInstalledNsisTemplates() {
   const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
   const appBuilderRoot = dirname(electronBuilderRequire.resolve('app-builder-lib/package.json'));
   const templateRoot = resolve(appBuilderRoot, 'templates/nsis');

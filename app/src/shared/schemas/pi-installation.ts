@@ -27,3 +27,8 @@ export type PiInstallationStatus = z.infer<typeof PiInstallationStatusSchema>;
 export const PiInstallationSaveRequestSchema = z
   .object({ path: PiInstallationPathSchema })
   .strict();
+
+export const PiInstallationBrowseResultSchema = z
+  .object({ path: PiInstallationPathSchema })
+  .strict();
+export type PiInstallationBrowseResult = z.infer<typeof PiInstallationBrowseResultSchema>;

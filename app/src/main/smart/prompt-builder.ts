@@ -13,7 +13,7 @@ When a screenshot is attached, use it only to resolve ambiguous dictated words.
 Return only the cleaned transcript, without quotation marks, a preamble, explanation, or Markdown fence.`;
 
 export const SMART_TEMPERATURE = 0.2 as const;
-export const SMART_MAX_OUTPUT_TOKENS = 2_048 as const;
+export const SMART_DEFAULT_OUTPUT_TOKENS = 2_048 as const;
 
 export function buildSmartCleanupPrompt(
   transcript: string,

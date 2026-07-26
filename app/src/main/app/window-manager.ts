@@ -17,6 +17,10 @@ export interface WindowManagerCallbacks {
   readonly onMainHidden: () => void;
 }
 
+const MAX_RENDERER_RECOVERY_ATTEMPTS = 2;
+const RENDERER_RECOVERY_BACKOFF_MS = 250;
+const RENDERER_STABILITY_WINDOW_MS = 30_000;
+
 export class WindowManager {
   readonly #loader: RendererLoader;
   readonly #roles: WindowRoleRegistry;
@@ -24,6 +28,8 @@ export class WindowManager {
   readonly #callbacks: WindowManagerCallbacks;
   readonly #windows = new Map<WindowRole, BrowserWindow>();
   readonly #recoveryAttempts = new Map<WindowRole, number>();
+  readonly #recoveryTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
+  readonly #stabilityTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
   #pendingMainClose: Promise<void> | null = null;
   #quitting = false;
 
@@ -55,14 +61,10 @@ export class WindowManager {
     return [...this.#windows.values()].find((window) => window.webContents.id === id) ?? null;
   }
 
-  async closeByWebContentsId(id: number): Promise<void> {
-    const window = this.getByWebContentsId(id);
-    if (window === null) return;
-    if (window === this.#windows.get('main')) {
-      await this.#coordinateMainClose(window);
-      return;
-    }
-    window.close();
+  async closeMainByWebContentsId(id: number): Promise<void> {
+    const main = this.#windows.get('main');
+    if (main?.webContents.id !== id) return;
+    await this.#coordinateMainClose(main);
   }
 
   showWidget(
@@ -114,11 +116,14 @@ export class WindowManager {
   }
 
   beginQuit(): void {
+    if (this.#quitting) return;
     this.#quitting = true;
+    this.#clearTimers(this.#recoveryTimers);
+    this.#clearTimers(this.#stabilityTimers);
   }
 
   destroyAll(): void {
-    this.#quitting = true;
+    this.beginQuit();
     for (const window of this.#windows.values()) {
       if (!window.isDestroyed()) window.destroy();
     }
@@ -126,6 +131,7 @@ export class WindowManager {
   }
 
   async #createAndLoad(role: WindowRole): Promise<void> {
+    if (this.#quitting) return;
     const window = this.#create(role);
     this.#windows.set(role, window);
     const expectedUrl = this.#loader.urlFor(role);
@@ -168,7 +174,9 @@ export class WindowManager {
         minWidth: 960,
         minHeight: 600,
       });
-      window.once('ready-to-show', () => window.show());
+      window.once('ready-to-show', () => {
+        if (!this.#quitting && !window.isDestroyed()) window.show();
+      });
       window.on('close', (event) => {
         if (this.#quitting) return;
         event.preventDefault();
@@ -235,8 +243,18 @@ export class WindowManager {
   #attachRecovery(window: BrowserWindow, role: WindowRole): void {
     let loaded = false;
     window.webContents.once('did-finish-load', () => {
+      if (this.#quitting || this.#windows.get(role) !== window) return;
       loaded = true;
-      setTimeout(() => this.#recoveryAttempts.delete(role), 30_000).unref();
+      this.#clearRoleTimer(this.#stabilityTimers, role);
+      const timer = setTimeout(() => {
+        if (this.#stabilityTimers.get(role) !== timer) return;
+        this.#stabilityTimers.delete(role);
+        if (!this.#quitting && this.#windows.get(role) === window) {
+          this.#recoveryAttempts.delete(role);
+        }
+      }, RENDERER_STABILITY_WINDOW_MS);
+      this.#stabilityTimers.set(role, timer);
+      timer.unref();
     });
     window.webContents.on('did-fail-load', (_event, errorCode) => {
       if (errorCode !== -3) this.#recover(role, window);
@@ -248,15 +266,36 @@ export class WindowManager {
 
   #recover(role: WindowRole, failed: BrowserWindow): void {
     if (this.#quitting || this.#windows.get(role) !== failed) return;
+    this.#clearRoleTimer(this.#stabilityTimers, role);
     const attempts = (this.#recoveryAttempts.get(role) ?? 0) + 1;
     this.#recoveryAttempts.set(role, attempts);
     this.#windows.delete(role);
     this.#roles.unregister(failed.webContents.id);
     if (!failed.isDestroyed()) failed.destroy();
-    if (attempts > 2) return;
+    if (attempts > MAX_RENDERER_RECOVERY_ATTEMPTS) {
+      this.#callbacks.requestQuit();
+      return;
+    }
+    this.#clearRoleTimer(this.#recoveryTimers, role);
     const timer = setTimeout(() => {
+      if (this.#recoveryTimers.get(role) !== timer) return;
+      this.#recoveryTimers.delete(role);
+      if (this.#quitting) return;
       void this.#createAndLoad(role).catch(() => undefined);
-    }, 250 * attempts);
+    }, RENDERER_RECOVERY_BACKOFF_MS * attempts);
+    this.#recoveryTimers.set(role, timer);
     timer.unref();
+  }
+
+  #clearRoleTimer(timers: Map<WindowRole, ReturnType<typeof setTimeout>>, role: WindowRole): void {
+    const timer = timers.get(role);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    timers.delete(role);
+  }
+
+  #clearTimers(timers: Map<WindowRole, ReturnType<typeof setTimeout>>): void {
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
   }
 }

@@ -84,6 +84,7 @@ function harness(
     readonly getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
     readonly sampleRate?: number;
     readonly immediateProcessorError?: boolean;
+    readonly closeAudioContext?: () => Promise<void>;
   } = {},
 ) {
   const mediaDevices = new EventTarget() as EventTarget & {
@@ -114,7 +115,7 @@ function harness(
     disconnect: workletDisconnect,
   }) as unknown as AudioWorkletNode;
   const contextResume = vi.fn(() => Promise.resolve());
-  const contextClose = vi.fn(() => Promise.resolve());
+  const contextClose = vi.fn(options.closeAudioContext ?? (() => Promise.resolve()));
   const context = {
     sampleRate: options.sampleRate ?? 48_000,
     state: 'running',
@@ -283,6 +284,17 @@ describe('CaptureEngine', () => {
     await test.engine.stop();
   });
 
+  it('ignores an unusable persisted microphone preference without passing it to browser media APIs', async () => {
+    const test = harness();
+
+    await expect(test.engine.start('microphone\u0085id')).resolves.toMatchObject({
+      activeMicrophoneId: 'default',
+      preferredUnavailable: true,
+    });
+    expect(test.getUserMedia.mock.calls[0]?.[0].audio).not.toHaveProperty('deviceId');
+    await test.engine.stop();
+  });
+
   it('refreshes anonymous enumeration after permission and reports Bluetooth hot-plug labels', async () => {
     let devices = [mediaDevice('', '')];
     const test = harness({ enumerateDevices: () => Promise.resolve(devices) });
@@ -405,6 +417,31 @@ describe('CaptureEngine', () => {
     test.worklet.dispatchEvent(new Event('processorerror'));
     await vi.waitFor(() => expect(test.unexpectedStop).toHaveBeenCalledWith('error'));
     expect(track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a delayed failure teardown stop a newer capture', async () => {
+    const firstClose = deferred<undefined>();
+    let closeCount = 0;
+    const test = harness({
+      closeAudioContext: () => {
+        closeCount += 1;
+        return closeCount === 1 ? firstClose.promise : Promise.resolve();
+      },
+    });
+    await test.engine.start(null);
+    await test.engine.activate();
+    test.worklet.dispatchEvent(new Event('processorerror'));
+    await vi.waitFor(() => expect(test.contextClose).toHaveBeenCalledOnce());
+
+    await test.engine.stop();
+    await test.engine.start(null);
+    await test.engine.activate();
+    firstClose.resolve(undefined);
+    await firstClose.promise;
+    await Promise.resolve();
+
+    expect(test.unexpectedStop).not.toHaveBeenCalled();
+    await test.engine.stop();
   });
 
   it('ends and cleans an active graph exactly once when the track is unplugged', async () => {

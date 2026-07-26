@@ -1,17 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CARGO_AUDIT_VERSION, isExpectedCargoAuditVersion } from './security-tool-versions.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = spawnSync('cargo', ['audit', '--version'], { cwd: ROOT, encoding: 'utf8' });
-if (version.status !== 0 || !/\b0\.22\.2\s*$/u.test(version.stdout.trim())) {
+if (version.status !== 0 || !isExpectedCargoAuditVersion(version.stdout)) {
   throw new Error(
-    'RustSec audit requires cargo-audit 0.22.2. Install with: cargo install cargo-audit --version 0.22.2 --locked',
+    `RustSec audit requires cargo-audit ${CARGO_AUDIT_VERSION}. Install with: cargo install cargo-audit --version ${CARGO_AUDIT_VERSION} --locked`,
   );
 }
 auditLockfile('helper/Cargo.lock');
 console.log(
-  'RustSec audit passed for the helper lock (cargo-audit 0.22.2, deny warnings, no ignores): 0 vulnerabilities and 0 warnings.',
+  `RustSec audit passed for the helper lock (cargo-audit ${CARGO_AUDIT_VERSION}, deny warnings, no ignores): 0 vulnerabilities and 0 warnings.`,
 );
 
 function auditLockfile(lockfile) {
