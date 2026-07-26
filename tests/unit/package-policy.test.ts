@@ -22,6 +22,22 @@ import {
 
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
+const mergedMasterRendererAssets = [
+  'out/renderer/assets/echo-session-valid.js',
+  'out/renderer/assets/echo-session-valid.css',
+  'out/renderer/assets/logo-light-valid.png',
+  'out/renderer/assets/logo-dark-valid.png',
+] as const;
+
+const performanceLazyChunks = [
+  'out/renderer/assets/InfoScreen-valid.js',
+  'out/renderer/assets/SettingsScreen-valid.js',
+  'out/renderer/assets/SmartProcessingSection-valid.js',
+  'out/renderer/assets/schemas-valid.js',
+] as const;
+
+const mergedRendererAssets = [...mergedMasterRendererAssets, ...performanceLazyChunks];
+
 const validAsar = [
   'out',
   'out/main',
@@ -43,14 +59,7 @@ const validAsar = [
   'out/renderer/assets/capture-valid.js',
   'out/renderer/assets/capture.worklet-valid.js',
   'out/renderer/assets/audio-valid.js',
-  'out/renderer/assets/echo-session-valid.js',
-  'out/renderer/assets/echo-session-valid.css',
-  'out/renderer/assets/InfoScreen-valid.js',
-  'out/renderer/assets/SettingsScreen-valid.js',
-  'out/renderer/assets/SmartProcessingSection-valid.js',
-  'out/renderer/assets/schemas-valid.js',
-  'out/renderer/assets/logo-light-valid.png',
-  'out/renderer/assets/logo-dark-valid.png',
+  ...mergedRendererAssets,
   ...PROVIDER_LOGO_BASENAMES.map(
     (name) => `out/renderer/assets/${name}-valid.${jpegProviderLogos.has(name) ? 'jpeg' : 'png'}`,
   ),
@@ -124,6 +133,11 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
     expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();
+  });
+
+  it.each(mergedRendererAssets)('retains the merged renderer allowlist for %s', (asset) => {
+    expect(validAsar).toContain(asset);
+    expect(() => validateAsarEntries(validAsar)).not.toThrow();
   });
 
   it('requires guarded worker artifacts, renderer assets, and all provider logos', async () => {
