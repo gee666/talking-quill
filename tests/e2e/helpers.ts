@@ -8,7 +8,7 @@ export async function resetProfile(name: string): Promise<string> {
   const settings = structuredClone(DEFAULT_SETTINGS);
   settings.welcome = {
     completedAt: 1,
-    lastStep: 6,
+    lastStep: 5,
     microphoneTested: true,
     activationTested: true,
   };

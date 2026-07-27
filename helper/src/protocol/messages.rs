@@ -8,7 +8,7 @@ use serde_json::{Value, value::RawValue};
 
 use crate::{
     framing::MAX_FRAME_BYTES,
-    keyboard::{EventPhase, HelperEvent, SessionKey},
+    keyboard::{ActivationBinding, EventPhase, HelperEvent, SessionKey},
 };
 
 pub const INBOUND_METHODS: [&str; 8] = [
@@ -39,6 +39,11 @@ impl RequestId {
             Self::String(value) => !value.is_empty() && value.len() <= MAX_STRING_ID_BYTES,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self::Number(value)
+    }
 }
 
 /// Strict JSON-RPC 2.0 request ID. Commands require an ID; an absent ID marks
@@ -62,7 +67,7 @@ impl<'de> Deserialize<'de> for IdField {
             type Value = IdField;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a non-null string or nonnegative integer request ID")
+                formatter.write_str("a non-null string or nonnegative safe-integer request ID")
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E>
@@ -230,11 +235,10 @@ struct PasteCommittedParams<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ActivationEventParams {
-    key: crate::keyboard::ActivationKey,
     phase: EventPhase,
-    shift: bool,
+    #[serde(flatten)]
+    binding: ActivationBinding,
 }
 
 #[derive(Debug, Serialize)]
@@ -255,14 +259,13 @@ pub enum OutboundEncodingError {
 pub fn encode_outbound(message: &Outbound) -> Result<Vec<u8>, OutboundEncodingError> {
     let serializable = match message {
         Outbound::Response(response) => SerializableOutbound::Response(response),
-        Outbound::Event(HelperEvent::Activation { key, phase, shift }) => {
+        Outbound::Event(HelperEvent::Activation { binding, phase }) => {
             SerializableOutbound::Notification(RpcNotification {
                 jsonrpc: "2.0",
                 method: "activation.event",
                 params: NotificationParams::Activation(ActivationEventParams {
-                    key: *key,
                     phase: *phase,
-                    shift: *shift,
+                    binding: *binding,
                 }),
             })
         }
@@ -393,11 +396,13 @@ impl RpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::ActivationKey;
+    use crate::keyboard::{ActivationKey, ProfileId};
     use crate::platform::FrontApp;
 
     fn string_response(length: usize) -> Outbound {
-        Outbound::Response(RpcResponse::success(RequestId::Number(1), "a".repeat(length)).unwrap())
+        Outbound::Response(
+            RpcResponse::success(RequestId::for_test(1), "a".repeat(length)).unwrap(),
+        )
     }
 
     #[test]
@@ -430,14 +435,18 @@ mod tests {
     fn every_keyboard_notification_is_frame_bounded() {
         for event in [
             HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    crate::keyboard::Shortcut::legacy_alt_letter(ActivationKey::Z, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             },
             HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::PROMPT,
+                    crate::keyboard::Shortcut::legacy_alt_letter(ActivationKey::Z, true),
+                ),
                 phase: EventPhase::Up,
-                shift: true,
             },
             HelperEvent::SessionKey {
                 key: SessionKey::Escape,

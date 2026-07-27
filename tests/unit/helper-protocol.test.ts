@@ -7,10 +7,16 @@ import {
 import {
   HELPER_MAX_FRAME_BYTES,
   HelperNotificationSchema,
+  HelperRequestIdSchema,
   HelperRpcResponseSchema,
   helperParamsSchemas,
   helperResultSchemas,
 } from '../../app/src/shared/helper/protocol';
+import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
+
+const binding = (profileId: string, shortcut: unknown) => ({ profileId, shortcut });
+const customProfileId = (index: number) =>
+  `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 
 describe('native helper framing', () => {
   it('decodes partial and concatenated big-endian frames', () => {
@@ -53,6 +59,28 @@ describe('native helper framing', () => {
 });
 
 describe('native helper JSON-RPC schemas', () => {
+  it('requires protocol v3 and has no lossy default activation key handshake field', () => {
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 3 }).success).toBe(true);
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 2 }).success).toBe(false);
+    const initialized = {
+      protocolVersion: 3,
+      helperVersion: '1.0.0',
+      platform: 'windows',
+      architecture: 'x86_64',
+      hookStatus: 'ready',
+      permissions: {
+        accessibility: 'not_applicable',
+        inputMonitoring: 'not_applicable',
+        eventPost: 'not_applicable',
+      },
+    };
+    expect(helperResultSchemas.initialize.safeParse(initialized).success).toBe(true);
+    expect(
+      helperResultSchemas.initialize.safeParse({ ...initialized, defaultActivationKey: 'Z' })
+        .success,
+    ).toBe(false);
+  });
+
   it('contains only the fixed command allowlist with strict params', () => {
     expect(Object.keys(helperParamsSchemas)).toEqual([
       'initialize',
@@ -67,13 +95,29 @@ describe('native helper JSON-RPC schemas', () => {
     expect(
       helperParamsSchemas['activation.configure'].safeParse({
         enabled: true,
-        bindings: [{ key: 'Z', shift: false }],
+        bindings: [binding('general', shortcutFromLegacyActivation('Z', false))],
       }).success,
     ).toBe(true);
     expect(
       helperParamsSchemas['activation.configure'].safeParse({
         enabled: true,
-        bindings: [{ key: 'F1', shift: false }],
+        bindings: [
+          binding('prompt', {
+            modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+            keys: ['Q', 'P'],
+          }),
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      helperParamsSchemas['activation.configure'].safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', {
+            modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+            keys: ['F1'],
+          }),
+        ],
       }).success,
     ).toBe(false);
     expect(
@@ -84,12 +128,126 @@ describe('native helper JSON-RPC schemas', () => {
     ).toBe(false);
   });
 
+  it('rejects empty enabled sets, duplicates, prefixes, and malformed chord keys', () => {
+    const schema = helperParamsSchemas['activation.configure'];
+    const altA = shortcutFromLegacyActivation('A', false);
+    expect(schema.safeParse({ enabled: true, bindings: [] }).success).toBe(false);
+    expect(schema.safeParse({ enabled: false, bindings: [] }).success).toBe(true);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', {
+            modifiers: { ctrl: false, alt: false, shift: false, meta: false },
+            keys: ['A'],
+          }),
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', {
+            modifiers: { ctrl: false, alt: false, shift: true, meta: false },
+            keys: ['A'],
+          }),
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [binding('general', altA), binding('prompt', altA)],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [binding('general', altA), binding('prompt', { ...altA, keys: ['A', 'B'] })],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', altA),
+          binding('general', shortcutFromLegacyActivation('B', false)),
+        ],
+      }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ enabled: true, bindings: [binding('custom', altA)] }).success).toBe(
+      false,
+    );
+    for (const profileId of [
+      '00000000-0000-0000-0000-000000000000',
+      'ffffffff-ffff-ffff-ffff-ffffffffffff',
+    ]) {
+      expect(
+        schema.safeParse({ enabled: true, bindings: [binding(profileId, altA)] }).success,
+      ).toBe(true);
+    }
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [binding('FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF', altA)],
+      }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ enabled: true, bindings: [altA] }).success).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', altA),
+          binding('prompt', {
+            ...altA,
+            modifiers: { ...altA.modifiers, shift: true },
+            keys: ['A', 'B'],
+          }),
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [binding('general', { ...altA, keys: ['A', 'A'] })],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: Array.from({ length: 11 }, (_, index) =>
+          binding(customProfileId(index), {
+            ...altA,
+            keys: [String.fromCharCode(65 + index)],
+          }),
+        ),
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts bounded numeric and v2-compatible string request IDs', () => {
+    for (const id of [0, Number.MAX_SAFE_INTEGER, 'request-id', 'é'.repeat(32)]) {
+      expect(HelperRequestIdSchema.safeParse(id).success).toBe(true);
+    }
+    for (const id of [-1, Number.MAX_SAFE_INTEGER + 1, '', 'a'.repeat(65), 'é'.repeat(33)]) {
+      expect(HelperRequestIdSchema.safeParse(id).success).toBe(false);
+    }
+  });
+
   it('strictly validates responses, method results, and notifications', () => {
     expect(
       HelperRpcResponseSchema.safeParse({
         jsonrpc: '2.0',
         id: 1,
         result: { submitted: true },
+      }).success,
+    ).toBe(true);
+    expect(
+      HelperRpcResponseSchema.safeParse({
+        jsonrpc: '2.0',
+        id: 'request-id',
+        result: {},
       }).success,
     ).toBe(true);
     expect(
@@ -111,14 +269,32 @@ describe('native helper JSON-RPC schemas', () => {
       HelperNotificationSchema.safeParse({
         jsonrpc: '2.0',
         method: 'activation.event',
-        params: { phase: 'down', key: 'Z', shift: true },
+        params: {
+          phase: 'down',
+          profileId: 'prompt',
+          shortcut: shortcutFromLegacyActivation('Z', true),
+        },
       }).success,
     ).toBe(true);
     expect(
       HelperNotificationSchema.safeParse({
         jsonrpc: '2.0',
         method: 'activation.event',
-        params: { phase: 'down', alternate: true },
+        params: { phase: 'down', profileId: 'general', shortcut: { keys: ['Z'] } },
+      }).success,
+    ).toBe(false);
+    expect(
+      HelperNotificationSchema.safeParse({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: { phase: 'down', shortcut: shortcutFromLegacyActivation('Z', false) },
+      }).success,
+    ).toBe(false);
+    expect(
+      HelperNotificationSchema.safeParse({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: { phase: 'down', profileId: 'general', key: 'Z', shift: false },
       }).success,
     ).toBe(false);
     expect(

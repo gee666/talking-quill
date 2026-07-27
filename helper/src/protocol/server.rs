@@ -6,30 +6,23 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{PROTOCOL_VERSION, messages::*};
 use crate::{
     CriticalDelivery,
-    keyboard::{ActivationBindings, ActivationKey},
+    keyboard::ActivationBindings,
     platform::{CallbackGate, Platform, PlatformError, TerminalReason, TerminalSignal},
 };
 
-/// `initialize` params schema: `{ "protocolVersion": 2 }`.
+/// `initialize` params schema: `{ "protocolVersion": 3 }`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct InitializeParams {
     protocol_version: u16,
 }
 
+/// Protocol-v3 `activation.configure` params schema.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ActivationBinding {
-    key: ActivationKey,
-    shift: bool,
-}
-
-/// Protocol-v2 `activation.configure` params schema.
-#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigureActivationParams {
     enabled: bool,
-    bindings: Vec<ActivationBinding>,
+    bindings: ActivationBindings,
 }
 
 /// `session.set_capture` params schema: `{ "active": boolean }`.
@@ -52,15 +45,8 @@ struct InitializeResult {
     helper_version: &'static str,
     platform: &'static str,
     architecture: &'static str,
-    default_activation_key: ActivationKey,
     hook_status: crate::platform::HookStatus,
     permissions: crate::platform::Permissions,
-}
-
-#[derive(Debug, Serialize)]
-struct ConfigureActivationResult {
-    enabled: bool,
-    bindings: Vec<ActivationBinding>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,30 +158,16 @@ impl<P: Platform> Server<P> {
                     Ok(params) => params,
                     Err(keep_running) => return HandleOutcome::from_keep_running(keep_running),
                 };
-                if params.bindings.len() > ActivationBindings::MAX
-                    || has_duplicate_bindings(&params.bindings)
-                    || (params.enabled && params.bindings.is_empty())
-                {
+                if params.enabled && params.bindings.is_empty() {
                     return HandleOutcome::from_keep_running(
                         self.send_error(request.id, RpcError::invalid_params()),
                     );
                 }
-                let exact: Vec<_> = params
-                    .bindings
-                    .iter()
-                    .map(|binding| (binding.key, binding.shift))
-                    .collect();
-                let Some(bindings) = ActivationBindings::from_exact(&exact) else {
-                    return HandleOutcome::from_keep_running(
-                        self.send_error(request.id, RpcError::invalid_params()),
-                    );
-                };
-                let result = ConfigureActivationResult {
-                    enabled: params.enabled,
-                    bindings: params.bindings,
-                };
-                match self.platform.configure_activation(params.enabled, bindings) {
-                    Ok(()) => self.send_success(request.id, result),
+                match self
+                    .platform
+                    .configure_activation(params.enabled, params.bindings)
+                {
+                    Ok(()) => self.send_success(request.id, params),
                     Err(error) => self.send_platform_error(request.id, error),
                 }
             }
@@ -320,7 +292,6 @@ impl<P: Platform> Server<P> {
             helper_version: env!("CARGO_PKG_VERSION"),
             platform: std::env::consts::OS,
             architecture: std::env::consts::ARCH,
-            default_activation_key: ActivationKey::DEFAULT,
             hook_status: self.platform.hook_status(),
             permissions: self.platform.permissions(),
         };
@@ -417,18 +388,6 @@ impl<P: Platform> Server<P> {
     }
 }
 
-fn has_duplicate_bindings(bindings: &[ActivationBinding]) -> bool {
-    for (index, binding) in bindings.iter().enumerate() {
-        if bindings[..index]
-            .iter()
-            .any(|candidate| candidate.key == binding.key && candidate.shift == binding.shift)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn success_outbound<T: Serialize>(id: RequestId, value: T) -> Outbound {
     let response_id = id.clone();
     match RpcResponse::success(id, value) {
@@ -455,7 +414,7 @@ mod tests {
 
     #[test]
     fn oversized_success_becomes_stable_bounded_error_without_recursion() {
-        let outbound = success_outbound(RequestId::Number(7), "\u{0001}".repeat(MAX_FRAME_BYTES));
+        let outbound = success_outbound(RequestId::for_test(7), "\u{0001}".repeat(MAX_FRAME_BYTES));
         let payload = encode_outbound(&outbound).unwrap();
         assert!(payload.len() < MAX_FRAME_BYTES);
         let response: serde_json::Value = serde_json::from_slice(&payload).unwrap();

@@ -40,19 +40,6 @@ pub enum HookStatus {
     Stopped,
 }
 
-const ACTIVATION_ENABLED_MASK: u64 = 1_u64 << 63;
-
-pub(crate) const fn activation_config_value(enabled: bool, bindings: ActivationBindings) -> u64 {
-    bindings.bits() | if enabled { ACTIVATION_ENABLED_MASK } else { 0 }
-}
-
-pub(crate) const fn activation_config_from_value(value: u64) -> (bool, ActivationBindings) {
-    (
-        value & ACTIVATION_ENABLED_MASK != 0,
-        ActivationBindings::from_bits(value),
-    )
-}
-
 pub(crate) const fn hook_status_to_u8(status: HookStatus) -> u8 {
     match status {
         HookStatus::Ready => 0,
@@ -458,7 +445,22 @@ pub trait Platform: Sized {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::ActivationKey;
+    use crate::keyboard::{
+        ActivationBinding, ActivationKey, ProfileId, Shortcut, ShortcutModifiers,
+    };
+
+    fn test_shortcut() -> Shortcut {
+        Shortcut::new(
+            ShortcutModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                meta: false,
+            },
+            &[ActivationKey::Z],
+        )
+        .unwrap()
+    }
 
     fn escaped_content_bytes(value: &str) -> usize {
         serde_json::to_string(value).unwrap().len() - 2
@@ -496,9 +498,8 @@ mod tests {
         let terminal = TerminalSignal::new(gate, terminal_sender);
         let capture = AtomicBool::new(false);
         let activation = HelperEvent::Activation {
-            key: ActivationKey::Z,
+            binding: ActivationBinding::new(ProfileId::GENERAL, test_shortcut()),
             phase: EventPhase::Down,
-            shift: false,
         };
         let (sender, receiver) = crossbeam_channel::bounded(1);
 
@@ -536,9 +537,8 @@ mod tests {
             &outbound_tx,
             &terminal,
             HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(ProfileId::GENERAL, test_shortcut()),
                 phase: crate::keyboard::EventPhase::Down,
-                shift: false,
             },
         ));
         assert!(!gate.is_open());
@@ -558,9 +558,7 @@ mod tests {
             KeyInput {
                 key,
                 phase: KeyPhase::Down,
-                alt: true,
-                shift: false,
-                disallowed_modifiers: false,
+                modifiers: crate::keyboard::ModifierMask::new(false, true, false, false),
                 repeat: false,
                 injected: false,
             },
@@ -574,9 +572,7 @@ mod tests {
             KeyInput {
                 key,
                 phase: KeyPhase::Up,
-                alt: false,
-                shift: false,
-                disallowed_modifiers: false,
+                modifiers: crate::keyboard::ModifierMask::default(),
                 repeat: false,
                 injected: false,
             },

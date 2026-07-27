@@ -9,8 +9,10 @@ import { ProcessingModeSchema } from '../../../shared/schemas/history';
 import {
   DEFAULT_SETTINGS,
   SETTINGS_SCHEMA_VERSION,
+  SettingsSchema,
   type Settings,
 } from '../../../shared/schemas/settings';
+import { ShortcutKeySchema, shortcutFromLegacyActivation } from '../../../shared/schemas/shortcut';
 import { utf8ByteLength } from '../../../shared/schemas/text-bounds';
 import {
   VOCABULARY_TOTAL_MAX_UTF8_BYTES,
@@ -18,11 +20,11 @@ import {
   VocabularyListSchema,
   type VocabularyEntry,
 } from '../../../shared/schemas/vocabulary';
-import { ActivationKeySchema } from '../../../shared/helper/protocol';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
 } from './legacy-settings-contracts';
+import type { LegacySettingsV20 } from './legacy-settings-v20';
 
 export function migrateRemovedLargeModel(input: unknown): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
@@ -31,12 +33,14 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
   if (typeof app === 'object' && app !== null && !Array.isArray(app)) {
     const legacyApp = app as Record<string, unknown>;
     legacyApp.launchAtLogin ??= DEFAULT_SETTINGS.app.launchAtLogin;
+    const activationKey = ShortcutKeySchema.parse(legacyApp.activationKey);
+    delete legacyApp.activationKey;
     const profiles = defaultDictationProfiles();
     const general = profiles[0];
     if (general === undefined) throw new Error('Default General profile is missing');
     profiles[0] = {
       ...general,
-      activationKey: ActivationKeySchema.parse(legacyApp.activationKey),
+      shortcut: shortcutFromLegacyActivation(activationKey, false),
       processingMode: ProcessingModeSchema.parse(legacyApp.defaultProcessingMode),
     };
     migrated.dictationProfiles = profiles;
@@ -53,9 +57,10 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
   const welcome = migrated.welcome;
   if (typeof welcome === 'object' && welcome !== null && !Array.isArray(welcome)) {
     // Earlier evidence omitted profile identity and Shift, so it is not proof
-    // of any exact v19 activation binding.
+    // of any exact activation binding.
     (welcome as Record<string, unknown>).activationEvidence = null;
     (welcome as Record<string, unknown>).activationTested = false;
+    migrateWelcomeStep(welcome as Record<string, unknown>);
     const modelEvidence = (welcome as Record<string, unknown>).modelEvidence;
     if (
       typeof modelEvidence === 'object' &&
@@ -68,6 +73,30 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
     }
   }
   return migrated;
+}
+
+export function migrateFiveStepWelcome(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const migrated = structuredClone(input) as Record<string, unknown>;
+  const welcome = migrated.welcome;
+  if (typeof welcome === 'object' && welcome !== null && !Array.isArray(welcome)) {
+    migrateWelcomeStep(welcome as Record<string, unknown>);
+  }
+  return migrated;
+}
+
+export function migrateShortcutChords(legacy: LegacySettingsV20): Settings {
+  const { activationKey: _activationKey, ...app } = structuredClone(legacy.app);
+  void _activationKey;
+  return SettingsSchema.parse({
+    ...structuredClone(legacy),
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    app,
+    dictationProfiles: legacy.dictationProfiles.map(({ activationKey, shift, ...profile }) => ({
+      ...structuredClone(profile),
+      shortcut: shortcutFromLegacyActivation(activationKey, shift),
+    })),
+  });
 }
 
 export function stripDictationProfiles(input: unknown): unknown {
@@ -137,7 +166,7 @@ export function migrateUnverifiedWelcome(legacy: LegacySettingsWithWelcomeProgre
   const completedAt = legacy.welcome.completedAt;
   migrated.welcome = {
     ...structuredClone(DEFAULT_SETTINGS.welcome),
-    lastStep: completedAt === null ? (legacy.welcome.lastStep === 1 ? 1 : 2) : 6,
+    lastStep: completedAt === null ? (legacy.welcome.lastStep === 1 ? 1 : 2) : 5,
     completedAt,
   };
   return migrated;
@@ -151,7 +180,10 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
     if (general === undefined) throw new Error('Default General profile is missing');
     profiles[0] = {
       ...general,
-      activationKey: ActivationKeySchema.parse(legacyApp.activationKey),
+      shortcut: shortcutFromLegacyActivation(
+        ShortcutKeySchema.parse(legacyApp.activationKey),
+        false,
+      ),
       processingMode: ProcessingModeSchema.parse(legacyApp.defaultProcessingMode),
     };
   }
@@ -161,10 +193,6 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
       ...structuredClone(DEFAULT_SETTINGS.app),
       enabled: legacy.app.enabled,
       closeToTray: legacy.app.closeToTray,
-      activationKey:
-        'activationKey' in legacy.app
-          ? legacy.app.activationKey
-          : DEFAULT_SETTINGS.app.activationKey,
       defaultProcessingMode:
         'defaultProcessingMode' in legacy.app
           ? legacy.app.defaultProcessingMode
@@ -195,6 +223,16 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
     ),
     welcome: structuredClone(DEFAULT_SETTINGS.welcome),
   };
+}
+
+function migrateWelcomeStep(welcome: Record<string, unknown>): void {
+  if (welcome.completedAt !== null && welcome.completedAt !== undefined) {
+    welcome.lastStep = 5;
+  } else if (welcome.lastStep === 5) {
+    welcome.lastStep = 4;
+  } else if (welcome.lastStep === 6) {
+    welcome.lastStep = 5;
+  }
 }
 
 function migrateLegacyTranscription(

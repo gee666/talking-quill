@@ -5,6 +5,7 @@ import type { AppState } from '../../../shared/schemas/app-state';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Card, Status, Toast, Toggle } from '../../design';
 import { DictationHistory } from '../history/DictationHistory';
+import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
 import { presentAppStatus } from '../../status-presentation';
 
 const STATUS_COPY: Record<
@@ -100,7 +101,7 @@ export function DashboardScreen({
             disabled={savingEnabled}
             onChange={(event) => void updateEnabled(event.currentTarget.checked)}
             label={state.enabled ? 'Talking Quill enabled' : 'Talking Quill disabled'}
-            hint="Use the configured Alt or Option shortcut from any application."
+            hint="Use any configured profile shortcut chord from another application."
           />
         </Card>
         {enabledError === null ? null : (
@@ -123,7 +124,7 @@ export function DashboardScreen({
                 {settings.dictationProfiles
                   .map(
                     (profile) =>
-                      `${profile.name}: ${platform === 'darwin' ? 'Option' : 'Alt'} + ${profile.shift ? 'Shift + ' : ''}${profile.activationKey} (${profile.processingMode === 'raw' ? 'Raw' : 'Smart'})`,
+                      `${profile.name}: ${formatKeyboardShortcutWithTrigger(profile.shortcut, platform)} (${profile.processingMode === 'raw' ? 'Raw' : 'Smart'})`,
                   )
                   .join(' · ')}
               </dd>
@@ -155,10 +156,11 @@ export function DashboardScreen({
             />
           </label>
           <p className="body-copy">
-            Release quickly for Quick Dictation; hold for {String(ECHO_HOLD_THRESHOLD_MS)} ms for
-            Extended Dictation. Press Enter, press the shortcut again, or use the widget Stop button
-            to submit. Press Escape to cancel. Each profile shortcut uses its configured Raw or
-            Smart mode.
+            The shortcut&apos;s final letter key down starts timing. Release that final key before{' '}
+            {String(ECHO_HOLD_THRESHOLD_MS)} ms for Quick Dictation, or keep it down for Extended
+            Dictation. Press Enter, press the full shortcut chord again, or use the widget Stop
+            button to submit. Press Escape to cancel. Each profile shortcut uses its configured Raw
+            or Smart mode.
           </p>
         </Card>
         <Card title="Current readiness" description={copy.readiness}>

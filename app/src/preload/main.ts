@@ -27,6 +27,14 @@ const api: MainApi = {
     stop: () => invoke('activation-test:stop', {}),
     onChanged: (listener) => subscribe('activation-test:changed', listener),
   },
+  shortcutCapture: {
+    start: async () => {
+      await invoke('shortcut-capture:start', {});
+    },
+    stop: async () => {
+      await invoke('shortcut-capture:stop', {});
+    },
+  },
   app: {
     getBootstrap: () => invoke('bootstrap:get', {}),
     setEnabled: (enabled) => invoke('app:set-enabled', { enabled }),

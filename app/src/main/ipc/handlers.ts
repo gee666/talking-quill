@@ -104,6 +104,14 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       dependencies.echo.startActivationTest(context.webContentsId, context.onDestroyed),
     'activation-test:stop': (_request, context) =>
       dependencies.echo.stopActivationTest(context.webContentsId),
+    'shortcut-capture:start': async (_request, context) => {
+      await dependencies.echo.startShortcutCapture(context.webContentsId, context.onDestroyed);
+      return { accepted: true };
+    },
+    'shortcut-capture:stop': async (_request, context) => {
+      await dependencies.echo.stopShortcutCapture(context.webContentsId);
+      return { accepted: true };
+    },
     'app:set-enabled': ({ enabled }) =>
       serializeSettingsMutation(async () => {
         await updateSettings(dependencies, { app: { enabled } });
@@ -119,10 +127,14 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
     },
     'settings:update': (patch) =>
       serializeSettingsMutation(() => updateSettings(dependencies, patch)),
-    'profile:create': (input) => dependencies.echo.createProfile(input),
-    'profile:update': ({ id, patch }) => dependencies.echo.updateProfile(id, patch),
-    'profile:delete': ({ id }) => dependencies.echo.deleteProfile(id),
-    'profile:reset': ({ id }) => dependencies.echo.resetProfile(id),
+    'profile:create': (input) =>
+      serializeSettingsMutation(() => dependencies.echo.createProfile(input)),
+    'profile:update': ({ id, patch }) =>
+      serializeSettingsMutation(() => dependencies.echo.updateProfile(id, patch)),
+    'profile:delete': ({ id }) =>
+      serializeSettingsMutation(() => dependencies.echo.deleteProfile(id)),
+    'profile:reset': ({ id }) =>
+      serializeSettingsMutation(() => dependencies.echo.resetProfile(id)),
     'provider:catalog': () => ({ providers: [...dependencies.providers.catalog()] }),
     'provider:pi-installation-status': () => dependencies.piInstallation.status(),
     'provider:pi-installation-save': ({ path }) => dependencies.piInstallation.save(path),
@@ -268,15 +280,12 @@ async function updateSettings(
   const modelChanged =
     patch.transcription?.modelId !== undefined &&
     patch.transcription.modelId !== before.transcription.modelId;
-  const enabledChanged =
-    patch.app?.enabled !== undefined && patch.app.enabled !== before.app.enabled;
   const requestedLaunchAtLogin = patch.app?.launchAtLogin;
 
   // Evidence is derived from the values being replaced. Clear it before committing so a failed
   // invalidation can be retried with the same patch instead of becoming invisible after commit.
   if (microphoneChanged) await dependencies.welcome.invalidateMicrophoneBinding();
   if (modelChanged) await dependencies.welcome.invalidateModelSelection();
-  if (enabledChanged) await dependencies.welcome.invalidateActivationBinding();
 
   // Reconcile every explicit request, even when it matches persisted settings. This repairs an OS
   // state whose compensation failed after an earlier settings write failure.

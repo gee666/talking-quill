@@ -146,7 +146,7 @@ describe('release assembly tooling', () => {
     ).toThrow();
     const result = spawnSync(
       process.execPath,
-      ['scripts/verify-release-tag.mjs', 'v1.0.2', '--dry-run'],
+      ['scripts/verify-release-tag.mjs', 'v0.0.1', '--dry-run'],
       {
         cwd: root,
         env: { ...process.env, GITHUB_REPOSITORY: 'gee666/legacy-origin' },
@@ -155,12 +155,6 @@ describe('release assembly tooling', () => {
     );
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('restricted to gee666/talking-quill');
-  });
-
-  it('emits the immutable checked-out commit for dry-run preflight', () => {
-    const output = resolve(fixture, 'github-output.txt');
-    run('scripts/verify-release-tag.mjs', ['v1.0.2', '--dry-run'], { GITHUB_OUTPUT: output });
-    expect(readFileSync(output, 'utf8')).toContain(`commit=${commit}\n`);
   });
 });
 

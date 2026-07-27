@@ -2,7 +2,7 @@ use std::{
     ptr::null_mut,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -15,41 +15,30 @@ use windows_sys::Win32::{
     UI::{
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RETURN,
-            VK_RSHIFT, VK_RWIN, VK_SHIFT,
+            GetAsyncKeyState, GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW, VK_CONTROL,
+            VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN,
+            VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT,
-            LLKHF_ALTDOWN, LLKHF_INJECTED, MSG, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
-            PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN,
-            WM_SYSKEYUP,
+            CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW,
+            GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED,
+            MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
+            TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP,
+            WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
 
-use super::{
-    front_app::front_app,
-    hotkeys::{
-        ActivationCandidate, ActivationCandidateState, ActivationCommand, ActivationConfig,
-        CandidateUpAction, ConfigurationHandoff, ConfigurationTimeoutAction, HotKeyRegistrar,
-        HotKeyRuntime, HotKeyTransactionError, WindowsHotKeyRegistrar, cancel_configuration,
-        candidate_for_exact_passive_down, commit_configuration, configuration_ack_timeout,
-        configuration_handoff, configure_hotkeys, confirm_configuration_rollback,
-        release_activation_candidate, resolve_activation_candidate_message, unregister_all_hotkeys,
-    },
-    paste::inject_paste,
-};
+use super::{front_app::front_app, paste::inject_paste};
 use crate::{
     keyboard::{
-        ActivationBindings, ActivationKey, KeyInput, KeyPhase, KeyboardReducer, PhysicalKey,
-        PhysicalKeyTracker,
+        ActivationBindings, ActivationKey, HelperEvent, KeyInput, KeyPhase, KeyboardReducer,
+        ModifierMask, PhysicalKey, PhysicalKeyTracker,
     },
     platform::{
         CallbackGate, FrontApp, HookStatus, PasteResult, PermissionState, Permissions, Platform,
-        PlatformError, TerminalReason, TerminalSignal, activation_config_from_value,
-        activation_config_value, deliver_callback_event, deliver_callback_event_with_session_arm,
-        hook_status_from_u8, hook_status_to_u8,
+        PlatformError, TerminalReason, TerminalSignal, deliver_callback_event,
+        deliver_callback_event_with_session_arm, hook_status_from_u8, hook_status_to_u8,
     },
     protocol::Outbound,
 };
@@ -58,8 +47,9 @@ use crate::{
 pub(super) const INJECTED_MARKER: usize = 0x4D45_4348_4F50_5354;
 #[cfg(target_pointer_width = "32")]
 pub(super) const INJECTED_MARKER: usize = 0x4F50_5354;
-const WM_ACTIVATION_CONFIG: u32 = WM_APP + 0x45;
-const ACTIVATION_CONFIG_TIMEOUT: Duration = Duration::from_secs(2);
+
+const WM_OWNER_COMMAND: u32 = WM_APP + 0x45;
+const OWNER_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNER_WAKE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(5),
@@ -67,6 +57,38 @@ const OWNER_WAKE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(20),
 ];
 static DPI_AWARENESS_READY: OnceLock<bool> = OnceLock::new();
+static CALLBACK_CONTEXT: AtomicPtr<CallbackContext> = AtomicPtr::new(null_mut());
+
+/// Set-1 scan codes for the physical positions exposed by DOM `KeyboardEvent.code`.
+/// The array index is the corresponding `ActivationKey` discriminant.
+const LETTER_SCAN_CODES: [u32; 26] = [
+    0x1E, // KeyA
+    0x30, // KeyB
+    0x2E, // KeyC
+    0x20, // KeyD
+    0x12, // KeyE
+    0x21, // KeyF
+    0x22, // KeyG
+    0x23, // KeyH
+    0x17, // KeyI
+    0x24, // KeyJ
+    0x25, // KeyK
+    0x26, // KeyL
+    0x32, // KeyM
+    0x31, // KeyN
+    0x18, // KeyO
+    0x19, // KeyP
+    0x10, // KeyQ
+    0x13, // KeyR
+    0x1F, // KeyS
+    0x14, // KeyT
+    0x16, // KeyU
+    0x2F, // KeyV
+    0x11, // KeyW
+    0x2D, // KeyX
+    0x15, // KeyY
+    0x2C, // KeyZ
+];
 
 fn retry_owner_wake(mut post: impl FnMut() -> bool, mut backoff: impl FnMut(Duration)) -> bool {
     if post() {
@@ -84,8 +106,8 @@ fn retry_owner_wake(mut post: impl FnMut() -> bool, mut backoff: impl FnMut(Dura
 fn post_owner_message(thread_id: u32, message: u32) -> bool {
     retry_owner_wake(
         || {
-            // SAFETY: all owner messages are pointer-free and target the thread
-            // whose queue was created before readiness was reported.
+            // SAFETY: owner messages are pointer-free and target the thread
+            // whose queue is created before startup readiness is reported.
             unsafe { PostThreadMessageW(thread_id, message, 0, 0) != 0 }
         },
         thread::sleep,
@@ -104,10 +126,45 @@ impl Drop for OwnerCompletion {
     }
 }
 
-static CALLBACK_CONTEXT: AtomicPtr<CallbackContext> = AtomicPtr::new(null_mut());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum StartupState {
+    Pending,
+    Running,
+    Cancelled,
+}
+
+fn claim_startup(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            StartupState::Pending as u8,
+            StartupState::Running as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn cancel_startup(state: &AtomicU8) -> StartupState {
+    match state.compare_exchange(
+        StartupState::Pending as u8,
+        StartupState::Cancelled as u8,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => StartupState::Cancelled,
+        Err(value) if value == StartupState::Running as u8 => StartupState::Running,
+        Err(_) => StartupState::Cancelled,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ActivationConfig {
+    enabled: bool,
+    bindings: ActivationBindings,
+}
 
 struct SharedState {
-    activation_config: AtomicU64,
     session_capture: AtomicBool,
     hook_status: AtomicU8,
     stopping: AtomicBool,
@@ -116,10 +173,6 @@ struct SharedState {
 impl SharedState {
     fn new() -> Self {
         Self {
-            activation_config: AtomicU64::new(activation_config_value(
-                false,
-                ActivationBindings::default(),
-            )),
             session_capture: AtomicBool::new(false),
             hook_status: AtomicU8::new(hook_status_to_u8(HookStatus::Unavailable)),
             stopping: AtomicBool::new(false),
@@ -128,34 +181,40 @@ impl SharedState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ShiftKeyTracker {
+struct ModifierSides {
     left: bool,
     right: bool,
     generic: bool,
 }
 
-impl ShiftKeyTracker {
-    fn from_state(mut is_down: impl FnMut(u16) -> bool) -> Self {
-        let left = is_down(VK_LSHIFT);
-        let right = is_down(VK_RSHIFT);
+impl ModifierSides {
+    fn from_state(
+        left: u16,
+        right: u16,
+        generic: Option<u16>,
+        is_down: &mut impl FnMut(u16) -> bool,
+    ) -> Self {
+        let left_down = is_down(left);
+        let right_down = is_down(right);
         Self {
-            left,
-            right,
-            // Some keyboards expose only the aggregate virtual key. Keep that
-            // fallback separate so normal side-specific key-up events cannot
-            // clear the other held Shift key.
-            generic: !left && !right && is_down(VK_SHIFT),
+            left: left_down,
+            right: right_down,
+            generic: !left_down && !right_down && generic.is_some_and(is_down),
         }
     }
 
-    fn observe(&mut self, code: u16, phase: KeyPhase) {
-        let down = phase == KeyPhase::Down;
-        match code {
-            VK_LSHIFT => self.left = down,
-            VK_RSHIFT => self.right = down,
-            VK_SHIFT => self.generic = down,
-            _ => {}
-        }
+    fn observe_left(&mut self, phase: KeyPhase) {
+        self.generic = false;
+        self.left = phase == KeyPhase::Down;
+    }
+
+    fn observe_right(&mut self, phase: KeyPhase) {
+        self.generic = false;
+        self.right = phase == KeyPhase::Down;
+    }
+
+    fn observe_generic(&mut self, phase: KeyPhase) {
+        self.generic = phase == KeyPhase::Down;
     }
 
     const fn is_down(self) -> bool {
@@ -163,30 +222,292 @@ impl ShiftKeyTracker {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ModifierTracker {
+    ctrl: ModifierSides,
+    alt: ModifierSides,
+    shift: ModifierSides,
+    meta: ModifierSides,
+}
+
+impl ModifierTracker {
+    fn from_state(mut is_down: impl FnMut(u16) -> bool) -> Self {
+        Self {
+            ctrl: ModifierSides::from_state(
+                VK_LCONTROL,
+                VK_RCONTROL,
+                Some(VK_CONTROL),
+                &mut is_down,
+            ),
+            alt: ModifierSides::from_state(VK_LMENU, VK_RMENU, Some(VK_MENU), &mut is_down),
+            shift: ModifierSides::from_state(VK_LSHIFT, VK_RSHIFT, Some(VK_SHIFT), &mut is_down),
+            meta: ModifierSides::from_state(VK_LWIN, VK_RWIN, None, &mut is_down),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        virtual_key: u16,
+        scan_code: u32,
+        extended: bool,
+        phase: KeyPhase,
+    ) -> bool {
+        match virtual_key {
+            VK_LCONTROL => self.ctrl.observe_left(phase),
+            VK_RCONTROL => self.ctrl.observe_right(phase),
+            VK_CONTROL if scan_code == 0x1D && extended => self.ctrl.observe_right(phase),
+            VK_CONTROL if scan_code == 0x1D => self.ctrl.observe_left(phase),
+            VK_CONTROL => self.ctrl.observe_generic(phase),
+            VK_LMENU => self.alt.observe_left(phase),
+            VK_RMENU => self.alt.observe_right(phase),
+            VK_MENU if scan_code == 0x38 && extended => self.alt.observe_right(phase),
+            VK_MENU if scan_code == 0x38 => self.alt.observe_left(phase),
+            VK_MENU => self.alt.observe_generic(phase),
+            VK_LSHIFT => self.shift.observe_left(phase),
+            VK_RSHIFT => self.shift.observe_right(phase),
+            VK_SHIFT if scan_code == 0x2A => self.shift.observe_left(phase),
+            VK_SHIFT if scan_code == 0x36 => self.shift.observe_right(phase),
+            VK_SHIFT => self.shift.observe_generic(phase),
+            VK_LWIN => self.meta.observe_left(phase),
+            VK_RWIN => self.meta.observe_right(phase),
+            _ => return false,
+        }
+        true
+    }
+
+    const fn mask(self) -> ModifierMask {
+        ModifierMask::new(
+            self.ctrl.is_down(),
+            self.alt.is_down(),
+            self.shift.is_down(),
+            self.meta.is_down(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnterSource {
+    Main,
+    Numpad,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WindowsPhysicalTracker {
+    common: PhysicalKeyTracker,
+    main_enter_held: bool,
+    numpad_enter_held: bool,
+}
+
+impl WindowsPhysicalTracker {
+    fn observe(
+        &mut self,
+        key: PhysicalKey,
+        enter_source: Option<EnterSource>,
+        phase: KeyPhase,
+    ) -> bool {
+        if key != PhysicalKey::Enter {
+            return self.common.observe(key, phase);
+        }
+        let held = match enter_source {
+            Some(EnterSource::Main) => &mut self.main_enter_held,
+            Some(EnterSource::Numpad) => &mut self.numpad_enter_held,
+            None => return false,
+        };
+        match phase {
+            KeyPhase::Down => {
+                let repeat = *held;
+                *held = true;
+                repeat
+            }
+            KeyPhase::Up => {
+                *held = false;
+                false
+            }
+        }
+    }
+
+    fn seed_enter_preheld(&mut self) {
+        // GetAsyncKeyState exposes both physical Enter sources as VK_RETURN.
+        // Conservatively fence each source until its own observed up.
+        self.main_enter_held = true;
+        self.numpad_enter_held = true;
+    }
+
+    fn held_letter_bits(&self) -> u32 {
+        self.common.held_letter_bits()
+    }
+}
+
 #[derive(Default)]
 struct CallbackKeyboard {
     reducer: KeyboardReducer,
-    physical: PhysicalKeyTracker,
-    shift: ShiftKeyTracker,
+    physical: WindowsPhysicalTracker,
+    modifiers: ModifierTracker,
+    activation_fenced_letters: u32,
+    activation: ActivationConfig,
+    captured_enter_source: Option<EnterSource>,
 }
 
 struct CallbackContext {
     state: Arc<SharedState>,
     keyboard: Mutex<CallbackKeyboard>,
-    hotkeys: Mutex<HotKeyRuntime>,
     outbound: Sender<Outbound>,
     gate: Arc<CallbackGate>,
     terminal: Arc<TerminalSignal>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerMutationKind {
+    Configure,
+    SetSessionCapture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnerMutation {
+    kind: OwnerMutationKind,
+    activation: ActivationConfig,
+    session_capture: bool,
+}
+
+impl OwnerMutation {
+    fn configure(activation: ActivationConfig) -> Self {
+        Self {
+            kind: OwnerMutationKind::Configure,
+            activation,
+            session_capture: false,
+        }
+    }
+
+    fn set_session_capture(active: bool) -> Self {
+        Self {
+            kind: OwnerMutationKind::SetSessionCapture,
+            activation: ActivationConfig::default(),
+            session_capture: active,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum OwnerCommandState {
+    Pending,
+    Applying,
+    Applied,
+    Cancelled,
+}
+
+fn owner_command_state(state: &AtomicU8) -> OwnerCommandState {
+    match state.load(Ordering::Acquire) {
+        1 => OwnerCommandState::Applying,
+        2 => OwnerCommandState::Applied,
+        3 => OwnerCommandState::Cancelled,
+        _ => OwnerCommandState::Pending,
+    }
+}
+
+fn claim_owner_command(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            OwnerCommandState::Pending as u8,
+            OwnerCommandState::Applying as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn cancel_owner_command(state: &AtomicU8) -> OwnerCommandState {
+    match state.compare_exchange(
+        OwnerCommandState::Pending as u8,
+        OwnerCommandState::Cancelled as u8,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => OwnerCommandState::Cancelled,
+        Err(_) => owner_command_state(state),
+    }
+}
+
+struct OwnerCommand {
+    mutation: OwnerMutation,
+    state: Arc<AtomicU8>,
+    acknowledgement: Sender<Result<(), PlatformError>>,
 }
 
 pub struct NativePlatform {
     state: Arc<SharedState>,
     gate: Arc<CallbackGate>,
     terminal: Arc<TerminalSignal>,
-    activation_commands: Sender<ActivationCommand>,
+    owner_commands: Sender<OwnerCommand>,
     thread_id: u32,
     owner_completion: Receiver<()>,
     thread: Option<JoinHandle<()>>,
+}
+
+impl NativePlatform {
+    fn submit_owner_mutation(
+        &self,
+        mutation: OwnerMutation,
+        terminal_reason: TerminalReason,
+    ) -> Result<(), PlatformError> {
+        if self.state.stopping.load(Ordering::Acquire)
+            || self.thread.is_none()
+            || self.terminal.is_triggered()
+        {
+            return Err(PlatformError::ThreadStopped);
+        }
+
+        let command_state = Arc::new(AtomicU8::new(OwnerCommandState::Pending as u8));
+        let (acknowledgement, response) = bounded(1);
+        self.owner_commands
+            .send_timeout(
+                OwnerCommand {
+                    mutation,
+                    state: Arc::clone(&command_state),
+                    acknowledgement,
+                },
+                OWNER_COMMAND_TIMEOUT,
+            )
+            .map_err(|_| PlatformError::NativeFailure)?;
+
+        if !post_owner_message(self.thread_id, WM_OWNER_COMMAND)
+            && cancel_owner_command(&command_state) == OwnerCommandState::Cancelled
+        {
+            self.mark_owner_failure(terminal_reason);
+            return Err(PlatformError::NativeFailure);
+        }
+
+        if let Ok(result) = response.recv_timeout(OWNER_COMMAND_TIMEOUT) {
+            return result;
+        }
+
+        match cancel_owner_command(&command_state) {
+            OwnerCommandState::Applied => Ok(()),
+            OwnerCommandState::Applying => {
+                if let Ok(result) = response.recv_timeout(OWNER_COMMAND_TIMEOUT) {
+                    return result;
+                }
+                if owner_command_state(&command_state) == OwnerCommandState::Applied {
+                    Ok(())
+                } else {
+                    self.mark_owner_failure(TerminalReason::OwnerThreadUnresponsive);
+                    Err(PlatformError::NativeFailure)
+                }
+            }
+            OwnerCommandState::Pending | OwnerCommandState::Cancelled => {
+                self.mark_owner_failure(terminal_reason);
+                Err(PlatformError::NativeFailure)
+            }
+        }
+    }
+
+    fn mark_owner_failure(&self, reason: TerminalReason) {
+        self.state.hook_status.store(
+            hook_status_to_u8(HookStatus::Unavailable),
+            Ordering::Release,
+        );
+        self.terminal.trigger(reason);
+    }
 }
 
 impl Platform for NativePlatform {
@@ -195,33 +516,35 @@ impl Platform for NativePlatform {
         gate: Arc<CallbackGate>,
         terminal: Arc<TerminalSignal>,
     ) -> Result<Self, PlatformError> {
-        // Establish per-monitor-v2 awareness so GetWindowRect returns
-        // unvirtualized physical pixels. Electron owns the monitor-aware
-        // physical-to-DIP conversion before display matching.
+        // Establish per-monitor-v2 awareness so front-app bounds are returned
+        // in unvirtualized physical pixels.
         if !*DPI_AWARENESS_READY.get_or_init(|| unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != 0
         }) {
             return Err(PlatformError::NativeFailure);
         }
+
         let state = Arc::new(SharedState::new());
         let context = CallbackContext {
             state: Arc::clone(&state),
             keyboard: Mutex::new(CallbackKeyboard::default()),
-            hotkeys: Mutex::new(HotKeyRuntime::default()),
             outbound,
             gate: Arc::clone(&gate),
             terminal: Arc::clone(&terminal),
         };
         let (ready_tx, ready_rx) = bounded(1);
+        let startup_state = Arc::new(AtomicU8::new(StartupState::Pending as u8));
         let (owner_completion_tx, owner_completion) = bounded(1);
-        let (activation_commands, activation_command_receiver) = bounded(4);
+        let (owner_commands, owner_command_receiver) = bounded(8);
+        let owner_startup_state = Arc::clone(&startup_state);
         let thread = thread::Builder::new()
             .name("talking-quill-helper-win-hook".into())
             .spawn(move || {
                 hook_thread(
                     context,
                     ready_tx,
-                    activation_command_receiver,
+                    owner_startup_state,
+                    owner_command_receiver,
                     owner_completion_tx,
                 );
             })
@@ -237,10 +560,17 @@ impl Platform for NativePlatform {
             }
             Err(_) => {
                 gate.close();
+                state.stopping.store(true, Ordering::Release);
                 state.hook_status.store(
                     hook_status_to_u8(HookStatus::Unavailable),
                     Ordering::Release,
                 );
+                if cancel_startup(&startup_state) == StartupState::Running
+                    && let Ok(Ok(late_thread_id)) = ready_rx.recv_timeout(OWNER_COMPLETION_TIMEOUT)
+                {
+                    let _ = post_owner_message(late_thread_id, WM_QUIT);
+                }
+                drop(ready_rx);
                 if owner_completed(&owner_completion, OWNER_COMPLETION_TIMEOUT) {
                     let _ = thread.join();
                 }
@@ -252,7 +582,7 @@ impl Platform for NativePlatform {
             state,
             gate,
             terminal,
-            activation_commands,
+            owner_commands,
             thread_id,
             owner_completion,
             thread: Some(thread),
@@ -272,81 +602,17 @@ impl Platform for NativePlatform {
         enabled: bool,
         bindings: ActivationBindings,
     ) -> Result<(), PlatformError> {
-        if self.state.stopping.load(Ordering::Acquire) || self.thread.is_none() {
-            return Err(PlatformError::ThreadStopped);
-        }
-        let handoff = Arc::new(AtomicU8::new(ConfigurationHandoff::Pending as u8));
-        let (acknowledgement, response) = bounded(1);
-        self.activation_commands
-            .send_timeout(
-                ActivationCommand {
-                    requested: ActivationConfig { enabled, bindings },
-                    handoff: Arc::clone(&handoff),
-                    acknowledgement,
-                },
-                ACTIVATION_CONFIG_TIMEOUT,
-            )
-            .map_err(|_| PlatformError::NativeFailure)?;
-
-        if !post_owner_message(self.thread_id, WM_ACTIVATION_CONFIG) {
-            let committed = cancel_configuration(&handoff) == ConfigurationHandoff::Committed;
-            self.state.hook_status.store(
-                hook_status_to_u8(HookStatus::Unavailable),
-                Ordering::Release,
-            );
-            self.terminal
-                .trigger(TerminalReason::ActivationConfigurationUnavailable);
-            return if committed {
-                Ok(())
-            } else {
-                Err(PlatformError::NativeFailure)
-            };
-        }
-
-        if let Ok(result) = response.recv_timeout(ACTIVATION_CONFIG_TIMEOUT) {
-            return result;
-        }
-
-        match configuration_ack_timeout(&handoff) {
-            ConfigurationTimeoutAction::Success => return Ok(()),
-            ConfigurationTimeoutAction::Failed => {
-                self.state.hook_status.store(
-                    hook_status_to_u8(HookStatus::Unavailable),
-                    Ordering::Release,
-                );
-                self.terminal
-                    .trigger(TerminalReason::ActivationConfigurationUnavailable);
-                return Err(PlatformError::NativeFailure);
-            }
-            ConfigurationTimeoutAction::WakeTerminalCleanup => {}
-        }
-
-        // The owner may still complete rollback/terminal cleanup, but neither a
-        // permanently failed post nor an expired acknowledgement can block a
-        // protocol thread. TerminalRequested prevents a later commit. If the
-        // queue never recovers, process exit releases the thread registrations.
-        if !post_owner_message(self.thread_id, WM_ACTIVATION_CONFIG)
-            || response.recv_timeout(ACTIVATION_CONFIG_TIMEOUT).is_err()
-        {
-            self.state.hook_status.store(
-                hook_status_to_u8(HookStatus::Unavailable),
-                Ordering::Release,
-            );
-            self.terminal
-                .trigger(TerminalReason::ActivationConfigurationUnavailable);
-            return Err(PlatformError::NativeFailure);
-        }
-
-        if configuration_handoff(&handoff) == ConfigurationHandoff::Committed {
-            Ok(())
-        } else {
-            Err(PlatformError::NativeFailure)
-        }
+        self.submit_owner_mutation(
+            OwnerMutation::configure(ActivationConfig { enabled, bindings }),
+            TerminalReason::ActivationConfigurationUnavailable,
+        )
     }
 
     fn set_session_capture(&self, active: bool) -> Result<(), PlatformError> {
-        self.state.session_capture.store(active, Ordering::Release);
-        Ok(())
+        self.submit_owner_mutation(
+            OwnerMutation::set_session_capture(active),
+            TerminalReason::OwnerThreadUnresponsive,
+        )
     }
 
     fn inject_paste(&self) -> PasteResult {
@@ -368,42 +634,30 @@ impl Platform for NativePlatform {
     fn shutdown(&mut self) -> Option<TerminalReason> {
         self.gate.close();
         self.state.stopping.store(true, Ordering::Release);
-        self.state.session_capture.store(false, Ordering::Release);
         let Some(thread) = self.thread.take() else {
             return self.terminal.reason();
         };
 
-        let first_wake = post_owner_message(self.thread_id, WM_QUIT);
-        let completed = first_wake
-            && (owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT)
-                || (post_owner_message(self.thread_id, WM_QUIT)
-                    && owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT)));
+        let _ = post_owner_message(self.thread_id, WM_QUIT);
+        let completed = owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT) || {
+            // Always re-check completion: the owner may exit before either
+            // retry post, making that post fail after completion was queued.
+            let _ = post_owner_message(self.thread_id, WM_QUIT);
+            owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT)
+        };
         if completed {
-            // OwnerCompletion is sent only as the final hook-thread guard drops,
-            // after unregistration, unhooking, and callback-context release.
             if thread.join().is_ok() {
                 self.state
                     .hook_status
                     .store(hook_status_to_u8(HookStatus::Stopped), Ordering::Release);
             } else {
-                self.state.hook_status.store(
-                    hook_status_to_u8(HookStatus::Unavailable),
-                    Ordering::Release,
-                );
-                self.terminal.trigger(TerminalReason::HookStopped);
+                self.mark_owner_failure(TerminalReason::HookStopped);
             }
         } else {
-            // Never join an owner whose queue did not accept/dispatch WM_QUIT.
-            // Dropping JoinHandle detaches safely: the thread owns its context
-            // and Arc resources. If Windows never recovers the queue, process
-            // exit performs the unavoidable hook/registration cleanup.
+            // Never join an owner whose queue did not dispatch WM_QUIT. The
+            // process owns the detached hook resources until imminent exit.
             drop(thread);
-            self.state.hook_status.store(
-                hook_status_to_u8(HookStatus::Unavailable),
-                Ordering::Release,
-            );
-            self.terminal
-                .trigger(TerminalReason::OwnerThreadUnresponsive);
+            self.mark_owner_failure(TerminalReason::OwnerThreadUnresponsive);
         }
         self.terminal.reason()
     }
@@ -415,365 +669,73 @@ impl Drop for NativePlatform {
     }
 }
 
-fn mark_hotkey_configuration_terminal(
-    context: &CallbackContext,
-    runtime: &mut HotKeyRuntime,
-    registrar: &mut impl HotKeyRegistrar,
-) {
-    unregister_all_hotkeys(registrar);
-    runtime.registrations.config.enabled = false;
-    runtime.candidate = ActivationCandidateState::Idle;
-    context.state.activation_config.store(
-        activation_config_value(false, runtime.registrations.config.bindings),
-        Ordering::Release,
-    );
-    context.state.hook_status.store(
-        hook_status_to_u8(HookStatus::Unavailable),
-        Ordering::Release,
-    );
-    context
-        .terminal
-        .trigger(TerminalReason::ActivationConfigurationUnavailable);
-}
-
-fn finish_failed_configuration(
-    context: &CallbackContext,
-    runtime: &mut HotKeyRuntime,
-    registrar: &mut impl HotKeyRegistrar,
-    handoff: &AtomicU8,
-    rollback_failed: bool,
-) {
-    let mut state = configuration_handoff(handoff);
-    if state == ConfigurationHandoff::Pending {
-        state = cancel_configuration(handoff);
-    }
-    if state == ConfigurationHandoff::Cancelled && !rollback_failed {
-        state = confirm_configuration_rollback(handoff);
-    }
-    if rollback_failed || state == ConfigurationHandoff::TerminalRequested {
-        mark_hotkey_configuration_terminal(context, runtime, registrar);
-        handoff.store(
-            ConfigurationHandoff::TerminalComplete as u8,
-            Ordering::Release,
-        );
-    }
-}
-
-fn process_activation_commands(
-    context: &CallbackContext,
-    receiver: &Receiver<ActivationCommand>,
-    registrar: &mut impl HotKeyRegistrar,
-) {
+fn process_owner_commands(context: &CallbackContext, receiver: &Receiver<OwnerCommand>) {
     while let Ok(command) = receiver.try_recv() {
-        let initial_handoff = configuration_handoff(&command.handoff);
-        if initial_handoff != ConfigurationHandoff::Pending {
-            if let Ok(mut runtime) = context.hotkeys.try_lock() {
-                finish_failed_configuration(
-                    context,
-                    &mut runtime,
-                    registrar,
-                    &command.handoff,
-                    false,
-                );
-            } else {
-                unregister_all_hotkeys(registrar);
-                command.handoff.store(
-                    ConfigurationHandoff::TerminalComplete as u8,
-                    Ordering::Release,
-                );
-                context.terminal.trigger(TerminalReason::ReducerPoisoned);
-            }
+        if context.state.stopping.load(Ordering::Acquire) {
+            let _ = cancel_owner_command(&command.state);
+            let _ = command
+                .acknowledgement
+                .try_send(Err(PlatformError::ThreadStopped));
+            continue;
+        }
+        if !claim_owner_command(&command.state) {
             let _ = command
                 .acknowledgement
                 .try_send(Err(PlatformError::NativeFailure));
             continue;
         }
 
-        let mut runtime = match context.hotkeys.try_lock() {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                unregister_all_hotkeys(registrar);
-                command.handoff.store(
-                    ConfigurationHandoff::TerminalComplete as u8,
-                    Ordering::Release,
-                );
-                let _ = command
-                    .acknowledgement
-                    .try_send(Err(PlatformError::NativeFailure));
-                context.state.hook_status.store(
-                    hook_status_to_u8(HookStatus::Unavailable),
-                    Ordering::Release,
-                );
-                context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                continue;
-            }
-        };
-        if runtime.registrations.config != command.requested
-            && runtime.candidate.blocks_configuration()
-        {
-            let _ = cancel_configuration(&command.handoff);
-            finish_failed_configuration(context, &mut runtime, registrar, &command.handoff, false);
-            let _ = command
-                .acknowledgement
-                .try_send(Err(PlatformError::NativeFailure));
-            continue;
-        }
-
-        let previous = runtime.registrations;
-        match configure_hotkeys(previous, command.requested, registrar, || {
-            configuration_handoff(&command.handoff) == ConfigurationHandoff::Pending
-        }) {
-            Ok(next) if commit_configuration(&command.handoff) => {
-                runtime.registrations = next;
-                if next != previous {
-                    runtime.candidate = ActivationCandidateState::Idle;
+        let applied = match command.mutation.kind {
+            OwnerMutationKind::Configure => match context.keyboard.try_lock() {
+                Ok(mut keyboard) => {
+                    // Preserve accepted trigger ownership solely for balancing
+                    // up, but fence every passive prefix across this binding
+                    // revision until all letters held at the revision release.
+                    keyboard.reducer.fence_activation_revision();
+                    keyboard.activation_fenced_letters = keyboard.physical.held_letter_bits();
+                    keyboard.activation = command.mutation.activation;
+                    true
                 }
-                context.state.activation_config.store(
-                    activation_config_value(next.config.enabled, next.config.bindings),
-                    Ordering::Release,
-                );
-                let _ = command.acknowledgement.try_send(Ok(()));
-            }
-            Ok(next) => {
-                let rollback_failed =
-                    match configure_hotkeys(next, previous.config, registrar, || true) {
-                        Ok(restored) => {
-                            runtime.registrations = restored;
-                            runtime.candidate = ActivationCandidateState::Idle;
-                            context.state.activation_config.store(
-                                activation_config_value(
-                                    restored.config.enabled,
-                                    restored.config.bindings,
-                                ),
-                                Ordering::Release,
-                            );
-                            false
-                        }
-                        Err(_) => true,
-                    };
-                finish_failed_configuration(
-                    context,
-                    &mut runtime,
-                    registrar,
-                    &command.handoff,
-                    rollback_failed,
-                );
-                let _ = command
-                    .acknowledgement
-                    .try_send(Err(PlatformError::NativeFailure));
-            }
-            Err(HotKeyTransactionError::RollbackFailed) => {
-                finish_failed_configuration(
-                    context,
-                    &mut runtime,
-                    registrar,
-                    &command.handoff,
-                    true,
-                );
-                let _ = command
-                    .acknowledgement
-                    .try_send(Err(PlatformError::NativeFailure));
-            }
-            Err(HotKeyTransactionError::Conflict | HotKeyTransactionError::Cancelled) => {
-                finish_failed_configuration(
-                    context,
-                    &mut runtime,
-                    registrar,
-                    &command.handoff,
-                    false,
-                );
-                let _ = command
-                    .acknowledgement
-                    .try_send(Err(PlatformError::NativeFailure));
-            }
-        }
-    }
-}
-
-fn disable_hotkeys_after_delivery_failure(context: &CallbackContext) {
-    // This callback runs on the RegisterHotKey owner thread. The current chord
-    // cannot be replayed safely after Windows consumed it, but unregistering
-    // synchronously makes every subsequent chord fail open.
-    let mut registrar = WindowsHotKeyRegistrar;
-    unregister_all_hotkeys(&mut registrar);
-    if let Ok(mut runtime) = context.hotkeys.try_lock() {
-        runtime.registrations.config.enabled = false;
-        runtime.registrations.generation = runtime.registrations.generation.wrapping_add(1);
-        context.state.activation_config.store(
-            activation_config_value(false, runtime.registrations.config.bindings),
-            Ordering::Release,
-        );
-    }
-}
-
-fn mark_activation_candidate_consumed(context: &CallbackContext, candidate: ActivationCandidate) {
-    if let Ok(mut runtime) = context.hotkeys.try_lock()
-        && runtime.candidate.candidate() == Some(candidate)
-    {
-        runtime.candidate = ActivationCandidateState::ConsumedDown(candidate);
-    }
-}
-
-fn complete_activation_candidate(context: &CallbackContext, candidate: ActivationCandidate) {
-    if let Ok(mut runtime) = context.hotkeys.try_lock()
-        && runtime.candidate.candidate() == Some(candidate)
-    {
-        runtime.candidate = ActivationCandidateState::Completed(candidate);
-    }
-}
-
-fn handle_hotkey_message(context: &CallbackContext, w_param: WPARAM, l_param: LPARAM) {
-    let Ok(id) = i32::try_from(w_param) else {
-        return;
-    };
-
-    let (registrations, candidate, released_before_message) = {
-        let mut runtime = match context.hotkeys.try_lock() {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                context.state.hook_status.store(
-                    hook_status_to_u8(HookStatus::Unavailable),
-                    Ordering::Release,
-                );
-                context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                return;
+                Err(_) => false,
+            },
+            OwnerMutationKind::SetSessionCapture => {
+                context
+                    .state
+                    .session_capture
+                    .store(command.mutation.session_capture, Ordering::Release);
+                true
             }
         };
-        let registrations = runtime.registrations;
-        if !matches!(
-            runtime.candidate,
-            ActivationCandidateState::Pressed(_)
-                | ActivationCandidateState::ReleasedBeforeMessage(_)
-        ) {
-            return;
-        }
-        let Some(candidate) = runtime.candidate.candidate().and_then(|candidate| {
-            resolve_activation_candidate_message(candidate, registrations, id, l_param)
-        }) else {
-            return;
-        };
-        let released_before_message = matches!(
-            runtime.candidate,
-            ActivationCandidateState::ReleasedBeforeMessage(_)
-        );
-        runtime.candidate = ActivationCandidateState::Accepted(candidate);
-        (registrations, candidate, released_before_message)
-    };
 
-    let mut keyboard = match context.keyboard.try_lock() {
-        Ok(keyboard) => keyboard,
-        Err(_) => {
+        if applied {
+            command
+                .state
+                .store(OwnerCommandState::Applied as u8, Ordering::Release);
+            let _ = command.acknowledgement.try_send(Ok(()));
+        } else {
+            command
+                .state
+                .store(OwnerCommandState::Cancelled as u8, Ordering::Release);
             context.state.hook_status.store(
                 hook_status_to_u8(HookStatus::Unavailable),
                 Ordering::Release,
             );
             context.terminal.trigger(TerminalReason::ReducerPoisoned);
-            disable_hotkeys_after_delivery_failure(context);
-            if released_before_message {
-                complete_activation_candidate(context, candidate);
-            } else {
-                mark_activation_candidate_consumed(context, candidate);
-            }
-            return;
+            let _ = command
+                .acknowledgement
+                .try_send(Err(PlatformError::NativeFailure));
         }
-    };
-    let down = keyboard.reducer.plan_registered_binding(
-        candidate.key,
-        candidate.shift,
-        registrations.config.bindings,
-        registrations.config.enabled,
-    );
-    let down_delivered = down.event().is_none()
-        || deliver_callback_event_with_session_arm(
-            &context.outbound,
-            &context.terminal,
-            &context.state.session_capture,
-            down.event().expect("event checked above"),
-        );
-    if !down_delivered {
-        context.state.hook_status.store(
-            hook_status_to_u8(HookStatus::Unavailable),
-            Ordering::Release,
-        );
-    }
-    let _ = keyboard.reducer.apply(down, down_delivered);
-    if !down_delivered {
-        drop(keyboard);
-        disable_hotkeys_after_delivery_failure(context);
-        if released_before_message {
-            complete_activation_candidate(context, candidate);
-        } else {
-            // RegisterHotKey already consumed the OS chord. Replaying is unsafe;
-            // retain only a balancing marker so the physical up is swallowed.
-            mark_activation_candidate_consumed(context, candidate);
-        }
-        return;
-    }
-
-    if released_before_message {
-        let up = keyboard.reducer.plan_passive_bindings(
-            KeyInput {
-                key: PhysicalKey::Letter(candidate.key),
-                phase: KeyPhase::Up,
-                alt: false,
-                shift: false,
-                disallowed_modifiers: false,
-                repeat: false,
-                injected: false,
-            },
-            registrations.config.bindings,
-            registrations.config.enabled,
-            false,
-        );
-        let up_delivered = up.event().is_none()
-            || deliver_callback_event(
-                &context.outbound,
-                &context.terminal,
-                up.event().expect("event checked above"),
-            );
-        if !up_delivered {
-            context.state.hook_status.store(
-                hook_status_to_u8(HookStatus::Unavailable),
-                Ordering::Release,
-            );
-        }
-        let _ = keyboard.reducer.apply(up, up_delivered);
-        drop(keyboard);
-        if !up_delivered {
-            disable_hotkeys_after_delivery_failure(context);
-        }
-        complete_activation_candidate(context, candidate);
-    }
-}
-
-fn drain_queued_hotkey_messages(context: &CallbackContext) {
-    let mut message = MSG::default();
-    loop {
-        // SAFETY: called only on the message-queue owner thread. PM_REMOVE
-        // transfers one complete thread WM_HOTKEY message into local storage.
-        let found = unsafe {
-            PeekMessageW(
-                &raw mut message,
-                null_mut(),
-                WM_HOTKEY,
-                WM_HOTKEY,
-                PM_REMOVE,
-            )
-        };
-        if found == 0 {
-            return;
-        }
-        handle_hotkey_message(context, message.wParam, message.lParam);
     }
 }
 
 fn hook_thread(
     context: CallbackContext,
     ready: Sender<Result<u32, PlatformError>>,
-    activation_commands: Receiver<ActivationCommand>,
+    startup_state: Arc<AtomicU8>,
+    owner_commands: Receiver<OwnerCommand>,
     owner_completion: Sender<()>,
 ) {
-    // Declared first so it drops last, after every owner-thread resource.
+    // Declared first so it drops last, after all owner-thread resources.
     let _owner_completion = OwnerCompletion(owner_completion);
     let mut context = Box::new(context);
     let context_ptr = (&raw mut *context).cast::<CallbackContext>();
@@ -785,9 +747,8 @@ fn hook_thread(
         return;
     }
 
-    // SAFETY: the callback has the required system ABI, the context pointer is
-    // kept alive for the complete hook lifetime, and this thread owns the
-    // Windows message loop which dispatches low-level hook callbacks.
+    // SAFETY: the callback has the system ABI, and the boxed context remains
+    // alive and registered until this owner thread unhooks.
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), null_mut(), 0) };
     if hook.is_null() {
         CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
@@ -795,17 +756,15 @@ fn hook_thread(
         return;
     }
 
-    // Low-level callbacks are delivered through this owning thread's message
-    // loop. Snapshot after installation but before dispatch or readiness, so a
-    // key already held when the hook was installed is seeded before its first
-    // queued repeat can be reduced.
-    let physical = physical_tracker_from_state(key_is_down);
-    let shift = ShiftKeyTracker::from_state(key_is_down);
+    // Low-level callbacks are delivered on this message-loop thread. Seed all
+    // tracked physical state after installation and before readiness so a key
+    // already held cannot begin an activation or session sequence.
+    let physical = physical_tracker_from_state(native_physical_key_is_down);
+    let modifiers = ModifierTracker::from_state(key_is_down);
     let keyboard = match context.keyboard.get_mut() {
         Ok(keyboard) => keyboard,
         Err(_) => {
-            // SAFETY: `hook` was installed successfully above and remains owned
-            // by this thread; no callback has been dispatched.
+            // SAFETY: `hook` is installed and still owned by this thread.
             unsafe { UnhookWindowsHookEx(hook) };
             CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
             let _ = ready.send(Err(PlatformError::HookUnavailable));
@@ -813,22 +772,25 @@ fn hook_thread(
         }
     };
     keyboard.physical = physical;
-    keyboard.shift = shift;
+    keyboard.modifiers = modifiers;
 
     let mut message = MSG::default();
-    // SAFETY: a no-remove peek creates this owner thread's message queue before
-    // readiness, so later PostThreadMessageW configuration commands are valid.
+    // SAFETY: this no-remove peek creates the owner queue before readiness.
     unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
-    let mut registrar = WindowsHotKeyRegistrar;
 
+    if !claim_startup(&startup_state) {
+        // SAFETY: `hook` is valid and owned by this thread.
+        unsafe { UnhookWindowsHookEx(hook) };
+        CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
+        return;
+    }
     context
         .state
         .hook_status
         .store(hook_status_to_u8(HookStatus::Ready), Ordering::Release);
-    // SAFETY: this call only reads the current native thread identifier.
+    // SAFETY: reads the current native thread identifier.
     let thread_id = unsafe { GetCurrentThreadId() };
-    if ready.send(Ok(thread_id)).is_err() {
-        unregister_all_hotkeys(&mut registrar);
+    if ready.send(Ok(thread_id)).is_err() || context.state.stopping.load(Ordering::Acquire) {
         // SAFETY: `hook` is valid and owned by this thread.
         unsafe { UnhookWindowsHookEx(hook) };
         CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
@@ -836,37 +798,30 @@ fn hook_thread(
     }
 
     loop {
-        // SAFETY: `message` is valid writable storage. A null HWND requests
-        // all messages for the current hook thread.
+        // SAFETY: `message` is valid writable storage; null HWND selects all
+        // messages for this hook owner thread.
         let result = unsafe { GetMessageW(&raw mut message, null_mut(), 0, 0) };
         if result <= 0 {
             break;
         }
-        match message.message {
-            WM_ACTIVATION_CONFIG => {
-                // Resolve an activation whose up raced its queued WM_HOTKEY
-                // before allowing a configuration generation to change.
-                drain_queued_hotkey_messages(&context);
-                process_activation_commands(&context, &activation_commands, &mut registrar);
-            }
-            WM_HOTKEY => handle_hotkey_message(&context, message.wParam, message.lParam),
-            _ => {
-                // SAFETY: `message` was initialized by GetMessageW.
-                unsafe {
-                    TranslateMessage(&raw const message);
-                    DispatchMessageW(&raw const message);
-                }
+        if message.message == WM_OWNER_COMMAND {
+            process_owner_commands(&context, &owner_commands);
+        } else {
+            // SAFETY: `message` was initialized by GetMessageW.
+            unsafe {
+                TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
             }
         }
     }
 
     context.gate.close();
-    unregister_all_hotkeys(&mut registrar);
-    while let Ok(command) = activation_commands.try_recv() {
-        command.handoff.store(
-            ConfigurationHandoff::TerminalComplete as u8,
-            Ordering::Release,
-        );
+    context
+        .state
+        .session_capture
+        .store(false, Ordering::Release);
+    while let Ok(command) = owner_commands.try_recv() {
+        let _ = cancel_owner_command(&command.state);
         let _ = command
             .acknowledgement
             .try_send(Err(PlatformError::ThreadStopped));
@@ -878,7 +833,7 @@ fn hook_thread(
     if !context.state.stopping.load(Ordering::Acquire) {
         context.terminal.trigger(TerminalReason::HookStopped);
     }
-    // SAFETY: `hook` remains owned by this thread and is unhooked exactly once.
+    // SAFETY: `hook` remains owned by this thread and is unhooked once.
     unsafe { UnhookWindowsHookEx(hook) };
     CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
 }
@@ -892,13 +847,11 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
         if context_ptr.is_null() {
             return None;
         }
-        // SAFETY: the hook thread stores this pointer before installation and
-        // clears it only after unhooking. Windows invokes this callback on that
-        // same thread.
+        // SAFETY: the owner stores this pointer before hook installation and
+        // clears it only after unhooking on the same thread.
         let context = unsafe { &*context_ptr };
-
-        // SAFETY: for HC_ACTION Windows documents l_param as a valid pointer to
-        // KBDLLHOOKSTRUCT for the duration of this callback.
+        // SAFETY: HC_ACTION defines l_param as a valid KBDLLHOOKSTRUCT pointer
+        // for this callback's duration.
         let native = unsafe { &*(l_param as *const KBDLLHOOKSTRUCT) };
         let phase = match w_param as u32 {
             WM_KEYDOWN | WM_SYSKEYDOWN => KeyPhase::Down,
@@ -906,187 +859,28 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             _ => return None,
         };
         let injected = native.flags & LLKHF_INJECTED != 0 || native.dwExtraInfo == INJECTED_MARKER;
-        if injected {
-            return None;
-        }
-        let key = map_virtual_key(native.vkCode);
-        if key == PhysicalKey::Other {
-            if matches!(native.vkCode as u16, VK_SHIFT | VK_LSHIFT | VK_RSHIFT) {
-                let mut keyboard = match context.keyboard.try_lock() {
-                    Ok(keyboard) => keyboard,
-                    Err(_) => {
-                        context.state.hook_status.store(
-                            hook_status_to_u8(HookStatus::Unavailable),
-                            Ordering::Release,
-                        );
-                        context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                        return None;
-                    }
-                };
-                keyboard.shift.observe(native.vkCode as u16, phase);
-            }
-            return None;
-        }
-
-        // Native modifier queries are only relevant to activation letters.
-        // Enter and Escape capture depends solely on the active session gate.
-        let (alt, disallowed_modifiers) = if matches!(key, PhysicalKey::Letter(_)) {
-            (
-                native.flags & LLKHF_ALTDOWN != 0 || key_is_down(VK_MENU),
-                activation_disallowed_modifiers(key_is_down),
-            )
-        } else {
-            (false, false)
-        };
-        let mut input = KeyInput {
-            key,
+        let extended = native.flags & LLKHF_EXTENDED != 0;
+        Some(process_hook_record(
+            context,
+            native.vkCode as u16,
+            native.scanCode,
+            extended,
             phase,
-            alt,
-            shift: false,
-            disallowed_modifiers,
-            repeat: false,
-            injected: false,
-        };
-
-        {
-            let mut keyboard = match context.keyboard.try_lock() {
-                Ok(keyboard) => keyboard,
-                Err(_) => {
-                    context.state.hook_status.store(
-                        hook_status_to_u8(HookStatus::Unavailable),
-                        Ordering::Release,
-                    );
-                    context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                    return None;
-                }
-            };
-            input.shift = keyboard.shift.is_down();
-            input.repeat = keyboard.physical.observe(key, phase);
-        }
-
-        // Record only a fresh, exact registered chord. The low-level down is
-        // deliberately passed: RegisterHotKey performs the OS suppression and
-        // WM_HOTKEY remains the reducer's establishment point.
-        if context.gate.is_open()
-            && phase == KeyPhase::Down
-            && let PhysicalKey::Letter(letter) = key
-        {
-            let mut runtime = match context.hotkeys.try_lock() {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    context.state.hook_status.store(
-                        hook_status_to_u8(HookStatus::Unavailable),
-                        Ordering::Release,
-                    );
-                    context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                    return None;
-                }
-            };
-            runtime.candidate = candidate_for_exact_passive_down(
-                runtime.registrations,
-                runtime.candidate,
-                letter,
-                alt,
-                input.shift,
-                input.disallowed_modifiers,
-                input.repeat,
-            );
-        }
-
-        // An up may run before its posted WM_HOTKEY is dispatched. Drain first
-        // so accepted downs are always reduced before their balancing ups.
-        let mut candidate_up = CandidateUpAction::Pass;
-        if phase == KeyPhase::Up
-            && let PhysicalKey::Letter(letter) = key
-        {
-            drain_queued_hotkey_messages(context);
-            let mut runtime = match context.hotkeys.try_lock() {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    context.state.hook_status.store(
-                        hook_status_to_u8(HookStatus::Unavailable),
-                        Ordering::Release,
-                    );
-                    context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                    return None;
-                }
-            };
-            (runtime.candidate, candidate_up) =
-                release_activation_candidate(runtime.candidate, letter);
-        }
-
-        if matches!(candidate_up, CandidateUpAction::SwallowAwaitMessage(_)) {
-            return Some(true);
-        }
-
-        // Physical state is updated even while the gate is closed, but a gate
-        // transition must not bypass the balancing up of an OS-consumed down.
-        let must_balance = matches!(
-            candidate_up,
-            CandidateUpAction::BalanceAccepted(_) | CandidateUpAction::SwallowConsumed(_)
-        );
-        if !context.gate.is_open() && !must_balance {
-            return None;
-        }
-
-        let (activation_enabled, configured) =
-            activation_config_from_value(context.state.activation_config.load(Ordering::Acquire));
-        let capture = context.state.session_capture.load(Ordering::Acquire);
-        let mut keyboard = match context.keyboard.try_lock() {
-            Ok(keyboard) => keyboard,
-            Err(_) => {
-                context.state.hook_status.store(
-                    hook_status_to_u8(HookStatus::Unavailable),
-                    Ordering::Release,
-                );
-                context.terminal.trigger(TerminalReason::ReducerPoisoned);
-                return if must_balance { Some(true) } else { None };
-            }
-        };
-        let plan =
-            keyboard
-                .reducer
-                .plan_passive_bindings(input, configured, activation_enabled, capture);
-        let delivered = plan.event().is_none()
-            || (context.gate.is_open()
-                && deliver_callback_event(
-                    &context.outbound,
-                    &context.terminal,
-                    plan.event().expect("event checked above"),
-                ));
-        if !delivered {
-            context.state.hook_status.store(
-                hook_status_to_u8(HookStatus::Unavailable),
-                Ordering::Release,
-            );
-        }
-        let reducer_swallow = keyboard.reducer.apply(plan, delivered);
-        drop(keyboard);
-
-        if let CandidateUpAction::BalanceAccepted(candidate)
-        | CandidateUpAction::SwallowConsumed(candidate) = candidate_up
-        {
-            complete_activation_candidate(context, candidate);
-            if !delivered {
-                disable_hotkeys_after_delivery_failure(context);
-            }
-            Some(true)
-        } else {
-            Some(reducer_swallow)
-        }
+            injected,
+        ))
     });
 
     match result {
         Ok(Some(true)) => 1,
         Ok(Some(false)) | Ok(None) => {
-            // SAFETY: passing null for the ignored hook handle is documented for
-            // low-level hooks; the original callback arguments are unchanged.
+            // SAFETY: the ignored hook handle may be null; original arguments
+            // are forwarded unchanged.
             unsafe { CallNextHookEx(null_mut(), code, w_param, l_param) }
         }
         Err(_) => {
             let context_ptr = CALLBACK_CONTEXT.load(Ordering::Acquire);
             if !context_ptr.is_null() {
-                // SAFETY: the callback context remains alive until unhooking.
+                // SAFETY: context remains alive until owner-thread unhooking.
                 let context = unsafe { &*context_ptr };
                 context.state.hook_status.store(
                     hook_status_to_u8(HookStatus::Unavailable),
@@ -1094,17 +888,204 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                 );
                 context.terminal.trigger(TerminalReason::CallbackPanicked);
             }
-            // SAFETY: fail open with the original callback arguments.
+            // SAFETY: panic handling always fails open with original arguments.
             unsafe { CallNextHookEx(null_mut(), code, w_param, l_param) }
         }
     }
 }
 
-fn activation_disallowed_modifiers(mut is_down: impl FnMut(u16) -> bool) -> bool {
-    let ctrl = is_down(VK_CONTROL);
-    let left_win = is_down(VK_LWIN);
-    let right_win = is_down(VK_RWIN);
-    ctrl || left_win || right_win
+fn process_hook_record(
+    context: &CallbackContext,
+    virtual_key: u16,
+    scan_code: u32,
+    extended: bool,
+    phase: KeyPhase,
+    injected: bool,
+) -> bool {
+    // Helper-synthesized and other injected records pass through without
+    // changing modifier, physical, reducer, or capture state.
+    if injected {
+        return false;
+    }
+
+    let mut keyboard = match context.keyboard.try_lock() {
+        Ok(keyboard) => keyboard,
+        Err(_) => {
+            context.state.hook_status.store(
+                hook_status_to_u8(HookStatus::Unavailable),
+                Ordering::Release,
+            );
+            context.terminal.trigger(TerminalReason::ReducerPoisoned);
+            return false;
+        }
+    };
+
+    if keyboard
+        .modifiers
+        .observe(virtual_key, scan_code, extended, phase)
+    {
+        let modifiers = keyboard.modifiers.mask();
+        keyboard.reducer.observe_modifiers(modifiers);
+        // Modifier prefixes intentionally leak through to the foreground app.
+        return false;
+    }
+
+    let key = map_scan_code(scan_code, extended);
+    if key == PhysicalKey::Other {
+        return false;
+    }
+    let enter_source = enter_source(scan_code, extended);
+    let repeat = keyboard.physical.observe(key, enter_source, phase);
+    if let PhysicalKey::Letter(letter) = key
+        && phase == KeyPhase::Up
+    {
+        keyboard.activation_fenced_letters &= !(1_u32 << u32::from(letter.index()));
+    }
+    let input = KeyInput {
+        key,
+        phase,
+        modifiers: keyboard.modifiers.mask(),
+        repeat,
+        injected: false,
+    };
+    if key == PhysicalKey::Enter
+        && keyboard
+            .captured_enter_source
+            .is_some_and(|captured| Some(captured) != enter_source)
+    {
+        return false;
+    }
+    let accepting = context.gate.is_open();
+    if !accepting && !keyboard.reducer.is_capturing(key) {
+        // Keep native physical state current while closed, but do not retain
+        // prefixes that could complete a chord after initialization/reopening.
+        if let PhysicalKey::Letter(letter) = key
+            && phase == KeyPhase::Down
+        {
+            keyboard.activation_fenced_letters |= 1_u32 << u32::from(letter.index());
+        }
+        return false;
+    }
+    let activation = keyboard.activation;
+    let capture = context.state.session_capture.load(Ordering::Acquire);
+    let plan = keyboard.reducer.plan_bindings(
+        input,
+        activation.bindings,
+        accepting && activation.enabled && keyboard.activation_fenced_letters == 0,
+        accepting && capture,
+    );
+    let planned_event = plan.event();
+    let delivered = planned_event.is_none()
+        || (accepting
+            && match planned_event.expect("event presence checked above") {
+                event @ HelperEvent::Activation { .. } => deliver_callback_event_with_session_arm(
+                    &context.outbound,
+                    &context.terminal,
+                    &context.state.session_capture,
+                    event,
+                ),
+                event => deliver_callback_event(&context.outbound, &context.terminal, event),
+            });
+    if !delivered {
+        context.state.hook_status.store(
+            hook_status_to_u8(HookStatus::Unavailable),
+            Ordering::Release,
+        );
+    }
+    let swallowed = keyboard.reducer.apply(plan, delivered);
+    if let Some(HelperEvent::SessionKey {
+        key: crate::keyboard::SessionKey::Enter,
+        phase: crate::keyboard::EventPhase::Down,
+    }) = planned_event
+        && delivered
+        && swallowed
+    {
+        keyboard.captured_enter_source = enter_source;
+    } else if key == PhysicalKey::Enter
+        && phase == KeyPhase::Up
+        && keyboard.captured_enter_source == enter_source
+    {
+        keyboard.captured_enter_source = None;
+    }
+    swallowed
+}
+
+const fn enter_source(scan_code: u32, extended: bool) -> Option<EnterSource> {
+    if scan_code != 0x1C {
+        None
+    } else if extended {
+        Some(EnterSource::Numpad)
+    } else {
+        Some(EnterSource::Main)
+    }
+}
+
+fn map_scan_code(scan_code: u32, extended: bool) -> PhysicalKey {
+    if !extended
+        && let Some(index) = LETTER_SCAN_CODES
+            .iter()
+            .position(|candidate| *candidate == scan_code)
+    {
+        return PhysicalKey::Letter(
+            ActivationKey::from_index(index as u8).expect("scan table has exactly A-Z entries"),
+        );
+    }
+    match scan_code {
+        0x01 => PhysicalKey::Escape,
+        // Preserve existing session behavior for both main and numpad Enter.
+        0x1C => PhysicalKey::Enter,
+        _ => PhysicalKey::Other,
+    }
+}
+
+fn physical_tracker_from_state(
+    mut is_down: impl FnMut(PhysicalKey) -> bool,
+) -> WindowsPhysicalTracker {
+    let mut tracker = WindowsPhysicalTracker::default();
+    for index in 0_u8..26 {
+        let key = PhysicalKey::Letter(ActivationKey::from_index(index).expect("A-Z index"));
+        if is_down(key) {
+            tracker.observe(key, None, KeyPhase::Down);
+        }
+    }
+    if is_down(PhysicalKey::Escape) {
+        tracker.observe(PhysicalKey::Escape, None, KeyPhase::Down);
+    }
+    if is_down(PhysicalKey::Enter) {
+        tracker.seed_enter_preheld();
+    }
+    tracker
+}
+
+fn native_physical_key_is_down(key: PhysicalKey) -> bool {
+    let virtual_key = match key {
+        PhysicalKey::Letter(letter) => {
+            let scan_code = LETTER_SCAN_CODES[usize::from(letter.index())];
+            // Use the foreground layout to translate each physical scan
+            // position into the virtual key queried by GetAsyncKeyState.
+            // SAFETY: all calls take scalar values or a null optional pointer.
+            let foreground_thread = unsafe {
+                let window = GetForegroundWindow();
+                if window.is_null() {
+                    0
+                } else {
+                    GetWindowThreadProcessId(window, null_mut())
+                }
+            };
+            // SAFETY: a zero thread ID requests the current thread's layout.
+            let layout = unsafe { GetKeyboardLayout(foreground_thread) };
+            // SAFETY: scan code, mapping mode, and layout are valid scalar inputs.
+            let mapped = unsafe { MapVirtualKeyExW(scan_code, MAPVK_VSC_TO_VK_EX, layout) };
+            let Ok(mapped) = u16::try_from(mapped & 0xFFFF) else {
+                return false;
+            };
+            mapped
+        }
+        PhysicalKey::Escape => VK_ESCAPE,
+        PhysicalKey::Enter => VK_RETURN,
+        PhysicalKey::Other => return false,
+    };
+    virtual_key != 0 && key_is_down(virtual_key)
 }
 
 pub(super) fn key_is_down(key: u16) -> bool {
@@ -1112,48 +1093,128 @@ pub(super) fn key_is_down(key: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
 }
 
-fn physical_tracker_from_state(mut is_down: impl FnMut(u16) -> bool) -> PhysicalKeyTracker {
-    let mut tracker = PhysicalKeyTracker::default();
-    for code in 0x41_u16..=0x5A {
-        if is_down(code) {
-            tracker.observe(map_virtual_key(u32::from(code)), KeyPhase::Down);
-        }
-    }
-    for (code, key) in [
-        (VK_ESCAPE, PhysicalKey::Escape),
-        (VK_RETURN, PhysicalKey::Enter),
-    ] {
-        if is_down(code) {
-            tracker.observe(key, KeyPhase::Down);
-        }
-    }
-    tracker
-}
-
-fn map_virtual_key(code: u32) -> PhysicalKey {
-    if (0x41..=0x5A).contains(&code) {
-        let index = u8::try_from(code - 0x41).expect("A-Z range fits in u8");
-        return PhysicalKey::Letter(
-            ActivationKey::from_index(index).expect("A-Z maps to activation key"),
-        );
-    }
-    if code == u32::from(VK_ESCAPE) {
-        PhysicalKey::Escape
-    } else if code == u32::from(VK_RETURN) {
-        PhysicalKey::Enter
-    } else {
-        PhysicalKey::Other
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::keyboard::{
+        ActivationBinding, EventPhase, ProfileId, SessionKey, Shortcut, ShortcutModifiers,
+    };
 
-    fn bindings(values: &[(ActivationKey, bool)]) -> ActivationBindings {
-        ActivationBindings::from_exact(values).unwrap()
+    fn shortcut(modifiers: ShortcutModifiers, keys: &[ActivationKey]) -> Shortcut {
+        Shortcut::new(modifiers, keys).unwrap()
+    }
+
+    fn full_bindings() -> ActivationBindings {
+        ActivationBindings::new(&[
+            ActivationBinding::new(
+                ProfileId::GENERAL,
+                shortcut(
+                    ShortcutModifiers {
+                        ctrl: false,
+                        alt: true,
+                        shift: false,
+                        meta: false,
+                    },
+                    &[ActivationKey::X, ActivationKey::P],
+                ),
+            ),
+            ActivationBinding::new(
+                ProfileId::PROMPT,
+                shortcut(
+                    ShortcutModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: true,
+                        meta: false,
+                    },
+                    &[ActivationKey::P],
+                ),
+            ),
+        ])
+        .unwrap()
+    }
+
+    fn test_context(
+        outbound_capacity: usize,
+    ) -> (
+        CallbackContext,
+        Receiver<Outbound>,
+        Receiver<TerminalReason>,
+    ) {
+        let gate = Arc::new(CallbackGate::new());
+        gate.open();
+        let (terminal_tx, terminal_rx) = bounded(1);
+        let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
+        let (outbound, outbound_rx) = bounded(outbound_capacity);
+        let context = CallbackContext {
+            state: Arc::new(SharedState::new()),
+            keyboard: Mutex::new(CallbackKeyboard {
+                activation: ActivationConfig {
+                    enabled: true,
+                    bindings: full_bindings(),
+                },
+                ..CallbackKeyboard::default()
+            }),
+            outbound,
+            gate,
+            terminal,
+        };
+        (context, outbound_rx, terminal_rx)
+    }
+
+    fn record(
+        context: &CallbackContext,
+        virtual_key: u16,
+        key: PhysicalKey,
+        phase: KeyPhase,
+    ) -> bool {
+        let (scan_code, extended) = match key {
+            PhysicalKey::Letter(letter) => (LETTER_SCAN_CODES[usize::from(letter.index())], false),
+            PhysicalKey::Escape => (0x01, false),
+            PhysicalKey::Enter => (0x1C, false),
+            PhysicalKey::Other => (0, false),
+        };
+        process_hook_record(context, virtual_key, scan_code, extended, phase, false)
+    }
+
+    fn enter(context: &CallbackContext, source: EnterSource, phase: KeyPhase) -> bool {
+        process_hook_record(
+            context,
+            VK_RETURN,
+            0x1C,
+            source == EnterSource::Numpad,
+            phase,
+            false,
+        )
+    }
+
+    fn modifier(context: &CallbackContext, virtual_key: u16, phase: KeyPhase) -> bool {
+        process_hook_record(context, virtual_key, 0, false, phase, false)
+    }
+
+    fn receive_event(receiver: &Receiver<Outbound>) -> HelperEvent {
+        match receiver.recv_timeout(Duration::from_millis(50)).unwrap() {
+            Outbound::Event(event) => event,
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+    }
+
+    fn apply_config(context: &CallbackContext, activation: ActivationConfig) {
+        let (command_tx, command_rx) = bounded(1);
+        let state = Arc::new(AtomicU8::new(OwnerCommandState::Pending as u8));
+        let (acknowledgement, response) = bounded(1);
+        command_tx
+            .send(OwnerCommand {
+                mutation: OwnerMutation::configure(activation),
+                state: Arc::clone(&state),
+                acknowledgement,
+            })
+            .unwrap();
+        process_owner_commands(context, &command_rx);
+        assert_eq!(owner_command_state(&state), OwnerCommandState::Applied);
+        assert!(response.recv().unwrap().is_ok());
     }
 
     #[test]
@@ -1180,6 +1241,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_handoff_has_exclusive_running_or_cancelled_outcomes() {
+        let cancelled = AtomicU8::new(StartupState::Pending as u8);
+        assert_eq!(cancel_startup(&cancelled), StartupState::Cancelled);
+        assert!(!claim_startup(&cancelled));
+
+        let running = AtomicU8::new(StartupState::Pending as u8);
+        assert!(claim_startup(&running));
+        assert_eq!(cancel_startup(&running), StartupState::Running);
+    }
+
+    #[test]
     fn owner_completion_wait_is_bounded_and_accepts_normal_completion() {
         let (completed_tx, completed_rx) = bounded(1);
         completed_tx.send(()).unwrap();
@@ -1190,132 +1262,705 @@ mod tests {
     }
 
     #[test]
-    fn activation_config_is_atomic_and_defaults_disabled() {
-        let state = SharedState::new();
-        assert_eq!(
-            activation_config_from_value(state.activation_config.load(Ordering::Acquire)),
-            (false, ActivationBindings::default())
-        );
-        state.activation_config.store(
-            activation_config_value(
-                true,
-                bindings(&[(ActivationKey::B, false), (ActivationKey::B, true)]),
-            ),
-            Ordering::Release,
-        );
-        assert_eq!(
-            activation_config_from_value(state.activation_config.load(Ordering::Acquire)),
-            (
-                true,
-                bindings(&[(ActivationKey::B, false), (ActivationKey::B, true)])
-            )
+    fn owner_commands_apply_full_config_and_capture_in_fifo_order() {
+        let (context, _outbound, _terminal) = test_context(4);
+        let (command_tx, command_rx) = bounded(4);
+        let updated = ActivationConfig {
+            enabled: true,
+            bindings: ActivationBindings::new(&[ActivationBinding::new(
+                ProfileId::GENERAL,
+                shortcut(
+                    ShortcutModifiers {
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                        meta: true,
+                    },
+                    &[ActivationKey::Q, ActivationKey::P],
+                ),
+            )])
+            .unwrap(),
+        };
+        let mut states = Vec::new();
+        let mut responses = Vec::new();
+        for mutation in [
+            OwnerMutation::configure(updated),
+            OwnerMutation::set_session_capture(true),
+        ] {
+            let state = Arc::new(AtomicU8::new(OwnerCommandState::Pending as u8));
+            let (ack, response) = bounded(1);
+            command_tx
+                .send(OwnerCommand {
+                    mutation,
+                    state: Arc::clone(&state),
+                    acknowledgement: ack,
+                })
+                .unwrap();
+            states.push(state);
+            responses.push(response);
+        }
+
+        process_owner_commands(&context, &command_rx);
+
+        assert_eq!(context.keyboard.lock().unwrap().activation, updated);
+        assert!(context.state.session_capture.load(Ordering::Acquire));
+        for state in states {
+            assert_eq!(owner_command_state(&state), OwnerCommandState::Applied);
+        }
+        for response in responses {
+            assert!(response.recv().unwrap().is_ok());
+        }
+    }
+
+    #[test]
+    fn cancelled_owner_command_never_applies_late() {
+        let (context, _outbound, _terminal) = test_context(1);
+        let previous = context.keyboard.lock().unwrap().activation;
+        let state = Arc::new(AtomicU8::new(OwnerCommandState::Pending as u8));
+        let (command_tx, command_rx) = bounded(1);
+        let (ack, response) = bounded(1);
+        command_tx
+            .send(OwnerCommand {
+                mutation: OwnerMutation::configure(ActivationConfig::default()),
+                state: Arc::clone(&state),
+                acknowledgement: ack,
+            })
+            .unwrap();
+        assert_eq!(cancel_owner_command(&state), OwnerCommandState::Cancelled);
+
+        process_owner_commands(&context, &command_rx);
+
+        assert_eq!(context.keyboard.lock().unwrap().activation, previous);
+        assert!(response.recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn scan_codes_map_every_dom_letter_position_independent_of_virtual_key() {
+        for (index, scan_code) in LETTER_SCAN_CODES.iter().copied().enumerate() {
+            assert_eq!(
+                map_scan_code(scan_code, false),
+                PhysicalKey::Letter(ActivationKey::from_index(index as u8).unwrap())
+            );
+            assert_eq!(map_scan_code(scan_code, true), PhysicalKey::Other);
+        }
+        assert_eq!(map_scan_code(0x01, false), PhysicalKey::Escape);
+        assert_eq!(map_scan_code(0x1C, false), PhysicalKey::Enter);
+        assert_eq!(map_scan_code(0x1C, true), PhysicalKey::Enter);
+        assert_eq!(enter_source(0x1C, false), Some(EnterSource::Main));
+        assert_eq!(enter_source(0x1C, true), Some(EnterSource::Numpad));
+        assert_eq!(enter_source(0x01, false), None);
+        assert_eq!(map_scan_code(0, false), PhysicalKey::Other);
+    }
+
+    #[test]
+    fn post_install_snapshot_seeds_every_tracked_key_without_seeding_reducer() {
+        let held = [
+            PhysicalKey::Letter(ActivationKey::X),
+            PhysicalKey::Escape,
+            PhysicalKey::Enter,
+        ];
+        let mut queried = Vec::new();
+        let mut tracker = physical_tracker_from_state(|key| {
+            queried.push(key);
+            held.contains(&key)
+        });
+        assert_eq!(queried.len(), 28);
+        for index in 0_u8..26 {
+            let key = PhysicalKey::Letter(ActivationKey::from_index(index).unwrap());
+            assert_eq!(
+                tracker.observe(key, None, KeyPhase::Down),
+                held.contains(&key),
+                "physical letter index {index}"
+            );
+        }
+        assert!(tracker.observe(PhysicalKey::Escape, None, KeyPhase::Down));
+        assert!(tracker.observe(PhysicalKey::Enter, Some(EnterSource::Main), KeyPhase::Down,));
+        assert!(tracker.observe(
+            PhysicalKey::Enter,
+            Some(EnterSource::Numpad),
+            KeyPhase::Down,
+        ));
+    }
+
+    #[test]
+    fn modifier_tracker_is_exact_side_aware_and_generic_safe() {
+        let mut tracker = ModifierTracker::from_state(|key| key == VK_LSHIFT);
+        assert_eq!(tracker.mask(), ModifierMask::new(false, false, true, false));
+        tracker.observe(VK_RSHIFT, 0x36, false, KeyPhase::Down);
+        tracker.observe(VK_LSHIFT, 0x2A, false, KeyPhase::Up);
+        assert!(tracker.mask().shift());
+        tracker.observe(VK_RSHIFT, 0x36, false, KeyPhase::Up);
+        assert_eq!(tracker.mask(), ModifierMask::default());
+
+        for (key, expected) in [
+            (VK_CONTROL, ModifierMask::new(true, false, false, false)),
+            (VK_MENU, ModifierMask::new(false, true, false, false)),
+            (VK_SHIFT, ModifierMask::new(false, false, true, false)),
+            (VK_LWIN, ModifierMask::new(false, false, false, true)),
+        ] {
+            let mut tracker = ModifierTracker::default();
+            assert!(tracker.observe(key, 0, false, KeyPhase::Down));
+            assert_eq!(tracker.mask(), expected);
+            assert!(tracker.observe(key, 0, false, KeyPhase::Up));
+            assert_eq!(tracker.mask(), ModifierMask::default());
+        }
+
+        // Generic virtual keys are resolved by scan code/extended state, so
+        // releasing one side cannot clear the other. AltGr remains exact
+        // Ctrl+Alt rather than an injected or implicit modifier.
+        let mut tracker = ModifierTracker::default();
+        tracker.observe(VK_CONTROL, 0x1D, false, KeyPhase::Down);
+        tracker.observe(VK_CONTROL, 0x1D, true, KeyPhase::Down);
+        tracker.observe(VK_CONTROL, 0x1D, false, KeyPhase::Up);
+        assert!(tracker.mask().ctrl());
+        tracker.observe(VK_CONTROL, 0x1D, true, KeyPhase::Up);
+        assert!(!tracker.mask().ctrl());
+        tracker.observe(VK_CONTROL, 0x1D, false, KeyPhase::Down);
+        tracker.observe(VK_MENU, 0x38, true, KeyPhase::Down);
+        assert_eq!(tracker.mask(), ModifierMask::new(true, true, false, false));
+    }
+
+    #[test]
+    fn every_nonempty_exact_modifier_mask_can_activate_in_the_native_path() {
+        for bits in 1_u8..16 {
+            let modifiers = ShortcutModifiers {
+                ctrl: bits & 0b0001 != 0,
+                alt: bits & 0b0010 != 0,
+                shift: bits & 0b0100 != 0,
+                meta: bits & 0b1000 != 0,
+            };
+            let expected = shortcut(modifiers, &[ActivationKey::P]);
+            let expected_binding = ActivationBinding::new(ProfileId::GENERAL, expected);
+            let (context, outbound, _terminal) = test_context(2);
+            context.keyboard.lock().unwrap().activation = ActivationConfig {
+                enabled: true,
+                bindings: ActivationBindings::new(&[ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    expected,
+                )])
+                .unwrap(),
+            };
+            for (enabled, virtual_key) in [
+                (modifiers.ctrl, VK_LCONTROL),
+                (modifiers.alt, VK_LMENU),
+                (modifiers.shift, VK_LSHIFT),
+                (modifiers.meta, VK_LWIN),
+            ] {
+                if enabled {
+                    modifier(&context, virtual_key, KeyPhase::Down);
+                }
+            }
+
+            assert!(
+                record(
+                    &context,
+                    0x50,
+                    PhysicalKey::Letter(ActivationKey::P),
+                    KeyPhase::Down,
+                ),
+                "modifier bits {bits:04b}",
+            );
+            assert_eq!(
+                receive_event(&outbound),
+                HelperEvent::Activation {
+                    binding: expected_binding,
+                    phase: EventPhase::Down,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn closed_gate_tracks_native_state_without_retaining_future_prefixes() {
+        let (context, outbound, _terminal) = test_context(4);
+        context.gate.close();
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(
+            context
+                .keyboard
+                .lock()
+                .unwrap()
+                .reducer
+                .held_letters()
+                .is_empty()
         );
 
-        for enabled in [false, true] {
-            for index in 0..26 {
-                let key = ActivationKey::from_index(index).unwrap();
+        context.gate.open();
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+        record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        );
+        record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Up,
+        );
+
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+    }
+
+    #[test]
+    fn every_binding_revision_fences_physically_held_letters_until_release() {
+        let (context, outbound, _terminal) = test_context(4);
+        context.gate.close();
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(
+            context
+                .keyboard
+                .lock()
+                .unwrap()
+                .reducer
+                .held_letters()
+                .is_empty()
+        );
+
+        let one_key = ActivationBinding::new(
+            ProfileId::GENERAL,
+            shortcut(
+                ShortcutModifiers {
+                    ctrl: false,
+                    alt: true,
+                    shift: false,
+                    meta: false,
+                },
+                &[ActivationKey::P],
+            ),
+        );
+        apply_config(
+            &context,
+            ActivationConfig {
+                enabled: true,
+                bindings: ActivationBindings::new(&[one_key]).unwrap(),
+            },
+        );
+        context.gate.open();
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+        record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        );
+        record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Up,
+        );
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding: one_key,
+                phase: EventPhase::Down,
+            },
+        );
+    }
+
+    #[test]
+    fn modifier_changes_fence_a_passive_native_prefix_until_all_letters_release() {
+        let (context, outbound, _terminal) = test_context(4);
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+        for (virtual_key, physical) in [
+            (0x50, PhysicalKey::Letter(ActivationKey::P)),
+            (0x58, PhysicalKey::Letter(ActivationKey::X)),
+        ] {
+            record(&context, virtual_key, physical, KeyPhase::Up);
+        }
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+    }
+
+    #[test]
+    fn alt_x_p_passes_prefix_and_modifiers_but_swallows_trigger_sequence() {
+        let (context, outbound, _terminal) = test_context(4);
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Down));
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding: full_bindings().iter().next().unwrap(),
+                phase: EventPhase::Down,
+            }
+        );
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+
+        // Config, prefix, and modifier changes cannot alter the accepted up.
+        apply_config(&context, ActivationConfig::default());
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Up));
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Up,
+        ));
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding: full_bindings().iter().next().unwrap(),
+                phase: EventPhase::Up,
+            }
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_p_matches_exactly_and_extra_or_missing_state_does_not() {
+        let (context, outbound, _terminal) = test_context(4);
+        assert!(!modifier(&context, VK_LCONTROL, KeyPhase::Down));
+        assert!(!modifier(&context, VK_RSHIFT, KeyPhase::Down));
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        let expected = full_bindings().iter().nth(1).unwrap();
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding: expected,
+                phase: EventPhase::Down,
+            }
+        );
+        assert!(record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding: expected,
+                phase: EventPhase::Up,
+            }
+        );
+
+        // Missing Shift prevents a separate fresh gesture.
+        let (missing, missing_outbound, _terminal) = test_context(2);
+        modifier(&missing, VK_LCONTROL, KeyPhase::Down);
+        assert!(!record(
+            &missing,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(missing_outbound.try_recv().is_err());
+
+        // An extra modifier prevents the next fresh gesture.
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Down));
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        ));
+        assert!(outbound.try_recv().is_err());
+
+        // An extra held letter also prevents the otherwise exact chord.
+        let (extra, extra_outbound, _terminal) = test_context(2);
+        modifier(&extra, VK_LCONTROL, KeyPhase::Down);
+        modifier(&extra, VK_LSHIFT, KeyPhase::Down);
+        record(
+            &extra,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        );
+        assert!(!record(
+            &extra,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(extra_outbound.try_recv().is_err());
+    }
+
+    #[test]
+    fn wrong_order_extra_letters_and_injected_records_never_activate_or_mutate() {
+        let (context, outbound, _terminal) = test_context(4);
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+
+        // Injected ups do not clear physical modifier or letter state.
+        assert!(!process_hook_record(
+            &context,
+            VK_LMENU,
+            0,
+            false,
+            KeyPhase::Up,
+            true,
+        ));
+        assert!(!process_hook_record(
+            &context,
+            0x50,
+            LETTER_SCAN_CODES[usize::from(ActivationKey::P.index())],
+            false,
+            KeyPhase::Up,
+            true,
+        ));
+        assert_eq!(
+            context.keyboard.lock().unwrap().modifiers.mask(),
+            ModifierMask::new(false, true, false, false)
+        );
+        assert!(context.keyboard.lock().unwrap().physical.observe(
+            PhysicalKey::Letter(ActivationKey::P),
+            None,
+            KeyPhase::Down
+        ));
+    }
+
+    #[test]
+    fn outbound_failure_passes_current_trigger_and_every_later_record() {
+        let (context, _outbound, terminal) = test_context(0);
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert_eq!(
+            terminal.recv_timeout(Duration::from_millis(50)).unwrap(),
+            TerminalReason::OutboundQueueUnavailable
+        );
+        assert!(!context.gate.is_open());
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x50,
+            PhysicalKey::Letter(ActivationKey::P),
+            KeyPhase::Up,
+        ));
+    }
+
+    #[test]
+    fn simultaneous_enter_sources_latch_one_balanced_sequence_in_every_order() {
+        for (first, second) in [
+            (EnterSource::Main, EnterSource::Numpad),
+            (EnterSource::Numpad, EnterSource::Main),
+        ] {
+            for release_accepted_first in [false, true] {
+                let (context, outbound, _terminal) = test_context(4);
+                context.state.session_capture.store(true, Ordering::Release);
+
+                assert!(enter(&context, first, KeyPhase::Down));
                 assert_eq!(
-                    activation_config_from_value(activation_config_value(
-                        enabled,
-                        bindings(&[(key, false), (key, true)])
-                    )),
-                    (enabled, bindings(&[(key, false), (key, true)]))
+                    receive_event(&outbound),
+                    HelperEvent::SessionKey {
+                        key: SessionKey::Enter,
+                        phase: EventPhase::Down,
+                    },
                 );
+                assert!(enter(&context, first, KeyPhase::Down));
+                assert!(!enter(&context, second, KeyPhase::Down));
+                assert!(!enter(&context, second, KeyPhase::Down));
+                assert!(outbound.try_recv().is_err());
+
+                let releases = if release_accepted_first {
+                    [first, second]
+                } else {
+                    [second, first]
+                };
+                for source in releases {
+                    assert_eq!(
+                        enter(&context, source, KeyPhase::Up),
+                        source == first,
+                        "first={first:?}, release={source:?}",
+                    );
+                }
+                assert_eq!(
+                    receive_event(&outbound),
+                    HelperEvent::SessionKey {
+                        key: SessionKey::Enter,
+                        phase: EventPhase::Up,
+                    },
+                );
+                assert!(outbound.try_recv().is_err());
+                assert_eq!(context.keyboard.lock().unwrap().captured_enter_source, None,);
             }
         }
     }
 
     #[test]
-    fn ctrl_and_windows_keys_exhaustively_disallow_activation() {
-        for mask in 0_u8..8 {
-            let mut queried = Vec::new();
-            let disallowed = activation_disallowed_modifiers(|key| {
-                queried.push(key);
-                match key {
-                    VK_CONTROL => mask & 0b001 != 0,
-                    VK_LWIN => mask & 0b010 != 0,
-                    VK_RWIN => mask & 0b100 != 0,
-                    _ => false,
-                }
-            });
-            assert_eq!(disallowed, mask != 0, "mask {mask:03b}");
-            assert_eq!(queried, [VK_CONTROL, VK_LWIN, VK_RWIN]);
-        }
+    fn enter_source_tracking_survives_capture_and_config_transitions() {
+        let (context, outbound, _terminal) = test_context(4);
 
-        for modifier in [VK_CONTROL, VK_LWIN, VK_RWIN, VK_MENU, VK_SHIFT] {
-            assert_eq!(map_virtual_key(u32::from(modifier)), PhysicalKey::Other);
-        }
+        assert!(!enter(&context, EnterSource::Main, KeyPhase::Down));
+        context.state.session_capture.store(true, Ordering::Release);
+        assert!(!enter(&context, EnterSource::Main, KeyPhase::Down));
+        assert!(enter(&context, EnterSource::Numpad, KeyPhase::Down));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Down,
+            },
+        );
+        assert!(enter(&context, EnterSource::Numpad, KeyPhase::Down));
+
+        context
+            .state
+            .session_capture
+            .store(false, Ordering::Release);
+        apply_config(&context, ActivationConfig::default());
+        assert!(!enter(&context, EnterSource::Main, KeyPhase::Up));
+        assert!(enter(&context, EnterSource::Numpad, KeyPhase::Up));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Up,
+            },
+        );
+        assert!(outbound.try_recv().is_err());
     }
 
     #[test]
-    fn post_install_snapshot_queries_and_seeds_every_tracked_physical_key() {
-        let held = [0x41, 0x5A, VK_ESCAPE, VK_RETURN];
-        let mut queried = Vec::new();
-        let mut tracker = physical_tracker_from_state(|code| {
-            queried.push(code);
-            held.contains(&code)
-        });
-
-        let mut expected_queries = (0x41_u16..=0x5A).collect::<Vec<_>>();
-        expected_queries.extend([VK_ESCAPE, VK_RETURN]);
-        assert_eq!(queried, expected_queries);
-
-        for code in 0x41_u16..=0x5A {
-            assert_eq!(
-                tracker.observe(map_virtual_key(u32::from(code)), KeyPhase::Down),
-                held.contains(&code),
-                "virtual key {code:#x}"
-            );
-        }
-        assert!(tracker.observe(PhysicalKey::Escape, KeyPhase::Down));
-        assert!(tracker.observe(PhysicalKey::Enter, KeyPhase::Down));
-    }
-
-    #[test]
-    fn post_install_held_keys_cannot_begin_activation_or_session_capture() {
-        let mut tracker =
-            physical_tracker_from_state(|code| matches!(code, 0x41 | VK_ESCAPE | VK_RETURN));
-        let mut reducer = KeyboardReducer::default();
-
-        for (key, alt, capture) in [
-            (PhysicalKey::Letter(ActivationKey::A), true, false),
-            (PhysicalKey::Escape, false, true),
-            (PhysicalKey::Enter, false, true),
+    fn escape_and_enter_capture_remains_paired_and_modifier_independent() {
+        let (context, outbound, _terminal) = test_context(8);
+        context.state.session_capture.store(true, Ordering::Release);
+        modifier(&context, VK_LWIN, KeyPhase::Down);
+        for (key, session_key) in [
+            (PhysicalKey::Escape, SessionKey::Escape),
+            (PhysicalKey::Enter, SessionKey::Enter),
         ] {
-            let repeat = tracker.observe(key, KeyPhase::Down);
-            assert!(repeat);
-            let plan = reducer.plan(
-                KeyInput {
-                    key,
-                    phase: KeyPhase::Down,
-                    alt,
-                    shift: false,
-                    disallowed_modifiers: false,
-                    repeat,
-                    injected: false,
-                },
-                ActivationKey::A,
-                true,
-                capture,
+            assert!(record(&context, 0, key, KeyPhase::Down));
+            assert_eq!(
+                receive_event(&outbound),
+                HelperEvent::SessionKey {
+                    key: session_key,
+                    phase: EventPhase::Down,
+                }
             );
-            assert!(plan.event().is_none());
-            assert!(!reducer.apply(plan, true));
+            assert!(record(&context, 0, key, KeyPhase::Down));
+            assert!(record(&context, 0, key, KeyPhase::Up));
+            assert_eq!(
+                receive_event(&outbound),
+                HelperEvent::SessionKey {
+                    key: session_key,
+                    phase: EventPhase::Up,
+                }
+            );
         }
-    }
-
-    #[test]
-    fn shift_tracker_preserves_both_sides_and_aggregate_only_keyboards() {
-        let mut tracker = ShiftKeyTracker::from_state(|code| code == VK_LSHIFT);
-        assert!(tracker.is_down());
-        tracker.observe(VK_RSHIFT, KeyPhase::Down);
-        tracker.observe(VK_LSHIFT, KeyPhase::Up);
-        assert!(tracker.is_down());
-        tracker.observe(VK_RSHIFT, KeyPhase::Up);
-        assert!(!tracker.is_down());
-
-        let mut aggregate = ShiftKeyTracker::from_state(|code| code == VK_SHIFT);
-        assert!(aggregate.is_down());
-        aggregate.observe(VK_SHIFT, KeyPhase::Up);
-        assert!(!aggregate.is_down());
     }
 }

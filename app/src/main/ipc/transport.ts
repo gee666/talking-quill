@@ -1,4 +1,4 @@
-import { ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { ipcMain, type Event as ElectronEvent, type IpcMainInvokeEvent } from 'electron';
 import {
   failureResponseSchema,
   invokeRegistry,
@@ -157,9 +157,39 @@ function authorize(
 function createContext(event: IpcMainInvokeEvent) {
   return {
     webContentsId: event.sender.id,
-    onDestroyed: (listener: () => void) => {
-      event.sender.once('destroyed', listener);
-      return () => event.sender.off('destroyed', listener);
-    },
+    onDestroyed: (listener: () => void) => subscribeToRendererInvalidation(event.sender, listener),
   } as const;
+}
+
+export function subscribeToRendererInvalidation(
+  sender: IpcMainInvokeEvent['sender'],
+  listener: () => void,
+): () => void {
+  let active = true;
+  const cleanup = () => {
+    if (!active) return;
+    active = false;
+    sender.off('destroyed', invalidate);
+    sender.off('render-process-gone', invalidate);
+    sender.off('did-start-navigation', onDidStartNavigation);
+    sender.off('did-navigate', invalidate);
+  };
+  const invalidate = () => {
+    if (!active) return;
+    cleanup();
+    listener();
+  };
+  const onDidStartNavigation = (
+    _event: ElectronEvent,
+    _url: string,
+    isInPlace: boolean,
+    isMainFrame: boolean,
+  ) => {
+    if (isMainFrame && !isInPlace) invalidate();
+  };
+  sender.on('destroyed', invalidate);
+  sender.on('render-process-gone', invalidate);
+  sender.on('did-start-navigation', onDidStartNavigation);
+  sender.on('did-navigate', invalidate);
+  return cleanup;
 }

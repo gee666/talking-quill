@@ -73,6 +73,10 @@ export interface MainApi {
     stop(): Promise<ActivationTestState>;
     onChanged(listener: (state: ActivationTestState) => void): Unsubscribe;
   };
+  readonly shortcutCapture: {
+    start(): Promise<void>;
+    stop(): Promise<void>;
+  };
   readonly app: {
     getBootstrap(): Promise<BootstrapData>;
     setEnabled(enabled: boolean): Promise<AppState>;

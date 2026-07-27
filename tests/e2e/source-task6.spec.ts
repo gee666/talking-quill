@@ -257,6 +257,26 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     const { main, widget } = await rendererPages(application);
     await main.getByRole('button', { name: 'Settings' }).click();
 
+    // Renderer capture retains physical held-key order and leaves Tab navigation available.
+    await main.getByRole('button', { name: 'Dictation profiles' }).click();
+    const shortcutInput = main.getByRole('textbox', { name: 'General keyboard shortcut' });
+    await shortcutInput.focus();
+    await expect(shortcutInput).not.toHaveAttribute('aria-busy', 'true');
+    await main.keyboard.down('Alt');
+    await main.keyboard.down('x');
+    await main.keyboard.down('p');
+    await expect(shortcutInput).toHaveValue('Alt + X + P');
+    await main.keyboard.up('p');
+    await main.keyboard.up('x');
+    await main.keyboard.up('Alt');
+    await main.keyboard.press('Shift+Tab');
+    await expect(main.getByRole('textbox', { name: 'General profile name' })).toBeFocused();
+    await shortcutInput.focus();
+    await expect(shortcutInput).not.toHaveAttribute('aria-busy', 'true');
+    await main.keyboard.press('Tab');
+    await expect(main.getByRole('combobox', { name: 'General processing mode' })).toBeFocused();
+    await main.getByRole('button', { name: 'General' }).click();
+
     // Safe live gesture test: the same helper event route is used, while capture stays untouched.
     await main.getByRole('button', { name: 'Test activation shortcut' }).click();
     await driverCall(application, 'activationDown');

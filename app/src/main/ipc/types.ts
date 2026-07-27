@@ -2,6 +2,7 @@ import type { InvokeChannel, InvokeRequest, InvokeResponse } from '../../shared/
 
 export interface AuthorizedIpcContext {
   readonly webContentsId: number;
+  /** Fires once when the sender, renderer process, or current main-frame document is replaced. */
   readonly onDestroyed: (listener: () => void) => () => void;
 }
 

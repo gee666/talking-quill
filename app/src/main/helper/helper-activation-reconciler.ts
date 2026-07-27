@@ -4,6 +4,7 @@ import {
   type HelperParams,
 } from '../../shared/helper/protocol';
 import { type HelperReadinessReason } from '../../shared/schemas/helper-readiness';
+import { deepFreezeShortcut } from '../../shared/schemas/shortcut';
 import { type HelperRpcSession } from './helper-rpc-channel';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3_000;
@@ -62,7 +63,14 @@ export class HelperActivationReconciler {
     });
     const desired = Object.freeze({
       enabled: configured.enabled,
-      bindings: Object.freeze(configured.bindings.map((binding) => Object.freeze(binding))),
+      bindings: Object.freeze(
+        configured.bindings.map((binding) =>
+          Object.freeze({
+            profileId: binding.profileId,
+            shortcut: deepFreezeShortcut(binding.shortcut),
+          }),
+        ),
+      ),
     });
     const apply = async (): Promise<ActivationConfiguration> => {
       const previous = this.#desired;

@@ -30,21 +30,29 @@ export const nativeProviderRequest: InvokeRequest<'provider:list-models'> = {
 
 export const validProfileBindingUpdate: InvokeRequest<'profile:update'> = {
   id: 'general',
-  patch: { activationKey: 'Q', shift: true, name: 'Moved General' },
+  patch: {
+    shortcut: {
+      modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+      keys: ['P'],
+    },
+    name: 'Moved General',
+  },
 };
 export const validProfileNonBindingUpdate: InvokeRequest<'profile:update'> = {
   id: 'general',
   patch: { processingMode: 'smart' },
 };
-export const invalidProfileKeyOnlyUpdate: InvokeRequest<'profile:update'> = {
+export const invalidProfileKeysOnlyUpdate: InvokeRequest<'profile:update'> = {
   id: 'general',
-  // @ts-expect-error binding updates require activationKey and shift together
-  patch: { activationKey: 'Q' },
+  // @ts-expect-error shortcut updates require the complete canonical shape
+  patch: { shortcut: { keys: ['Q'] } },
 };
-export const invalidProfileShiftOnlyUpdate: InvokeRequest<'profile:update'> = {
+export const invalidProfileModifiersOnlyUpdate: InvokeRequest<'profile:update'> = {
   id: 'general',
-  // @ts-expect-error binding updates require activationKey and shift together
-  patch: { shift: true },
+  patch: {
+    // @ts-expect-error shortcut updates require ordered keys
+    shortcut: { modifiers: { ctrl: false, alt: true, shift: true, meta: false } },
+  },
 };
 
 // @ts-expect-error adding an unregistered channel is a compile-time failure

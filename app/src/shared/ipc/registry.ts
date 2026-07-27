@@ -177,6 +177,16 @@ export const invokeRegistry = Object.freeze({
     request: emptyRequest,
     response: ActivationTestStateSchema,
   }),
+  'shortcut-capture:start': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: acknowledgement,
+  }),
+  'shortcut-capture:stop': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: acknowledgement,
+  }),
   'app:set-enabled': defineInvoke({
     roles: ['main'] as const,
     request: z.object({ enabled: z.boolean() }).strict(),
@@ -199,16 +209,12 @@ export const invokeRegistry = Object.freeze({
       .strict()
       .superRefine((request, context) => {
         if (
-          'activationKey' in request.patch &&
-          isReservedBindingForAnotherProfile(
-            request.id,
-            request.patch.activationKey,
-            request.patch.shift,
-          )
+          request.patch.shortcut !== undefined &&
+          isReservedBindingForAnotherProfile(request.id, request.patch.shortcut)
         ) {
           context.addIssue({
             code: 'custom',
-            path: ['patch', 'activationKey'],
+            path: ['patch', 'shortcut'],
             message: RESERVED_DICTATION_BINDING_ERROR,
           });
         }

@@ -1,15 +1,9 @@
 import { PublicAppError } from '../security/public-error';
-import { HELPER_PROTOCOL_VERSION } from '../../shared/helper/protocol';
 import {
   WelcomeStepSchema,
   type WelcomeState,
   type WelcomeStep,
 } from '../../shared/schemas/welcome';
-import type { ActivationKey } from '../../shared/helper/protocol';
-import {
-  GENERAL_PROFILE_ID,
-  type DictationProfileId,
-} from '../../shared/schemas/dictation-profiles';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { SettingsPatch } from '../../shared/schemas/settings';
@@ -18,8 +12,7 @@ const USABLE_RMS_THRESHOLD = 0.005;
 const MIN_OBSERVED_SAMPLES = 1_600;
 const MICROPHONE_STEP = 2 satisfies WelcomeStep;
 const MODEL_STEP = 3 satisfies WelcomeStep;
-const ACTIVATION_STEP = 4 satisfies WelcomeStep;
-const FINAL_STEP = 6 satisfies WelcomeStep;
+const FINAL_STEP = 5 satisfies WelcomeStep;
 
 export interface WelcomePrerequisites {
   readonly microphoneReady: () => boolean;
@@ -30,13 +23,6 @@ export interface WelcomePrerequisites {
   } | null;
   readonly modelReady: () => Promise<boolean>;
   readonly modelRevision: (modelId: WhisperModelId) => string;
-  readonly helperReady: () => boolean;
-  readonly helperReadinessGeneration: () => number;
-  readonly activationGestureRecognized: () => {
-    readonly profileId: DictationProfileId;
-    readonly activationKey: ActivationKey;
-    readonly shift: boolean;
-  } | null;
 }
 
 /** Owns serialized onboarding validation and persistence. */
@@ -72,13 +58,6 @@ export class WelcomeService {
 
   async invalidateModelSelection(): Promise<void> {
     await this.#invalidate(MODEL_STEP, { modelEvidence: null });
-  }
-
-  async invalidateActivationBinding(): Promise<void> {
-    await this.#invalidate(ACTIVATION_STEP, {
-      activationTested: false,
-      activationEvidence: null,
-    });
   }
 
   setStep(step: WelcomeStep): Promise<WelcomeState> {
@@ -232,39 +211,6 @@ export class WelcomeService {
         },
       };
     }
-    if (step === ACTIVATION_STEP) {
-      if (!this.#prerequisites.helperReady()) {
-        throw prerequisiteError('Finish keyboard helper and permission setup before continuing.');
-      }
-      const testedActivation = this.#prerequisites.activationGestureRecognized();
-      if (testedActivation?.profileId !== GENERAL_PROFILE_ID) {
-        throw prerequisiteError(
-          'Test the General profile shortcut with a Quick or Extended activation gesture before continuing.',
-        );
-      }
-      const settings = this.#settings.get();
-      const testedProfile = settings.dictationProfiles.find(
-        (profile) =>
-          profile.id === testedActivation.profileId &&
-          profile.activationKey === testedActivation.activationKey &&
-          profile.shift === testedActivation.shift,
-      );
-      if (testedProfile === undefined) {
-        throw prerequisiteError('The tested activation profile has changed. Test it again.');
-      }
-      return {
-        activationTested: true,
-        activationEvidence: {
-          profileId: testedProfile.id,
-          activationKey: testedProfile.activationKey,
-          shift: testedProfile.shift,
-          enabled: true,
-          helperProtocol: HELPER_PROTOCOL_VERSION,
-          readinessGeneration: this.#prerequisites.helperReadinessGeneration(),
-          observedAt: Math.max(0, Math.floor(this.#now())),
-        },
-      };
-    }
     return {};
   }
 
@@ -289,29 +235,6 @@ export class WelcomeService {
       model.manifestRevision !== this.#prerequisites.modelRevision(selectedModel)
     ) {
       throw prerequisiteError('The selected model evidence is stale. Return to step 3.');
-    }
-    const current = this.#settings.get();
-    const activation = current.welcome.activationEvidence;
-    const readinessGeneration = this.#prerequisites.helperReadinessGeneration();
-    const activatedProfile =
-      activation === null || activation === undefined
-        ? undefined
-        : current.dictationProfiles.find(
-            (profile) =>
-              profile.id === activation.profileId &&
-              profile.activationKey === activation.activationKey &&
-              profile.shift === activation.shift,
-          );
-    if (
-      !this.#prerequisites.helperReady() ||
-      !current.app.enabled ||
-      activation === null ||
-      activation === undefined ||
-      activatedProfile === undefined ||
-      activation.helperProtocol !== HELPER_PROTOCOL_VERSION ||
-      activation.readinessGeneration !== readinessGeneration
-    ) {
-      throw prerequisiteError('The activation shortcut is not ready. Return to step 4.');
     }
   }
 

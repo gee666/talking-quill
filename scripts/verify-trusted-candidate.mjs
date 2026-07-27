@@ -7,8 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 export const POLICY_PATHS = Object.freeze([
   '.npmrc',
-  '.github/workflows/release.yml',
-  '.github/workflows/publish-release.yml',
   'release.config.json',
   'package.json',
   'pnpm-lock.yaml',

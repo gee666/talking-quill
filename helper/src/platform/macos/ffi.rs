@@ -10,17 +10,21 @@ pub(super) type CFMachPortRef = *mut c_void;
 pub(super) type CGEventRef = *mut c_void;
 pub(super) type CGEventTapProxy = *mut c_void;
 pub(super) type AXUIElementRef = *mut c_void;
+pub(super) type CGEventSourceStateId = i32;
 
+pub(super) const K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION: CGEventSourceStateId = 0;
 pub(super) const K_CG_SESSION_EVENT_TAP: u32 = 1;
 pub(super) const K_CG_HID_EVENT_TAP: u32 = 0;
 pub(super) const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
 pub(super) const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
 pub(super) const K_CG_EVENT_KEY_DOWN: u32 = 10;
 pub(super) const K_CG_EVENT_KEY_UP: u32 = 11;
+pub(super) const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
 pub(super) const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 pub(super) const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 pub(super) const K_CG_KEYBOARD_EVENT_AUTOREPEAT: u32 = 8;
 pub(super) const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
+pub(super) const K_CG_EVENT_SOURCE_UNIX_PROCESS_ID: u32 = 41;
 pub(super) const K_CG_EVENT_SOURCE_USER_DATA: u32 = 42;
 pub(super) const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
 pub(super) const K_CG_EVENT_FLAG_MASK_CONTROL: u64 = 0x0004_0000;
@@ -51,6 +55,27 @@ pub(super) struct CFRange {
     pub(super) length: CFIndex,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(super) struct MachTimebaseInfo {
+    pub(super) numer: u32,
+    pub(super) denom: u32,
+}
+
+#[repr(C)]
+pub(super) struct CFRunLoopSourceContext {
+    pub(super) version: CFIndex,
+    pub(super) info: *mut c_void,
+    pub(super) retain: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+    pub(super) release: Option<unsafe extern "C" fn(*const c_void)>,
+    pub(super) copy_description: Option<unsafe extern "C" fn(*const c_void) -> CFStringRef>,
+    pub(super) equal: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> u8>,
+    pub(super) hash: Option<unsafe extern "C" fn(*const c_void) -> usize>,
+    pub(super) schedule: Option<unsafe extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub(super) cancel: Option<unsafe extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub(super) perform: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     pub(super) static kCFRunLoopCommonModes: CFStringRef;
@@ -61,6 +86,13 @@ unsafe extern "C" {
         port: CFMachPortRef,
         order: CFIndex,
     ) -> CFRunLoopSourceRef;
+    pub(super) fn CFRunLoopSourceCreate(
+        allocator: CFTypeRef,
+        order: CFIndex,
+        context: *mut CFRunLoopSourceContext,
+    ) -> CFRunLoopSourceRef;
+    pub(super) fn CFRunLoopSourceSignal(source: CFRunLoopSourceRef);
+    pub(super) fn CFRunLoopSourceInvalidate(source: CFRunLoopSourceRef);
     pub(super) fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     pub(super) fn CFRunLoopAddSource(
         run_loop: CFRunLoopRef,
@@ -75,6 +107,7 @@ unsafe extern "C" {
     pub(super) fn CFMachPortInvalidate(port: CFMachPortRef);
     pub(super) fn CFRunLoopRun();
     pub(super) fn CFRunLoopStop(run_loop: CFRunLoopRef);
+    pub(super) fn CFRunLoopWakeUp(run_loop: CFRunLoopRef);
     pub(super) fn CFStringCreateWithCString(
         allocator: CFTypeRef,
         string: *const c_char,
@@ -120,6 +153,8 @@ unsafe extern "C" {
     pub(super) fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
     pub(super) fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
     pub(super) fn CGEventGetFlags(event: CGEventRef) -> u64;
+    pub(super) fn CGEventGetTimestamp(event: CGEventRef) -> u64;
+    pub(super) fn CGEventSourceKeyState(state_id: CGEventSourceStateId, virtual_key: u16) -> bool;
     pub(super) fn CGEventCreateKeyboardEvent(
         source: CFTypeRef,
         virtual_key: u16,
@@ -130,6 +165,12 @@ unsafe extern "C" {
     pub(super) fn CGEventPost(tap: u32, event: CGEventRef);
     pub(super) fn CGPreflightListenEventAccess() -> bool;
     pub(super) fn CGPreflightPostEventAccess() -> bool;
+}
+
+#[link(name = "System")]
+unsafe extern "C" {
+    pub(super) fn mach_absolute_time() -> u64;
+    pub(super) fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
 }
 
 // IsSecureEventInputEnabled is declared by HIToolbox/Events.h. Carbon is the

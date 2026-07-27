@@ -86,6 +86,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
         settings={settings}
         platform={bootstrap.platform}
         onSettingsSaved={(next) => setSettings((current) => mergeSettingsSnapshot(current, next))}
+        onOpenWelcome={() => setWelcomeReopened(true)}
       />
     ) : (
       <InfoScreen

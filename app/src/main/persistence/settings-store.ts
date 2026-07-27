@@ -298,27 +298,11 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
   const dictationProfiles = patch.dictationProfiles ?? current.dictationProfiles;
   const general = dictationProfiles.find((profile) => profile.id === GENERAL_PROFILE_ID);
   if (general === undefined) throw new Error('The General dictation profile is required');
-  const currentEvidence = current.welcome.activationEvidence;
-  const evidenceProfile =
-    currentEvidence === null || currentEvidence === undefined
-      ? undefined
-      : dictationProfiles.find(
-          (profile) =>
-            profile.id === currentEvidence.profileId &&
-            profile.activationKey === currentEvidence.activationKey &&
-            profile.shift === currentEvidence.shift,
-        );
-  const bindingEvidenceInvalidated =
-    patch.dictationProfiles !== undefined &&
-    currentEvidence !== null &&
-    currentEvidence !== undefined &&
-    evidenceProfile === undefined;
   return SettingsSchema.parse({
     schemaVersion: SETTINGS_SCHEMA_VERSION,
     app: {
       ...current.app,
       ...patch.app,
-      activationKey: general.activationKey,
       defaultProcessingMode: general.processingMode,
     },
     recording: { ...current.recording, ...patch.recording },
@@ -345,21 +329,6 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     },
     voiceCommands: patch.voiceCommands ?? current.voiceCommands,
     customVocabulary: patch.customVocabulary ?? current.customVocabulary,
-    welcome: {
-      ...current.welcome,
-      ...patch.welcome,
-      ...(bindingEvidenceInvalidated
-        ? {
-            activationTested: false,
-            activationEvidence: null,
-            completedAt: current.welcome.completedAt,
-            lastStep:
-              current.welcome.completedAt === null
-                ? Math.min(current.welcome.lastStep, 4)
-                : current.welcome.lastStep,
-            revision: (current.welcome.revision ?? 0) + 1,
-          }
-        : {}),
-    },
+    welcome: { ...current.welcome, ...patch.welcome },
   });
 }

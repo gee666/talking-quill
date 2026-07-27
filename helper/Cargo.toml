@@ -1,6 +1,6 @@
 [package]
 name = "talking-quill-helper"
-version = "1.0.2"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.97.1"
 publish = false

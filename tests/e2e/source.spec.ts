@@ -159,6 +159,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
       'welcome',
       'info',
       'activationTest',
+      'shortcutCapture',
       'app',
       'settings',
       'profiles',

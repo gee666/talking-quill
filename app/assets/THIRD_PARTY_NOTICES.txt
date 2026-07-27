@@ -4,7 +4,7 @@ This inventory is generated from the production @talking-quill/app deployment gr
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: cd0b9502c5d9a44249024d661e2ac828b9ccc1330b606ba13bf0ae24a061fb88
-helper/Cargo.lock SHA-256: 12c4e4bf604bae09b272f200ae30f0b1bc9f69745f5e16d029f7677f66840809
+helper/Cargo.lock SHA-256: 4c2277dcbdc6a9619cf403cacfbaa1ee10f7dffc8cdcbd46202de50f4f372b70
 scripts/model-manifest.json SHA-256: e5f139abb8b3baf5a31faf8235d64adc9ff3dc9c7d2b1aae808366e4e6124fff
 
 Production JavaScript/native dependencies (91 records)
@@ -228,7 +228,7 @@ serde@1.0.229 — SPDX: MIT OR Apache-2.0
 syn@3.0.1 — SPDX: MIT OR Apache-2.0
   https://crates.io/crates/syn/3.0.1
   Targets: aarch64-apple-darwin, aarch64-pc-windows-msvc, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-helper@1.0.2 — SPDX: MIT
+talking-quill-helper@0.0.1 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, aarch64-pc-windows-msvc, x86_64-apple-darwin, x86_64-pc-windows-msvc
 thiserror-impl@2.0.19 — SPDX: MIT OR Apache-2.0
@@ -7651,7 +7651,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 706e281ee8b8fdb3cbeb92d1dff6937ac4086ab46b1ce54d9c2ead922d24deab
-Applies to: talking-quill-helper@1.0.2/LICENSE
+Applies to: talking-quill-helper@0.0.1/LICENSE
 
 The MIT License
 

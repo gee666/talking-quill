@@ -1,6 +1,6 @@
 use super::{
-    ActivationBindings, ActivationKey, EventPhase, HelperEvent, KeyInput, KeyPhase, PhysicalKey,
-    SessionKey,
+    ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, KeyInput,
+    KeyPhase, ModifierMask, PhysicalKey, ProfileId, SessionKey, Shortcut,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -13,35 +13,73 @@ enum SequenceState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveActivation {
-    key: ActivationKey,
-    shift: bool,
+    binding: ActivationBinding,
+    trigger: ActivationKey,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ActivationInputMode {
-    NativeKey,
-    PassiveHook,
-    RegisteredHotKey,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HeldLetters {
+    keys: [ActivationKey; Shortcut::MAX_KEYS],
+    count: u8,
 }
 
-/// Pure keyboard state used by both native callbacks.
+impl HeldLetters {
+    fn as_slice(&self) -> &[ActivationKey] {
+        &self.keys[..usize::from(self.count)]
+    }
+
+    fn contains(&self, key: ActivationKey) -> bool {
+        self.as_slice().contains(&key)
+    }
+
+    fn push_fresh(&mut self, key: ActivationKey) -> bool {
+        if self.contains(key) || usize::from(self.count) == Shortcut::MAX_KEYS {
+            return false;
+        }
+        self.keys[usize::from(self.count)] = key;
+        self.count += 1;
+        true
+    }
+
+    fn release(&mut self, key: ActivationKey) {
+        let Some(index) = self.as_slice().iter().position(|held| *held == key) else {
+            return;
+        };
+        let count = usize::from(self.count);
+        self.keys.copy_within(index + 1..count, index);
+        self.count -= 1;
+    }
+}
+
+impl Default for HeldLetters {
+    fn default() -> Self {
+        Self {
+            keys: [ActivationKey::A; Shortcut::MAX_KEYS],
+            count: 0,
+        }
+    }
+}
+
+/// Pure keyboard state used by native callbacks and platform-neutral tests.
 ///
-/// A callback first calls [`KeyboardReducer::plan`], attempts the optional
-/// nonblocking event delivery, and then calls [`KeyboardReducer::apply`]. The
-/// failure branch passes the current physical key sequence through, preventing
-/// later repeats or key-up from being captured after its first key-down escaped.
+/// Fresh A-Z downs are retained in physical order while the keys remain held.
+/// Prefix letters always pass through. A fresh final-key down is accepted only
+/// when the exact four-modifier mask and complete ordered held-key sequence
+/// equal one configured shortcut. After successful down delivery, only that
+/// trigger's down/repeats/up are swallowed; its up emits the accepted shortcut
+/// snapshot even if modifiers, prefixes, or configuration changed meanwhile.
 ///
-/// Alt/Option and optional Shift are activation context, not captured
-/// sequences. Their native down/up events always pass through so unrelated
-/// modifier input is never swallowed and does not require risky synthetic
-/// reinjection. Ctrl/Control, Command, or either Windows key disallow a new
-/// activation but likewise pass through. Only an explicitly enabled configured
-/// letter's down, repeats, and matching up are swallowed after a successfully
-/// delivered activation.
+/// A callback first calls [`KeyboardReducer::plan`], attempts optional
+/// nonblocking delivery, and then calls [`KeyboardReducer::apply`]. Failed
+/// initial delivery is fail-open. Escape/Enter session capture retains its
+/// independent down/up behavior.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardReducer {
     active_activation: Option<ActiveActivation>,
-    activation_passthrough: [bool; 26],
+    held_letters: HeldLetters,
+    modifiers: ModifierMask,
+    activation_sequence_modifiers: Option<ModifierMask>,
+    activation_sequence_fenced: bool,
     escape: SequenceState,
     enter: SequenceState,
 }
@@ -63,6 +101,7 @@ impl DecisionPlan {
 }
 
 impl KeyboardReducer {
+    /// Compatibility entry point for the current one-letter native paths.
     #[must_use]
     pub fn plan(
         &self,
@@ -71,13 +110,11 @@ impl KeyboardReducer {
         activation_enabled: bool,
         session_capture: bool,
     ) -> DecisionPlan {
-        self.plan_with_activation_mode(
-            input,
-            activation_key,
-            activation_enabled,
-            session_capture,
-            ActivationInputMode::NativeKey,
-        )
+        let shortcut = Shortcut::legacy_alt_letter(activation_key, input.modifiers.shift());
+        let bindings =
+            ActivationBindings::new(&[ActivationBinding::new(ProfileId::GENERAL, shortcut)])
+                .expect("one shortcut is bounded");
+        self.plan_bindings(input, bindings, activation_enabled, session_capture)
     }
 
     #[must_use]
@@ -88,136 +125,61 @@ impl KeyboardReducer {
         activation_enabled: bool,
         session_capture: bool,
     ) -> DecisionPlan {
-        let (configured, enabled) = match input.key {
-            PhysicalKey::Letter(key) => (
-                key,
-                activation_enabled && bindings.contains(key, input.shift),
-            ),
-            _ => (ActivationKey::DEFAULT, activation_enabled),
-        };
-        self.plan(input, configured, enabled, session_capture)
+        self.plan_input(input, bindings, activation_enabled, session_capture)
     }
 
-    /// Plans a Windows low-level-hook event. Letter down/repeat events are
-    /// observation-only because RegisterHotKey owns full-chord down blocking;
-    /// a matching up for an established activation is still balanced here.
-    #[must_use]
-    pub fn plan_passive_hook(
-        &self,
-        input: KeyInput,
-        activation_key: ActivationKey,
-        activation_enabled: bool,
-        session_capture: bool,
-    ) -> DecisionPlan {
-        self.plan_with_activation_mode(
-            input,
-            activation_key,
-            activation_enabled,
-            session_capture,
-            ActivationInputMode::PassiveHook,
-        )
-    }
-
-    #[must_use]
-    pub fn plan_passive_bindings(
+    fn plan_input(
         &self,
         input: KeyInput,
         bindings: ActivationBindings,
         activation_enabled: bool,
         session_capture: bool,
-    ) -> DecisionPlan {
-        let configured = match input.key {
-            PhysicalKey::Letter(key) => key,
-            _ => ActivationKey::DEFAULT,
-        };
-        self.plan_with_activation_mode(
-            input,
-            configured,
-            activation_enabled && matches!(input.key, PhysicalKey::Letter(key) if bindings.contains(key, input.shift)),
-            session_capture,
-            ActivationInputMode::PassiveHook,
-        )
-    }
-
-    /// Plans one validated, nonrepeating Windows WM_HOTKEY activation down.
-    #[must_use]
-    pub fn plan_registered_hotkey(
-        &self,
-        key: ActivationKey,
-        shift: bool,
-        activation_key: ActivationKey,
-        activation_enabled: bool,
-    ) -> DecisionPlan {
-        self.plan_with_activation_mode(
-            KeyInput {
-                key: PhysicalKey::Letter(key),
-                phase: KeyPhase::Down,
-                alt: true,
-                shift,
-                disallowed_modifiers: false,
-                repeat: false,
-                injected: false,
-            },
-            activation_key,
-            activation_enabled,
-            false,
-            ActivationInputMode::RegisteredHotKey,
-        )
-    }
-
-    #[must_use]
-    pub fn plan_registered_binding(
-        &self,
-        key: ActivationKey,
-        shift: bool,
-        bindings: ActivationBindings,
-        activation_enabled: bool,
-    ) -> DecisionPlan {
-        self.plan_registered_hotkey(
-            key,
-            shift,
-            key,
-            activation_enabled && bindings.contains(key, shift),
-        )
-    }
-
-    fn plan_with_activation_mode(
-        &self,
-        input: KeyInput,
-        activation_key: ActivationKey,
-        activation_enabled: bool,
-        session_capture: bool,
-        activation_mode: ActivationInputMode,
     ) -> DecisionPlan {
         if input.injected {
             return DecisionPlan::unchanged(self, false);
         }
 
         match input.key {
-            PhysicalKey::Letter(key) => self.plan_letter(
-                input,
-                key,
-                activation_key,
-                activation_enabled,
-                activation_mode,
-            ),
-            PhysicalKey::Escape => self.plan_control(input, SessionKey::Escape, session_capture),
-            PhysicalKey::Enter => self.plan_control(input, SessionKey::Enter, session_capture),
+            PhysicalKey::Letter(key) => {
+                let active_trigger = self
+                    .active_activation
+                    .is_some_and(|active| active.trigger == key);
+                if input.phase == KeyPhase::Up
+                    && !active_trigger
+                    && !self.held_letters.contains(key)
+                {
+                    return DecisionPlan::unchanged(self, false);
+                }
+                let mut observed = self.clone();
+                observed.observe_modifiers(input.modifiers);
+                observed.plan_letter(input, key, bindings, activation_enabled)
+            }
+            PhysicalKey::Escape => {
+                let mut observed = self.clone();
+                if input.phase == KeyPhase::Down || self.escape != SequenceState::Idle {
+                    observed.observe_modifiers(input.modifiers);
+                }
+                observed.plan_control(input, SessionKey::Escape, session_capture)
+            }
+            PhysicalKey::Enter => {
+                let mut observed = self.clone();
+                if input.phase == KeyPhase::Down || self.enter != SequenceState::Idle {
+                    observed.observe_modifiers(input.modifiers);
+                }
+                observed.plan_control(input, SessionKey::Enter, session_capture)
+            }
             PhysicalKey::Other => DecisionPlan::unchanged(self, false),
         }
     }
 
-    /// Abandons every captured native sequence while returning synthetic
-    /// balancing notifications for downs that were already delivered. Native
-    /// backends use this when a policy transaction makes the current event pass
-    /// through before normal reducer planning can run.
+    /// Abandons every captured sequence while returning synthetic balancing
+    /// notifications for downs that were already delivered.
     pub fn fail_open_balancing_events(&mut self) -> [Option<HelperEvent>; 3] {
         let activation = self
             .active_activation
             .map(|active| HelperEvent::Activation {
-                key: active.key,
+                binding: active.binding,
                 phase: EventPhase::Up,
-                shift: active.shift,
             });
         let escape =
             (self.escape == SequenceState::Suppressed).then_some(HelperEvent::SessionKey {
@@ -233,10 +195,8 @@ impl KeyboardReducer {
     }
 
     /// Applies a planned transition and returns whether the native event must
-    /// be swallowed. `delivered` is ignored when the plan has no notification.
-    /// A failed initial down remains fail-open, while the matching up of an
-    /// already delivered/swallowed down remains swallowed to balance the
-    /// current physical sequence before later input fails open.
+    /// be swallowed. A failed initial down passes through. A matching up for an
+    /// already delivered down remains swallowed even if its delivery fails.
     pub fn apply(&mut self, plan: DecisionPlan, delivered: bool) -> bool {
         if plan.event.is_none() || delivered {
             *self = plan.delivered_state;
@@ -247,89 +207,146 @@ impl KeyboardReducer {
         }
     }
 
+    #[must_use]
+    pub fn held_letters(&self) -> &[ActivationKey] {
+        self.held_letters.as_slice()
+    }
+
+    #[must_use]
+    pub const fn modifiers(&self) -> ModifierMask {
+        self.modifiers
+    }
+
+    /// Records an exact modifier transition. Any change while passive letters
+    /// are held fences that physical sequence until all of those letters are
+    /// released. Accepted activations remain intact solely for balancing up.
+    pub fn observe_modifiers(&mut self, modifiers: ModifierMask) {
+        if !self.held_letters.as_slice().is_empty()
+            && self.activation_sequence_modifiers != Some(modifiers)
+        {
+            self.activation_sequence_fenced = true;
+        }
+        self.modifiers = modifiers;
+    }
+
+    /// Fences passive letters across an activation binding revision without
+    /// disturbing an accepted activation snapshot.
+    pub fn fence_activation_revision(&mut self) {
+        if !self.held_letters.as_slice().is_empty() {
+            self.activation_sequence_fenced = true;
+        }
+    }
+
+    /// Returns whether any sequence has an initial down that was already
+    /// delivered and suppressed.
+    #[must_use]
+    pub fn has_captured_sequence(&self) -> bool {
+        self.active_activation.is_some()
+            || self.escape == SequenceState::Suppressed
+            || self.enter == SequenceState::Suppressed
+    }
+
+    /// Returns whether this physical key belongs to a sequence whose initial
+    /// down was already delivered and suppressed. Native hooks use this only to
+    /// finish balancing repeats/ups after their callback gate closes.
+    #[must_use]
+    pub fn is_capturing(&self, key: PhysicalKey) -> bool {
+        match key {
+            PhysicalKey::Letter(letter) => self
+                .active_activation
+                .is_some_and(|active| active.trigger == letter),
+            PhysicalKey::Escape => self.escape == SequenceState::Suppressed,
+            PhysicalKey::Enter => self.enter == SequenceState::Suppressed,
+            PhysicalKey::Other => false,
+        }
+    }
+
     fn plan_letter(
         &self,
         input: KeyInput,
         key: ActivationKey,
-        configured: ActivationKey,
+        bindings: ActivationBindings,
         activation_enabled: bool,
-        activation_mode: ActivationInputMode,
     ) -> DecisionPlan {
-        if activation_mode == ActivationInputMode::PassiveHook && input.phase == KeyPhase::Down {
-            return DecisionPlan::unchanged(self, false);
-        }
-
-        let key_index = usize::from(key.index());
-        if self.activation_passthrough[key_index] {
-            let mut next = self.clone();
-            if input.phase == KeyPhase::Up {
-                next.activation_passthrough[key_index] = false;
-            }
-            return DecisionPlan::same(next, false);
-        }
-
         if let Some(active) = self.active_activation {
-            if active.key != key {
-                return self.pass_letter_sequence(input, key);
-            }
+            if active.trigger == key {
+                if input.phase == KeyPhase::Down {
+                    return DecisionPlan::unchanged(self, true);
+                }
 
-            // Once captured, the configured letter's complete physical
-            // sequence remains captured even if configuration or modifiers
-            // change before its matching up.
-            if input.phase == KeyPhase::Down {
-                return DecisionPlan::unchanged(self, true);
+                let mut next = self.clone();
+                next.active_activation = None;
+                next.held_letters.release(key);
+                next.reset_activation_sequence_if_released();
+                return DecisionPlan {
+                    delivered_state: next.clone(),
+                    failed_state: next,
+                    event: Some(HelperEvent::Activation {
+                        binding: active.binding,
+                        phase: EventPhase::Up,
+                    }),
+                    swallow_if_delivered: true,
+                    swallow_if_failed: true,
+                };
             }
-
-            let mut next = self.clone();
-            next.active_activation = None;
-            return DecisionPlan {
-                delivered_state: next.clone(),
-                failed_state: next,
-                event: Some(HelperEvent::Activation {
-                    key: active.key,
-                    phase: EventPhase::Up,
-                    shift: active.shift,
-                }),
-                swallow_if_delivered: true,
-                // This down was already delivered and swallowed. Balance that
-                // physical sequence even if only its up notification fails;
-                // the callback makes all subsequent input fail open.
-                swallow_if_failed: true,
-            };
+            return self.pass_letter(input, key);
         }
 
-        if input.repeat
-            || key != configured
-            || input.phase != KeyPhase::Down
-            || !activation_enabled
-            || !input.alt
-            || input.disallowed_modifiers
-        {
-            return self.pass_letter_sequence(input, key);
-        }
+        match input.phase {
+            KeyPhase::Up => self.pass_letter(input, key),
+            KeyPhase::Down if input.repeat => DecisionPlan::unchanged(self, false),
+            KeyPhase::Down => {
+                let mut next = self.clone();
+                let begins_sequence = next.held_letters.as_slice().is_empty();
+                if !next.held_letters.push_fresh(key) {
+                    return DecisionPlan::same(next, false);
+                }
+                if begins_sequence {
+                    next.activation_sequence_modifiers = Some(input.modifiers);
+                    if !input.modifiers.any() {
+                        next.activation_sequence_fenced = true;
+                    }
+                }
+                let accepted = (!next.activation_sequence_fenced && activation_enabled)
+                    .then(|| bindings.find_exact(input.modifiers, next.held_letters.as_slice()));
+                let Some(binding) = accepted
+                    .flatten()
+                    .filter(|binding| binding.shortcut().trigger() == key)
+                else {
+                    return DecisionPlan::same(next, false);
+                };
 
-        let shift = input.shift;
-        let mut delivered = self.clone();
-        delivered.active_activation = Some(ActiveActivation { key, shift });
-        let mut failed = self.clone();
-        failed.activation_passthrough[key_index] = true;
-
-        DecisionPlan {
-            delivered_state: delivered,
-            failed_state: failed,
-            event: Some(HelperEvent::Activation {
-                key,
-                phase: EventPhase::Down,
-                shift,
-            }),
-            swallow_if_delivered: true,
-            swallow_if_failed: false,
+                let mut delivered = next.clone();
+                delivered.active_activation = Some(ActiveActivation {
+                    binding,
+                    trigger: key,
+                });
+                DecisionPlan {
+                    delivered_state: delivered,
+                    failed_state: next,
+                    event: Some(HelperEvent::Activation {
+                        binding,
+                        phase: EventPhase::Down,
+                    }),
+                    swallow_if_delivered: true,
+                    swallow_if_failed: false,
+                }
+            }
         }
     }
 
-    fn pass_letter_sequence(&self, input: KeyInput, key: ActivationKey) -> DecisionPlan {
+    fn pass_letter(&self, input: KeyInput, key: ActivationKey) -> DecisionPlan {
         let mut next = self.clone();
-        next.activation_passthrough[usize::from(key.index())] = input.phase == KeyPhase::Down;
+        match input.phase {
+            KeyPhase::Down if !input.repeat => {
+                next.held_letters.push_fresh(key);
+            }
+            KeyPhase::Up => {
+                next.held_letters.release(key);
+                next.reset_activation_sequence_if_released();
+            }
+            KeyPhase::Down => {}
+        }
         DecisionPlan::same(next, false)
     }
 
@@ -367,8 +384,6 @@ impl KeyboardReducer {
                         phase: EventPhase::Up,
                     }),
                     swallow_if_delivered: true,
-                    // The matching down was already delivered and swallowed.
-                    // Swallow this up even when its notification fails.
                     swallow_if_failed: true,
                 }
             }
@@ -392,6 +407,13 @@ impl KeyboardReducer {
                     swallow_if_failed: false,
                 }
             }
+        }
+    }
+
+    fn reset_activation_sequence_if_released(&mut self) {
+        if self.held_letters.as_slice().is_empty() {
+            self.activation_sequence_modifiers = None;
+            self.activation_sequence_fenced = false;
         }
     }
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
 import type { AppStatus } from '../../app/src/shared/schemas/app-state';
 import { DEFAULT_SETTINGS, type Settings } from '../../app/src/shared/schemas/settings';
+import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 import { PROVIDER_CATALOG } from '../../app/src/main/providers/registry';
 import { AppShell } from '../../app/src/renderer/main/AppShell';
 import { APP_STATUS_PRESENTATIONS } from '../../app/src/renderer/status-presentation';
@@ -68,6 +69,10 @@ const api: MainApi = {
         activationTestListener = null;
       };
     },
+  },
+  shortcutCapture: {
+    start: () => Promise.resolve(),
+    stop: () => Promise.resolve(),
   },
   app: {
     getBootstrap,
@@ -256,7 +261,6 @@ beforeEach(() => {
       app: {
         enabled: patch.app?.enabled ?? DEFAULT_SETTINGS.app.enabled,
         closeToTray: patch.app?.closeToTray ?? DEFAULT_SETTINGS.app.closeToTray,
-        activationKey: DEFAULT_SETTINGS.app.activationKey,
         defaultProcessingMode: DEFAULT_SETTINGS.app.defaultProcessingMode,
         widgetSize: patch.app?.widgetSize ?? DEFAULT_SETTINGS.app.widgetSize,
         soundsEnabled: patch.app?.soundsEnabled ?? DEFAULT_SETTINGS.app.soundsEnabled,
@@ -283,7 +287,7 @@ beforeEach(() => {
       welcome: {
         ...structuredClone(DEFAULT_SETTINGS.welcome),
         completedAt: 1,
-        lastStep: 6,
+        lastStep: 5,
         microphoneTested: true,
         activationTested: true,
       },
@@ -295,8 +299,7 @@ beforeEach(() => {
     active: true,
     phase: 'waiting',
     profileId: null,
-    activationKey: null,
-    shift: false,
+    shortcut: null,
     elapsedMs: 0,
     unavailableReason: null,
   });
@@ -305,8 +308,7 @@ beforeEach(() => {
     active: false,
     phase: 'idle',
     profileId: null,
-    activationKey: null,
-    shift: false,
+    shortcut: null,
     elapsedMs: 0,
     unavailableReason: null,
   });
@@ -327,7 +329,7 @@ beforeEach(() => {
   completeWelcome.mockReset();
   completeWelcome.mockResolvedValue({
     completedAt: 1,
-    lastStep: 6,
+    lastStep: 5,
     microphoneTested: true,
     activationTested: true,
     reopened: false,
@@ -360,7 +362,7 @@ function renderShell(
           welcome: {
             ...settings.welcome,
             completedAt: 1,
-            lastStep: 6,
+            lastStep: 5,
             microphoneTested: true,
             activationTested: true,
             revision: 4,
@@ -375,7 +377,7 @@ describe('main application shell', () => {
   it('transitions from Welcome with the authoritative completion state', async () => {
     const initialWelcome = {
       ...structuredClone(DEFAULT_SETTINGS.welcome),
-      lastStep: 6 as const,
+      lastStep: 5 as const,
     };
     const completed = {
       ...initialWelcome,
@@ -428,6 +430,9 @@ describe('main application shell', () => {
     await user.keyboard('{Enter}');
     expect(await screen.findByRole('heading', { name: 'General settings' })).toHaveFocus();
     expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Show Welcome' }));
+    await user.click(screen.getByRole('button', { name: 'Exit Welcome' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Show Welcome' })).toHaveFocus());
     const infoButton = screen.getByRole('button', { name: 'Info' });
     infoButton.focus();
     await user.keyboard('{Enter}');
@@ -476,6 +481,25 @@ describe('main application shell', () => {
     first.unmount();
     renderShell('disabled', true);
     expect(screen.getByText('Model available')).toBeVisible();
+  });
+
+  it('formats full Windows chords and explains final-trigger timing on the Dashboard', () => {
+    const configured = structuredClone(DEFAULT_SETTINGS);
+    const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
+    if (general === undefined) throw new Error('Default General profile is missing');
+    general.shortcut = {
+      modifiers: { ctrl: true, alt: true, shift: true, meta: true },
+      keys: ['X', 'P'],
+    };
+    renderShell('ready', true, configured);
+
+    expect(
+      screen.getByText(/General: Ctrl \+ Alt \+ Shift \+ Win \+ X \+ P \(final trigger P\)/i),
+    ).toBeVisible();
+    expect(screen.getByText(/final letter key down starts timing/i)).toBeVisible();
+    expect(
+      screen.getByText(/release that final key before 600 ms for Quick Dictation/i),
+    ).toBeVisible();
   });
 
   it.each(Object.entries(APP_STATUS_PRESENTATIONS))(
@@ -527,8 +551,7 @@ describe('main application shell', () => {
         active: true,
         phase: 'quick',
         profileId: null,
-        activationKey: null,
-        shift: false,
+        shortcut: null,
         elapsedMs: 200,
         unavailableReason: null,
       }),
@@ -539,15 +562,14 @@ describe('main application shell', () => {
         active: true,
         phase: 'extended',
         profileId: 'prompt',
-        activationKey: 'Z',
-        shift: true,
+        shortcut: shortcutFromLegacyActivation('Z', true),
         elapsedMs: 600,
         unavailableReason: null,
       }),
     );
     expect(
       await screen.findByText(
-        'Extended Dictation gesture recognized: Prompt, Alt/Option + Shift + Z',
+        'Extended Dictation gesture recognized: Prompt, Alt + Shift + Z (final trigger Z)',
       ),
     ).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Stop shortcut test' }));
@@ -557,8 +579,7 @@ describe('main application shell', () => {
         active: false,
         phase: 'idle',
         profileId: null,
-        activationKey: null,
-        shift: false,
+        shortcut: null,
         elapsedMs: 0,
         unavailableReason: 'helper-unavailable',
       }),
@@ -585,10 +606,10 @@ describe('main application shell', () => {
     const authoritative = structuredClone(DEFAULT_SETTINGS);
     const authoritativeGeneral = authoritative.dictationProfiles[0];
     if (authoritativeGeneral === undefined) throw new Error('Default General profile is missing');
-    authoritativeGeneral.activationKey = 'Q';
+    authoritativeGeneral.shortcut = shortcutFromLegacyActivation('Q', false);
     authoritative.app.closeToTray = true;
     authoritative.welcome.completedAt = 1;
-    authoritative.welcome.lastStep = 6;
+    authoritative.welcome.lastStep = 5;
     getBootstrap.mockResolvedValueOnce({
       appVersion: '1.2.3',
       platform: 'win32',
@@ -607,7 +628,9 @@ describe('main application shell', () => {
     );
     expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
     await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
-    expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('Q');
+    expect(screen.getByRole('textbox', { name: 'General keyboard shortcut' })).toHaveValue(
+      'Alt + Q',
+    );
   });
 
   it('does not overwrite a newer settings event with an older failed-save reload', async () => {
@@ -623,9 +646,9 @@ describe('main application shell', () => {
     const newer = structuredClone(DEFAULT_SETTINGS);
     const newerGeneral = newer.dictationProfiles[0];
     if (newerGeneral === undefined) throw new Error('Default General profile is missing');
-    newerGeneral.activationKey = 'X';
+    newerGeneral.shortcut = shortcutFromLegacyActivation('X', false);
     newer.welcome.completedAt = 1;
-    newer.welcome.lastStep = 6;
+    newer.welcome.lastStep = 5;
     act(() => settingsListener?.(newer));
     reload.resolve({
       appVersion: '1.2.3',
@@ -636,7 +659,9 @@ describe('main application shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
     await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Activation key' })).toHaveValue('X'),
+      expect(screen.getByRole('textbox', { name: 'General keyboard shortcut' })).toHaveValue(
+        'Alt + X',
+      ),
     );
   });
 

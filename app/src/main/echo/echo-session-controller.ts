@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ECHO_TERMINAL_DISPLAY_MS } from '../../shared/constants/echo-session';
-import type { HelperNotification } from '../../shared/helper/protocol';
+import type { ActivationBinding, HelperNotification } from '../../shared/helper/protocol';
 import type { ActivationTestState } from '../../shared/schemas/activation-test';
 import type { VoiceCommandMatch } from '../../shared/schemas/commands';
 import {
@@ -17,6 +17,7 @@ import {
 } from '../../shared/schemas/echo-session';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
+import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 import type { WindowManager } from '../app/window-manager';
 import type { IpcEventEmitter } from '../ipc/event-emitter';
 import type { SettingsStore } from '../persistence/settings-store';
@@ -80,6 +81,7 @@ export class EchoSessionController {
   readonly #removeHelperNotifications: () => void;
   readonly #removeHelperReadiness: () => void;
   readonly #removeSettings: () => void;
+  readonly #shortcutCaptureOwners = new Map<number, () => void>();
   #state: EchoSessionState = IDLE_ECHO_SESSION;
   #abort: AbortController | null = null;
   #effectTail: Promise<void> = Promise.resolve();
@@ -88,6 +90,7 @@ export class EchoSessionController {
   #teardownInFlight: Promise<void> | null = null;
   #sessionSettings: Readonly<Settings> | null = null;
   #sessionProfile: Readonly<DictationProfile> | null = null;
+  #activationDownBinding: Readonly<ActivationBinding> | null = null;
   #shutdownOperation: Promise<void> | null = null;
   #disposed = false;
 
@@ -226,6 +229,34 @@ export class EchoSessionController {
     return this.#activationTest.stop(ownerWebContentsId);
   }
 
+  async startShortcutCapture(
+    ownerWebContentsId: number,
+    onDestroyed: (listener: () => void) => () => void,
+  ): Promise<void> {
+    if (this.#state.phase !== 'idle' || this.#activationTest.state.active) {
+      throw new Error('Shortcut capture is unavailable during an active session or shortcut test');
+    }
+    if (this.#shortcutCaptureOwners.has(ownerWebContentsId)) return;
+    const removeOnInvalidated = onDestroyed(() => {
+      void this.#releaseShortcutCaptureOwner(ownerWebContentsId).catch(() => undefined);
+    });
+    this.#shortcutCaptureOwners.set(ownerWebContentsId, removeOnInvalidated);
+    await this.#profiles.beginShortcutCapture(ownerWebContentsId);
+  }
+
+  async stopShortcutCapture(ownerWebContentsId: number): Promise<void> {
+    await this.#releaseShortcutCaptureOwner(ownerWebContentsId);
+  }
+
+  async #releaseShortcutCaptureOwner(ownerWebContentsId: number): Promise<void> {
+    const removeOnInvalidated = this.#shortcutCaptureOwners.get(ownerWebContentsId);
+    if (removeOnInvalidated !== undefined) {
+      this.#shortcutCaptureOwners.delete(ownerWebContentsId);
+      removeOnInvalidated();
+    }
+    await this.#profiles.endShortcutCapture(ownerWebContentsId);
+  }
+
   acceptHelperNotification(notification: HelperNotification): void {
     this.#onHelperNotification(notification);
   }
@@ -259,10 +290,12 @@ export class EchoSessionController {
   }
 
   updateGeneral(patch: PublicSettingsPatch): Promise<Settings> {
-    const current = this.#settings.get();
-    const nextEnabled = patch.app?.enabled ?? current.app.enabled;
-    if (!nextEnabled && this.#state.phase !== 'idle') this.cancel();
-    return this.#profiles.updateGeneral(patch, current);
+    const nextEnabled = patch.app?.enabled ?? this.#settings.get().app.enabled;
+    if (!nextEnabled) {
+      if (this.#activationTest.state.active) this.#activationTest.stop();
+      if (this.#state.phase !== 'idle') this.cancel();
+    }
+    return this.#profiles.updateGeneral(patch);
   }
 
   createProfile(input: DictationProfileCreate): Promise<Settings> {
@@ -295,6 +328,8 @@ export class EchoSessionController {
     this.#captureReconciler.beginShutdown();
     this.#abort?.abort();
     this.#activationTest.stop();
+    for (const removeOnDestroyed of this.#shortcutCaptureOwners.values()) removeOnDestroyed();
+    this.#shortcutCaptureOwners.clear();
     this.#clearResetTimer();
     this.#dispatch({ type: 'abort', reason: 'shutdown' });
     void (async () => {
@@ -320,6 +355,12 @@ export class EchoSessionController {
         // applied state unknown so every rejection/test path explicitly confirms it disabled.
         this.#captureReconciler.markNativeCaptureArmed();
       }
+      if (this.#profiles.shortcutCaptureActive) {
+        if (notification.params.phase === 'down') {
+          this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+        }
+        return;
+      }
       if (this.#activationTest.state.active) {
         this.#activationTest.accept(notification, this.#settings.get().dictationProfiles);
         if (notification.params.phase === 'down') {
@@ -340,8 +381,8 @@ export class EchoSessionController {
           }
           const profile = settings.dictationProfiles.find(
             (candidate) =>
-              candidate.activationKey === notification.params.key &&
-              candidate.shift === notification.params.shift,
+              candidate.id === notification.params.profileId &&
+              shortcutsEqual(candidate.shortcut, notification.params.shortcut),
           );
           if (profile === undefined) {
             this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
@@ -349,10 +390,11 @@ export class EchoSessionController {
           }
           this.#sessionSettings = settings;
           this.#sessionProfile = deepFreezeProfile(profile);
+          this.#activationDownBinding = freezeActivationBinding(notification.params);
           this.#dispatch({
             type: 'shortcut-down',
             sessionId: randomUUID(),
-            alternate: profile.shift,
+            alternate: profile.shortcut.modifiers.shift,
             processingMode: profile.processingMode,
             now: Date.now(),
           });
@@ -360,7 +402,18 @@ export class EchoSessionController {
           this.#state.phase === 'recordingQuick' ||
           this.#state.phase === 'recordingExtended'
         ) {
-          this.#dispatch({ type: 'submit', source: 'shortcut' });
+          if (
+            this.#sessionProfile !== null &&
+            this.#sessionProfile.id === notification.params.profileId
+          ) {
+            this.#activationDownBinding = freezeActivationBinding(notification.params);
+            this.#dispatch({ type: 'submit', source: 'shortcut' });
+          } else {
+            this.#captureReconciler.requestBestEffort(
+              isCapturePhase(this.#state.phase),
+              this.#capture.generation,
+            );
+          }
         } else {
           // Every activation down arms native Esc/Enter capture. Active phases which do not own
           // this new shortcut must explicitly disarm it instead of waiting for terminal reset.
@@ -369,7 +422,16 @@ export class EchoSessionController {
             this.#capture.generation,
           );
         }
-      } else this.#dispatch({ type: 'shortcut-up', now: Date.now() });
+      } else {
+        if (
+          this.#activationDownBinding === null ||
+          !activationBindingsEqual(this.#activationDownBinding, notification.params)
+        ) {
+          return;
+        }
+        this.#activationDownBinding = null;
+        this.#dispatch({ type: 'shortcut-up', now: Date.now() });
+      }
       return;
     }
     if (notification.params.phase !== 'down') return;
@@ -400,6 +462,7 @@ export class EchoSessionController {
   }
 
   #manageSessionTransition(previous: EchoSessionState, next: EchoSessionState): void {
+    if (next.phase === 'idle' || isTerminalPhase(next.phase)) this.#activationDownBinding = null;
     if (previous.phase === 'idle' && next.phase === 'arming') {
       this.#capture.beginGeneration();
       this.#abort = new AbortController();
@@ -648,7 +711,23 @@ export class EchoSessionController {
 }
 
 function deepFreezeProfile(profile: DictationProfile): Readonly<DictationProfile> {
-  return Object.freeze(structuredClone(profile));
+  const clone = structuredClone(profile);
+  clone.shortcut = deepFreezeShortcut(clone.shortcut);
+  return Object.freeze(clone);
+}
+
+function freezeActivationBinding(binding: ActivationBinding): Readonly<ActivationBinding> {
+  return Object.freeze({
+    profileId: binding.profileId,
+    shortcut: deepFreezeShortcut(binding.shortcut),
+  });
+}
+
+function activationBindingsEqual(
+  left: Readonly<ActivationBinding>,
+  right: ActivationBinding,
+): boolean {
+  return left.profileId === right.profileId && shortcutsEqual(left.shortcut, right.shortcut);
 }
 
 function piFallbackCategory(providerId: string, error: unknown): PiFallbackCategory | undefined {

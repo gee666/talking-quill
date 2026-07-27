@@ -23,7 +23,6 @@ const exempt = new Set([
   'scripts/inspect-package.mjs',
   'scripts/reference-independence-allowlist.json',
   'tests/unit/reference-independence.test.ts',
-  'docs/third-party/provider-logo-provenance.json',
   'eslint.config.mjs',
 ]);
 const forbiddenPath = /(?:\.\.[/\\])+reference(?:[/\\]|\b)|(?:^|["'`(])[/\\]?reference[/\\]/im;

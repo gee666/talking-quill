@@ -13,9 +13,8 @@ function deferred() {
 }
 
 describe('settings IPC handler', () => {
-  it('uses the same activation-evidence transaction for the enabled shortcut', async () => {
+  it('does not treat the enabled shortcut as Welcome prerequisite evidence', async () => {
     let settings: Settings = structuredClone(DEFAULT_SETTINGS);
-    const invalidateActivationBinding = vi.fn(() => Promise.resolve());
     const updateGeneral = vi.fn((patch: { app?: { enabled?: boolean } }) => {
       settings = { ...settings, app: { ...settings.app, ...patch.app } };
       return Promise.resolve(structuredClone(settings));
@@ -26,13 +25,12 @@ describe('settings IPC handler', () => {
         getState: () => ({ enabled: settings.app.enabled }),
       },
       echo: { updateGeneral },
-      welcome: { invalidateActivationBinding },
+      welcome: {},
     } as unknown as HandlerDependencies);
 
     await expect(handlers['app:set-enabled']({ enabled: false }, context)).resolves.toEqual({
       enabled: false,
     });
-    expect(invalidateActivationBinding).toHaveBeenCalledOnce();
     expect(updateGeneral).toHaveBeenCalledWith({ app: { enabled: false } });
   });
 

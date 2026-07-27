@@ -469,7 +469,9 @@ fn write_message<W: Write>(
 mod tests {
     use super::*;
     use crate::{
-        keyboard::{ActivationKey, EventPhase, HelperEvent},
+        keyboard::{
+            ActivationBinding, ActivationKey, EventPhase, HelperEvent, ProfileId, Shortcut,
+        },
         protocol::{RequestId, RpcResponse},
     };
 
@@ -515,9 +517,11 @@ mod tests {
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
             .send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    Shortcut::legacy_alt_letter(ActivationKey::Z, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             }))
             .unwrap();
         drop(outbound_tx);
@@ -543,7 +547,7 @@ mod tests {
         outbound_tx
             .send(Outbound::Response(
                 RpcResponse::success(
-                    RequestId::Number(1),
+                    RequestId::for_test(1),
                     "x".repeat(crate::framing::MAX_FRAME_BYTES),
                 )
                 .unwrap(),
@@ -573,9 +577,11 @@ mod tests {
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
             .send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::A,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    Shortcut::legacy_alt_letter(ActivationKey::A, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             }))
             .unwrap();
         critical_tx
@@ -583,8 +589,8 @@ mod tests {
             .unwrap();
         completion_tx
             .send(vec![
-                Outbound::PasteCommitted(crate::protocol::RequestId::Number(7)),
-                Outbound::PasteCommitted(crate::protocol::RequestId::Number(8)),
+                Outbound::PasteCommitted(crate::protocol::RequestId::for_test(7)),
+                Outbound::PasteCommitted(crate::protocol::RequestId::for_test(8)),
             ])
             .unwrap();
         terminal.trigger(TerminalReason::OutboundQueueUnavailable);
@@ -613,9 +619,11 @@ mod tests {
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
             .send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    Shortcut::legacy_alt_letter(ActivationKey::Z, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             }))
             .unwrap();
         drop(outbound_tx);
@@ -641,9 +649,11 @@ mod tests {
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
             .send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    Shortcut::legacy_alt_letter(ActivationKey::Z, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             }))
             .unwrap();
         drop(outbound_tx);

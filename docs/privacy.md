@@ -1,9 +1,0 @@
-# Privacy
-
-Audio is captured only during a session and transcribed locally. Raw mode has no runtime network destination after its checksummed model is cached. Talking Quill has no account, telemetry, advertising, or invocation counter.
-
-Smart mode sends the transcript and custom vocabulary to exactly the selected provider. For Pi, Talking Quill runs the user-installed command in place with the normal profile, configuration, authentication state, models, extensions, and inherited environment. It does not authenticate or sandbox that code. Pi and extensions may access files, the network, or processes with the user's permissions. Model listing sends no transcript; a Smart prompt is bounded and sent only through stdin. Talking Quill disables Pi tools, sessions, context files, and approval when those flags are supported. On-Screen Awareness additionally sends one downscaled screenshot captured at submit; it is not reused, and local retention defaults off. Provider privacy terms and charges are separate from Talking Quill.
-
-Settings are stored locally, including an optional Pi executable path; provider secrets are OS-encrypted and never readable through renderer IPC. The path is used only to launch the selected command and is not sent to a provider or included in public error text. The dictation history is optional. Diagnostic logging defaults off and excludes audio, transcripts, screenshots, secrets, request/response bodies, and authorization headers. Update network access occurs only when Check for updates is pressed. Model downloads use the pinned Hugging Face artifacts listed in the manifest.
-
-Delete all history removes history and retained screenshots only. Reset all application data removes Talking Quill settings, credentials, history, screenshots, models, and logs. Neither operation touches Ollama or Pi's separate configuration, OAuth/API credentials, packages, caches, or sessions.

@@ -323,17 +323,7 @@ export class TalkingQuillApplication {
       const echoHelper = task6Composition?.helper ?? helper;
       if (task6Composition !== null) state.setModelReady(true);
       state.setHelperReadiness(echoHelper.readiness);
-      let welcomeTarget: WelcomeService | null = null;
-      let helperReadinessGeneration = 0;
-      let previousHelperReadiness = echoHelper.readiness;
       const removeHelperReadiness = echoHelper.subscribeReadiness((readiness) => {
-        if (readiness.status !== previousHelperReadiness.status) {
-          helperReadinessGeneration += 1;
-          if (settings.get().welcome.activationEvidence != null) {
-            void welcomeTarget?.invalidateActivationBinding();
-          }
-        }
-        previousHelperReadiness = readiness;
         state.setHelperReadiness(readiness);
       });
       this.#removeHelperReadiness = removeHelperReadiness;
@@ -402,36 +392,14 @@ export class TalkingQuillApplication {
             ? modelRuntime.selectedModelReadyForWelcome()
             : Promise.resolve(task6Composition.welcome.model),
         modelRevision: (modelId) => modelRuntime.manifestRevision(modelId),
-        helperReady: () =>
-          task6Composition?.welcome.helper ?? state.getState().helper.status === 'ready',
-        helperReadinessGeneration: () => helperReadinessGeneration,
-        activationGestureRecognized: () => {
-          const activation = echo.activationTestState;
-          if (
-            (activation.phase !== 'quick' && activation.phase !== 'extended') ||
-            activation.profileId === null ||
-            activation.activationKey === null
-          ) {
-            return null;
-          }
-          return {
-            profileId: activation.profileId,
-            activationKey: activation.activationKey,
-            shift: activation.shift,
-          };
-        },
       });
-      welcomeTarget = welcome;
       const removeModelWelcomeTarget = modelRuntime.bindWelcome(welcome);
       recording.setWelcomeEvidenceInvalidator(() => {
         if (settings.get().welcome.microphoneEvidence != null) {
           void welcome.invalidateMicrophoneBinding();
         }
       });
-      cleanup.add('welcome-readiness-target', () => {
-        welcomeTarget = null;
-        removeModelWelcomeTarget();
-      });
+      cleanup.add('welcome-readiness-target', removeModelWelcomeTarget);
       const removeEchoState = echo.subscribe((snapshot) => state.setSession(snapshot));
       this.#ownRuntimeDisposer(cleanup, 'echo-state', removeEchoState);
       if (task6Composition !== null) {

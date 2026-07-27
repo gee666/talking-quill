@@ -23,12 +23,16 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
   'info:notices': {},
   'activation-test:start': {},
   'activation-test:stop': {},
+  'shortcut-capture:start': {},
+  'shortcut-capture:stop': {},
   'app:set-enabled': { enabled: true },
   'settings:update': { app: { soundsEnabled: false } },
   'profile:create': {
     name: 'Fixture profile',
-    activationKey: 'A',
-    shift: false,
+    shortcut: {
+      modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+      keys: ['X', 'P'],
+    },
     processingMode: 'raw',
     smartPrompt: null,
   },

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject, type ReactNode } from 'react';
 import type { Settings } from '../../../shared/schemas/settings';
-import { EmptyState, Icon, Input, Status, Toast, type IconName } from '../../design';
+import { Button, EmptyState, Icon, Input, Status, Toast, type IconName } from '../../design';
 import { SmartProcessingSection } from '../SmartProcessingSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { GeneralSection } from '../settings/GeneralSection';
@@ -28,11 +28,13 @@ export function SettingsScreen({
   settings,
   platform,
   onSettingsSaved,
+  onOpenWelcome,
 }: {
   readonly headingRef: RefObject<HTMLHeadingElement | null>;
   readonly settings: Settings;
   readonly platform: string;
   readonly onSettingsSaved: (settings: Settings) => void;
+  readonly onOpenWelcome: () => void;
 }) {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -75,13 +77,26 @@ export function SettingsScreen({
     {
       title: 'General',
       keywords: 'Enable Talking Quill launch at login close to tray widget size sounds startup',
-      node: <GeneralSection settings={settings} disabled={saving} onSave={saveGeneral} />,
+      node: (
+        <GeneralSection
+          settings={settings}
+          platform={platform}
+          disabled={saving}
+          onSave={saveGeneral}
+        />
+      ),
     },
     {
       title: 'Dictation profiles',
       keywords:
-        'Dictation profiles shortcut binding Alt Option Shift General Prompt custom raw smart processing prompt reset',
-      node: <DictationProfilesSection settings={settings} onSettingsSaved={onSettingsSaved} />,
+        'Dictation profiles shortcut chord binding Ctrl Control Alt Option Shift Win Command General Prompt custom raw smart processing prompt reset',
+      node: (
+        <DictationProfilesSection
+          settings={settings}
+          platform={platform}
+          onSettingsSaved={onSettingsSaved}
+        />
+      ),
     },
     {
       title: 'Recording',
@@ -134,9 +149,14 @@ export function SettingsScreen({
           </h1>
           <p>Search and manage validated local preferences.</p>
         </div>
-        <Status tone={saving ? 'info' : notice?.tone === 'error' ? 'error' : 'success'} live>
-          {saving ? 'Saving' : notice?.tone === 'error' ? 'Save failed' : 'Saved locally'}
-        </Status>
+        <div className="provider-actions">
+          <Button id="reopen-welcome" variant="secondary" onClick={onOpenWelcome}>
+            Show Welcome
+          </Button>
+          <Status tone={saving ? 'info' : notice?.tone === 'error' ? 'error' : 'success'} live>
+            {saving ? 'Saving' : notice?.tone === 'error' ? 'Save failed' : 'Saved locally'}
+          </Status>
+        </div>
       </header>
       <p className="sr-only" role="status" aria-live="polite">
         {visible.length === 0

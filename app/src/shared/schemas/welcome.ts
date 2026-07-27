@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ActivationKeySchema } from '../helper/protocol';
+import { ShortcutKeySchema } from './shortcut';
 import { MicrophoneIdSchema } from './audio';
 import { DictationProfileIdSchema } from './dictation-profiles';
 import { WhisperModelIdSchema } from './model-manifest';
@@ -10,7 +10,6 @@ export const WelcomeStepSchema = z.union([
   z.literal(3),
   z.literal(4),
   z.literal(5),
-  z.literal(6),
 ]);
 
 export const MicrophoneEvidenceSchema = z
@@ -29,7 +28,7 @@ export const MicrophoneEvidenceSchema = z
 export const ActivationEvidenceSchema = z
   .object({
     profileId: DictationProfileIdSchema,
-    activationKey: ActivationKeySchema,
+    activationKey: ShortcutKeySchema,
     shift: z.boolean(),
     enabled: z.literal(true),
     helperProtocol: z.number().int().positive(),
@@ -51,8 +50,8 @@ export const WelcomeSettingsSchema = z
   .object({
     completedAt: z.number().int().nonnegative().nullable(),
     lastStep: WelcomeStepSchema,
-    // Retained for backward-compatible rendering only. They are never prerequisite evidence.
     microphoneTested: z.boolean(),
+    // Retained only for settings compatibility. Activation testing is not an onboarding step.
     activationTested: z.boolean(),
     microphoneEvidence: MicrophoneEvidenceSchema.nullable().optional(),
     activationEvidence: ActivationEvidenceSchema.nullable().optional(),

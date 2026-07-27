@@ -44,7 +44,7 @@ async function seedRetainedScreenshotHistory(profile: string): Promise<void> {
   const onboarded = structuredClone(DEFAULT_SETTINGS);
   onboarded.welcome = {
     completedAt: 1,
-    lastStep: 6,
+    lastStep: 5,
     microphoneTested: true,
     activationTested: true,
   };

@@ -8,10 +8,9 @@ import { GENERAL_PROFILE_ID } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
 import type { WelcomeState, WelcomeStep } from '../../../shared/schemas/welcome';
 import { Button, Card, Status, useTheme } from '../../design';
-import { GeneralSection } from '../settings/GeneralSection';
 import { RecordingSection } from '../settings/RecordingSection';
 import { ModelSetup } from '../setup/ModelSetup';
-import { GeneralShortcutSetup } from './GeneralShortcutSetup';
+import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
 import { publicErrorMessage } from '../public-error';
 
 const SmartProcessingSection = lazy(async () => {
@@ -19,14 +18,7 @@ const SmartProcessingSection = lazy(async () => {
   return { default: module.SmartProcessingSection };
 });
 
-const STEP_NAMES = [
-  'Welcome',
-  'Microphone',
-  'Local model',
-  'Shortcut',
-  'Smart processing',
-  'Ready',
-] as const;
+const STEP_NAMES = ['Welcome', 'Microphone', 'Local model', 'Smart processing', 'Ready'] as const;
 
 export function WelcomeWizard({
   settings,
@@ -98,7 +90,7 @@ export function WelcomeWizard({
         processingMode: 'raw',
       });
       onSettingsSaved(saved);
-      const welcome = await window.talkingQuill.welcome.setStep(6);
+      const welcome = await window.talkingQuill.welcome.setStep(5);
       if ((welcome.revision ?? 0) >= latestWelcomeRevision.current) {
         setOptimisticStep({ step: welcome.lastStep, source: settings.welcome });
       }
@@ -140,7 +132,7 @@ export function WelcomeWizard({
           {STEP_NAMES[step - 1]}
         </h1>
         <div className="welcome__header-meta">
-          <p className="eyebrow welcome__counter">Setup · Step {step} of 6</p>
+          <p className="eyebrow welcome__counter">Setup · Step {step} of 5</p>
           {reopened ? (
             <Button variant="quiet" onClick={onClose}>
               Exit Welcome
@@ -188,16 +180,16 @@ export function WelcomeWizard({
         >
           Back
         </Button>
-        {step === 5 ? (
+        {step === 4 ? (
           <>
             <Button variant="quiet" busy={saving} onClick={() => void skipSmartProcessing()}>
               Skip Smart processing
             </Button>
-            <Button busy={saving} onClick={() => void move(6)}>
+            <Button busy={saving} onClick={() => void move(5)}>
               Continue
             </Button>
           </>
-        ) : step < 6 ? (
+        ) : step < 5 ? (
           <Button busy={saving} onClick={() => void move((step + 1) as WelcomeStep)}>
             Continue
           </Button>
@@ -243,58 +235,6 @@ export function WelcomeWizard({
     if (current === 4)
       return (
         <>
-          <GeneralShortcutSetup
-            key={JSON.stringify(
-              settings.dictationProfiles.find((profile) => profile.id === GENERAL_PROFILE_ID),
-            )}
-            settings={settings}
-            disabled={saving}
-            onSettingsSaved={onSettingsSaved}
-          />
-          <GeneralSection
-            settings={settings}
-            disabled={saving}
-            activationTestProfileId={GENERAL_PROFILE_ID}
-            onSave={async (patch) =>
-              onSettingsSaved(await window.talkingQuill.settings.update(patch))
-            }
-          />
-          {platform === 'darwin' ? (
-            <Card title="macOS permissions">
-              <p className="body-copy">
-                Allow Accessibility and Input Monitoring so the global shortcut and text insertion
-                work.
-              </p>
-              <Status tone={state.helper.status === 'ready' ? 'success' : 'warning'}>
-                {state.helper.status === 'ready'
-                  ? 'Permissions ready'
-                  : 'Permission setup required'}
-              </Status>
-              <div className="provider-actions">
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    void window.talkingQuill.info.openPermissionSettings('accessibility')
-                  }
-                >
-                  Open Accessibility settings
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    void window.talkingQuill.info.openPermissionSettings('input-monitoring')
-                  }
-                >
-                  Open Input Monitoring settings
-                </Button>
-              </div>
-            </Card>
-          ) : null}
-        </>
-      );
-    if (current === 5)
-      return (
-        <>
           <Card title="Optional Smart processing">
             <p className="body-copy">
               Skip this step for fully local Raw transcription. Ollama is highlighted as a local
@@ -313,27 +253,69 @@ export function WelcomeWizard({
         </>
       );
     return (
-      <Card title="Talking Quill is ready">
-        <p>
-          Use {platform === 'darwin' ? 'Option' : 'Alt'} +{' '}
-          {settings.dictationProfiles.find((profile) => profile.id === GENERAL_PROFILE_ID)?.shift
-            ? 'Shift + '
-            : ''}
-          {settings.dictationProfiles.find((profile) => profile.id === GENERAL_PROFILE_ID)
-            ?.activationKey ?? 'Z'}{' '}
-          from any application.
-        </p>
-        <ul>
-          <li>Release quickly for Quick Dictation.</li>
-          <li>Hold for {String(ECHO_HOLD_THRESHOLD_MS)} ms for Extended Dictation.</li>
-          <li>Enter submits; Escape cancels; each profile uses its configured mode.</li>
-        </ul>
-        <Status tone={state.modelReady && state.helper.status === 'ready' ? 'success' : 'warning'}>
-          {state.modelReady && state.helper.status === 'ready'
-            ? 'Ready for first dictation'
-            : 'Setup can be revisited from Info'}
-        </Status>
-      </Card>
+      <>
+        <Card title="Talking Quill is ready">
+          <p>Your configured dictation profiles are ready:</p>
+          <ul aria-label="Configured dictation profiles">
+            {settings.dictationProfiles.map((profile) => (
+              <li key={profile.id}>
+                <strong>{profile.name}</strong>:{' '}
+                {formatKeyboardShortcutWithTrigger(profile.shortcut, platform)} —{' '}
+                {profile.processingMode === 'raw' ? 'Raw' : 'Smart'}
+                {' processing'}
+              </li>
+            ))}
+          </ul>
+          <ul>
+            <li>
+              Quick Dictation starts when you release the shortcut&apos;s final letter key before{' '}
+              {String(ECHO_HOLD_THRESHOLD_MS)} ms and submits after trailing silence.
+            </li>
+            <li>
+              Extended Dictation starts when you keep the shortcut&apos;s final letter key down for{' '}
+              {String(ECHO_HOLD_THRESHOLD_MS)} ms and keeps recording through silence until you
+              press Enter, press the full shortcut chord again, or use Stop.
+            </li>
+            <li>Escape cancels either mode.</li>
+          </ul>
+          <p>Shortcuts can be changed anytime in Settings under Dictation profiles.</p>
+          <Status
+            tone={state.modelReady && state.helper.status === 'ready' ? 'success' : 'warning'}
+          >
+            {state.modelReady && state.helper.status === 'ready'
+              ? 'Ready for first dictation'
+              : 'Setup can be revisited from Info'}
+          </Status>
+        </Card>
+        {platform === 'darwin' ? (
+          <Card title="macOS permissions">
+            <p className="body-copy">
+              Allow Accessibility and Input Monitoring so global shortcuts and text insertion work.
+            </p>
+            <Status tone={state.helper.status === 'ready' ? 'success' : 'warning'}>
+              {state.helper.status === 'ready' ? 'Permissions ready' : 'Permission setup required'}
+            </Status>
+            <div className="provider-actions">
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  void window.talkingQuill.info.openPermissionSettings('accessibility')
+                }
+              >
+                Open Accessibility settings
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  void window.talkingQuill.info.openPermissionSettings('input-monitoring')
+                }
+              >
+                Open Input Monitoring settings
+              </Button>
+            </div>
+          </Card>
+        ) : null}
+      </>
     );
   }
 }

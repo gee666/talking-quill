@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /* eslint-disable @typescript-eslint/require-await -- async mocks model the preload Promise API. */
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,7 +30,7 @@ beforeEach(() => {
         lastStep: step,
         reopened: false,
       })),
-      complete: vi.fn(async () => ({ completedAt: 10, lastStep: 6, reopened: false })),
+      complete: vi.fn(async () => ({ completedAt: 10, lastStep: 5, reopened: false })),
     },
     info: {
       status: vi.fn(async () => ({ microphone: 'granted', screenRecording: 'granted', helper })),
@@ -88,8 +88,7 @@ beforeEach(() => {
         active: false,
         phase: 'idle',
         profileId: null,
-        activationKey: null,
-        shift: false,
+        shortcut: null,
         elapsedMs: 0,
         unavailableReason: null,
       })),
@@ -146,7 +145,6 @@ describe('Welcome, Info, and settings completion', () => {
     expect(screen.getByRole('heading', { name: 'Local model' })).toHaveFocus();
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     expect((api.welcome as { setStep: ReturnType<typeof vi.fn> }).setStep).toHaveBeenCalledWith(4);
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Skip Smart processing' }));
     expect((api.profiles as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith(
       'general',
@@ -155,7 +153,7 @@ describe('Welcome, Info, and settings completion', () => {
     await user.click(screen.getByRole('button', { name: 'Start using Talking Quill' }));
     expect((api.welcome as { complete: ReturnType<typeof vi.fn> }).complete).toHaveBeenCalledOnce();
     expect((api.providers as { catalog: ReturnType<typeof vi.fn> }).catalog).not.toHaveBeenCalled();
-    expect(onComplete).toHaveBeenCalledWith({ completedAt: 10, lastStep: 6, reopened: false });
+    expect(onComplete).toHaveBeenCalledWith({ completedAt: 10, lastStep: 5, reopened: false });
   });
 
   it('uses authoritative step responses and follows persisted progress rollbacks', async () => {
@@ -178,7 +176,7 @@ describe('Welcome, Info, and settings completion', () => {
     expect(await screen.findByRole('heading', { name: 'Microphone' })).toHaveFocus();
 
     const advanced = settings();
-    advanced.welcome.lastStep = 6;
+    advanced.welcome.lastStep = 5;
     view.rerender(<WelcomeWizard {...props} settings={advanced} />);
     expect(await screen.findByRole('heading', { name: 'Ready' })).toHaveFocus();
 
@@ -230,44 +228,38 @@ describe('Welcome, Info, and settings completion', () => {
     expect(screen.getByRole('heading', { name: 'Microphone' })).toHaveFocus();
   });
 
-  it('lets Welcome users replace the General shortcut before testing it', async () => {
-    const user = userEvent.setup();
-    const shortcutStep = settings();
-    shortcutStep.welcome.lastStep = 4;
-
-    render(
-      <WelcomeWizard
-        settings={shortcutStep}
-        state={state}
-        platform="win32"
-        reopened={false}
-        onSettingsSaved={vi.fn()}
-        onComplete={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    );
-
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Activation key' }), 'Q');
-    await user.click(screen.getByRole('button', { name: 'Save General shortcut' }));
-    expect((api.profiles as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith(
-      'general',
-      { activationKey: 'Q', shift: false },
-    );
-  });
-
-  it('renders the General shortcut by identity when profiles are reordered', () => {
-    const reordered = settings();
-    reordered.welcome.lastStep = 6;
-    const general = reordered.dictationProfiles.find((profile) => profile.id === 'general');
-    const prompt = reordered.dictationProfiles.find((profile) => profile.id === 'prompt');
+  it('lists every configured profile with its current shortcut and processing mode', () => {
+    const configured = settings();
+    configured.welcome.lastStep = 5;
+    const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
+    const prompt = configured.dictationProfiles.find((profile) => profile.id === 'prompt');
     if (general === undefined || prompt === undefined) {
       throw new Error('Built-in dictation profiles are missing');
     }
-    reordered.dictationProfiles = [prompt, { ...general, activationKey: 'Q' }];
+    configured.dictationProfiles = [
+      prompt,
+      {
+        ...general,
+        shortcut: {
+          modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+          keys: ['P'],
+        },
+      },
+      {
+        id: '11111111-1111-4111-8111-111111111111',
+        name: 'Meeting notes',
+        shortcut: {
+          modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+          keys: ['X', 'P'],
+        },
+        processingMode: 'raw',
+        smartPrompt: null,
+      },
+    ];
 
     render(
       <WelcomeWizard
-        settings={reordered}
+        settings={configured}
         state={state}
         platform="win32"
         reopened={false}
@@ -276,7 +268,18 @@ describe('Welcome, Info, and settings completion', () => {
         onClose={vi.fn()}
       />,
     );
-    expect(screen.getByText(/Alt\s+\+\s+Q\s+from any application\./)).toBeInTheDocument();
+    const profiles = screen.getByRole('list', { name: 'Configured dictation profiles' });
+    expect(
+      within(profiles)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual([
+      'Prompt: Alt + Shift + Z (final trigger Z) — Smart processing',
+      'General: Ctrl + Shift + P (final trigger P) — Raw processing',
+      'Meeting notes: Alt + X + P (final trigger P) — Raw processing',
+    ]);
+    expect(screen.getByText(/Shortcuts can be changed anytime in Settings/i)).toBeVisible();
+    expect(screen.queryByText(/Test activation shortcut/i)).not.toBeInTheDocument();
   });
 
   it('lets a completed user exit a reopened Welcome flow', async () => {
@@ -469,6 +472,7 @@ describe('Welcome, Info, and settings completion', () => {
         settings={configured}
         platform="win32"
         onSettingsSaved={vi.fn()}
+        onOpenWelcome={vi.fn()}
       />,
     );
     await user.click(screen.getByRole('button', { name: 'Privacy & data' }));
@@ -506,6 +510,7 @@ describe('Welcome, Info, and settings completion', () => {
         settings={configured}
         platform="win32"
         onSettingsSaved={vi.fn()}
+        onOpenWelcome={vi.fn()}
       />,
     );
     const search = screen.getByRole('searchbox', { name: 'Search settings' });

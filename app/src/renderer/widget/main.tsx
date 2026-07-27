@@ -89,7 +89,8 @@ export function WidgetShell() {
       </p>
       <p id="widget-keyboard-equivalents" className="widget-live">
         This status window never takes keyboard focus. Use global Enter to submit, Escape to cancel,
-        or the activation shortcut to stop. Pointer Stop and Cancel controls are also available.
+        or the full activation shortcut chord to stop. Pointer Stop and Cancel controls are also
+        available.
       </p>
       <div className="widget-pill">
         <div

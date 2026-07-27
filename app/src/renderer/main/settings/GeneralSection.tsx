@@ -6,10 +6,12 @@ import {
 import type { DictationProfileId } from '../../../shared/schemas/dictation-profiles';
 import type { PublicSettingsPatch, Settings } from '../../../shared/schemas/settings';
 import { Button, Card, Select, Status, Toggle } from '../../design';
+import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
 
 function activationTestLabel(
   state: ActivationTestState,
   settings: Settings,
+  platform: string,
   requiredProfileId?: DictationProfileId,
 ) {
   if (
@@ -35,11 +37,21 @@ function activationTestLabel(
     case 'waiting':
       return 'Waiting for shortcut';
     case 'pressed':
-      return 'Shortcut held';
+      return 'Shortcut final trigger held';
     case 'quick':
-      return recognizedActivationLabel('Quick Dictation gesture recognized', state, settings);
+      return recognizedActivationLabel(
+        'Quick Dictation gesture recognized',
+        state,
+        settings,
+        platform,
+      );
     case 'extended':
-      return recognizedActivationLabel('Extended Dictation gesture recognized', state, settings);
+      return recognizedActivationLabel(
+        'Extended Dictation gesture recognized',
+        state,
+        settings,
+        platform,
+      );
     case 'idle':
       return 'Shortcut test inactive';
   }
@@ -49,21 +61,24 @@ function recognizedActivationLabel(
   prefix: string,
   state: ActivationTestState,
   settings: Settings,
+  platform: string,
 ): string {
-  if (state.profileId === null || state.activationKey === null) return prefix;
+  if (state.profileId === null || state.shortcut === null) return prefix;
   const profileName =
     settings.dictationProfiles.find((profile) => profile.id === state.profileId)?.name ??
     state.profileId;
-  return `${prefix}: ${profileName}, Alt/Option + ${state.shift ? 'Shift + ' : ''}${state.activationKey}`;
+  return `${prefix}: ${profileName}, ${formatKeyboardShortcutWithTrigger(state.shortcut, platform)}`;
 }
 
 export function GeneralSection({
   settings,
+  platform,
   disabled,
   onSave,
   activationTestProfileId,
 }: {
   readonly settings: Settings;
+  readonly platform: string;
   readonly disabled: boolean;
   readonly onSave: (patch: PublicSettingsPatch, success: string) => Promise<void>;
   readonly activationTestProfileId?: DictationProfileId;
@@ -101,7 +116,8 @@ export function GeneralSection({
       <div className="gesture-test" aria-live="polite">
         <strong>Live gesture test</strong>
         <span>
-          This safely tests the helper gesture without opening the microphone or inserting text.
+          This safely tests the helper chord without opening the microphone or inserting text. The
+          final letter key down/up controls Quick versus Extended timing.
         </span>
         <Status
           tone={
@@ -113,7 +129,7 @@ export function GeneralSection({
                 : 'neutral'
           }
         >
-          {activationTestLabel(gesture, settings, activationTestProfileId)}
+          {activationTestLabel(gesture, settings, platform, activationTestProfileId)}
         </Status>
         <Button
           disabled={disabled || !settings.app.enabled}

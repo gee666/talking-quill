@@ -2,8 +2,12 @@ import { SETTINGS_SCHEMA_VERSION, SettingsSchema } from '../../shared/schemas/se
 import type { SettingsMigrations } from './settings-store';
 import { LEGACY_SETTINGS_V1_TO_V12_SCHEMAS } from './settings-migrations/legacy-settings-v1-v12';
 import { LEGACY_SETTINGS_V13_TO_V18_SCHEMAS } from './settings-migrations/legacy-settings-v13-v18';
+import { LegacySettingsV19Schema } from './settings-migrations/legacy-settings-v19';
+import { LegacySettingsV20Schema } from './settings-migrations/legacy-settings-v20';
 import {
+  migrateFiveStepWelcome,
   migrateLegacy,
+  migrateShortcutChords,
   migrateRemovedLargeModel,
   migrateUnverifiedWelcome,
   stripDiagnosticLoggingField,
@@ -126,4 +130,12 @@ export const SETTINGS_MIGRATIONS: SettingsMigrations = Object.freeze({
       migrateRemovedLargeModel({ ...legacy, schemaVersion: SETTINGS_SCHEMA_VERSION }),
     );
   },
+  19: (input) =>
+    LegacySettingsV20Schema.parse(
+      migrateFiveStepWelcome({
+        ...LegacySettingsV19Schema.parse(input),
+        schemaVersion: 20,
+      }),
+    ),
+  20: (input) => migrateShortcutChords(LegacySettingsV20Schema.parse(input)),
 });

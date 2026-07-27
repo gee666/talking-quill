@@ -5,10 +5,6 @@ import {
   WelcomeService,
   type WelcomePrerequisites,
 } from '../../app/src/main/welcome/welcome-service';
-import {
-  DEFAULT_GENERAL_PROFILE,
-  DEFAULT_PROMPT_PROFILE,
-} from '../../app/src/shared/schemas/dictation-profiles';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 const roots: string[] = [];
@@ -17,12 +13,7 @@ const ready = (
   overrides: Partial<{
     microphone: boolean;
     model: boolean;
-    helper: boolean;
-    gesture: boolean;
     rms: number;
-    activationKey: 'Z' | 'Q';
-    activationProfileId: 'general' | 'prompt';
-    activationShift: boolean;
   }> = {},
 ): WelcomePrerequisites => ({
   microphoneReady: () => overrides.microphone ?? true,
@@ -33,16 +24,6 @@ const ready = (
   }),
   modelReady: () => Promise.resolve(overrides.model ?? true),
   modelRevision: () => 'a'.repeat(40),
-  helperReady: () => overrides.helper ?? true,
-  helperReadinessGeneration: () => 1,
-  activationGestureRecognized: () =>
-    (overrides.gesture ?? true)
-      ? {
-          profileId: overrides.activationProfileId ?? 'general',
-          activationKey: overrides.activationKey ?? 'Z',
-          shift: overrides.activationShift ?? false,
-        }
-      : null,
 });
 
 describe('WelcomeService', () => {
@@ -58,71 +39,28 @@ describe('WelcomeService', () => {
     await service.setStep(3);
     await service.setStep(4);
     await service.setStep(5);
-    await service.setStep(6);
     await store.flush();
     const restarted = new SettingsStore(path);
     await restarted.initialize();
     const resumed = new WelcomeService(restarted, ready(), () => 1234);
     expect(resumed.state()).toMatchObject({
       completedAt: null,
-      lastStep: 6,
+      lastStep: 5,
       microphoneTested: true,
-      activationTested: true,
+      activationTested: false,
     });
-    expect(await resumed.complete()).toMatchObject({ completedAt: 1234, lastStep: 6 });
+    expect(await resumed.complete()).toMatchObject({ completedAt: 1234, lastStep: 5 });
     await resumed.invalidateMicrophoneBinding();
     await resumed.invalidateModelSelection();
-    await resumed.invalidateActivationBinding();
     await restarted.flush();
     const unavailableRestart = new SettingsStore(path);
     await unavailableRestart.initialize();
     const completed = new WelcomeService(
       unavailableRestart,
-      ready({ microphone: false, model: false, helper: false, gesture: false }),
+      ready({ microphone: false, model: false }),
     );
-    expect(completed.state()).toMatchObject({ completedAt: 1234, lastStep: 6 });
+    expect(completed.state()).toMatchObject({ completedAt: 1234, lastStep: 5 });
     expect(completed.state(true).reopened).toBe(true);
-  });
-
-  it('uses the General profile identity when profile order changes', async () => {
-    const root = await createTestDirectory('welcome-profile-order');
-    roots.push(root);
-    const store = new SettingsStore(join(root, 'settings.json'));
-    await store.initialize();
-    await store.update({
-      dictationProfiles: [
-        structuredClone(DEFAULT_PROMPT_PROFILE),
-        { ...structuredClone(DEFAULT_GENERAL_PROFILE), activationKey: 'Q' },
-      ],
-    });
-    const service = new WelcomeService(store, ready({ activationKey: 'Q' }), () => 1234);
-    await service.setStep(2);
-    await service.setStep(3);
-    await service.setStep(4);
-    await service.setStep(5);
-    expect(store.get().welcome.activationEvidence).toMatchObject({
-      profileId: 'general',
-      activationKey: 'Q',
-      shift: false,
-    });
-  });
-
-  it('requires the General profile shortcut during Welcome activation testing', async () => {
-    const root = await createTestDirectory('welcome-prompt-activation');
-    roots.push(root);
-    const store = new SettingsStore(join(root, 'settings.json'));
-    await store.initialize();
-    const service = new WelcomeService(
-      store,
-      ready({ activationProfileId: 'prompt', activationKey: 'Z', activationShift: true }),
-      () => 1234,
-    );
-    await service.setStep(2);
-    await service.setStep(3);
-    await service.setStep(4);
-    await expect(service.setStep(5)).rejects.toThrow('General profile shortcut');
-    expect(store.get().welcome.activationEvidence).toBeNull();
-    expect(store.get().welcome.lastStep).toBe(4);
   });
 
   it('commits each step once, skips no-op writes, and completes idempotently', async () => {
@@ -142,21 +80,17 @@ describe('WelcomeService', () => {
     expect(store.get().welcome.microphoneEvidence).not.toBeNull();
     await service.setStep(4);
     expect(store.get().welcome.modelEvidence).not.toBeNull();
-    await service.setStep(5);
-    expect(store.get().welcome.activationEvidence).not.toBeNull();
     await expect(service.complete()).rejects.toThrow('every Welcome step');
+    expect(updates).toBe(3);
+    await service.setStep(5);
+    expect(store.get().welcome.activationEvidence).toBeNull();
     expect(updates).toBe(4);
-    await service.setStep(6);
-    expect(updates).toBe(5);
 
     const completed = await service.complete();
-    expect(updates).toBe(6);
-    const resumed = new WelcomeService(
-      store,
-      ready({ microphone: false, model: false, helper: false, gesture: false }),
-    );
+    expect(updates).toBe(5);
+    const resumed = new WelcomeService(store, ready({ microphone: false, model: false }));
     expect(await resumed.complete()).toEqual(completed);
-    expect(updates).toBe(6);
+    expect(updates).toBe(5);
   });
 
   it('rejects completion when readiness invalidates during asynchronous verification', async () => {
@@ -177,7 +111,7 @@ describe('WelcomeService', () => {
         return modelChecks === 1 ? Promise.resolve(true) : delayedModel;
       },
     });
-    for (const step of [2, 3, 4, 5, 6] as const) await service.setStep(step);
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
     const completion = service.complete();
     await Promise.resolve();
     const invalidation = service.invalidateModelSelection();
@@ -213,7 +147,7 @@ describe('WelcomeService', () => {
     });
     await store.initialize();
     const service = new WelcomeService(store, ready(), () => 1234);
-    for (const step of [2, 3, 4, 5, 6] as const) await service.setStep(step);
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
     const observedCompletionStates: (number | null)[] = [];
     store.subscribe((settings) => {
       observedCompletionStates.push(settings.welcome.completedAt);
@@ -286,7 +220,7 @@ describe('WelcomeService', () => {
     const store = new SettingsStore(join(root, 'settings.json'));
     await store.initialize();
     const service = new WelcomeService(store, ready());
-    for (const step of [2, 3, 4, 5, 6] as const) await service.setStep(step);
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
     const evidence = store.get().welcome.microphoneEvidence;
     if (evidence == null) throw new Error('Expected microphone evidence');
     await store.update({
@@ -309,7 +243,7 @@ describe('WelcomeService', () => {
     const store = new SettingsStore(join(root, 'settings.json'));
     await store.initialize();
     const service = new WelcomeService(store, ready());
-    await expect(service.setStep(7 as never)).rejects.toThrow();
+    await expect(service.setStep(6 as never)).rejects.toThrow();
     expect(store.get().welcome.lastStep).toBe(1);
   });
 });

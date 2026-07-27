@@ -11,6 +11,7 @@ import {
   type DictationProfileCreate,
   type DictationProfilePatch,
 } from '../../shared/schemas/dictation-profiles';
+import type { ActivationBinding } from '../../shared/helper/protocol';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { EchoHelperPort } from './echo-session-ports';
@@ -19,10 +20,11 @@ export class ProfileActivationCoordinator {
   readonly #settings: SettingsStore;
   readonly #helper: EchoHelperPort;
   readonly #isModelReady: () => boolean;
-  #activationTail: Promise<void> = Promise.resolve();
+  #transactionTail: Promise<void> = Promise.resolve();
+  #transactionActive = false;
   #syncRequested = false;
   #syncScheduled = false;
-  #profileTransaction: Promise<void> = Promise.resolve();
+  readonly #shortcutCaptureOwners = new Set<number>();
   #disposed = false;
 
   constructor(options: {
@@ -37,60 +39,82 @@ export class ProfileActivationCoordinator {
 
   dispose(): void {
     this.#disposed = true;
+    this.#shortcutCaptureOwners.clear();
+  }
+
+  get shortcutCaptureActive(): boolean {
+    return this.#shortcutCaptureOwners.size > 0;
+  }
+
+  async beginShortcutCapture(ownerWebContentsId: number): Promise<void> {
+    if (this.#disposed) throw new Error('Shortcut capture is unavailable');
+    if (this.#shortcutCaptureOwners.has(ownerWebContentsId)) return;
+    this.#shortcutCaptureOwners.add(ownerWebContentsId);
+    try {
+      await this.#serializeTransaction(() => this.#syncActivation());
+    } catch (error: unknown) {
+      // Keep the owner active so a stale native activation cannot start dictation while the
+      // renderer reports the capture failure. Blur/destruction releases it and retries sync.
+      this.requestSync();
+      throw error;
+    }
+  }
+
+  async endShortcutCapture(ownerWebContentsId: number): Promise<void> {
+    if (!this.#shortcutCaptureOwners.delete(ownerWebContentsId) || this.#disposed) return;
+    try {
+      await this.#serializeTransaction(() => this.#syncActivation());
+    } catch (error: unknown) {
+      this.requestSync();
+      throw error;
+    }
   }
 
   requestSync(): void {
     if (this.#disposed) return;
     this.#syncRequested = true;
-    if (this.#syncScheduled) return;
+    if (this.#transactionActive || this.#syncScheduled) return;
     this.#syncScheduled = true;
-    const operation = async () => {
-      try {
-        while (this.#syncRequested && !this.#disposed) {
-          this.#syncRequested = false;
-          const settings = this.#settings.get().app;
-          await this.#helper.configureActivation(
-            settings.enabled && this.#isModelReady(),
-            profileBindings(this.#settings.get().dictationProfiles),
-          );
-        }
-      } finally {
+    void this.#serializeTransaction(() => this.#drainSyncRequests()).then(
+      () => {
         this.#syncScheduled = false;
         if (this.#syncRequested) this.requestSync();
-      }
-    };
-    this.#activationTail = this.#activationTail.then(operation, operation).catch(() => undefined);
+      },
+      () => {
+        // Retain the failed request for the next readiness/settings signal without hot-looping.
+        this.#syncScheduled = false;
+      },
+    );
   }
 
-  async updateGeneral(patch: PublicSettingsPatch, current: Readonly<Settings>): Promise<Settings> {
-    const nextEnabled = patch.app?.enabled ?? current.app.enabled;
-    if (this.#helper.readiness.status !== 'ready') return this.#settings.update(patch);
-    await this.#helper.configureActivation(
-      nextEnabled && this.#isModelReady(),
-      profileBindings(current.dictationProfiles),
-    );
-    try {
-      return await this.#settings.update(patch);
-    } catch (error: unknown) {
-      await this.#helper
-        .configureActivation(
-          current.app.enabled && this.#isModelReady(),
-          profileBindings(current.dictationProfiles),
-        )
-        .catch(() => undefined);
-      throw error;
-    }
+  updateGeneral(patch: PublicSettingsPatch): Promise<Settings> {
+    return this.#serializeTransaction(async () => {
+      const current = this.#settings.get();
+      const nextEnabled = patch.app?.enabled ?? current.app.enabled;
+      try {
+        if (this.#helper.readiness.status === 'ready') {
+          await this.#helper.configureActivation(
+            this.#activationEnabled(nextEnabled),
+            profileBindings(current.dictationProfiles),
+          );
+        }
+        return await this.#settings.update(patch);
+      } catch (error: unknown) {
+        await this.#syncActivation().catch(() => this.requestSync());
+        throw error;
+      }
+    });
   }
 
   createProfile(input: DictationProfileCreate): Promise<Settings> {
-    return this.#serializeProfileTransaction(() => {
+    return this.#serializeTransaction(() => {
       const profile = { id: randomUUID(), ...DictationProfileCreateSchema.parse(input) };
       return this.#replaceProfiles([...this.#settings.get().dictationProfiles, profile]);
     });
   }
 
   updateProfile(id: string, patch: DictationProfilePatch): Promise<Settings> {
-    return this.#serializeProfileTransaction(() => {
+    return this.#serializeTransaction(() => {
       const parsed = DictationProfilePatchSchema.parse(patch);
       const current = this.#settings.get().dictationProfiles;
       if (!current.some((profile) => profile.id === id)) {
@@ -105,7 +129,7 @@ export class ProfileActivationCoordinator {
   }
 
   deleteProfile(id: string): Promise<Settings> {
-    return this.#serializeProfileTransaction(() => {
+    return this.#serializeTransaction(() => {
       if (id === GENERAL_PROFILE_ID || id === PROMPT_PROFILE_ID) {
         throw new Error('Built-in dictation profiles cannot be deleted');
       }
@@ -118,7 +142,7 @@ export class ProfileActivationCoordinator {
   }
 
   resetProfile(id: string): Promise<Settings> {
-    return this.#serializeProfileTransaction(() => {
+    return this.#serializeTransaction(() => {
       const replacement =
         id === GENERAL_PROFILE_ID
           ? DEFAULT_GENERAL_PROFILE
@@ -134,43 +158,73 @@ export class ProfileActivationCoordinator {
     });
   }
 
-  #serializeProfileTransaction<Result>(operation: () => Promise<Result>): Promise<Result> {
-    const result = this.#profileTransaction.then(operation, operation);
-    this.#profileTransaction = result.then(
+  async #replaceProfiles(input: readonly DictationProfile[]): Promise<Settings> {
+    const profiles = DictationProfileListSchema.parse(input);
+    const current = this.#settings.get();
+    try {
+      if (this.#helper.readiness.status === 'ready') {
+        await this.#helper.configureActivation(
+          this.#activationEnabled(current.app.enabled),
+          profileBindings(profiles),
+        );
+      }
+      return await this.#settings.update({ dictationProfiles: profiles });
+    } catch (error: unknown) {
+      await this.#syncActivation().catch(() => this.requestSync());
+      throw error;
+    }
+  }
+
+  #activationEnabled(enabled: boolean): boolean {
+    return enabled && this.#isModelReady() && !this.shortcutCaptureActive;
+  }
+
+  async #syncActivation(): Promise<void> {
+    const settings = this.#settings.get();
+    await this.#helper.configureActivation(
+      this.#activationEnabled(settings.app.enabled),
+      profileBindings(settings.dictationProfiles),
+    );
+  }
+
+  async #drainSyncRequests(): Promise<void> {
+    while (this.#syncRequested && !this.#disposed) {
+      this.#syncRequested = false;
+      try {
+        await this.#syncActivation();
+      } catch (error: unknown) {
+        this.#syncRequested = true;
+        throw error;
+      }
+    }
+  }
+
+  #serializeTransaction<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const execute = async () => {
+      this.#transactionActive = true;
+      try {
+        const value = await operation();
+        try {
+          await this.#drainSyncRequests();
+        } catch {
+          // The operation already succeeded. A redundant subscription-driven reconciliation must
+          // not report a committed mutation as failed; requestSync retains and retries it.
+        }
+        return value;
+      } finally {
+        this.#transactionActive = false;
+        if (this.#syncRequested && !this.#syncScheduled) this.requestSync();
+      }
+    };
+    const result = this.#transactionTail.then(execute, execute);
+    this.#transactionTail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   }
-
-  async #replaceProfiles(input: readonly DictationProfile[]): Promise<Settings> {
-    const profiles = DictationProfileListSchema.parse(input);
-    const current = this.#settings.get();
-    if (this.#helper.readiness.status !== 'ready') {
-      return this.#settings.update({ dictationProfiles: profiles });
-    }
-    await this.#helper.configureActivation(
-      current.app.enabled && this.#isModelReady(),
-      profileBindings(profiles),
-    );
-    try {
-      const saved = await this.#settings.update({ dictationProfiles: profiles });
-      // The settings subscription schedules an authoritative activation sync. Keep it inside this
-      // transaction so a following CRUD operation cannot leave the helper on an older profile set.
-      await this.#activationTail;
-      return saved;
-    } catch (error: unknown) {
-      await this.#helper
-        .configureActivation(
-          current.app.enabled && this.#isModelReady(),
-          profileBindings(current.dictationProfiles),
-        )
-        .catch(() => undefined);
-      throw error;
-    }
-  }
 }
 
-function profileBindings(profiles: readonly DictationProfile[]) {
-  return profiles.map(({ activationKey: key, shift }) => ({ key, shift }));
+function profileBindings(profiles: readonly DictationProfile[]): ActivationBinding[] {
+  return profiles.map((profile) => ({ profileId: profile.id, shortcut: profile.shortcut }));
 }

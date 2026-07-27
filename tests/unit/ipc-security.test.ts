@@ -4,6 +4,7 @@ import { ProviderError } from '../../app/src/main/providers/errors';
 import { ModelManagerError } from '../../app/src/main/transcription/errors';
 import { authorizeIpc } from '../../app/src/main/security/ipc-authorization';
 import { toPublicError } from '../../app/src/main/security/public-error';
+import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 import {
   eventRegistry,
   invokeRegistry,
@@ -16,7 +17,7 @@ const RESET_ACKNOWLEDGEMENT_TOKEN = '00000000-0000-4000-8000-000000000013';
 
 describe('typed IPC registry', () => {
   it('requires strict request and response schemas for every channel', () => {
-    expect(Object.keys(invokeRegistry)).toHaveLength(71);
+    expect(Object.keys(invokeRegistry)).toHaveLength(73);
     for (const [channel, contract] of Object.entries(invokeRegistry)) {
       expect(contract.roles.length, channel).toBeGreaterThan(0);
       expect(contract.request.safeParse({ unknown: true }).success, channel).toBe(false);
@@ -27,8 +28,7 @@ describe('typed IPC registry', () => {
     expect(
       invokeRegistry['profile:create'].request.safeParse({
         name: 'Reserved',
-        activationKey: 'Z',
-        shift: false,
+        shortcut: shortcutFromLegacyActivation('Z', false),
         processingMode: 'raw',
         smartPrompt: null,
       }).success,
@@ -37,20 +37,25 @@ describe('typed IPC registry', () => {
     expect(
       profileUpdate.safeParse({
         id: '11111111-1111-4111-8111-111111111111',
-        patch: { activationKey: 'Q' },
-      }).success,
-    ).toBe(false);
-    expect(profileUpdate.safeParse({ id: 'general', patch: { shift: true } }).success).toBe(false);
-    expect(
-      profileUpdate.safeParse({
-        id: 'general',
-        patch: { activationKey: 'Z', shift: true },
+        patch: { shortcut: { keys: ['Q'] } },
       }).success,
     ).toBe(false);
     expect(
       profileUpdate.safeParse({
         id: 'general',
-        patch: { activationKey: 'Q', shift: true, name: 'Moved General' },
+        patch: { shortcut: { modifiers: { ctrl: false, alt: true, shift: true, meta: false } } },
+      }).success,
+    ).toBe(false);
+    expect(
+      profileUpdate.safeParse({
+        id: 'general',
+        patch: { shortcut: shortcutFromLegacyActivation('Z', true) },
+      }).success,
+    ).toBe(false);
+    expect(
+      profileUpdate.safeParse({
+        id: 'general',
+        patch: { shortcut: shortcutFromLegacyActivation('Q', true), name: 'Moved General' },
       }).success,
     ).toBe(true);
     expect(

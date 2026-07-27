@@ -1,37 +1,21 @@
 import { z } from 'zod';
+import { DictationProfileIdSchema } from '../schemas/dictation-profiles';
+import { ShortcutSchema, shortcutIdentity, shortcutsConflict } from '../schemas/shortcut';
 
-export const HELPER_PROTOCOL_VERSION = 2 as const;
+export const HELPER_PROTOCOL_VERSION = 3 as const;
 export const HELPER_MAX_FRAME_BYTES = 16 * 1024;
-export const HelperRequestIdSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-
-export const ActivationKeySchema = z.enum([
-  'A',
-  'B',
-  'C',
-  'D',
-  'E',
-  'F',
-  'G',
-  'H',
-  'I',
-  'J',
-  'K',
-  'L',
-  'M',
-  'N',
-  'O',
-  'P',
-  'Q',
-  'R',
-  'S',
-  'T',
-  'U',
-  'V',
-  'W',
-  'X',
-  'Y',
-  'Z',
+const HelperNumericRequestIdSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const HelperStringRequestIdSchema = z
+  .string()
+  .min(1)
+  .refine((value) => new TextEncoder().encode(value).byteLength <= 64, {
+    message: 'String request IDs must not exceed 64 UTF-8 bytes',
+  });
+export const HelperRequestIdSchema = z.union([
+  HelperNumericRequestIdSchema,
+  HelperStringRequestIdSchema,
 ]);
+
 export const HelperHookStatusSchema = z.enum([
   'ready',
   'permission_required',
@@ -58,7 +42,6 @@ export const HelperInitializeResultSchema = z
     helperVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
     platform: z.enum(['windows', 'macos']),
     architecture: z.enum(['x86_64', 'aarch64']),
-    defaultActivationKey: ActivationKeySchema,
     hookStatus: HelperHookStatusSchema,
     permissions: HelperPermissionsSchema,
   })
@@ -96,23 +79,43 @@ export const HelperFrontAppSchema = z
 
 const emptySchema = z.object({}).strict();
 export const ActivationBindingSchema = z
-  .object({ key: ActivationKeySchema, shift: z.boolean() })
+  .object({
+    profileId: DictationProfileIdSchema,
+    shortcut: ShortcutSchema,
+  })
   .strict();
 export const ActivationBindingsSchema = z
   .array(ActivationBindingSchema)
   .max(10)
   .superRefine((bindings, context) => {
-    const seen = new Set<string>();
+    const profileIds = new Set<string>();
+    const identities = new Set<string>();
+    const prior: z.infer<typeof ShortcutSchema>[] = [];
     for (const [index, binding] of bindings.entries()) {
-      const exact = `${binding.shift ? 'shift+' : ''}${binding.key}`;
-      if (seen.has(exact)) {
+      if (profileIds.has(binding.profileId)) {
         context.addIssue({
           code: 'custom',
-          path: [index],
-          message: 'Activation bindings must be distinct',
+          path: [index, 'profileId'],
+          message: 'Activation profile IDs must be distinct',
         });
       }
-      seen.add(exact);
+      const identity = shortcutIdentity(binding.shortcut);
+      if (identities.has(identity)) {
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'shortcut'],
+          message: 'Activation shortcuts must be distinct',
+        });
+      } else if (prior.some((candidate) => shortcutsConflict(candidate, binding.shortcut))) {
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'shortcut'],
+          message: 'Activation shortcuts with the same modifiers must not prefix one another',
+        });
+      }
+      profileIds.add(binding.profileId);
+      identities.add(identity);
+      prior.push(binding.shortcut);
     }
   });
 const configureActivationParamsSchema = z
@@ -157,7 +160,6 @@ export type HelperParams<Method extends HelperMethod> = z.infer<
 export type HelperResult<Method extends HelperMethod> = z.infer<
   (typeof helperResultSchemas)[Method]
 >;
-export type ActivationKey = z.infer<typeof ActivationKeySchema>;
 export type ActivationBinding = z.infer<typeof ActivationBindingSchema>;
 export type HelperHookStatus = z.infer<typeof HelperHookStatusSchema>;
 export type HelperPermissions = z.infer<typeof HelperPermissionsSchema>;
@@ -196,8 +198,8 @@ export const HelperNotificationSchema = z.discriminatedUnion('method', [
       params: z
         .object({
           phase: z.enum(['down', 'up']),
-          key: ActivationKeySchema,
-          shift: z.boolean(),
+          profileId: DictationProfileIdSchema,
+          shortcut: ShortcutSchema,
         })
         .strict(),
     })

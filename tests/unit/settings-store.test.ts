@@ -15,6 +15,10 @@ import {
   SettingsPatchSchema,
   SettingsSchema,
 } from '../../app/src/shared/schemas/settings';
+import {
+  shortcutFromLegacyActivation,
+  shortcutTrigger,
+} from '../../app/src/shared/schemas/shortcut';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 const directories: string[] = [];
@@ -71,6 +75,41 @@ async function testPath() {
   return join(directory, 'settings.json');
 }
 
+function legacySettingsBase() {
+  return {
+    ...structuredClone(DEFAULT_SETTINGS),
+    app: { ...structuredClone(DEFAULT_SETTINGS.app), activationKey: 'Z' as const },
+  };
+}
+
+function legacyV19Settings() {
+  const current = structuredClone(DEFAULT_SETTINGS);
+  const general = current.dictationProfiles.find((profile) => profile.id === 'general');
+  if (general === undefined) throw new Error('Missing General profile');
+  return {
+    ...current,
+    schemaVersion: 19 as const,
+    app: {
+      ...current.app,
+      activationKey: shortcutTrigger(general.shortcut),
+    },
+    dictationProfiles: current.dictationProfiles.map(({ shortcut, ...profile }) => ({
+      ...profile,
+      activationKey: shortcutTrigger(shortcut),
+      shift: shortcut.modifiers.shift,
+    })),
+    welcome: { ...current.welcome, lastStep: 1 as 1 | 2 | 3 | 4 | 5 | 6 },
+  };
+}
+
+function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
+  const v20 = SETTINGS_MIGRATIONS[19]?.(legacy);
+  if (typeof v20 !== 'object' || v20 === null || Array.isArray(v20)) {
+    throw new Error('V19 migration did not emit settings');
+  }
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[20]?.(v20 as Readonly<Record<string, unknown>>));
+}
+
 function validSettings(
   overrides: { readonly enabled?: boolean; readonly closeToTray?: boolean } = {},
 ) {
@@ -88,7 +127,7 @@ function validSettings(
 describe('SettingsStore', () => {
   it('migrates v17 by removing only the retired Pi extension preference', () => {
     const legacy = {
-      ...structuredClone(DEFAULT_SETTINGS),
+      ...legacySettingsBase(),
       schemaVersion: 17,
       smartProcessing: {
         ...structuredClone(DEFAULT_SETTINGS.smartProcessing),
@@ -110,9 +149,55 @@ describe('SettingsStore', () => {
     expect(migrated.smartProcessing).not.toHaveProperty('piExtensionsEnabled');
   });
 
+  it.each([
+    [1, 1],
+    [2, 2],
+    [3, 3],
+    [4, 4],
+    [5, 4],
+    [6, 5],
+  ] as const)(
+    'migrates the v19 Welcome step %s to the five-step flow at %s',
+    (legacyStep, step) => {
+      const legacy = legacyV19Settings();
+      legacy.welcome.lastStep = legacyStep;
+
+      const migrated = migrateV19ToCurrent(legacy);
+
+      expect(migrated.welcome.lastStep).toBe(step);
+    },
+  );
+
+  it('loads and persists an incomplete v19 final step as the new final step 5', async () => {
+    const path = await testPath();
+    const legacy = legacyV19Settings();
+    legacy.welcome.lastStep = 6;
+    await writeFile(path, JSON.stringify(legacy), 'utf8');
+
+    const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+    await store.initialize();
+
+    expect(store.getDiagnostic()).toBeNull();
+    expect(store.get()).toMatchObject({
+      schemaVersion: SETTINGS_SCHEMA_VERSION,
+      welcome: { completedAt: null, lastStep: 5 },
+    });
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+  });
+
+  it('normalizes completed v19 Welcome progress to final step 5', () => {
+    const legacy = legacyV19Settings();
+    legacy.welcome.lastStep = 6;
+    legacy.welcome.completedAt = 123;
+
+    const migrated = migrateV19ToCurrent(legacy);
+
+    expect(migrated.welcome).toMatchObject({ completedAt: 123, lastStep: 5 });
+  });
+
   it('migrates the removed large model to turbo and invalidates its stale readiness evidence', () => {
     const legacy = {
-      ...structuredClone(DEFAULT_SETTINGS),
+      ...legacySettingsBase(),
       schemaVersion: 18,
       transcription: { modelId: 'Xenova/whisper-large', language: 'ru' },
       welcome: {
@@ -135,16 +220,14 @@ describe('SettingsStore', () => {
       {
         id: 'general',
         name: 'General',
-        activationKey: 'Z',
-        shift: false,
+        shortcut: shortcutFromLegacyActivation('Z', false),
         processingMode: 'raw',
         smartPrompt: null,
       },
       {
         id: 'prompt',
         name: 'Prompt',
-        activationKey: 'Z',
-        shift: true,
+        shortcut: shortcutFromLegacyActivation('Z', true),
         processingMode: 'smart',
         smartPrompt:
           'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Use lists, tables, and other formatting when useful.',
@@ -158,7 +241,7 @@ describe('SettingsStore', () => {
       ['Q', 'smart'],
     ] as const) {
       const legacy = {
-        ...structuredClone(DEFAULT_SETTINGS),
+        ...legacySettingsBase(),
         schemaVersion: 18,
         app: {
           ...structuredClone(DEFAULT_SETTINGS.app),
@@ -181,12 +264,12 @@ describe('SettingsStore', () => {
       expect(migrated.dictationProfiles.find((profile) => profile.id === 'general')).toEqual({
         id: 'general',
         name: 'General',
-        activationKey,
-        shift: false,
+        shortcut: shortcutFromLegacyActivation(activationKey, false),
         processingMode: defaultProcessingMode,
         smartPrompt: null,
       });
-      expect(migrated.app).toMatchObject({ activationKey, defaultProcessingMode });
+      expect(migrated.app).toMatchObject({ defaultProcessingMode });
+      expect(migrated.app).not.toHaveProperty('activationKey');
       expect(migrated.welcome).toMatchObject({
         activationTested: false,
         activationEvidence: null,
@@ -327,9 +410,9 @@ describe('SettingsStore', () => {
     'migrates schema-v%s byte-oversized Task 7-9 data without resetting unrelated settings',
     async (version) => {
       const path = await testPath();
-      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
       legacy.schemaVersion = version;
-      legacy.app = { ...structuredClone(DEFAULT_SETTINGS.app), enabled: false };
+      legacy.app = { ...legacySettingsBase().app, enabled: false };
       delete (legacy.privacy as Record<string, unknown>).retainSmartScreenshots;
       delete (legacy.smartProcessing as Record<string, unknown>).onScreenAwarenessEnabled;
       delete (legacy.smartProcessing as Record<string, unknown>).visionOverrides;
@@ -376,7 +459,7 @@ describe('SettingsStore', () => {
 
   it('migrates v13 settings with diagnostic logging safely disabled', async () => {
     const path = await testPath();
-    const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
     legacy.schemaVersion = 13;
     delete (legacy.privacy as Record<string, unknown>).diagnosticLoggingEnabled;
     await writeFile(path, JSON.stringify(legacy), 'utf8');
@@ -391,7 +474,7 @@ describe('SettingsStore', () => {
     'migrates historical v14 provider selection %s without reinterpretation',
     async (providerId) => {
       const path = await testPath();
-      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
       legacy.schemaVersion = 14;
       (legacy.smartProcessing as Record<string, unknown>).selectedProviderId = providerId;
       (legacy.smartProcessing as Record<string, unknown>).providers = {};
@@ -406,7 +489,7 @@ describe('SettingsStore', () => {
 
   it('does not accept Pi as a fabricated historical v14 provider', async () => {
     const path = await testPath();
-    const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
     legacy.schemaVersion = 14;
     (legacy.smartProcessing as Record<string, unknown>).selectedProviderId = 'pi';
     await writeFile(path, JSON.stringify(legacy), 'utf8');
@@ -422,10 +505,10 @@ describe('SettingsStore', () => {
     'preserves an inert v14 provider endpoint and unrelated settings until repaired: %s',
     async (baseUrl) => {
       const path = await testPath();
-      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
       legacy.schemaVersion = 14;
       legacy.app = {
-        ...structuredClone(DEFAULT_SETTINGS.app),
+        ...legacySettingsBase().app,
         enabled: false,
         soundsEnabled: false,
       };
@@ -503,10 +586,10 @@ describe('SettingsStore', () => {
   );
 
   it.each(LEGACY_PROVIDER_ENDPOINTS)(
-    'loads a current v19 legacy endpoint and permits unrelated updates without making it runnable: %s',
+    'migrates a v19 legacy endpoint and permits unrelated updates without making it runnable: %s',
     async (baseUrl) => {
       const path = await testPath();
-      const current = structuredClone(DEFAULT_SETTINGS);
+      const current = legacyV19Settings();
       current.app.enabled = false;
       current.privacy.historyEnabled = false;
       current.smartProcessing.selectedProviderId = 'generic-openai';
@@ -515,7 +598,7 @@ describe('SettingsStore', () => {
         modelId: 'legacy-model',
       };
       await writeFile(path, JSON.stringify(current), 'utf8');
-      const store = new SettingsStore(path);
+      const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
 
       await store.initialize();
 
@@ -573,9 +656,9 @@ describe('SettingsStore', () => {
     'preserves a legacy provider endpoint through the v%s current-shape migration',
     async (version) => {
       const path = await testPath();
-      const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+      const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
       legacy.schemaVersion = version;
-      legacy.app = { ...structuredClone(DEFAULT_SETTINGS.app), enabled: false };
+      legacy.app = { ...legacySettingsBase().app, enabled: false };
       legacy.smartProcessing = {
         ...structuredClone(DEFAULT_SETTINGS.smartProcessing),
         selectedProviderId: 'generic-openai',
@@ -615,7 +698,7 @@ describe('SettingsStore', () => {
 
   it('migrates v14 settings without losing provider state', async () => {
     const path = await testPath();
-    const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    const legacy = legacySettingsBase() as unknown as Record<string, unknown>;
     legacy.schemaVersion = 14;
     await writeFile(path, JSON.stringify(legacy), 'utf8');
     const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
@@ -1111,8 +1194,10 @@ describe('SettingsStore', () => {
     await store.initialize();
 
     const migrated = store.get();
+    const { activationKey: _activationKey, ...legacyApp } = legacy.app;
+    void _activationKey;
     expect(migrated.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
-    expect(migrated.app).toEqual({ ...structuredClone(DEFAULT_SETTINGS.app), ...legacy.app });
+    expect(migrated.app).toEqual({ ...structuredClone(DEFAULT_SETTINGS.app), ...legacyApp });
     expect(migrated.recording).toEqual(legacy.recording);
     expect(migrated.transcription).toEqual(
       'transcription' in legacy
@@ -1189,7 +1274,7 @@ describe('SettingsStore', () => {
 
   it('migrates v6 settings to v8 with Task 7 and Task 8 defaults', async () => {
     const path = await testPath();
-    const legacy: Record<string, unknown> = structuredClone(DEFAULT_SETTINGS);
+    const legacy: Record<string, unknown> = legacySettingsBase();
     legacy.schemaVersion = 6;
     delete legacy.privacy;
     delete legacy.voiceCommands;
@@ -1210,7 +1295,7 @@ describe('SettingsStore', () => {
 
   it('migrates v5 settings to the current schema with all defaults and empty credential epochs', async () => {
     const path = await testPath();
-    const legacyBase: Record<string, unknown> = structuredClone(DEFAULT_SETTINGS);
+    const legacyBase: Record<string, unknown> = legacySettingsBase();
     delete legacyBase.privacy;
     delete legacyBase.voiceCommands;
     delete legacyBase.customVocabulary;
@@ -1244,7 +1329,7 @@ describe('SettingsStore', () => {
 
   it('migrates v6 settings to v8 with privacy defaults without changing provider state', async () => {
     const path = await testPath();
-    const legacy: Record<string, unknown> = structuredClone(DEFAULT_SETTINGS);
+    const legacy: Record<string, unknown> = legacySettingsBase();
     Reflect.deleteProperty(legacy, 'privacy');
     Reflect.deleteProperty(legacy, 'voiceCommands');
     Reflect.deleteProperty(legacy, 'customVocabulary');
@@ -1266,9 +1351,9 @@ describe('SettingsStore', () => {
     'migrates v11 progress at step $lastStep without inventing prerequisite evidence',
     async ({ lastStep, completedAt }) => {
       const path = await testPath();
-      const legacy: Record<string, unknown> = structuredClone(DEFAULT_SETTINGS);
+      const legacy: Record<string, unknown> = legacySettingsBase();
       legacy.schemaVersion = 11;
-      legacy.app = { ...structuredClone(DEFAULT_SETTINGS.app), launchAtLogin: true };
+      legacy.app = { ...legacySettingsBase().app, launchAtLogin: true };
       legacy.transcription = {
         ...structuredClone(DEFAULT_SETTINGS.transcription),
         language: 'fr',
@@ -1283,7 +1368,7 @@ describe('SettingsStore', () => {
         app: { launchAtLogin: true },
         transcription: { language: 'fr' },
         welcome: {
-          lastStep: completedAt === null ? 2 : 6,
+          lastStep: completedAt === null ? 2 : 5,
           completedAt,
           microphoneTested: false,
           activationTested: false,
@@ -1297,7 +1382,7 @@ describe('SettingsStore', () => {
 
   it('preserves v12 completion without treating booleans as prerequisite evidence', async () => {
     const path = await testPath();
-    const legacy = structuredClone(DEFAULT_SETTINGS) as Record<string, unknown>;
+    const legacy = legacySettingsBase() as Record<string, unknown>;
     legacy.schemaVersion = 12;
     legacy.welcome = {
       completedAt: 1_700_000_000_000,
@@ -1309,7 +1394,7 @@ describe('SettingsStore', () => {
     const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
     await store.initialize();
     expect(store.get().welcome).toMatchObject({
-      lastStep: 6,
+      lastStep: 5,
       completedAt: 1_700_000_000_000,
       microphoneTested: false,
       activationTested: false,
@@ -1370,9 +1455,11 @@ describe('SettingsStore', () => {
       await store.initialize();
 
       const migrated = store.get();
+      const { activationKey: _activationKey, ...legacyApp } = legacy.app as Record<string, unknown>;
+      void _activationKey;
       expect(migrated).toMatchObject({
         schemaVersion: SETTINGS_SCHEMA_VERSION,
-        app: legacy.app,
+        app: legacyApp,
         recording: legacy.recording,
         transcription: {
           modelId: 'onnx-community/whisper-large-v3-turbo',
@@ -1428,7 +1515,7 @@ describe('SettingsStore', () => {
     expect(store.get()).toEqual(DEFAULT_SETTINGS);
   });
 
-  it('always derives compatibility mirrors atomically from the General profile', async () => {
+  it('removes the activation-key mirror and derives the processing mirror atomically', async () => {
     expect(
       SettingsSchema.safeParse({
         ...structuredClone(DEFAULT_SETTINGS),
@@ -1445,29 +1532,34 @@ describe('SettingsStore', () => {
     const path = await testPath();
     const store = new SettingsStore(path);
     await store.initialize();
-    const profiles = store
-      .get()
-      .dictationProfiles.map((profile) =>
-        profile.id === 'general'
-          ? { ...profile, activationKey: 'Q' as const, processingMode: 'smart' as const }
-          : profile,
-      );
+    const profiles = store.get().dictationProfiles.map((profile) =>
+      profile.id === 'general'
+        ? {
+            ...profile,
+            shortcut: shortcutFromLegacyActivation('Q', false),
+            processingMode: 'smart' as const,
+          }
+        : profile,
+    );
     let saved = await store.update({
-      app: { activationKey: 'X', defaultProcessingMode: 'raw' },
+      app: { defaultProcessingMode: 'raw' },
       dictationProfiles: profiles,
     });
-    expect(saved.app).toMatchObject({ activationKey: 'Q', defaultProcessingMode: 'smart' });
+    expect(saved.app).toMatchObject({ defaultProcessingMode: 'smart' });
+    expect(saved.app).not.toHaveProperty('activationKey');
 
-    saved = await store.update({ app: { activationKey: 'A', defaultProcessingMode: 'raw' } });
-    expect(saved.app).toMatchObject({ activationKey: 'Q', defaultProcessingMode: 'smart' });
+    saved = await store.update({ app: { defaultProcessingMode: 'raw' } });
+    expect(saved.app).toMatchObject({ defaultProcessingMode: 'smart' });
+    expect(saved.app).not.toHaveProperty('activationKey');
   });
 
-  it('preserves activation evidence for unrelated profile CRUD and invalidates its exact binding', async () => {
+  it('does not rewind Welcome progress for profile shortcut changes', async () => {
     const path = await testPath();
     const store = new SettingsStore(path);
     await store.initialize();
     await store.update({
       welcome: {
+        lastStep: 5,
         activationTested: true,
         activationEvidence: {
           profileId: 'prompt',
@@ -1483,8 +1575,7 @@ describe('SettingsStore', () => {
     const custom = {
       id: '11111111-1111-4111-8111-111111111111',
       name: 'Untested',
-      activationKey: 'Q' as const,
-      shift: false,
+      shortcut: shortcutFromLegacyActivation('Q', false),
       processingMode: 'raw' as const,
       smartPrompt: null,
     };
@@ -1511,10 +1602,16 @@ describe('SettingsStore', () => {
 
     saved = await store.update({
       dictationProfiles: saved.dictationProfiles.map((profile) =>
-        profile.id === 'prompt' ? { ...profile, activationKey: 'P' as const } : profile,
+        profile.id === 'prompt'
+          ? { ...profile, shortcut: shortcutFromLegacyActivation('P', true) }
+          : profile,
       ),
     });
-    expect(saved.welcome).toMatchObject({ activationTested: false, activationEvidence: null });
+    expect(saved.welcome).toMatchObject({
+      lastStep: 5,
+      activationTested: true,
+      activationEvidence: { profileId: 'prompt', activationKey: 'Z', shift: true },
+    });
   });
 
   it('keeps provider configuration out of public settings patches', () => {

@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { WelcomeSettingsSchema } from './welcome';
-import { ActivationKeySchema } from '../helper/protocol';
 import { VoiceCommandListSchema } from './commands';
 import { VocabularyListSchema } from './vocabulary';
 import { MicrophoneIdSchema, SilencePresetSchema } from './audio';
@@ -19,7 +18,7 @@ import {
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 19 as const;
+export const SETTINGS_SCHEMA_VERSION = 21 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 
@@ -40,8 +39,6 @@ export const AppSettingsSchema = z
   .object({
     enabled: z.boolean(),
     closeToTray: z.boolean(),
-    // Retained as a compatibility mirror for pre-profile clients; profiles are authoritative.
-    activationKey: ActivationKeySchema,
     defaultProcessingMode: ProcessingModeSchema,
     widgetSize: WidgetSizeSchema,
     soundsEnabled: z.boolean(),
@@ -140,13 +137,6 @@ export const SettingsObjectSchema = z
 export const SettingsSchema = SettingsObjectSchema.superRefine((settings, context) => {
   const general = settings.dictationProfiles.find((profile) => profile.id === 'general');
   if (general === undefined) return;
-  if (settings.app.activationKey !== general.activationKey) {
-    context.addIssue({
-      code: 'custom',
-      path: ['app', 'activationKey'],
-      message: 'The activation key compatibility mirror must match the General profile.',
-    });
-  }
   if (settings.app.defaultProcessingMode !== general.processingMode) {
     context.addIssue({
       code: 'custom',
@@ -158,7 +148,6 @@ export const SettingsSchema = SettingsObjectSchema.superRefine((settings, contex
 
 const AppSettingsPatchSchema = AppSettingsSchema.partial();
 const PublicAppSettingsPatchSchema = AppSettingsSchema.omit({
-  activationKey: true,
   defaultProcessingMode: true,
 }).partial();
 const RecordingSettingsPatchSchema = RecordingSettingsSchema.partial();
@@ -212,7 +201,6 @@ export const DEFAULT_SETTINGS: Settings = deepFreeze({
   app: {
     enabled: true,
     closeToTray: true,
-    activationKey: 'Z',
     defaultProcessingMode: 'raw',
     widgetSize: 'default',
     soundsEnabled: true,

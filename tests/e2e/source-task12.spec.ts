@@ -48,7 +48,7 @@ async function axe(page: Awaited<ReturnType<typeof rendererPages>>['main']) {
 }
 async function assertCompactTracker(page: Page, currentStep: number) {
   const items = page.locator('.welcome__progress li');
-  await expect(items).toHaveCount(6);
+  await expect(items).toHaveCount(5);
   await expect(items.nth(currentStep - 1)).toHaveAttribute('data-state', 'current');
   const geometry = await items.evaluateAll((elements) =>
     elements.map((element) => {
@@ -88,12 +88,6 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await driver(application, 'setWelcomePrerequisites', [true]);
     await main.getByRole('button', { name: 'Continue' }).click();
     await expect(main.getByRole('heading', { name: 'Local model' })).toBeFocused();
-    await main.getByRole('button', { name: 'Continue' }).click();
-    await expect(main.getByRole('heading', { name: 'Shortcut', exact: true })).toBeFocused();
-    await main.getByRole('button', { name: 'Test activation shortcut' }).click();
-    await driver(application, 'activationDown');
-    await driver(application, 'activationUp');
-    await expect(main.getByText(/gesture recognized/)).toBeVisible();
     await main.getByRole('button', { name: 'Continue' }).click();
     await expect(
       main.getByRole('heading', { name: 'Smart processing', exact: true }).first(),
@@ -161,22 +155,7 @@ test('Task 12 screens remain accessible without overflow at 960 by 600', async (
         viewport: document.documentElement.clientWidth,
       })),
     ).toEqual({ width: 960, viewport: 960 });
-    for (let step = 1; step < 6; step += 1) {
-      if (step === 4) {
-        await main.getByRole('button', { name: 'Test activation shortcut' }).click();
-        await driver(application, 'activationDown');
-        await driver(application, 'activationUp');
-      }
-      const button = main.getByRole('button', {
-        name: step === 5 ? 'Skip Smart processing' : 'Continue',
-      });
-      await button.click();
-      await axe(main);
-      await assertCompactTracker(main, step + 1);
-      await main.screenshot({
-        path: `tmp/review-screenshots/welcome-step-${String(step + 1)}-960.png`,
-        fullPage: false,
-      });
+    for (let step = 1; step < 5; step += 1) {
       if (step === 4) {
         await main.getByRole('button', { name: 'Configure Smart processing' }).click();
         const scrollRegion = main.getByRole('region', { name: 'Smart processing setup controls' });
@@ -188,6 +167,16 @@ test('Task 12 screens remain accessible without overflow at 960 by 600', async (
           fullPage: false,
         });
       }
+      const button = main.getByRole('button', {
+        name: step === 4 ? 'Skip Smart processing' : 'Continue',
+      });
+      await button.click();
+      await axe(main);
+      await assertCompactTracker(main, step + 1);
+      await main.screenshot({
+        path: `tmp/review-screenshots/welcome-step-${String(step + 1)}-960.png`,
+        fullPage: false,
+      });
     }
   } finally {
     await application.evaluate(({ app }) => app.quit()).catch(() => undefined);

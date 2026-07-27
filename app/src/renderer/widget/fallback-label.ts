@@ -101,12 +101,14 @@ function fallbackSecondary(session: EchoSessionSnapshot): string {
 function normalSecondary(session: EchoSessionSnapshot): string {
   if (session.phase === 'cancelled') return 'Talking Quill';
   if (session.message !== null) return session.message;
-  if (session.phase === 'arming') return 'Release for Quick Dictation or keep holding';
+  if (session.phase === 'arming') {
+    return 'Release the final trigger for Quick Dictation or keep it held';
+  }
   if (session.phase === 'recordingQuick') {
     return 'Pause or press Enter to submit; press Escape to cancel';
   }
   if (session.phase === 'recordingExtended') {
-    return 'Press the shortcut to stop or Escape to cancel';
+    return 'Press the full shortcut chord to stop or Escape to cancel';
   }
   return 'Talking Quill';
 }

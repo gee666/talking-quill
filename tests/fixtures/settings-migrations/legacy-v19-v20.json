@@ -1,0 +1,137 @@
+{
+  "v19-profile-bindings": {
+    "schemaVersion": 19,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "Q",
+      "defaultProcessingMode": "smart",
+      "widgetSize": "large",
+      "soundsEnabled": false,
+      "launchAtLogin": true
+    },
+    "recording": { "preferredMicrophoneId": "legacy-microphone", "silencePreset": "relaxed" },
+    "transcription": { "modelId": "Xenova/whisper-small", "language": "fr" },
+    "dictationProfiles": [
+      {
+        "id": "general",
+        "name": "General moved",
+        "activationKey": "Q",
+        "shift": true,
+        "processingMode": "smart",
+        "smartPrompt": "General prompt"
+      },
+      {
+        "id": "prompt",
+        "name": "Prompt",
+        "activationKey": "Z",
+        "shift": true,
+        "processingMode": "smart",
+        "smartPrompt": null
+      },
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "Custom",
+        "activationKey": "X",
+        "shift": false,
+        "processingMode": "raw",
+        "smartPrompt": null
+      }
+    ],
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 30,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": true
+    },
+    "smartProcessing": {
+      "selectedProviderId": "ollama",
+      "providers": { "ollama": { "baseUrl": "http://127.0.0.1:11434", "keepAlive": 300 } },
+      "credentialEpochs": {},
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": false,
+      "visionOverrides": []
+    },
+    "voiceCommands": [],
+    "customVocabulary": [],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 6,
+      "microphoneTested": false,
+      "activationTested": false,
+      "microphoneEvidence": null,
+      "activationEvidence": null,
+      "modelEvidence": null,
+      "revision": 4
+    }
+  },
+  "v20-profile-bindings": {
+    "schemaVersion": 20,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "activationKey": "G",
+      "defaultProcessingMode": "raw",
+      "widgetSize": "huge",
+      "soundsEnabled": true,
+      "launchAtLogin": false
+    },
+    "recording": { "preferredMicrophoneId": null, "silencePreset": "average" },
+    "transcription": {
+      "modelId": "onnx-community/whisper-large-v3-turbo",
+      "language": null
+    },
+    "dictationProfiles": [
+      {
+        "id": "general",
+        "name": "General",
+        "activationKey": "G",
+        "shift": false,
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "prompt",
+        "name": "Prompt moved",
+        "activationKey": "P",
+        "shift": true,
+        "processingMode": "smart",
+        "smartPrompt": "Prompt profile"
+      },
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "name": "Custom shifted",
+        "activationKey": "X",
+        "shift": true,
+        "processingMode": "smart",
+        "smartPrompt": null
+      }
+    ],
+    "privacy": {
+      "historyEnabled": true,
+      "historyRetentionDays": null,
+      "retainSmartScreenshots": false,
+      "diagnosticLoggingEnabled": false
+    },
+    "smartProcessing": {
+      "selectedProviderId": "ollama",
+      "providers": { "ollama": { "baseUrl": "http://127.0.0.1:11434", "keepAlive": 300 } },
+      "credentialEpochs": {},
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": false,
+      "visionOverrides": []
+    },
+    "voiceCommands": [],
+    "customVocabulary": [],
+    "welcome": {
+      "completedAt": 1700000000000,
+      "lastStep": 5,
+      "microphoneTested": true,
+      "activationTested": false,
+      "microphoneEvidence": null,
+      "activationEvidence": null,
+      "modelEvidence": null,
+      "revision": 5
+    }
+  }
+}

@@ -27,13 +27,13 @@ function handle(request) {
   }
   const { id, method, params } = request;
   if (method === 'initialize') {
+    if (params.protocolVersion !== 3) process.exit(28);
     const initialize = () => {
       respond(id, {
-        protocolVersion: 2,
+        protocolVersion: 3,
         helperVersion: scenario === 'mismatch' ? '9.9.9' : '1.0.0',
         platform,
         architecture,
-        defaultActivationKey: 'Z',
         hookStatus:
           scenario === 'permission-required' || scenario === 'permission-recovers'
             ? 'permission_required'
@@ -56,13 +56,14 @@ function handle(request) {
       process.exit(26);
     }
     const expectedEnabled = scenario === 'expect-enabled';
-    const expectedKey = expectedEnabled ? 'Q' : null;
+    const expectedTrigger = expectedEnabled ? 'Q' : null;
     if (
       scenario === 'expect-enabled' &&
       !configured &&
       (params.enabled !== expectedEnabled ||
         !Array.isArray(params.bindings) ||
-        (expectedKey !== null && params.bindings[0]?.key !== expectedKey))
+        (expectedTrigger !== null &&
+          params.bindings[0]?.shortcut?.keys?.at(-1) !== expectedTrigger))
     )
       process.exit(25);
     configured = true;
@@ -94,7 +95,11 @@ function handle(request) {
           : 'ready',
     });
     if (scenario === 'notify') {
-      notify('activation.event', { phase: 'down', key: 'Z', shift: false });
+      notify('activation.event', {
+        phase: 'down',
+        profileId: 'general',
+        shortcut: legacyShortcut('Z', false),
+      });
     }
   } else if (method === 'shutdown') {
     const finish = () => {
@@ -104,6 +109,13 @@ function handle(request) {
     if (scenario === 'slow-shutdown') setTimeout(finish, 150);
     else finish();
   } else respondError(id, -32601, 'Method not found');
+}
+
+function legacyShortcut(key, shift) {
+  return {
+    modifiers: { ctrl: false, alt: true, shift, meta: false },
+    keys: [key],
+  };
 }
 
 function permissions() {

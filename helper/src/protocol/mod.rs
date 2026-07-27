@@ -1,4 +1,4 @@
-//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 2).
+//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 3).
 //!
 //! # Transport and framing
 //!
@@ -28,9 +28,9 @@
 //! at most 64 UTF-8 bytes; and `params` is required and must be an object.
 //! Unknown or duplicate envelope fields are invalid. An ID is either a JSON
 //! integer in `0..=9_007_199_254_740_991` or a nonempty string of at most 64
-//! UTF-8 bytes. Negative, fractional, boolean, null, array, object, empty-string,
-//! oversized, and otherwise unsupported IDs are invalid. Valid IDs are echoed
-//! unchanged; the helper does not assign IDs or enforce uniqueness, so the host
+//! UTF-8 bytes. Negative, fractional, boolean, null, array, object, oversized,
+//! and otherwise unsupported IDs are invalid. Valid IDs are echoed unchanged;
+//! the helper does not assign IDs or enforce uniqueness, so the host
 //! owns correlation. Invalid envelopes receive Invalid Request with a null
 //! response ID; malformed JSON receives Parse error with a null response ID.
 //!
@@ -49,18 +49,21 @@
 //! and are Invalid Request.
 //!
 //! - `initialize`
-//!   - Params: `{"protocolVersion":2}`.
-//!   - Result: `{"protocolVersion":2,"helperVersion":string,
-//!     "platform":string,"architecture":string,
-//!     "defaultActivationKey":"Z","hookStatus":HOOK_STATUS,
+//!   - Params: `{"protocolVersion":3}`.
+//!   - Result: `{"protocolVersion":3,"helperVersion":string,
+//!     "platform":string,"architecture":string,"hookStatus":HOOK_STATUS,
 //!     "permissions":PERMISSIONS}`.
 //! - `activation.configure`
-//!   - Params/result: `{"enabled":boolean,"bindings":[{"key":"A".."Z","shift":boolean}]}`.
-//!     At most ten distinct exact bindings are accepted. Enabling on macOS is
-//!     rejected unless required permissions and the event tap are ready;
-//!     disabling remains available during permission loss. On Windows the helper
-//!     retains unchanged no-repeat registrations and transactionally adds/removes
-//!     changed chords. Any conflict leaves the prior configuration unchanged.
+//!   - Params/result: `{"enabled":boolean,"bindings":[BINDING]}` where
+//!     `BINDING` is `{"profileId":PROFILE_ID,"shortcut":SHORTCUT}` and
+//!     `SHORTCUT` is `{"modifiers":{"ctrl":boolean,"alt":boolean,
+//!     "shift":boolean,"meta":boolean},"keys":["A".."Z",...]}`.
+//!     A shortcut contains 1 through 26 ordered unique keys, at least one of
+//!     Ctrl/Alt/Shift/Meta, and the final key is its trigger. At most ten
+//!     bindings with distinct profile IDs are accepted. Exact shortcut duplicates
+//!     and same-modifier prefix conflicts are invalid; enabled activation requires
+//!     at least one binding. Windows and macOS both consume this complete bounded
+//!     representation without reducing modifier or key-order information.
 //! - `session.set_capture`
 //!   - Params: `{"active":boolean}`.
 //!   - Result: `{"active":boolean}`.
@@ -87,8 +90,9 @@
 //! - `shutdown`
 //!   - Params: `{}`.
 //!   - Result: `{}`. Before this response is queued, the callback gate is
-//!     closed and the native hook is disabled and joined, so no callback can
-//!     enqueue or swallow input after the shutdown response.
+//!     closed and native-owner completion is awaited for a bounded interval.
+//!     An unresponsive owner is detached and reported as terminal, so no
+//!     successful shutdown response is emitted while capture state is unknown.
 //!
 //! `HOOK_STATUS` is one of `"ready"`, `"permission_required"`,
 //! `"unavailable"`, or `"stopped"`. `PERMISSIONS` is
@@ -98,7 +102,7 @@
 //! `"permission_denied"`, `"conflicting_modifiers"`, `"secure_input"`,
 //! `"os_rejected"`, or `"unavailable"`.
 //!
-//! `initialize` with `protocolVersion` exactly 2 must be the first successful
+//! `initialize` with `protocolVersion` exactly 3 must be the first successful
 //! command. Before it succeeds, other allowlisted commands return Invalid
 //! helper state. A failed or incompatible initialization leaves the helper
 //! uninitialized. After success, every later `initialize` returns Invalid
@@ -111,16 +115,17 @@
 //! # Outbound keyboard notifications
 //!
 //! While initialized and capture is enabled as appropriate, the helper may
-//! emit these ID-less JSON-RPC notifications. Activation requires the configured
-//! A-Z key with Alt/Option and optional Shift, with no Control/Ctrl, Command, or
-//! Windows key. Modifier events themselves always pass through. On Windows,
-//! WM_HOTKEY is the sole activation-down source and the low-level hook only
-//! balances the matching activation-key up; unrelated Alt chords and all letter
-//! downs remain unmodified by the hook. Session Escape/Enter capture is
-//! independent of activation configuration/modifiers.
+//! emit these ID-less JSON-RPC notifications. Platform-neutral reduction uses
+//! exact four-modifier equality and the complete ordered held-letter sequence.
+//! Prefix letters and modifiers pass through (and may therefore leak into the
+//! foreground application). Only an accepted final trigger down, its repeats,
+//! and its matching up are swallowed. Session Escape/Enter capture is independent
+//! of activation configuration/modifiers.
 //!
 //! - `activation.event` params:
-//!   `{"phase":"down"|"up","key":"A".."Z","shift":boolean}`.
+//!   `{"phase":"down"|"up","profileId":PROFILE_ID,"shortcut":SHORTCUT}`.
+//!   Down and up carry the same accepted profile-owned binding snapshot even
+//!   if activation configuration changes before the trigger is released.
 //! - `session.key` params:
 //!   `{"key":"escape"|"enter","phase":"down"|"up"}`.
 //!
@@ -170,4 +175,4 @@ pub use messages::{
 pub(crate) use server::HandleOutcome;
 pub use server::Server;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;

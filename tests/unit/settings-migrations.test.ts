@@ -16,18 +16,39 @@ const fixtureDirectory = join(import.meta.dirname, '../fixtures/settings-migrati
 const PRIMARY_RAW_FIXTURES = [
   ...readRawFixtures('legacy-v1-v12.json'),
   ...readRawFixtures('legacy-v13-v18.json'),
+  ...readRawFixtures('legacy-v19-v20.json'),
 ];
 const RAW_FIXTURES = [...PRIMARY_RAW_FIXTURES, ...readRawFixtures('legacy-forked-versions.json')];
 
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 18 }, (_, index) => index + 1),
+      Array.from({ length: 20 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
-      Array.from({ length: 18 }, (_, index) => index + 1),
+      Array.from({ length: 20 }, (_, index) => index + 1),
     );
+  });
+
+  it('makes v19 emit literal v20 before the v20 to v21 shortcut migration', () => {
+    const fixture = readRawFixtures('legacy-v19-v20.json').find(({ version }) => version === 19);
+    if (fixture === undefined) throw new Error('Missing v19 fixture');
+
+    const v20 = SETTINGS_MIGRATIONS[19]?.(fixture.source);
+    expect(v20).toMatchObject({ schemaVersion: 20, app: { activationKey: 'Q' } });
+    expect(v20).toHaveProperty('dictationProfiles.0.activationKey', 'Q');
+    expect(v20).toHaveProperty('dictationProfiles.0.shift', true);
+
+    const v21 = SettingsSchema.parse(
+      SETTINGS_MIGRATIONS[20]?.(v20 as Readonly<Record<string, unknown>>),
+    );
+    expect(v21.schemaVersion).toBe(21);
+    expect(v21.app).not.toHaveProperty('activationKey');
+    expect(v21.dictationProfiles[0]?.shortcut).toEqual({
+      modifiers: { ctrl: false, alt: true, shift: true, meta: false },
+      keys: ['Q'],
+    });
   });
 
   it.each(RAW_FIXTURES)('migrates raw $name settings without recovery', async (fixture) => {
@@ -81,6 +102,8 @@ describe('frozen settings migrations', () => {
       'legacy-settings-contracts.ts',
       'legacy-settings-v1-v12.ts',
       'legacy-settings-v13-v18.ts',
+      'legacy-settings-v19.ts',
+      'legacy-settings-v20.ts',
     ]) {
       const source = readFileSync(
         join(import.meta.dirname, '../../app/src/main/persistence/settings-migrations', filename),
@@ -109,11 +132,37 @@ function expectFrozenCanariesToSurvive(
   const { source, version } = fixture;
   const app = readRecord(source.app);
   if (typeof app?.activationKey === 'string') {
-    expect(migrated.app.activationKey).toBe(app.activationKey);
+    expect(migrated.app).not.toHaveProperty('activationKey');
+    const sourceProfiles = Array.isArray(source.dictationProfiles)
+      ? source.dictationProfiles.filter(isRecord)
+      : [];
+    const sourceGeneral = sourceProfiles.find((profile) => profile.id === 'general');
     expect(migrated.dictationProfiles.find((profile) => profile.id === 'general')).toMatchObject({
-      activationKey: app.activationKey,
+      shortcut: {
+        modifiers: {
+          ctrl: false,
+          alt: true,
+          shift: sourceGeneral?.shift === true,
+          meta: false,
+        },
+        keys: [app.activationKey],
+      },
       processingMode: app.defaultProcessingMode,
     });
+    for (const sourceProfile of sourceProfiles) {
+      const migratedProfile = migrated.dictationProfiles.find(
+        (profile) => profile.id === sourceProfile.id,
+      );
+      expect(migratedProfile?.shortcut).toEqual({
+        modifiers: {
+          ctrl: false,
+          alt: true,
+          shift: sourceProfile.shift === true,
+          meta: false,
+        },
+        keys: [sourceProfile.activationKey],
+      });
+    }
   }
   if (typeof app?.widgetSize === 'string') expect(migrated.app.widgetSize).toBe(app.widgetSize);
   if (typeof app?.soundsEnabled === 'boolean') {

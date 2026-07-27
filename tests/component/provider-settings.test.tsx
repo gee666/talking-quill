@@ -54,7 +54,7 @@ const api: MainApi = {
     complete: () =>
       Promise.resolve({
         completedAt: 1,
-        lastStep: 6,
+        lastStep: 5,
         microphoneTested: true,
         activationTested: true,
         reopened: false,
@@ -76,14 +76,17 @@ const api: MainApi = {
     openRelease: () => Promise.resolve(),
     notices: () => Promise.resolve('Third-party notices'),
   },
+  shortcutCapture: {
+    start: () => Promise.resolve(),
+    stop: () => Promise.resolve(),
+  },
   activationTest: {
     start: () =>
       Promise.resolve({
         active: true,
         phase: 'waiting',
         profileId: null,
-        activationKey: null,
-        shift: false,
+        shortcut: null,
         elapsedMs: 0,
         unavailableReason: null,
       }),
@@ -92,8 +95,7 @@ const api: MainApi = {
         active: false,
         phase: 'idle',
         profileId: null,
-        activationKey: null,
-        shift: false,
+        shortcut: null,
         elapsedMs: 0,
         unavailableReason: null,
       }),
@@ -118,7 +120,6 @@ const api: MainApi = {
         app: {
           enabled: patch.app?.enabled ?? settings.app.enabled,
           closeToTray: patch.app?.closeToTray ?? settings.app.closeToTray,
-          activationKey: settings.app.activationKey,
           defaultProcessingMode: settings.app.defaultProcessingMode,
           widgetSize: patch.app?.widgetSize ?? settings.app.widgetSize,
           soundsEnabled: patch.app?.soundsEnabled ?? settings.app.soundsEnabled,
@@ -260,7 +261,7 @@ beforeEach(() => {
   settings = structuredClone(DEFAULT_SETTINGS);
   settings.welcome = {
     completedAt: 1,
-    lastStep: 6,
+    lastStep: 5,
     microphoneTested: true,
     activationTested: true,
   };

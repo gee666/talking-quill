@@ -1,6 +1,6 @@
 {
   "name": "talking-quill",
-  "version": "1.0.2",
+  "version": "0.0.1",
   "private": true,
   "description": "Local-first system-wide dictation for Windows and macOS",
   "author": "Talking Quill contributors",

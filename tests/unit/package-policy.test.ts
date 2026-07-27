@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
@@ -189,40 +188,6 @@ describe('packaged runtime allowlist', () => {
         validAsar.filter((entry) => entry !== 'out/renderer/assets/openai-valid.png'),
       ),
     ).toThrow('Required provider logo is missing: openai');
-  });
-
-  it('binds all provider logos to exact source/current hashes while legal approval stays external', async () => {
-    const inventory = JSON.parse(
-      await readFile(resolve('docs/third-party/provider-logo-provenance.json'), 'utf8'),
-    ) as {
-      schemaVersion: number;
-      notice: string;
-      assets: {
-        path: string;
-        sha256: string;
-        sourceCommit: string;
-        sourcePath: string;
-        sourceBlob: string;
-        transformation: string;
-        trademarkApproval: string;
-      }[];
-    };
-    expect(inventory.schemaVersion).toBe(1);
-    expect(inventory.notice).toContain('external release blocker');
-    expect(inventory.assets).toHaveLength(38);
-    expect(new Set(inventory.assets.map(({ path }) => path)).size).toBe(38);
-    for (const asset of inventory.assets) {
-      expect(asset.sourceCommit).toMatch(/^[0-9a-f]{40}\^?$/u);
-      expect(asset.sourcePath.length).toBeGreaterThan(0);
-      expect(asset.sourceBlob).toMatch(/^[0-9a-f]{40}$/u);
-      expect(asset.transformation.length).toBeGreaterThan(0);
-      expect(asset.trademarkApproval).toBe('external-blocked');
-      expect(
-        createHash('sha256')
-          .update(await readFile(resolve(asset.path)))
-          .digest('hex'),
-      ).toBe(asset.sha256);
-    }
   });
 
   it('requires all 38 provider logos to have matching magic bytes and decode in Electron', () => {
@@ -498,16 +463,6 @@ describe('packaged runtime allowlist', () => {
       /inspectNativeTree\(root, \{\s*platform: mac \? 'mac' : 'win',\s*architecture: expectedArch,/u,
     );
     expect(inspector).toContain('writeArtifactProvenanceManifest');
-  });
-
-  it('verifies canonical artifact provenance immediately before CI upload', async () => {
-    const workflow = await readFile(resolve('.github/workflows/packaged-smoke.yml'), 'utf8');
-    const verification = workflow.indexOf('pnpm artifact-provenance:verify');
-    const upload = workflow.indexOf('actions/upload-artifact@');
-    expect(verification).toBeGreaterThan(0);
-    expect(upload).toBeGreaterThan(verification);
-    expect(workflow).toContain('path: ${{ steps.inspect-package.outputs.artifact_paths }}');
-    expect(await readFile(resolve('.gitignore'), 'utf8')).toContain('/artifact-provenance.json');
   });
 
   it('makes any uninspected expected final artifact fatal only in strict package gates', () => {

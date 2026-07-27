@@ -314,7 +314,9 @@ export class HelperRpcChannel {
     const raw = decodeHelperJson(payload);
     const response = HelperRpcResponseSchema.safeParse(raw);
     if (response.success) {
-      if (response.data.id === null) throw new Error('Uncorrelated helper response');
+      if (typeof response.data.id !== 'number') {
+        throw new Error('Uncorrelated helper response');
+      }
       if (this.#ignoredResponseIds.delete(response.data.id)) return;
       const pending = this.#pending.get(response.data.id);
       if (pending === undefined) throw new Error('Unknown helper response ID');
@@ -344,6 +346,9 @@ export class HelperRpcChannel {
 
     const notification = HelperNotificationSchema.parse(raw);
     if (notification.method === 'paste.committed') {
+      if (typeof notification.params.requestId !== 'number') {
+        throw new Error('Unknown paste commit request ID');
+      }
       const pending = this.#pending.get(notification.params.requestId);
       if (pending?.method !== 'paste.inject') throw new Error('Unknown paste commit request ID');
       if (pending.pasteCommitted) return;

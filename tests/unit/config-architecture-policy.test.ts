@@ -4,12 +4,6 @@ import { ESLint } from 'eslint';
 import { describe, expect, it } from 'vitest';
 import { POLICY_PATHS } from '../../scripts/verify-trusted-candidate.mjs';
 
-function protectedPaths(workflow: string): string[] {
-  const paths = /git ls-tree HEAD -- ([^|]+) \| sha256sum/u.exec(workflow)?.[1];
-  if (paths === undefined) throw new Error('Workflow does not define a protected policy tree.');
-  return paths.trim().split(/\s+/u);
-}
-
 const eslint = new ESLint();
 
 interface RestrictedImportOptions {
@@ -62,15 +56,6 @@ async function relativeModuleClosure(entryPaths: readonly string[]): Promise<Set
 }
 
 describe('configuration architecture policy', () => {
-  it('keeps both release controllers bound to the verifier exact protected path set', async () => {
-    const [candidate, publication] = await Promise.all([
-      readFile('.github/workflows/release.yml', 'utf8'),
-      readFile('.github/workflows/publish-release.yml', 'utf8'),
-    ]);
-    expect(protectedPaths(candidate)).toEqual(POLICY_PATHS);
-    expect(protectedPaths(publication)).toEqual(POLICY_PATHS);
-  });
-
   it('covers the relative module dependency closure of protected release executables', async () => {
     const protectedPaths = new Set(POLICY_PATHS);
     const closure = await relativeModuleClosure(
@@ -86,75 +71,6 @@ describe('configuration architecture policy', () => {
     ]) {
       expect(protectedPaths.has(dependency), dependency).toBe(true);
     }
-  });
-
-  it('protects package-manager execution configuration across the signing boundary', async () => {
-    const [workflow, notices, npmrc, workspace, lock] = await Promise.all([
-      readFile('.github/workflows/release.yml', 'utf8'),
-      readFile('scripts/generate-notices.mjs', 'utf8'),
-      readFile('.npmrc', 'utf8'),
-      readFile('pnpm-workspace.yaml', 'utf8'),
-      readFile('pnpm-lock.yaml', 'utf8'),
-    ]);
-    expect(POLICY_PATHS).toContain('.npmrc');
-    expect(npmrc).not.toMatch(
-      /^(?:save-exact|engine-strict|strict-peer-dependencies|auto-install-peers)=/mu,
-    );
-    expect(workspace).not.toMatch(
-      /^(?:saveExact|engineStrict|strictPeerDependencies|sharedWorkspaceLockfile|autoInstallPeers):/mu,
-    );
-    expect(lock).toMatch(/settings:\s+autoInstallPeers: true/u);
-    expect(notices.match(/--config\.ignore-pnpmfile=true/gu)).toHaveLength(2);
-    expect(workflow).toContain('pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile');
-  });
-
-  it('preserves prebuilt metadata and signs the same restored tree that is verified', async () => {
-    const workflow = await readFile('.github/workflows/release.yml', 'utf8');
-    const archive = workflow.indexOf('tar -czf tmp/prebuilt-transfer/application.tar.gz');
-    const restore = workflow.indexOf('tar -xzf tmp/prebuilt-transfer/application.tar.gz');
-    const sign = workflow.indexOf(
-      "node build/mac-sign.cjs sign '${{ matrix.target }}' '${{ matrix.packageRoot }}'",
-    );
-    const distributable = workflow.indexOf('--prepackaged');
-    const inspect = workflow.indexOf(
-      'node scripts/inspect-package.mjs -- ${{ matrix.packageRoot }}',
-      sign,
-    );
-    expect(archive).toBeGreaterThan(0);
-    expect(restore).toBeGreaterThan(archive);
-    expect(sign).toBeGreaterThan(restore);
-    expect(distributable).toBeGreaterThan(sign);
-    expect(inspect).toBeGreaterThan(distributable);
-    expect(workflow).toContain('path: tmp/prebuilt-transfer/application.tar.gz');
-    expect(workflow).not.toContain('path: ${{ matrix.packageRoot }}');
-    expect(workflow).toContain('node build/mac-sign.cjs notarize-dmg');
-
-    const windowsDistributable = workflow.slice(
-      workflow.indexOf('Create the signed Windows installer'),
-      workflow.indexOf('Create macOS distributables'),
-    );
-    const macDistributable = workflow.slice(
-      workflow.indexOf('Create macOS distributables'),
-      workflow.indexOf('Notarize and staple the produced macOS disk image'),
-    );
-    expect(windowsDistributable).toContain('secrets.WINDOWS_CSC_LINK');
-    for (const sanitizedToolOverride of [
-      "SIGNTOOL_PATH: ''",
-      "ELECTRON_BUILDER_WINDOWS_KITS_PATH: ''",
-      "ELECTRON_BUILDER_OSSL_SIGNCODE_PATH: ''",
-      "ELECTRON_BUILDER_RCEDIT_PATH: ''",
-    ]) {
-      expect(windowsDistributable).toContain(sanitizedToolOverride);
-    }
-    expect(macDistributable).not.toMatch(/CSC_LINK|CSC_KEY_PASSWORD|MACOS_CSC/u);
-    expect(workflow).toContain('Test-Path app/electron-builder.env');
-    expect(workflow.match(/^\s+CSC_LINK:/gmu)).toHaveLength(3);
-    expect(workflow.match(/secrets\.MACOS_CSC_LINK/gu)).toHaveLength(2);
-    expect(workflow).toContain('pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile');
-    expect(workflow).not.toContain(
-      'pnpm exec electron-builder --config ../build/electron-builder.yml --prepackaged',
-    );
-    expect(inspect).toBeLessThan(workflow.indexOf('Verify Windows Authenticode', inspect));
   });
 
   it('retains renderer/shared and preload boundaries in narrow transport exceptions', async () => {

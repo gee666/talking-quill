@@ -23,7 +23,6 @@ export interface SourceTask6Composition {
   readonly welcome: {
     readonly microphone: boolean;
     readonly model: boolean;
-    readonly helper: boolean;
   };
   readonly driver: unknown;
   startPackagedMedia(): void;

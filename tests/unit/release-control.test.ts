@@ -9,7 +9,7 @@ import { validatePublicRelease } from '../../scripts/verify-public-release.mjs';
 const policy = {
   repository: 'gee666/talking-quill',
   defaultBranch: 'main',
-  releaseTag: 'v1.0.2',
+  releaseTag: 'v0.0.1',
   environments: ['release-trust', 'release-signing', 'release-publication'],
   runnerLabels: ['release-runner'],
   environmentSecrets: { 'release-signing': ['SIGNING_KEY'] },
@@ -134,7 +134,7 @@ describe('release control-plane policy', () => {
       ),
     ).toThrow('protects the release tag');
     expect(() =>
-      validateExternalControls(controls, { ...policy, releaseTag: 'release-1.0.2' }),
+      validateExternalControls(controls, { ...policy, releaseTag: 'release-0.0.1' }),
     ).toThrow('strict semver release tag');
     expect(() => validateExternalControls({ ...controls, runnerLabels: [] }, policy)).toThrow(
       'runner label',
@@ -150,7 +150,7 @@ describe('release control-plane policy', () => {
     );
     expect(() => parseApprovedFingerprints('')).toThrow();
     expect(() => parseApprovedFingerprints('not-a-fingerprint')).toThrow();
-    expect(POLICY_PATHS).toContain('.github/workflows/publish-release.yml');
+    expect(POLICY_PATHS.some((path) => path.startsWith('.github/'))).toBe(false);
     expect(POLICY_PATHS).toContain('scripts/verify-public-release.mjs');
   });
 

@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use talking_quill_helper::{
     CriticalDelivery, RunError,
     framing::{MAX_FRAME_BYTES, read_frame, write_frame},
-    keyboard::{ActivationBindings, ActivationKey, EventPhase, HelperEvent, SessionKey},
+    keyboard::{
+        ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, ProfileId,
+        SessionKey, Shortcut, ShortcutModifiers,
+    },
     platform::{
         CallbackGate, FrontApp, HookStatus, PasteFailure, PasteResult, PermissionState,
         Permissions, Platform, PlatformError, TerminalReason, TerminalSignal,
@@ -114,7 +117,9 @@ impl Platform for FakePlatform {
         *self.state.activation.lock().unwrap() = bindings
             .iter()
             .next()
-            .map_or(ActivationKey::DEFAULT, |binding| binding.0);
+            .map_or(ActivationKey::DEFAULT, |binding| {
+                binding.shortcut().trigger()
+            });
         *self.state.activation_bindings.lock().unwrap() = bindings;
         *self.state.activation_enabled.lock().unwrap() = enabled;
         Ok(())
@@ -171,9 +176,20 @@ impl Platform for FakePlatform {
             && let Some(outbound) = &self.outbound
         {
             let _ = outbound.try_send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    Shortcut::new(
+                        ShortcutModifiers {
+                            ctrl: false,
+                            alt: true,
+                            shift: false,
+                            meta: false,
+                        },
+                        &[ActivationKey::Z],
+                    )
+                    .unwrap(),
+                ),
                 phase: EventPhase::Up,
-                shift: false,
             }));
         }
         self.state
@@ -277,10 +293,51 @@ fn receive(receiver: &Receiver<Outbound>) -> Value {
     serde_json::from_slice(&encode_outbound(&outbound).unwrap()).unwrap()
 }
 
+fn shortcut_value(keys: &[&str], ctrl: bool, alt: bool, shift: bool, meta: bool) -> Value {
+    json!({
+        "modifiers": {"ctrl": ctrl, "alt": alt, "shift": shift, "meta": meta},
+        "keys": keys,
+    })
+}
+
+fn alt_shortcut(key: &str, shift: bool) -> Value {
+    shortcut_value(&[key], false, true, shift, false)
+}
+
+fn profile_id(index: usize) -> String {
+    match index {
+        0 => "general".to_owned(),
+        1 => "prompt".to_owned(),
+        _ => format!("00000000-0000-4000-8000-{index:012x}"),
+    }
+}
+
+fn binding_value(profile_id: &str, shortcut: Value) -> Value {
+    json!({"profileId": profile_id, "shortcut": shortcut})
+}
+
+fn alt_binding(profile_id: &str, key: &str, shift: bool) -> Value {
+    binding_value(profile_id, alt_shortcut(key, shift))
+}
+
+fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
+    Shortcut::new(
+        ShortcutModifiers {
+            ctrl: false,
+            alt: true,
+            shift,
+            meta: false,
+        },
+        &[key],
+    )
+    .unwrap()
+}
+
 fn initialize(server: &mut Server<FakePlatform>, receiver: &Receiver<Outbound>) {
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 2}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
     let response = receive(receiver);
-    assert_eq!(response["result"]["protocolVersion"], 2);
+    assert_eq!(response["result"]["protocolVersion"], 3);
+    assert!(response["result"].get("defaultActivationKey").is_none());
 }
 
 fn assert_error(receiver: &Receiver<Outbound>, code: i64, id: Value) {
@@ -316,7 +373,7 @@ fn inbound_allowlist_is_exact() {
 }
 
 #[test]
-fn initialization_must_be_first_exactly_once_and_exactly_version_two() {
+fn initialization_must_be_first_exactly_once_and_exactly_version_three() {
     let (mut server, receiver, state, gate) = setup_observable();
     assert!(!gate.is_open());
 
@@ -378,6 +435,26 @@ fn successful_paste_commit_disables_session_capture_before_responding() {
 }
 
 #[test]
+fn string_request_ids_are_echoed_by_responses_and_paste_commit_notifications() {
+    let (mut server, receiver, _state, _gate) = setup_observable();
+    assert!(server.handle_payload(&request_with_id(
+        json!("initialize-id"),
+        "initialize",
+        json!({"protocolVersion": 3}),
+    )));
+    assert_eq!(receive(&receiver)["id"], "initialize-id");
+
+    assert!(server.handle_payload(&request_with_id(
+        json!("paste-id"),
+        "paste.inject",
+        json!({}),
+    )));
+    let committed = receive(&receiver);
+    assert_eq!(committed["params"]["requestId"], "paste-id");
+    assert_eq!(receive(&receiver)["id"], "paste-id");
+}
+
+#[test]
 fn activation_stays_disabled_until_exact_configuration_enables_it() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
@@ -394,14 +471,14 @@ fn activation_stays_disabled_until_exact_configuration_enables_it() {
     assert!(server.handle_payload(&request(
         2,
         "activation.configure",
-        json!({"enabled": true, "bindings": [{"key": "B", "shift": false}]}),
+        json!({"enabled": true, "bindings": [alt_binding("general", "B", false)]}),
     )));
     assert_eq!(
         receive(&receiver),
         json!({
             "jsonrpc": "2.0",
             "id": 2,
-            "result": {"enabled": true, "bindings": [{"key": "B", "shift": false}]},
+            "result": {"enabled": true, "bindings": [alt_binding("general", "B", false)]},
         })
     );
     assert!(*state.activation_enabled.lock().unwrap());
@@ -410,11 +487,11 @@ fn activation_stays_disabled_until_exact_configuration_enables_it() {
     assert!(server.handle_payload(&request(
         3,
         "activation.configure",
-        json!({"enabled": false, "bindings": [{"key": "C", "shift": false}]}),
+        json!({"enabled": false, "bindings": [alt_binding("general", "C", false)]}),
     )));
     assert_eq!(
         receive(&receiver)["result"],
-        json!({"enabled": false, "bindings": [{"key": "C", "shift": false}]})
+        json!({"enabled": false, "bindings": [alt_binding("general", "C", false)]})
     );
     assert!(!*state.activation_enabled.lock().unwrap());
     assert_eq!(*state.activation.lock().unwrap(), ActivationKey::C);
@@ -427,7 +504,7 @@ fn activation_configuration_failure_is_native_error_and_retains_previous_state()
     assert!(server.handle_payload(&request(
         2,
         "activation.configure",
-        json!({"enabled": true, "bindings": [{"key": "A", "shift": false}]}),
+        json!({"enabled": true, "bindings": [alt_binding("general", "A", false)]}),
     )));
     let _ = receive(&receiver);
 
@@ -435,7 +512,7 @@ fn activation_configuration_failure_is_native_error_and_retains_previous_state()
     assert!(server.handle_payload(&request(
         3,
         "activation.configure",
-        json!({"enabled": true, "bindings": [{"key": "B", "shift": false}]}),
+        json!({"enabled": true, "bindings": [alt_binding("general", "B", false)]}),
     )));
     assert_error(&receiver, -32_003, json!(3));
     assert!(*state.activation_enabled.lock().unwrap());
@@ -448,7 +525,7 @@ fn worst_case_native_front_app_result_is_sanitized_below_frame_limit() {
     initialize(&mut server, &receiver);
     state.oversized_front_app.store(true, Ordering::Release);
 
-    let id = "\u{0001}".repeat(64);
+    let id = 9_007_199_254_740_991_u64;
     assert!(server.handle_payload(&request_with_id(json!(id), "front_app.get", json!({}),)));
     let response = receive(&receiver);
     assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_FRAME_BYTES);
@@ -509,7 +586,7 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 2})),
+        request(1, "initialize", json!({"protocolVersion": 3})),
         request(2, "ping", json!({})),
         request(3, "shutdown", json!({})),
     ] {
@@ -536,7 +613,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
     let mut eof_input = Vec::new();
     write_frame(
         &mut eof_input,
-        &request(1, "initialize", json!({"protocolVersion": 2})),
+        &request(1, "initialize", json!({"protocolVersion": 3})),
     )
     .unwrap();
     let mut eof_output = Vec::new();
@@ -554,7 +631,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
 fn framed_runner_does_not_wait_for_eof_after_shutdown() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 2})),
+        request(1, "initialize", json!({"protocolVersion": 3})),
         request(2, "shutdown", json!({})),
     ] {
         write_frame(&mut input, &payload).unwrap();
@@ -609,9 +686,11 @@ fn full_ordinary_queue_cannot_drop_a_reserved_paste_delivery() {
     for _ in 0..256 {
         outbound_tx
             .send(Outbound::Event(HelperEvent::Activation {
-                key: ActivationKey::A,
+                binding: ActivationBinding::new(
+                    ProfileId::GENERAL,
+                    alt_shortcut_model(ActivationKey::A, false),
+                ),
                 phase: EventPhase::Down,
-                shift: false,
             }))
             .unwrap();
     }
@@ -662,11 +741,11 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
 #[test]
 fn full_framed_coordinator_dispatches_every_registered_method_in_sequence() {
     let calls = [
-        (1, "initialize", json!({"protocolVersion": 2})),
+        (1, "initialize", json!({"protocolVersion": 3})),
         (
             2,
             "activation.configure",
-            json!({"enabled": true, "bindings": [{"key": "Z", "shift": false}]}),
+            json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         (3, "session.set_capture", json!({"active": true})),
         (4, "paste.inject", json!({})),
@@ -715,7 +794,7 @@ fn every_allowed_method_dispatches_after_initialization() {
         (
             2,
             "activation.configure",
-            json!({"enabled": true, "bindings": [{"key": "Z", "shift": false}]}),
+            json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         (3, "session.set_capture", json!({"active": true})),
         (4, "paste.inject", json!({})),
@@ -851,8 +930,7 @@ fn request_id_boundaries_and_types_are_enforced() {
     let valid_ids = [
         json!(0),
         json!(9_007_199_254_740_991_u64),
-        json!("x"),
-        json!("a".repeat(64)),
+        json!("request"),
         json!("é".repeat(32)),
     ];
     for id in valid_ids {
@@ -958,9 +1036,11 @@ fn secure_input_paste_failure_has_stable_wire_value() {
 #[test]
 fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
     let activation = Outbound::Event(HelperEvent::Activation {
-        key: ActivationKey::Z,
+        binding: ActivationBinding::new(
+            ProfileId::PROMPT,
+            alt_shortcut_model(ActivationKey::Z, true),
+        ),
         phase: EventPhase::Down,
-        shift: true,
     });
     let activation: Value = serde_json::from_slice(&encode_outbound(&activation).unwrap()).unwrap();
     assert_eq!(
@@ -968,7 +1048,11 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
         json!({
             "jsonrpc": "2.0",
             "method": "activation.event",
-            "params": {"phase": "down", "key": "Z", "shift": true},
+            "params": {
+                "phase": "down",
+                "profileId": "prompt",
+                "shortcut": alt_shortcut("Z", true),
+            },
         })
     );
 
@@ -990,7 +1074,7 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
 #[test]
 fn valid_notifications_are_never_executed_or_answered() {
     let (mut server, receiver, state, gate) = setup_observable();
-    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 2}),)));
+    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 3}),)));
     assert!(receiver.try_recv().is_err());
     assert!(!gate.is_open());
 
@@ -998,10 +1082,10 @@ fn valid_notifications_are_never_executed_or_answered() {
     state.calls.lock().unwrap().clear();
 
     for (method, params) in [
-        ("initialize", json!({"protocolVersion": 2})),
+        ("initialize", json!({"protocolVersion": 3})),
         (
             "activation.configure",
-            json!({"enabled": true, "bindings": [{"key": "Z", "shift": false}]}),
+            json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         ("session.set_capture", json!({"active": true})),
         ("paste.inject", json!({})),
@@ -1045,7 +1129,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
         Arc::clone(&terminal),
     );
 
-    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 2}),)));
+    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
     assert!(!gate.is_open());
     assert_eq!(
         terminal.reason(),
@@ -1075,7 +1159,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 2}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
     let _ = outbound_rx.recv().unwrap();
     assert!(gate.is_open());
     drop(outbound_rx);
@@ -1110,7 +1194,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
         Arc::clone(&gate),
         terminal,
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 2}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
     assert!(gate.is_open());
 
     assert!(!server.handle_payload(&request(2, "ping", json!({}))));
@@ -1185,28 +1269,126 @@ proptest! {
 }
 
 #[test]
-fn protocol_v2_configures_all_exact_bindings_and_rejects_legacy_shape() {
+fn protocol_v3_configures_ordered_chords_and_preserves_every_wire_field() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
     let values = json!({
         "enabled": true,
         "bindings": [
-            {"key": "A", "shift": false},
-            {"key": "A", "shift": true},
-            {"key": "Q", "shift": false}
+            binding_value("general", shortcut_value(&["X", "P"], false, true, false, false)),
+            binding_value("prompt", shortcut_value(&["P"], true, false, true, false)),
+            binding_value(&profile_id(2), shortcut_value(&["X"], false, true, true, false))
         ]
     });
     assert!(server.handle_payload(&request(90, "activation.configure", values.clone())));
     assert_eq!(receive(&receiver)["result"], values);
+
     let configured = *state.activation_bindings.lock().unwrap();
-    assert!(configured.contains(ActivationKey::A, false));
-    assert!(configured.contains(ActivationKey::A, true));
-    assert!(configured.contains(ActivationKey::Q, false));
+    assert_eq!(
+        serde_json::to_value(configured).unwrap(),
+        values["bindings"]
+    );
+    assert_eq!(
+        configured.iter().next().unwrap().shortcut().keys(),
+        &[ActivationKey::X, ActivationKey::P]
+    );
+    assert_eq!(
+        configured.iter().nth(1).unwrap().shortcut().trigger(),
+        ActivationKey::P
+    );
+}
+
+#[test]
+fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+
+    let ten: Vec<_> = (0..10)
+        .map(|index| {
+            let key = char::from(b'A' + index as u8).to_string();
+            alt_binding(&profile_id(index), &key, false)
+        })
+        .collect();
+    assert!(server.handle_payload(&request(
+        90,
+        "activation.configure",
+        json!({"enabled": true, "bindings": ten}),
+    )));
+    assert!(receive(&receiver).get("result").is_some());
 
     assert!(server.handle_payload(&request(
         91,
         "activation.configure",
-        json!({"enabled": true, "key": "Z"}),
+        json!({"enabled": false, "bindings": []}),
     )));
-    assert_error(&receiver, -32_602, json!(91));
+    assert_eq!(
+        receive(&receiver)["result"],
+        json!({"enabled": false, "bindings": []})
+    );
+
+    let eleven: Vec<_> = (0..11)
+        .map(|index| {
+            let key = char::from(b'A' + index as u8).to_string();
+            alt_binding(&profile_id(index), &key, false)
+        })
+        .collect();
+    let mut twenty_seven: Vec<_> = ('A'..='Z').map(|key| key.to_string()).collect();
+    twenty_seven.push("A".to_owned());
+    let alt_x = shortcut_value(&["X"], false, true, false, false);
+    let alt_x_p = shortcut_value(&["X", "P"], false, true, false, false);
+    let invalid_profile = "00000000-0000-0000-8000-000000000001";
+    let invalid = [
+        json!({"enabled": true, "bindings": []}),
+        json!({"enabled": true, "bindings": eleven}),
+        json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&[], false, true, false, false))]}),
+        json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A"], false, false, false, false))]}),
+        json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A", "A"], false, true, false, false))]}),
+        json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": {"modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false}, "keys": ["a"]}}]}),
+        json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": {"modifiers": {"alt": true, "shift": false, "meta": false}, "keys": ["A"]}}]}),
+        json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": {"modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false, "capsLock": false}, "keys": ["A"]}}]}),
+        json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": {"modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false}, "keys": ["A"], "trigger": "A"}}]}),
+        json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&twenty_seven.iter().map(String::as_str).collect::<Vec<_>>(), false, true, false, false))]}),
+        json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("prompt", alt_x.clone())]}),
+        json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("prompt", alt_x_p.clone())]}),
+        json!({"enabled": true, "bindings": [binding_value("general", alt_x_p), binding_value("prompt", alt_x.clone())]}),
+        json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("general", shortcut_value(&["Q"], false, true, false, false))]}),
+        json!({"enabled": true, "bindings": [binding_value(invalid_profile, alt_x.clone())]}),
+        json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": alt_x.clone(), "extra": true}]}),
+        json!({"enabled": true, "bindings": [alt_x]}),
+    ];
+
+    for (offset, params) in invalid.into_iter().enumerate() {
+        let id = 100 + offset as u64;
+        assert!(server.handle_payload(&request(id, "activation.configure", params)));
+        assert_error(&receiver, -32_602, json!(id));
+    }
+}
+
+#[test]
+fn protocol_v3_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+    let values = json!({
+        "enabled": true,
+        "bindings": [
+            binding_value("general", shortcut_value(&["X"], false, true, false, false)),
+            binding_value("prompt", shortcut_value(&["X", "P"], true, false, true, false))
+        ]
+    });
+    assert!(server.handle_payload(&request(200, "activation.configure", values.clone())));
+    assert_eq!(receive(&receiver)["result"], values);
+
+    let shift_only = json!({
+        "enabled": true,
+        "bindings": [binding_value("general", shortcut_value(&["P"], false, false, true, false))]
+    });
+    assert!(server.handle_payload(&request(201, "activation.configure", shift_only.clone(),)));
+    assert_eq!(receive(&receiver)["result"], shift_only);
+
+    assert!(server.handle_payload(&request(
+        202,
+        "activation.configure",
+        json!({"enabled": true, "bindings": [{"key": "Z", "shift": false}]}),
+    )));
+    assert_error(&receiver, -32_602, json!(202));
 }

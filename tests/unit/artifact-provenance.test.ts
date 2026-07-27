@@ -11,7 +11,7 @@ import {
 
 const root = resolve('tmp', 'artifact-provenance-fixtures');
 const packageRoot = resolve(root, 'release', 'win-unpacked');
-const artifact = resolve(root, 'release', 'Talking-Quill-1.0.2-win-x64.exe');
+const artifact = resolve(root, 'release', 'Talking-Quill-0.0.1-win-x64.exe');
 
 beforeEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -29,7 +29,7 @@ afterEach(async () => {
 
 async function writeManifest() {
   return writeArtifactProvenanceManifest({
-    version: '1.0.2',
+    version: '0.0.1',
     platform: 'win',
     arch: 'x64',
     packageRoot,
@@ -43,7 +43,7 @@ describe('canonical artifact provenance manifest', () => {
     await expect(verifyArtifactProvenanceManifest()).resolves.toEqual(manifest);
     expect(artifactUploadPaths(manifest)).toEqual([
       'tmp/artifact-provenance-fixtures/release/win-unpacked/**',
-      'tmp/artifact-provenance-fixtures/release/Talking-Quill-1.0.2-win-x64.exe',
+      'tmp/artifact-provenance-fixtures/release/Talking-Quill-0.0.1-win-x64.exe',
       'artifact-provenance.json',
     ]);
     const persisted = await readFile(artifactProvenanceManifestPath, 'utf8');

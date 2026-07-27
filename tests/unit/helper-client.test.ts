@@ -4,6 +4,20 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HelperClient } from '../../app/src/main/helper/helper-client';
 import { encodeHelperFrame, HelperFrameDecoder } from '../../app/src/main/helper/framing';
+import type { ActivationBinding } from '../../app/src/shared/helper/protocol';
+import {
+  shortcutFromLegacyActivation as legacyShortcut,
+  type Shortcut,
+  type ShortcutKey,
+} from '../../app/src/shared/schemas/shortcut';
+
+function shortcutFromLegacyActivation(
+  key: ShortcutKey,
+  shift: boolean,
+  profileId = 'general',
+): ActivationBinding {
+  return { profileId, shortcut: legacyShortcut(key, shift) };
+}
 
 const fixture = resolve('tests/fixtures/fake-helper.mjs');
 const clients: HelperClient[] = [];
@@ -84,11 +98,10 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
               jsonrpc: '2.0',
               id: request.id,
               result: {
-                protocolVersion: 2,
+                protocolVersion: 3,
                 helperVersion: '1.0.0',
                 platform: process.platform === 'win32' ? 'windows' : 'macos',
                 architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',
-                defaultActivationKey: 'Z',
                 hookStatus: 'ready',
                 permissions: {
                   accessibility: 'not_applicable',
@@ -208,14 +221,14 @@ describe('supervised native HelperClient', () => {
     expect(readiness).toContain('ready');
     await expect(
       client.configureActivation(true, [
-        { key: 'Z', shift: false },
-        { key: 'Z', shift: true },
+        shortcutFromLegacyActivation('Z', false),
+        shortcutFromLegacyActivation('Z', true, 'prompt'),
       ]),
     ).resolves.toEqual({
       enabled: true,
       bindings: [
-        { key: 'Z', shift: false },
-        { key: 'Z', shift: true },
+        shortcutFromLegacyActivation('Z', false),
+        shortcutFromLegacyActivation('Z', true, 'prompt'),
       ],
     });
     await expect(client.setSessionCapture(true)).resolves.toEqual({ active: true });
@@ -229,6 +242,47 @@ describe('supervised native HelperClient', () => {
 
     await client.stop();
     expect(client.readiness).toMatchObject({ status: 'stopped', reason: 'shutdown' });
+  });
+
+  it('deep-clones and freezes retained shortcut intent before replay', async () => {
+    const controlled = createControlledClient();
+    const input: Shortcut = {
+      modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+      keys: ['Q', 'P'],
+    };
+    const configured = await controlled.client.configureActivation(true, [
+      { profileId: 'general', shortcut: input },
+    ]);
+
+    expect(Object.isFrozen(configured)).toBe(true);
+    expect(Object.isFrozen(configured.bindings)).toBe(true);
+    expect(Object.isFrozen(configured.bindings[0])).toBe(true);
+    expect(Object.isFrozen(configured.bindings[0]?.shortcut)).toBe(true);
+    expect(Object.isFrozen(configured.bindings[0]?.shortcut.modifiers)).toBe(true);
+    expect(Object.isFrozen(configured.bindings[0]?.shortcut.keys)).toBe(true);
+
+    input.modifiers.ctrl = false;
+    input.keys[0] = 'R';
+    const starting = controlled.client.start();
+    await vi.waitFor(() =>
+      expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
+        enabled: true,
+        bindings: [
+          {
+            profileId: 'general',
+            shortcut: {
+              modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+              keys: ['Q', 'P'],
+            },
+          },
+        ],
+      }),
+    );
+    const replay = latestRequest(controlled.requests, 'activation.configure');
+    controlled.emitResult(replay.id, replay.params);
+    await starting;
+    controlled.close();
+    await controlled.client.stop();
   });
 
   it('uses the protocol default without a redundant startup configuration round trip', async () => {
@@ -520,7 +574,9 @@ describe('supervised native HelperClient', () => {
     const controlled = createControlledClient();
     try {
       await controlled.client.start();
-      const desired = controlled.client.configureActivation(true, [{ key: 'Q', shift: false }]);
+      const desired = controlled.client.configureActivation(true, [
+        shortcutFromLegacyActivation('Q', false),
+      ]);
       await vi.waitFor(() =>
         expect(latestRequest(controlled.requests, 'activation.configure').params).toMatchObject({
           enabled: true,
@@ -528,7 +584,7 @@ describe('supervised native HelperClient', () => {
       );
       controlled.emitResult(latestRequest(controlled.requests, 'activation.configure').id, {
         enabled: true,
-        bindings: [{ key: 'Q', shift: false }],
+        bindings: [shortcutFromLegacyActivation('Q', false)],
       });
       await desired;
 
@@ -550,11 +606,14 @@ describe('supervised native HelperClient', () => {
         ).toHaveLength(activationCallsBeforeLoss + 1),
       );
       const suspend = latestRequest(controlled.requests, 'activation.configure');
-      expect(suspend.params).toEqual({ enabled: false, bindings: [{ key: 'Q', shift: false }] });
+      expect(suspend.params).toEqual({
+        enabled: false,
+        bindings: [shortcutFromLegacyActivation('Q', false)],
+      });
       expect(controlled.client.readiness.status).toBe('ready');
       controlled.emitResult(suspend.id, {
         enabled: false,
-        bindings: [{ key: 'Q', shift: false }],
+        bindings: [shortcutFromLegacyActivation('Q', false)],
       });
       await vi.waitFor(() =>
         expect(controlled.client.readiness).toMatchObject({
@@ -564,18 +623,18 @@ describe('supervised native HelperClient', () => {
       );
 
       const updatedIntent = controlled.client.configureActivation(true, [
-        { key: 'A', shift: true },
+        shortcutFromLegacyActivation('A', true),
       ]);
       await vi.waitFor(() =>
         expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
           enabled: false,
-          bindings: [{ key: 'A', shift: true }],
+          bindings: [shortcutFromLegacyActivation('A', true)],
         }),
       );
       const suspendedUpdate = latestRequest(controlled.requests, 'activation.configure');
       controlled.emitResult(suspendedUpdate.id, {
         enabled: false,
-        bindings: [{ key: 'A', shift: true }],
+        bindings: [shortcutFromLegacyActivation('A', true)],
       });
       await updatedIntent;
 
@@ -596,12 +655,12 @@ describe('supervised native HelperClient', () => {
       const restore = latestRequest(controlled.requests, 'activation.configure');
       expect(restore.params).toEqual({
         enabled: true,
-        bindings: [{ key: 'A', shift: true }],
+        bindings: [shortcutFromLegacyActivation('A', true)],
       });
       expect(controlled.client.readiness.status).toBe('permission-required');
       controlled.emitResult(restore.id, {
         enabled: true,
-        bindings: [{ key: 'A', shift: true }],
+        bindings: [shortcutFromLegacyActivation('A', true)],
       });
       await vi.waitFor(() => expect(controlled.client.readiness.status).toBe('ready'));
     } finally {
@@ -615,16 +674,16 @@ describe('supervised native HelperClient', () => {
     const controlled = createControlledClient();
     await controlled.client.start();
     const first = controlled.client
-      .configureActivation(true, [{ key: 'A', shift: false }])
+      .configureActivation(true, [shortcutFromLegacyActivation('A', false)])
       .catch((error: unknown) => error);
     const second = controlled.client
-      .configureActivation(true, [{ key: 'B', shift: true }])
+      .configureActivation(true, [shortcutFromLegacyActivation('B', true)])
       .catch((error: unknown) => error);
 
     await vi.waitFor(() =>
       expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
         enabled: true,
-        bindings: [{ key: 'A', shift: false }],
+        bindings: [shortcutFromLegacyActivation('A', false)],
       }),
     );
     controlled.emitError(latestRequest(controlled.requests, 'activation.configure').id);
@@ -642,7 +701,7 @@ describe('supervised native HelperClient', () => {
     await vi.waitFor(() =>
       expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
         enabled: true,
-        bindings: [{ key: 'B', shift: true }],
+        bindings: [shortcutFromLegacyActivation('B', true)],
       }),
     );
     controlled.emitError(latestRequest(controlled.requests, 'activation.configure').id);
@@ -668,7 +727,9 @@ describe('supervised native HelperClient', () => {
     const controlled = createControlledClient();
     try {
       await controlled.client.start();
-      const enabling = controlled.client.configureActivation(true, [{ key: 'Z', shift: false }]);
+      const enabling = controlled.client.configureActivation(true, [
+        shortcutFromLegacyActivation('Z', false),
+      ]);
       const enablingOutcome = enabling.catch((error: unknown) => error);
       await vi.waitFor(() =>
         expect(latestRequest(controlled.requests, 'activation.configure').params).toMatchObject({
@@ -699,20 +760,20 @@ describe('supervised native HelperClient', () => {
       for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
       controlled.emitResult(staleEnable.id, {
         enabled: true,
-        bindings: [{ key: 'Z', shift: false }],
+        bindings: [shortcutFromLegacyActivation('Z', false)],
       });
 
       await vi.waitFor(() =>
         expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
           enabled: false,
-          bindings: [{ key: 'Z', shift: false }],
+          bindings: [shortcutFromLegacyActivation('Z', false)],
         }),
       );
       const disable = latestRequest(controlled.requests, 'activation.configure');
       expect(controlled.client.readiness.status).toBe('ready');
       controlled.emitResult(disable.id, {
         enabled: false,
-        bindings: [{ key: 'Z', shift: false }],
+        bindings: [shortcutFromLegacyActivation('Z', false)],
       });
 
       await expect(enablingOutcome).resolves.toMatchObject({ enabled: true });
@@ -728,7 +789,9 @@ describe('supervised native HelperClient', () => {
   it('recycles a granted-permission helper whose live hook becomes unavailable', async () => {
     const controlled = createControlledClient();
     await controlled.client.start();
-    const desired = controlled.client.configureActivation(true, [{ key: 'Z', shift: false }]);
+    const desired = controlled.client.configureActivation(true, [
+      shortcutFromLegacyActivation('Z', false),
+    ]);
     await vi.waitFor(() =>
       expect(latestRequest(controlled.requests, 'activation.configure').params).toMatchObject({
         enabled: true,
@@ -736,7 +799,7 @@ describe('supervised native HelperClient', () => {
     );
     controlled.emitResult(latestRequest(controlled.requests, 'activation.configure').id, {
       enabled: true,
-      bindings: [{ key: 'Z', shift: false }],
+      bindings: [shortcutFromLegacyActivation('Z', false)],
     });
     await desired;
 
@@ -758,7 +821,7 @@ describe('supervised native HelperClient', () => {
     const disable = latestRequest(controlled.requests, 'activation.configure');
     controlled.emitResult(disable.id, {
       enabled: false,
-      bindings: [{ key: 'Z', shift: false }],
+      bindings: [shortcutFromLegacyActivation('Z', false)],
     });
 
     await health;
@@ -811,8 +874,8 @@ describe('supervised native HelperClient', () => {
     clients.push(client);
     await client.start();
     await client.configureActivation(true, [
-      { key: 'Q', shift: false },
-      { key: 'Q', shift: true },
+      shortcutFromLegacyActivation('Q', false),
+      shortcutFromLegacyActivation('Q', true, 'prompt'),
     ]);
     await client.setSessionCapture(true);
 
@@ -823,7 +886,7 @@ describe('supervised native HelperClient', () => {
 
   it('confirms startup health before replaying retained enabled activation', async () => {
     const controlled = createControlledClient({ deferStartupHealth: true });
-    await controlled.client.configureActivation(true, [{ key: 'Q', shift: false }]);
+    await controlled.client.configureActivation(true, [shortcutFromLegacyActivation('Q', false)]);
 
     const starting = controlled.client.start();
     await vi.waitFor(() =>
@@ -842,13 +905,13 @@ describe('supervised native HelperClient', () => {
     await vi.waitFor(() =>
       expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
         enabled: true,
-        bindings: [{ key: 'Q', shift: false }],
+        bindings: [shortcutFromLegacyActivation('Q', false)],
       }),
     );
     expect(controlled.client.readiness.status).toBe('starting');
     controlled.emitResult(latestRequest(controlled.requests, 'activation.configure').id, {
       enabled: true,
-      bindings: [{ key: 'Q', shift: false }],
+      bindings: [shortcutFromLegacyActivation('Q', false)],
     });
 
     await starting;
@@ -876,7 +939,7 @@ describe('supervised native HelperClient', () => {
     });
     clients.push(client);
     await client.start();
-    await client.configureActivation(true, [{ key: 'Q', shift: false }]);
+    await client.configureActivation(true, [shortcutFromLegacyActivation('Q', false)]);
 
     await client.restart();
     await waitFor(() => launches === 2 && client.readiness.status === 'permission-required');
@@ -905,8 +968,8 @@ describe('supervised native HelperClient', () => {
     clients.push(client);
     try {
       await client.configureActivation(true, [
-        { key: 'Q', shift: false },
-        { key: 'Q', shift: true },
+        shortcutFromLegacyActivation('Q', false),
+        shortcutFromLegacyActivation('Q', true, 'prompt'),
       ]);
       await client.start();
       expect(client.readiness.status).toBe('permission-required');

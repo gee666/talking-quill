@@ -1,5 +1,6 @@
 import type { HelperNotification } from '../../../app/src/shared/helper/protocol';
 import type { HelperReadiness } from '../../../app/src/shared/schemas/helper-readiness';
+import { shortcutFromLegacyActivation } from '../../../app/src/shared/schemas/shortcut';
 import type { TranscriptionResult } from '../../../app/src/shared/schemas/transcription';
 import type { HistoryStore } from '../../../app/src/main/persistence/history-store';
 import type { SettingsStore } from '../../../app/src/main/persistence/settings-store';
@@ -36,8 +37,11 @@ class DeterministicHelper implements EchoHelperPort {
     return () => undefined;
   }
 
-  configureActivation(enabled: boolean, key: Parameters<EchoHelperPort['configureActivation']>[1]) {
-    return Promise.resolve({ enabled, key });
+  configureActivation(
+    enabled: boolean,
+    bindings: Parameters<EchoHelperPort['configureActivation']>[1],
+  ) {
+    return Promise.resolve({ enabled, bindings });
   }
 
   setSessionCapture(active: boolean) {
@@ -146,7 +150,7 @@ export function createTask6TestComposition(
   const whisper = new DeterministicWhisper();
   const insertion = new DeterministicInsertion();
   let controller: EchoSessionController | null = null;
-  const welcome = { microphone: false, model: false, helper: false };
+  const welcome = { microphone: false, model: false };
   const requireController = () => {
     if (controller === null) throw new Error('Task 6 controller is not bound');
     return controller;
@@ -156,13 +160,21 @@ export function createTask6TestComposition(
       helper.emit({
         jsonrpc: '2.0',
         method: 'activation.event',
-        params: { phase: 'down', key: 'Z', shift: alternate },
+        params: {
+          phase: 'down',
+          profileId: alternate ? 'prompt' : 'general',
+          shortcut: shortcutFromLegacyActivation('Z', alternate),
+        },
       }),
     activationUp: (alternate = false) =>
       helper.emit({
         jsonrpc: '2.0',
         method: 'activation.event',
-        params: { phase: 'up', key: 'Z', shift: alternate },
+        params: {
+          phase: 'up',
+          profileId: alternate ? 'prompt' : 'general',
+          shortcut: shortcutFromLegacyActivation('Z', alternate),
+        },
       }),
     key: (key: 'escape' | 'enter') =>
       helper.emit({
@@ -180,7 +192,6 @@ export function createTask6TestComposition(
     setWelcomePrerequisites: async (ready: boolean) => {
       welcome.microphone = ready;
       welcome.model = ready;
-      welcome.helper = ready;
       await settings?.update({
         welcome: { microphoneTested: ready, activationTested: false },
       });
@@ -211,7 +222,11 @@ export function createTask6TestComposition(
       helper.emit({
         jsonrpc: '2.0',
         method: 'activation.event',
-        params: { phase: 'down', key: 'Z', shift: false },
+        params: {
+          phase: 'down',
+          profileId: 'general',
+          shortcut: shortcutFromLegacyActivation('Z', false),
+        },
       });
     },
     bind(next: EchoSessionController) {

@@ -94,6 +94,10 @@ fieldset.gesture-test > .me-field--row > .me-field__control {
   grid-column: 2;
   grid-row: 1;
 }
+fieldset.gesture-test > .me-field--row > input[readonly] {
+  cursor: text;
+  font-family: var(--font-mono);
+}
 fieldset.gesture-test > .me-field--row > .me-field__hint,
 fieldset.gesture-test > .me-field--row > .me-field__error {
   grid-column: 1 / -1;

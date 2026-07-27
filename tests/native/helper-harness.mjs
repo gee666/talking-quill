@@ -50,16 +50,17 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 2 });
+const initialized = await request('initialize', { protocolVersion: 3 });
 await request('activation.configure', { enabled: false, bindings: [] });
 await request('session.set_capture', { active: false });
-const activationRegistration = await registerAvailableActivation();
+const permissions = await request('permissions.get', {});
+const activationRegistration = await configureActivationCoverage(initialized, permissions);
 await request('activation.configure', { enabled: false, bindings: [] });
 const safeReport = {
   initialized,
   activationRegistration,
   health: await request('ping', {}),
-  permissions: await request('permissions.get', {}),
+  permissions,
   frontApp: await request('front_app.get', {}).catch((error) => ({ unavailable: error.message })),
 };
 console.log(JSON.stringify(safeReport, null, 2));
@@ -70,23 +71,27 @@ await request('activation.configure', { enabled: false, bindings: [] }).catch(()
 await request('shutdown', {});
 await childExit;
 
-async function registerAvailableActivation() {
-  let lastError = null;
-  for (const key of ['Z', 'Q', 'J']) {
-    try {
-      const configuration = await request('activation.configure', {
-        enabled: true,
-        bindings: [
-          { key, shift: false },
-          { key, shift: true },
-        ],
-      });
-      return { key, configuration };
-    } catch (error) {
-      lastError = error;
-    }
+async function configureActivationCoverage(initialization, permissions) {
+  const permissionReady = Object.values(permissions).every((value) =>
+    ['granted', 'not_applicable'].includes(value),
+  );
+  if (initialization.hookStatus !== 'ready' || !permissionReady) {
+    return {
+      skipped:
+        'Native hook or permissions unavailable; full-chord runtime coverage requires an interactive trusted host.',
+    };
   }
-  throw lastError ?? new Error('No activation key could be registered');
+  const configuration = await request('activation.configure', {
+    enabled: true,
+    bindings: fullChordBindings(),
+  });
+  return {
+    configuredChords:
+      process.platform === 'win32'
+        ? ['Alt+KeyX+KeyP', 'Ctrl+Shift+KeyP']
+        : ['Option+KeyX+KeyP', 'Control+Shift+KeyP'],
+    configuration,
+  };
 }
 
 async function runInteractive() {
@@ -96,26 +101,37 @@ async function runInteractive() {
       'Focus a test editor and verify Enter/Esc type normally. Return here and press Enter to continue. ',
     );
     notifications.length = 0;
+    const windows = process.platform === 'win32';
     await request('activation.configure', {
       enabled: true,
-      bindings: [
-        { key: 'Z', shift: false },
-        { key: 'Z', shift: true },
-      ],
+      bindings: fullChordBindings(),
     });
     console.log(
-      'For 15 seconds, focus the editor and press Alt/Option+Z, hold it for repeat, then press Alt/Option+Shift+Z.',
+      windows
+        ? 'For 20 seconds, focus the editor and hold Alt+X, press/hold P, then release P. Next press Ctrl+Shift+P. X/modifiers may leak into the editor; each P trigger must not.'
+        : 'For 20 seconds, focus the editor and hold Option+X, press/hold P, then release P. Next press Control+Shift+P. X/modifiers may leak into the editor; each P trigger must not.',
     );
-    await delay(15_000);
+    await delay(20_000);
     await request('activation.configure', { enabled: false, bindings: [] });
     const activations = printObserved('activation.event');
     assertPairedEvents(activations, 'activation.event');
     const activationDowns = activations.filter((event) => event.params.phase === 'down');
-    if (!activationDowns.some((event) => event.params.shift === false)) {
-      throw new Error('No normal activation-down event was observed');
-    }
-    if (!activationDowns.some((event) => event.params.shift === true)) {
-      throw new Error('No Shift-alternate activation-down event was observed');
+    const expectedShortcuts = [
+      ['general', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['prompt', ['P'], { ctrl: true, alt: false, shift: true, meta: false }],
+    ];
+    for (const [profileId, keys, modifiers] of expectedShortcuts) {
+      if (
+        !activationDowns.some(
+          (event) =>
+            event.params.profileId === profileId &&
+            shortcutMatches(event.params.shortcut, keys, modifiers),
+        )
+      ) {
+        throw new Error(
+          `No ${JSON.stringify({ profileId, keys, modifiers })} activation-down event was observed`,
+        );
+      }
     }
 
     notifications.length = 0;
@@ -153,11 +169,41 @@ function printObserved(method) {
 }
 
 function assertPairedEvents(events, label) {
-  const downs = events.filter((event) => event.params.phase === 'down').length;
-  const ups = events.filter((event) => event.params.phase === 'up').length;
-  if (downs === 0 || downs !== ups) {
-    throw new Error(`${label} did not contain paired down/up events (${downs}/${ups})`);
+  const counts = new Map();
+  for (const event of events) {
+    const identity = JSON.stringify({
+      profileId: event.params.profileId,
+      shortcut: event.params.shortcut,
+      ...(event.params.key === undefined ? {} : { key: event.params.key }),
+    });
+    const count = counts.get(identity) ?? { down: 0, up: 0 };
+    count[event.params.phase] += 1;
+    counts.set(identity, count);
   }
+  if (
+    counts.size === 0 ||
+    [...counts.values()].some((count) => count.down === 0 || count.down !== count.up)
+  ) {
+    throw new Error(`${label} did not contain exact paired down/up events`);
+  }
+}
+
+function fullChordBindings() {
+  return [
+    binding('general', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }),
+    binding('prompt', ['P'], { ctrl: true, alt: false, shift: true, meta: false }),
+  ];
+}
+
+function binding(profileId, keys, modifiers) {
+  return { profileId, shortcut: { modifiers, keys } };
+}
+
+function shortcutMatches(shortcut, keys, modifiers) {
+  return (
+    JSON.stringify(shortcut.keys) === JSON.stringify(keys) &&
+    Object.entries(modifiers).every(([name, enabled]) => shortcut.modifiers[name] === enabled)
+  );
 }
 
 function request(method, params) {

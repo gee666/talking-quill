@@ -1,320 +1,261 @@
 use talking_quill_helper::keyboard::{
-    ActivationKey, EventPhase, HelperEvent, KeyInput, KeyPhase, KeyboardReducer, PhysicalKey,
-    PhysicalKeyTracker, SessionKey,
+    ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, KeyInput,
+    KeyPhase, KeyboardReducer, ModifierMask, PhysicalKey, PhysicalKeyTracker, ProfileId,
+    SessionKey, Shortcut, ShortcutModifiers,
 };
 
-fn input(key: PhysicalKey, phase: KeyPhase, alt: bool, shift: bool, injected: bool) -> KeyInput {
+fn modifiers(ctrl: bool, alt: bool, shift: bool, meta: bool) -> ModifierMask {
+    ModifierMask::new(ctrl, alt, shift, meta)
+}
+
+fn shortcut(mask: ModifierMask, keys: &[ActivationKey]) -> Shortcut {
+    Shortcut::new(mask.into(), keys).unwrap()
+}
+
+fn bindings(shortcuts: &[Shortcut]) -> ActivationBindings {
+    let values: Vec<_> = shortcuts
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, shortcut)| {
+            let profile_id = match index {
+                0 => ProfileId::GENERAL,
+                1 => ProfileId::PROMPT,
+                _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
+            };
+            ActivationBinding::new(profile_id, shortcut)
+        })
+        .collect();
+    ActivationBindings::new(&values).unwrap()
+}
+
+fn letter(key: ActivationKey, phase: KeyPhase, mask: ModifierMask) -> KeyInput {
+    KeyInput {
+        key: PhysicalKey::Letter(key),
+        phase,
+        modifiers: mask,
+        repeat: false,
+        injected: false,
+    }
+}
+
+fn control(key: PhysicalKey, phase: KeyPhase) -> KeyInput {
     KeyInput {
         key,
         phase,
-        alt,
-        shift,
-        disallowed_modifiers: false,
+        modifiers: ModifierMask::default(),
         repeat: false,
-        injected,
+        injected: false,
     }
 }
 
 fn step(
     reducer: &mut KeyboardReducer,
     input: KeyInput,
-    configured: ActivationKey,
+    configured: ActivationBindings,
+    enabled: bool,
     capture: bool,
-    delivery_succeeds: bool,
+    delivered: bool,
 ) -> (Option<HelperEvent>, bool) {
-    step_with_activation(reducer, input, configured, true, capture, delivery_succeeds)
-}
-
-fn step_with_activation(
-    reducer: &mut KeyboardReducer,
-    input: KeyInput,
-    configured: ActivationKey,
-    activation_enabled: bool,
-    capture: bool,
-    delivery_succeeds: bool,
-) -> (Option<HelperEvent>, bool) {
-    let plan = reducer.plan(input, configured, activation_enabled, capture);
+    let plan = reducer.plan_bindings(input, configured, enabled, capture);
     let event = plan.event();
-    let swallowed = reducer.apply(plan, delivery_succeeds);
+    let swallowed = reducer.apply(plan, delivered);
     (event, swallowed)
 }
 
 #[test]
-fn activation_down_repeats_and_up_are_emitted_once_and_swallowed() {
+fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequence() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
     let mut reducer = KeyboardReducer::default();
-    let down = input(
-        PhysicalKey::Letter(ActivationKey::Z),
-        KeyPhase::Down,
-        true,
-        false,
-        false,
-    );
+
     assert_eq!(
-        step(&mut reducer, down, ActivationKey::Z, false, true),
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(reducer.held_letters(), &[ActivationKey::X]);
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
         (
             Some(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
                 phase: EventPhase::Down,
-                shift: false,
             }),
             true,
         )
     );
+
+    let mut repeat = letter(ActivationKey::P, KeyPhase::Down, alt);
+    repeat.repeat = true;
     assert_eq!(
-        step(&mut reducer, down, ActivationKey::Z, false, true),
+        step(&mut reducer, repeat, configured, true, false, true),
         (None, true)
     );
+
+    // Prefix release passes and cannot alter the accepted shortcut snapshot.
     assert_eq!(
         step(
             &mut reducer,
-            input(
-                PhysicalKey::Letter(ActivationKey::Z),
-                KeyPhase::Up,
-                false,
-                false,
-                false,
-            ),
-            ActivationKey::Z,
+            letter(ActivationKey::X, KeyPhase::Up, ModifierMask::default()),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(reducer.held_letters(), &[ActivationKey::P]);
+
+    // Modifier release also cannot change the matching up payload.
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
+            ActivationBindings::default(),
+            false,
             false,
             true,
         ),
         (
             Some(HelperEvent::Activation {
-                key: ActivationKey::Z,
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
                 phase: EventPhase::Up,
-                shift: false,
             }),
             true,
         )
     );
+    assert!(reducer.held_letters().is_empty());
 }
 
 #[test]
-fn shift_state_is_remembered_until_activation_up() {
-    let mut reducer = KeyboardReducer::default();
-    let (event, swallowed) = step(
-        &mut reducer,
-        input(
-            PhysicalKey::Letter(ActivationKey::A),
-            KeyPhase::Down,
-            true,
-            true,
-            false,
-        ),
-        ActivationKey::A,
-        false,
-        true,
-    );
-    assert_eq!(
-        event,
-        Some(HelperEvent::Activation {
-            key: ActivationKey::A,
-            phase: EventPhase::Down,
-            shift: true,
-        })
-    );
-    assert!(swallowed);
-    assert_eq!(
-        step(
-            &mut reducer,
-            input(
-                PhysicalKey::Letter(ActivationKey::A),
-                KeyPhase::Up,
-                false,
-                false,
-                false,
-            ),
-            ActivationKey::B,
-            false,
-            true,
-        ),
-        (
-            Some(HelperEvent::Activation {
-                key: ActivationKey::A,
-                phase: EventPhase::Up,
-                shift: true,
-            }),
-            true,
-        )
-    );
-}
+fn ctrl_shift_p_requires_exact_complete_modifier_mask() {
+    let required = modifiers(true, false, true, false);
+    let accepted = shortcut(required, &[ActivationKey::P]);
+    let configured = bindings(&[accepted]);
 
-#[test]
-fn activation_requires_alt_and_the_configured_letter() {
-    let mut reducer = KeyboardReducer::default();
-    for event in [
-        input(
-            PhysicalKey::Letter(ActivationKey::Z),
-            KeyPhase::Down,
-            false,
-            false,
-            false,
-        ),
-        input(
-            PhysicalKey::Letter(ActivationKey::Y),
-            KeyPhase::Down,
-            true,
-            false,
-            false,
-        ),
-        input(PhysicalKey::Other, KeyPhase::Down, true, true, false),
-    ] {
-        assert_eq!(
-            step(&mut reducer, event, ActivationKey::Z, false, true),
-            (None, false)
-        );
-    }
-}
-
-#[test]
-fn activation_enable_and_modifier_matrix_is_exhaustive() {
     for mask in 0_u8..16 {
-        let enabled = mask & 0b0001 != 0;
-        let alt = mask & 0b0010 != 0;
-        let shift = mask & 0b0100 != 0;
-        let disallowed = mask & 0b1000 != 0;
-        let mut reducer = KeyboardReducer::default();
-        let mut down = input(
-            PhysicalKey::Letter(ActivationKey::Z),
-            KeyPhase::Down,
-            alt,
-            shift,
-            false,
+        let actual = modifiers(
+            mask & 0b0001 != 0,
+            mask & 0b0010 != 0,
+            mask & 0b0100 != 0,
+            mask & 0b1000 != 0,
         );
-        down.disallowed_modifiers = disallowed;
-
-        let (event, swallowed) =
-            step_with_activation(&mut reducer, down, ActivationKey::Z, enabled, false, true);
-        if enabled && alt && !disallowed {
+        let mut reducer = KeyboardReducer::default();
+        let result = step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, actual),
+            configured,
+            true,
+            false,
+            true,
+        );
+        if actual == required {
             assert_eq!(
-                event,
-                Some(HelperEvent::Activation {
-                    key: ActivationKey::Z,
-                    phase: EventPhase::Down,
-                    shift,
-                }),
-                "mask {mask:04b}"
+                result,
+                (
+                    Some(HelperEvent::Activation {
+                        binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                        phase: EventPhase::Down,
+                    }),
+                    true,
+                ),
+                "modifier mask {mask:04b}"
             );
-            assert!(swallowed, "mask {mask:04b}");
         } else {
-            assert_eq!(event, None, "mask {mask:04b}");
-            assert!(!swallowed, "mask {mask:04b}");
+            assert_eq!(result, (None, false), "modifier mask {mask:04b}");
         }
     }
 }
 
 #[test]
-fn passing_activation_sequence_stays_passing_across_configuration_changes() {
+fn ordered_complete_held_sequence_rejects_wrong_order_missing_prefix_and_extra_keys() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
+
+    for downs in [
+        vec![ActivationKey::P, ActivationKey::X],
+        vec![ActivationKey::P],
+        vec![ActivationKey::Q, ActivationKey::X, ActivationKey::P],
+    ] {
+        let mut reducer = KeyboardReducer::default();
+        for key in downs {
+            assert_eq!(
+                step(
+                    &mut reducer,
+                    letter(key, KeyPhase::Down, alt),
+                    configured,
+                    true,
+                    false,
+                    true,
+                ),
+                (None, false)
+            );
+        }
+    }
+}
+
+#[test]
+fn fresh_down_after_releasing_an_extra_key_can_complete_the_exact_chord() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
     let mut reducer = KeyboardReducer::default();
-    let mut down = input(
-        PhysicalKey::Letter(ActivationKey::A),
-        KeyPhase::Down,
-        true,
-        false,
-        false,
-    );
-    down.disallowed_modifiers = true;
-    assert_eq!(
-        step_with_activation(&mut reducer, down, ActivationKey::A, true, false, true,),
-        (None, false)
-    );
 
-    let allowed_down = input(
-        PhysicalKey::Letter(ActivationKey::A),
-        KeyPhase::Down,
-        true,
-        false,
-        false,
-    );
-    assert_eq!(
-        step_with_activation(
-            &mut reducer,
-            allowed_down,
-            ActivationKey::A,
-            true,
-            false,
-            true,
-        ),
-        (None, false)
-    );
-    assert_eq!(
-        step_with_activation(
-            &mut reducer,
-            input(
-                PhysicalKey::Letter(ActivationKey::A),
-                KeyPhase::Up,
+    for key in [ActivationKey::Q, ActivationKey::X] {
+        assert!(
+            !step(
+                &mut reducer,
+                letter(key, KeyPhase::Down, alt),
+                configured,
+                true,
                 false,
-                false,
-                false,
-            ),
-            ActivationKey::B,
-            false,
-            false,
-            true,
-        ),
-        (None, false)
-    );
-
+                true,
+            )
+            .1
+        );
+    }
     assert!(
-        step_with_activation(
+        !step(
             &mut reducer,
-            allowed_down,
-            ActivationKey::A,
+            letter(ActivationKey::Q, KeyPhase::Up, alt),
+            configured,
             true,
             false,
             true,
         )
         .1
     );
-}
-
-#[test]
-fn captured_activation_sequence_stays_captured_across_configuration_changes() {
-    let mut reducer = KeyboardReducer::default();
-    let down = input(
-        PhysicalKey::Letter(ActivationKey::A),
-        KeyPhase::Down,
-        true,
-        true,
-        false,
-    );
-    assert!(step_with_activation(&mut reducer, down, ActivationKey::A, true, false, true,).1);
-
-    let mut changed_repeat = down;
-    changed_repeat.disallowed_modifiers = true;
+    assert_eq!(reducer.held_letters(), &[ActivationKey::X]);
     assert_eq!(
-        step_with_activation(
+        step(
             &mut reducer,
-            changed_repeat,
-            ActivationKey::B,
-            false,
-            false,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
             true,
-        ),
-        (None, true)
-    );
-    let mut changed_up = input(
-        PhysicalKey::Letter(ActivationKey::A),
-        KeyPhase::Up,
-        false,
-        false,
-        false,
-    );
-    changed_up.disallowed_modifiers = true;
-    assert_eq!(
-        step_with_activation(
-            &mut reducer,
-            changed_up,
-            ActivationKey::B,
-            false,
             false,
             true,
         ),
         (
             Some(HelperEvent::Activation {
-                key: ActivationKey::A,
-                phase: EventPhase::Up,
-                shift: true,
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                phase: EventPhase::Down,
             }),
             true,
         )
@@ -322,48 +263,387 @@ fn captured_activation_sequence_stays_captured_across_configuration_changes() {
 }
 
 #[test]
-fn delivered_activation_down_forces_matching_up_swallow_on_delivery_failure() {
-    for up_delivery_succeeds in [false, true] {
+fn repeats_never_add_keys_or_trigger_but_accepted_trigger_repeats_are_swallowed() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
+    let mut reducer = KeyboardReducer::default();
+
+    let mut orphaned_x = letter(ActivationKey::X, KeyPhase::Down, alt);
+    orphaned_x.repeat = true;
+    assert_eq!(
+        step(&mut reducer, orphaned_x, configured, true, false, true),
+        (None, false)
+    );
+    assert!(reducer.held_letters().is_empty());
+
+    assert!(
+        !step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    let mut orphaned_p = letter(ActivationKey::P, KeyPhase::Down, alt);
+    orphaned_p.repeat = true;
+    assert_eq!(
+        step(&mut reducer, orphaned_p, configured, true, false, true),
+        (None, false)
+    );
+    assert_eq!(reducer.held_letters(), &[ActivationKey::X]);
+
+    assert!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert_eq!(
+        step(&mut reducer, orphaned_p, configured, true, false, true),
+        (None, true)
+    );
+}
+
+#[test]
+fn configuration_change_after_down_uses_the_exact_accepted_snapshot_on_up() {
+    let alt = modifiers(false, true, false, false);
+    let original = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let original_binding = ActivationBinding::new(ProfileId::GENERAL, original);
+    let original_bindings = ActivationBindings::new(&[original_binding]).unwrap();
+    let replacement_bindings =
+        ActivationBindings::new(&[ActivationBinding::new(ProfileId::PROMPT, original)]).unwrap();
+    let mut reducer = KeyboardReducer::default();
+
+    assert!(
+        !step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            original_bindings,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            original_bindings,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
+            replacement_bindings,
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding: original_binding,
+                phase: EventPhase::Up,
+            }),
+            true,
+        )
+    );
+}
+
+#[test]
+fn failed_activation_down_delivery_fails_open_for_trigger_repeats_and_up() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
+    let mut reducer = KeyboardReducer::default();
+
+    assert!(
+        !step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            false,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                phase: EventPhase::Down,
+            }),
+            false,
+        )
+    );
+    let mut repeat = letter(ActivationKey::P, KeyPhase::Down, alt);
+    repeat.repeat = true;
+    assert_eq!(
+        step(&mut reducer, repeat, configured, true, false, true),
+        (None, false)
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+}
+
+#[test]
+fn duplicate_nonrepeat_down_never_retries_or_activates_a_different_trigger() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[accepted]);
+
+    for duplicate in [ActivationKey::X, ActivationKey::P] {
         let mut reducer = KeyboardReducer::default();
-        let key = PhysicalKey::Letter(ActivationKey::A);
         assert!(
-            step_with_activation(
+            !step(
                 &mut reducer,
-                input(key, KeyPhase::Down, true, false, false),
-                ActivationKey::A,
+                letter(ActivationKey::X, KeyPhase::Down, alt),
+                configured,
                 true,
                 false,
                 true,
             )
             .1
         );
-        assert_eq!(
-            step_with_activation(
+        // Failed trigger delivery intentionally retains the physical held state.
+        assert!(
+            !step(
                 &mut reducer,
-                input(key, KeyPhase::Up, false, false, false),
-                ActivationKey::B,
-                false,
-                false,
-                up_delivery_succeeds,
-            ),
-            (
-                Some(HelperEvent::Activation {
-                    key: ActivationKey::A,
-                    phase: EventPhase::Up,
-                    shift: false,
-                }),
+                letter(ActivationKey::P, KeyPhase::Down, alt),
+                configured,
                 true,
-            ),
-            "up delivery succeeds: {up_delivery_succeeds}"
+                false,
+                false,
+            )
+            .1
         );
 
-        // The physical sequence is complete in either outcome. In production,
-        // a failed up also closes the callback gate before this later input.
-        assert!(
-            step_with_activation(
+        assert_eq!(
+            step(
                 &mut reducer,
-                input(key, KeyPhase::Down, true, false, false),
-                ActivationKey::A,
+                letter(duplicate, KeyPhase::Down, alt),
+                configured,
+                true,
+                false,
+                true,
+            ),
+            (None, false),
+            "duplicate {duplicate:?}"
+        );
+    }
+}
+
+#[test]
+fn delivered_activation_up_stays_swallowed_when_up_delivery_fails() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::A]);
+    let configured = bindings(&[accepted]);
+    let mut reducer = KeyboardReducer::default();
+
+    assert!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::A, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::A, KeyPhase::Up, ModifierMask::default()),
+            ActivationBindings::default(),
+            false,
+            false,
+            false,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                phase: EventPhase::Up,
+            }),
+            true,
+        )
+    );
+}
+
+#[test]
+fn injected_letters_and_wrong_ups_do_not_change_chord_state() {
+    let alt = modifiers(false, true, false, false);
+    let configured = bindings(&[shortcut(alt, &[ActivationKey::X, ActivationKey::P])]);
+    let mut reducer = KeyboardReducer::default();
+
+    let mut injected = letter(ActivationKey::X, KeyPhase::Down, alt);
+    injected.injected = true;
+    assert_eq!(
+        step(&mut reducer, injected, configured, true, false, true),
+        (None, false)
+    );
+    assert!(reducer.held_letters().is_empty());
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::Q, KeyPhase::Up, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert!(reducer.held_letters().is_empty());
+    assert_eq!(reducer.modifiers(), ModifierMask::default());
+}
+
+#[test]
+fn disabled_activation_still_tracks_physical_order_without_emitting() {
+    let exact = modifiers(false, true, false, false);
+    let configured = bindings(&[shortcut(exact, &[ActivationKey::A])]);
+    let mut reducer = KeyboardReducer::default();
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::A, KeyPhase::Down, exact),
+            configured,
+            false,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(reducer.held_letters(), &[ActivationKey::A]);
+}
+
+#[test]
+fn accepted_activation_retains_profile_and_shortcut_across_reassignment() {
+    let alt = modifiers(false, true, false, false);
+    let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let original = ActivationBinding::new(ProfileId::GENERAL, chord);
+    let reassigned = ActivationBinding::new(ProfileId::PROMPT, chord);
+    let mut reducer = KeyboardReducer::default();
+    let original_bindings = ActivationBindings::new(&[original]).unwrap();
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            original_bindings,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            original_bindings,
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding: original,
+                phase: EventPhase::Down,
+            }),
+            true,
+        ),
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
+            ActivationBindings::new(&[reassigned]).unwrap(),
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding: original,
+                phase: EventPhase::Up,
+            }),
+            true,
+        ),
+    );
+}
+
+#[test]
+fn modifier_sequence_must_be_nonempty_and_unchanged_until_all_letters_release() {
+    let alt = modifiers(false, true, false, false);
+    let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let binding = ActivationBinding::new(ProfileId::GENERAL, chord);
+    let configured = ActivationBindings::new(&[binding]).unwrap();
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, ModifierMask::default()),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    reducer.observe_modifiers(alt);
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    for key in [ActivationKey::P, ActivationKey::X] {
+        assert!(
+            !step(
+                &mut reducer,
+                letter(key, KeyPhase::Up, alt),
+                configured,
                 true,
                 false,
                 true,
@@ -371,58 +651,245 @@ fn delivered_activation_down_forces_matching_up_swallow_on_delivery_failure() {
             .1
         );
     }
+
+    assert!(
+        !step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    reducer.observe_modifiers(modifiers(false, true, true, false));
+    reducer.observe_modifiers(alt);
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    for key in [ActivationKey::P, ActivationKey::X] {
+        let _ = step(
+            &mut reducer,
+            letter(key, KeyPhase::Up, alt),
+            configured,
+            true,
+            false,
+            true,
+        );
+    }
+
+    assert!(
+        !step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        )
+        .1
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding,
+                phase: EventPhase::Down,
+            }),
+            true,
+        ),
+    );
 }
 
 #[test]
-fn delivered_session_down_forces_matching_up_swallow_on_delivery_failure() {
+fn binding_revision_fences_passive_prefix_but_preserves_accepted_balance() {
+    let alt = modifiers(false, true, false, false);
+    let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let binding = ActivationBinding::new(ProfileId::GENERAL, chord);
+    let configured = ActivationBindings::new(&[binding]).unwrap();
+    let mut reducer = KeyboardReducer::default();
+
+    let _ = step(
+        &mut reducer,
+        letter(ActivationKey::X, KeyPhase::Down, alt),
+        configured,
+        false,
+        false,
+        true,
+    );
+    reducer.fence_activation_revision();
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    for key in [ActivationKey::P, ActivationKey::X] {
+        let _ = step(
+            &mut reducer,
+            letter(key, KeyPhase::Up, alt),
+            configured,
+            true,
+            false,
+            true,
+        );
+    }
+
+    let _ = step(
+        &mut reducer,
+        letter(ActivationKey::X, KeyPhase::Down, alt),
+        configured,
+        true,
+        false,
+        true,
+    );
+    let down = step(
+        &mut reducer,
+        letter(ActivationKey::P, KeyPhase::Down, alt),
+        configured,
+        true,
+        false,
+        true,
+    );
+    assert_eq!(
+        down.0,
+        Some(HelperEvent::Activation {
+            binding,
+            phase: EventPhase::Down
+        })
+    );
+    reducer.fence_activation_revision();
+    reducer.observe_modifiers(ModifierMask::default());
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
+            ActivationBindings::default(),
+            false,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding,
+                phase: EventPhase::Up,
+            }),
+            true,
+        ),
+    );
+}
+
+#[test]
+fn session_capture_gate_behavior_is_preserved_and_modifier_independent() {
     for (physical, session) in [
         (PhysicalKey::Escape, SessionKey::Escape),
         (PhysicalKey::Enter, SessionKey::Enter),
     ] {
-        for up_delivery_succeeds in [false, true] {
-            let mut reducer = KeyboardReducer::default();
-            assert!(
-                step_with_activation(
-                    &mut reducer,
-                    input(physical, KeyPhase::Down, false, false, false),
-                    ActivationKey::Z,
-                    false,
-                    true,
-                    true,
-                )
-                .1
-            );
-            assert_eq!(
-                step_with_activation(
-                    &mut reducer,
-                    input(physical, KeyPhase::Up, false, false, false),
-                    ActivationKey::Z,
-                    false,
-                    false,
-                    up_delivery_succeeds,
-                ),
-                (
-                    Some(HelperEvent::SessionKey {
-                        key: session,
-                        phase: EventPhase::Up,
-                    }),
-                    true,
-                ),
-                "{session:?}, up delivery succeeds: {up_delivery_succeeds}"
-            );
-        }
+        let mut reducer = KeyboardReducer::default();
+        let empty = ActivationBindings::default();
+        assert_eq!(
+            step(
+                &mut reducer,
+                control(physical, KeyPhase::Down),
+                empty,
+                false,
+                false,
+                true,
+            ),
+            (None, false)
+        );
+        // A sequence started before capture remains pass-through because the
+        // native tracker marks its next observed down as a repeat.
+        let mut preheld_repeat = control(physical, KeyPhase::Down);
+        preheld_repeat.repeat = true;
+        assert_eq!(
+            step(&mut reducer, preheld_repeat, empty, false, true, true,),
+            (None, false)
+        );
+        assert_eq!(
+            step(
+                &mut reducer,
+                control(physical, KeyPhase::Up),
+                empty,
+                false,
+                true,
+                true,
+            ),
+            (None, false)
+        );
+
+        let mut fresh_with_all_modifiers = control(physical, KeyPhase::Down);
+        fresh_with_all_modifiers.modifiers = modifiers(true, true, true, true);
+        assert_eq!(
+            step(
+                &mut reducer,
+                fresh_with_all_modifiers,
+                empty,
+                false,
+                true,
+                true,
+            ),
+            (
+                Some(HelperEvent::SessionKey {
+                    key: session,
+                    phase: EventPhase::Down,
+                }),
+                true,
+            )
+        );
+        assert_eq!(
+            step(
+                &mut reducer,
+                control(physical, KeyPhase::Up),
+                empty,
+                false,
+                false,
+                false,
+            ),
+            (
+                Some(HelperEvent::SessionKey {
+                    key: session,
+                    phase: EventPhase::Up,
+                }),
+                true,
+            )
+        );
     }
 }
 
 #[test]
-fn fail_open_balances_all_delivered_downs_and_clears_stale_sequences() {
+fn fail_open_balances_delivered_activation_and_session_downs_then_clears_state() {
+    let alt = modifiers(false, true, false, false);
+    let accepted = shortcut(alt, &[ActivationKey::A]);
+    let configured = bindings(&[accepted]);
     let mut reducer = KeyboardReducer::default();
-    let activation_key = PhysicalKey::Letter(ActivationKey::A);
+
     assert!(
-        step_with_activation(
+        step(
             &mut reducer,
-            input(activation_key, KeyPhase::Down, true, false, false),
-            ActivationKey::A,
+            letter(ActivationKey::A, KeyPhase::Down, alt),
+            configured,
             true,
             false,
             true,
@@ -430,10 +897,10 @@ fn fail_open_balances_all_delivered_downs_and_clears_stale_sequences() {
         .1
     );
     assert!(
-        step_with_activation(
+        step(
             &mut reducer,
-            input(PhysicalKey::Escape, KeyPhase::Down, false, false, false),
-            ActivationKey::A,
+            control(PhysicalKey::Escape, KeyPhase::Down),
+            configured,
             true,
             true,
             true,
@@ -445,9 +912,8 @@ fn fail_open_balances_all_delivered_downs_and_clears_stale_sequences() {
         reducer.fail_open_balancing_events(),
         [
             Some(HelperEvent::Activation {
-                key: ActivationKey::A,
+                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
                 phase: EventPhase::Up,
-                shift: false,
             }),
             Some(HelperEvent::SessionKey {
                 key: SessionKey::Escape,
@@ -456,411 +922,40 @@ fn fail_open_balances_all_delivered_downs_and_clears_stale_sequences() {
             None,
         ]
     );
-    assert_eq!(
-        step_with_activation(
-            &mut reducer,
-            input(activation_key, KeyPhase::Up, false, false, false),
-            ActivationKey::A,
-            false,
-            false,
-            true,
-        ),
-        (None, false)
-    );
-    assert_eq!(
-        step_with_activation(
-            &mut reducer,
-            input(PhysicalKey::Escape, KeyPhase::Up, false, false, false),
-            ActivationKey::A,
-            false,
-            false,
-            true,
-        ),
-        (None, false)
-    );
+    assert!(reducer.held_letters().is_empty());
 }
 
 #[test]
-fn session_capture_is_independent_of_activation_modifiers_and_enablement() {
-    let mut reducer = KeyboardReducer::default();
-    let mut escape = input(PhysicalKey::Escape, KeyPhase::Down, true, true, false);
-    escape.disallowed_modifiers = true;
-    assert_eq!(
-        step_with_activation(&mut reducer, escape, ActivationKey::Z, false, true, true,),
-        (
-            Some(HelperEvent::SessionKey {
-                key: SessionKey::Escape,
-                phase: EventPhase::Down,
-            }),
-            true,
-        )
-    );
-}
-
-#[test]
-fn registered_hotkey_down_and_passive_hook_up_form_one_balanced_activation() {
-    for shift in [false, true] {
-        let mut reducer = KeyboardReducer::default();
-        let key = PhysicalKey::Letter(ActivationKey::A);
-        let low_level_down = input(key, KeyPhase::Down, true, shift, false);
-        let passive = reducer.plan_passive_hook(low_level_down, ActivationKey::A, true, false);
-        assert!(passive.event().is_none());
-        assert!(!reducer.apply(passive, true));
-
-        let hotkey =
-            reducer.plan_registered_hotkey(ActivationKey::A, shift, ActivationKey::A, true);
-        assert_eq!(
-            hotkey.event(),
-            Some(HelperEvent::Activation {
-                key: ActivationKey::A,
-                phase: EventPhase::Down,
-                shift,
-            })
-        );
-        assert!(reducer.apply(hotkey, true));
-
-        let duplicate =
-            reducer.plan_registered_hotkey(ActivationKey::A, shift, ActivationKey::A, true);
-        assert!(duplicate.event().is_none());
-        let _ = reducer.apply(duplicate, true);
-
-        let mut repeat = low_level_down;
-        repeat.repeat = true;
-        let passive_repeat = reducer.plan_passive_hook(repeat, ActivationKey::B, false, false);
-        assert!(passive_repeat.event().is_none());
-        assert!(!reducer.apply(passive_repeat, true));
-
-        let up = reducer.plan_passive_hook(
-            input(key, KeyPhase::Up, false, false, false),
-            ActivationKey::B,
-            false,
-            false,
-        );
-        assert_eq!(
-            up.event(),
-            Some(HelperEvent::Activation {
-                key: ActivationKey::A,
-                phase: EventPhase::Up,
-                shift,
-            })
-        );
-        assert!(reducer.apply(up, false));
-    }
-}
-
-#[test]
-fn failed_registered_hotkey_down_leaves_passive_hook_sequence_open() {
-    let mut reducer = KeyboardReducer::default();
-    let hotkey = reducer.plan_registered_hotkey(ActivationKey::A, false, ActivationKey::A, true);
-    assert!(!reducer.apply(hotkey, false));
-
-    let up = reducer.plan_passive_hook(
-        input(
-            PhysicalKey::Letter(ActivationKey::A),
-            KeyPhase::Up,
-            false,
-            false,
-            false,
-        ),
-        ActivationKey::A,
-        true,
-        false,
-    );
-    assert!(up.event().is_none());
-    assert!(!reducer.apply(up, true));
-}
-
-#[test]
-fn passive_hook_never_captures_unrelated_alt_input() {
-    let mut reducer = KeyboardReducer::default();
-    for key in [
-        PhysicalKey::Letter(ActivationKey::A),
-        PhysicalKey::Letter(ActivationKey::B),
-        PhysicalKey::Other,
-    ] {
-        let plan = reducer.plan_passive_hook(
-            input(key, KeyPhase::Down, true, true, false),
-            ActivationKey::A,
-            true,
-            false,
-        );
-        assert!(plan.event().is_none());
-        assert!(!reducer.apply(plan, true));
-    }
-}
-
-#[test]
-fn failed_activation_delivery_passes_the_complete_sequence_through() {
-    let mut reducer = KeyboardReducer::default();
-    let down = input(
-        PhysicalKey::Letter(ActivationKey::Z),
-        KeyPhase::Down,
-        true,
-        false,
-        false,
-    );
-    assert_eq!(
-        step(&mut reducer, down, ActivationKey::Z, false, false),
-        (
-            Some(HelperEvent::Activation {
-                key: ActivationKey::Z,
-                phase: EventPhase::Down,
-                shift: false,
-            }),
-            false,
-        )
-    );
-    assert_eq!(
-        step(&mut reducer, down, ActivationKey::Z, false, true),
-        (None, false)
-    );
-    assert_eq!(
-        step(
-            &mut reducer,
-            input(
-                PhysicalKey::Letter(ActivationKey::Z),
-                KeyPhase::Up,
-                false,
-                false,
-                false,
-            ),
-            ActivationKey::Z,
-            false,
-            true,
-        ),
-        (None, false)
-    );
-}
-
-#[test]
-fn escape_and_enter_are_captured_only_for_sequences_started_in_session_mode() {
-    for (physical, session) in [
-        (PhysicalKey::Escape, SessionKey::Escape),
-        (PhysicalKey::Enter, SessionKey::Enter),
-    ] {
-        let mut reducer = KeyboardReducer::default();
-        let down = input(physical, KeyPhase::Down, false, false, false);
-        assert_eq!(
-            step(&mut reducer, down, ActivationKey::Z, false, true),
-            (None, false)
-        );
-        assert_eq!(
-            step(&mut reducer, down, ActivationKey::Z, true, true),
-            (
-                Some(HelperEvent::SessionKey {
-                    key: session,
-                    phase: EventPhase::Down,
-                }),
-                true,
-            )
-        );
-        assert_eq!(
-            step(&mut reducer, down, ActivationKey::Z, false, true),
-            (None, true)
-        );
-        assert_eq!(
-            step(
-                &mut reducer,
-                input(physical, KeyPhase::Up, false, false, false),
-                ActivationKey::Z,
-                false,
-                true,
-            ),
-            (
-                Some(HelperEvent::SessionKey {
-                    key: session,
-                    phase: EventPhase::Up,
-                }),
-                true,
-            )
-        );
-    }
-}
-
-#[test]
-fn failed_session_key_delivery_fails_open_until_key_up() {
-    let mut reducer = KeyboardReducer::default();
-    let down = input(PhysicalKey::Escape, KeyPhase::Down, false, false, false);
-    assert!(!step(&mut reducer, down, ActivationKey::Z, true, false).1);
-    assert_eq!(
-        step(&mut reducer, down, ActivationKey::Z, true, true),
-        (None, false)
-    );
-    assert_eq!(
-        step(
-            &mut reducer,
-            input(PhysicalKey::Escape, KeyPhase::Up, false, false, false),
-            ActivationKey::Z,
-            true,
-            true,
-        ),
-        (None, false)
-    );
-}
-
-#[test]
-fn physical_tracker_derives_down_down_up_transitions() {
+fn physical_tracker_derives_repeats_and_protects_keys_held_before_gate_open() {
     let mut tracker = PhysicalKeyTracker::default();
     let key = PhysicalKey::Letter(ActivationKey::Z);
     assert!(!tracker.observe(key, KeyPhase::Down));
     assert!(tracker.observe(key, KeyPhase::Down));
     assert!(!tracker.observe(key, KeyPhase::Up));
+
+    // A native backend observes while its callback gate is closed. The next
+    // down after opening is a repeat and cannot become a fresh trigger.
     assert!(!tracker.observe(key, KeyPhase::Down));
-    assert!(!tracker.observe(key, KeyPhase::Up));
-
-    assert!(!tracker.observe(PhysicalKey::Escape, KeyPhase::Down));
-    assert!(tracker.observe(PhysicalKey::Escape, KeyPhase::Down));
-    assert!(!tracker.observe(PhysicalKey::Escape, KeyPhase::Up));
-    assert!(!tracker.observe(PhysicalKey::Other, KeyPhase::Down));
-}
-
-#[test]
-fn keys_held_before_gate_open_do_not_become_new_captures() {
-    let mut tracker = PhysicalKeyTracker::default();
     let mut reducer = KeyboardReducer::default();
-    let letter = PhysicalKey::Letter(ActivationKey::Z);
-
-    // The native callback observes this event while its gate is closed and
-    // deliberately does not send it through the reducer.
-    assert!(!tracker.observe(letter, KeyPhase::Down));
-
-    // Once the gate opens, the next physical down is derived as a repeat even
-    // if Alt or configuration changed while the key remained held.
-    let mut held_down = input(letter, KeyPhase::Down, true, false, false);
-    held_down.repeat = tracker.observe(letter, KeyPhase::Down);
+    let alt = modifiers(false, true, false, false);
+    let configured = bindings(&[shortcut(alt, &[ActivationKey::Z])]);
+    let mut held = letter(ActivationKey::Z, KeyPhase::Down, alt);
+    held.repeat = tracker.observe(key, KeyPhase::Down);
     assert_eq!(
-        step(&mut reducer, held_down, ActivationKey::Z, true, true,),
-        (None, false)
-    );
-    assert!(!tracker.observe(letter, KeyPhase::Up));
-    assert_eq!(
-        step(
-            &mut reducer,
-            input(letter, KeyPhase::Up, false, false, false),
-            ActivationKey::Z,
-            true,
-            true,
-        ),
-        (None, false)
-    );
-
-    let mut fresh_down = input(letter, KeyPhase::Down, true, false, false);
-    fresh_down.repeat = tracker.observe(letter, KeyPhase::Down);
-    assert_eq!(
-        step(&mut reducer, fresh_down, ActivationKey::Z, true, true,),
-        (
-            Some(HelperEvent::Activation {
-                key: ActivationKey::Z,
-                phase: EventPhase::Down,
-                shift: false,
-            }),
-            true,
-        )
-    );
-}
-
-#[test]
-fn session_capture_does_not_capture_an_escape_held_before_enable() {
-    let mut tracker = PhysicalKeyTracker::default();
-    let mut reducer = KeyboardReducer::default();
-    assert!(!tracker.observe(PhysicalKey::Escape, KeyPhase::Down));
-
-    let mut held = input(PhysicalKey::Escape, KeyPhase::Down, false, false, false);
-    held.repeat = tracker.observe(PhysicalKey::Escape, KeyPhase::Down);
-    assert_eq!(
-        step(&mut reducer, held, ActivationKey::Z, true, true),
-        (None, false)
-    );
-    assert!(!tracker.observe(PhysicalKey::Escape, KeyPhase::Up));
-}
-
-#[test]
-fn orphaned_native_repeats_do_not_start_captured_sequences() {
-    let mut reducer = KeyboardReducer::default();
-    let mut activation = input(
-        PhysicalKey::Letter(ActivationKey::Z),
-        KeyPhase::Down,
-        true,
-        false,
-        false,
-    );
-    activation.repeat = true;
-    assert_eq!(
-        step(&mut reducer, activation, ActivationKey::Z, true, true),
-        (None, false)
-    );
-
-    let mut escape = input(PhysicalKey::Escape, KeyPhase::Down, false, false, false);
-    escape.repeat = true;
-    assert_eq!(
-        step(&mut reducer, escape, ActivationKey::Z, true, true),
+        step(&mut reducer, held, configured, true, false, true),
         (None, false)
     );
 }
 
 #[test]
-fn injected_events_always_pass_through() {
-    let mut reducer = KeyboardReducer::default();
-    assert_eq!(
-        step(
-            &mut reducer,
-            input(
-                PhysicalKey::Letter(ActivationKey::Z),
-                KeyPhase::Down,
-                true,
-                true,
-                true,
-            ),
-            ActivationKey::Z,
-            true,
-            true,
-        ),
-        (None, false)
-    );
-}
-
-#[test]
-fn exact_multi_bindings_emit_the_selected_key_and_shift_without_mode_aliasing() {
-    let bindings = talking_quill_helper::keyboard::ActivationBindings::from_exact(&[
-        (ActivationKey::A, false),
-        (ActivationKey::Q, true),
-        (ActivationKey::Z, false),
-    ])
-    .unwrap();
-    for (key, shift) in [
-        (ActivationKey::A, false),
-        (ActivationKey::Q, true),
-        (ActivationKey::Z, false),
-    ] {
-        let mut reducer = KeyboardReducer::default();
-        let plan = reducer.plan_bindings(
-            input(PhysicalKey::Letter(key), KeyPhase::Down, true, shift, false),
-            bindings,
-            true,
-            false,
-        );
-        assert_eq!(
-            plan.event(),
-            Some(HelperEvent::Activation {
-                key,
-                phase: EventPhase::Down,
-                shift,
-            })
-        );
-        assert!(reducer.apply(plan, true));
-    }
-
-    let plan = KeyboardReducer::default().plan_bindings(
-        input(
-            PhysicalKey::Letter(ActivationKey::Q),
-            KeyPhase::Down,
-            true,
-            false,
-            false,
-        ),
-        bindings,
-        true,
-        false,
-    );
-    assert_eq!(plan.event(), None);
+fn shortcut_modifier_round_trip_is_exact() {
+    let value = ShortcutModifiers {
+        ctrl: true,
+        alt: false,
+        shift: true,
+        meta: true,
+    };
+    let mask = ModifierMask::from(value);
+    assert_eq!(ShortcutModifiers::from(mask), value);
+    assert_eq!(mask, modifiers(true, false, true, true));
 }
