@@ -21,6 +21,8 @@ fn profile_id(index: usize) -> ProfileId {
     match index {
         0 => ProfileId::GENERAL,
         1 => ProfileId::PROMPT,
+        2 => ProfileId::MARKDOWN,
+        3 => ProfileId::TRANSLATE_TO_ENGLISH,
         _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
     }
 }
@@ -78,7 +80,7 @@ fn shortcut_accepts_exactly_twenty_six_unique_letters_and_rejects_twenty_seven()
 
 #[test]
 fn bindings_are_bounded_ordered_and_reject_exact_duplicates() {
-    let values: Vec<_> = (0..10)
+    let values: Vec<_> = (0..12)
         .map(|index| {
             shortcut(
                 modifiers(false, true, false, false),
@@ -93,13 +95,13 @@ fn bindings_are_bounded_ordered_and_reject_exact_duplicates() {
         .map(|(index, shortcut)| binding(index, shortcut))
         .collect();
     let bindings = ActivationBindings::new(&binding_values).unwrap();
-    assert_eq!(bindings.len(), 10);
+    assert_eq!(bindings.len(), 12);
     assert_eq!(bindings.iter().collect::<Vec<_>>(), binding_values);
 
     let mut too_many = binding_values;
     too_many.push(binding(
-        10,
-        shortcut(modifiers(false, true, false, false), &[ActivationKey::K]),
+        12,
+        shortcut(modifiers(false, true, false, false), &[ActivationKey::M]),
     ));
     assert_eq!(
         ActivationBindings::new(&too_many),
@@ -124,25 +126,44 @@ fn bindings_are_bounded_ordered_and_reject_exact_duplicates() {
 }
 
 #[test]
-fn same_modifier_prefixes_conflict_in_either_order_but_different_modifiers_do_not() {
+fn only_the_exact_built_in_family_allows_same_modifier_prefixes() {
     let alt = modifiers(false, true, false, false);
     let ctrl_shift = modifiers(true, false, true, false);
     let prefix = shortcut(alt, &[ActivationKey::X]);
-    let longer = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let prompt = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let markdown = shortcut(alt, &[ActivationKey::X, ActivationKey::M]);
+    let translate = shortcut(alt, &[ActivationKey::X, ActivationKey::E]);
 
-    for values in [
-        [binding(0, prefix), binding(1, longer)],
-        [binding(0, longer), binding(1, prefix)],
+    assert!(
+        ActivationBindings::new(&[
+            binding(0, prefix),
+            binding(1, prompt),
+            binding(2, markdown),
+            binding(3, translate),
+        ])
+        .is_ok()
+    );
+    for reserved in [
+        binding(4, prefix),
+        binding(4, prompt),
+        binding(0, shortcut(alt, &[ActivationKey::X, ActivationKey::Q])),
     ] {
         assert_eq!(
-            ActivationBindings::new(&values),
-            Err(ShortcutValidationError::PrefixConflict)
+            ActivationBindings::new(&[reserved]),
+            Err(ShortcutValidationError::ReservedBuiltInFamily),
         );
     }
 
+    let unrelated_prefix = shortcut(alt, &[ActivationKey::A]);
+    let unrelated_longer = shortcut(alt, &[ActivationKey::A, ActivationKey::B]);
+    assert_eq!(
+        ActivationBindings::new(&[binding(4, unrelated_prefix), binding(5, unrelated_longer)]),
+        Err(ShortcutValidationError::PrefixConflict),
+    );
+
     let different_modifiers = shortcut(ctrl_shift, &[ActivationKey::X, ActivationKey::P]);
     assert!(
-        ActivationBindings::new(&[binding(0, prefix), binding(1, different_modifiers),]).is_ok()
+        ActivationBindings::new(&[binding(0, prefix), binding(4, different_modifiers)]).is_ok()
     );
 }
 
@@ -153,14 +174,28 @@ fn bindings_wire_value_contains_strict_profile_id_and_shortcut_objects() {
             "profileId": "general",
             "shortcut": {
                 "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
-                "keys": ["X", "P"]
+                "keys": ["X"]
             }
         },
         {
             "profileId": "prompt",
             "shortcut": {
-                "modifiers": {"ctrl": true, "alt": false, "shift": true, "meta": false},
-                "keys": ["P"]
+                "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
+                "keys": ["X", "P"]
+            }
+        },
+        {
+            "profileId": "markdown",
+            "shortcut": {
+                "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
+                "keys": ["X", "M"]
+            }
+        },
+        {
+            "profileId": "translate-to-english",
+            "shortcut": {
+                "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
+                "keys": ["X", "E"]
             }
         }
     ]);

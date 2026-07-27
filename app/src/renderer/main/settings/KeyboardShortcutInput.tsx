@@ -8,9 +8,9 @@ import {
 import { Input } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 
-const ALT_X_P_EXAMPLE: Shortcut = {
+const ALT_Y_Q_EXAMPLE: Shortcut = {
   modifiers: { ctrl: false, alt: true, shift: false, meta: false },
-  keys: ['X', 'P'],
+  keys: ['Y', 'Q'],
 };
 const CTRL_SHIFT_P_EXAMPLE: Shortcut = {
   modifiers: { ctrl: true, alt: false, shift: true, meta: false },
@@ -150,7 +150,7 @@ export function KeyboardShortcutInput({
     captureState === 'preparing'
       ? 'Preparing shortcut capture…'
       : (captureGuidance ??
-        `Focus this field, hold one or more modifiers unchanged, then press letters in order—for example ${formatKeyboardShortcut(ALT_X_P_EXAMPLE, platform)} or ${formatKeyboardShortcut(CTRL_SHIFT_P_EXAMPLE, platform)}. The final letter is the trigger. Tab moves away.`);
+        `Focus this field, hold one or more modifiers unchanged, then press and keep each letter held in order—for example ${formatKeyboardShortcut(ALT_Y_Q_EXAMPLE, platform)} or ${formatKeyboardShortcut(CTRL_SHIFT_P_EXAMPLE, platform)}. For a multi-letter chord, all letters remain held simultaneously and the final letter is the trigger. Outside this field, the modifiers and prefix letters pass through to the foreground app before the trigger, so choose a safe chord. Tab moves away.`);
 
   return (
     <>

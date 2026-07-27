@@ -4,11 +4,15 @@ import logoDark from '../../../../assets/logo-dark.png';
 import logoLight from '../../../../assets/logo-light.png';
 import { ECHO_HOLD_THRESHOLD_MS } from '../../../shared/constants/echo-session';
 import type { AppState } from '../../../shared/schemas/app-state';
-import { GENERAL_PROFILE_ID } from '../../../shared/schemas/dictation-profiles';
+import {
+  BUILT_IN_DICTATION_PROFILE_METADATA,
+  GENERAL_PROFILE_ID,
+} from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
 import type { WelcomeState, WelcomeStep } from '../../../shared/schemas/welcome';
 import { Button, Card, Status, useTheme } from '../../design';
 import { RecordingSection } from '../settings/RecordingSection';
+import { TranscriptionLanguageSetting } from '../settings/TranscriptionModelSection';
 import { ModelSetup } from '../setup/ModelSetup';
 import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
 import { publicErrorMessage } from '../public-error';
@@ -227,6 +231,8 @@ export function WelcomeWizard({
           description="The model is downloaded once and then works offline."
         >
           <ModelSetup settings={settings} onSettingsSaved={onSettingsSaved} />
+          <div className="setting-divider" />
+          <TranscriptionLanguageSetting settings={settings} onSettingsSaved={onSettingsSaved} />
           <Status tone={state.modelReady ? 'success' : 'warning'}>
             {state.modelReady ? 'Selected model ready' : 'Download required'}
           </Status>
@@ -255,17 +261,19 @@ export function WelcomeWizard({
     return (
       <>
         <Card title="Talking Quill is ready">
-          <p>Your configured dictation profiles are ready:</p>
-          <ul aria-label="Configured dictation profiles">
-            {settings.dictationProfiles.map((profile) => (
-              <li key={profile.id}>
-                <strong>{profile.name}</strong>:{' '}
-                {formatKeyboardShortcutWithTrigger(profile.shortcut, platform)} —{' '}
-                {profile.processingMode === 'raw' ? 'Raw' : 'Smart'}
-                {' processing'}
+          <p>Built-in profile defaults:</p>
+          <ul aria-label="Built-in dictation profile defaults">
+            {BUILT_IN_DICTATION_PROFILE_METADATA.map(({ id, defaultProfile }) => (
+              <li key={id}>
+                <strong>{defaultProfile.name}</strong>:{' '}
+                {formatKeyboardShortcutWithTrigger(defaultProfile.shortcut, platform)} — Smart
+                processing
               </li>
             ))}
           </ul>
+          <p className="body-copy">
+            These are the reset defaults. Existing or migrated profile settings may differ.
+          </p>
           <ul>
             <li>
               Quick Dictation starts when you release the shortcut&apos;s final letter key before{' '}

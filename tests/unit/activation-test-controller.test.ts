@@ -25,6 +25,17 @@ function activation(
   };
 }
 
+function complete(
+  heldMs: number,
+  shortcut: Shortcut = DEFAULT_SETTINGS.dictationProfiles[0]?.shortcut ?? PROMPT_SHORTCUT,
+): Extract<HelperNotification, { method: 'activation.event' }> {
+  return {
+    jsonrpc: '2.0',
+    method: 'activation.event',
+    params: { phase: 'complete', profileId: 'general', shortcut, heldMs },
+  };
+}
+
 function profiles() {
   return DEFAULT_SETTINGS.dictationProfiles.map((profile) =>
     profile.id === 'prompt' ? { ...profile, shortcut: structuredClone(PROMPT_SHORTCUT) } : profile,
@@ -34,6 +45,23 @@ function profiles() {
 afterEach(() => vi.useRealTimers());
 
 describe('ActivationTestController', () => {
+  it.each([
+    [599, 'quick'],
+    [600, 'extended'],
+  ] as const)('classifies an atomic General completion at %i ms as %s', (heldMs, phase) => {
+    const controller = new ActivationTestController({
+      publish: vi.fn(),
+      requestCaptureOff: vi.fn(),
+    });
+    controller.start(42, () => () => undefined, null);
+    controller.accept(complete(heldMs), profiles());
+    expect(controller.state).toMatchObject({
+      phase,
+      profileId: 'general',
+      elapsedMs: heldMs,
+    });
+  });
+
   it('pairs an exact trigger-P chord and only lets the current renderer stop the test', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

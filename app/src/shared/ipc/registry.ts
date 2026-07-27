@@ -73,7 +73,7 @@ import {
   DictationProfileIdSchema,
   DictationProfilePatchSchema,
   RESERVED_DICTATION_BINDING_ERROR,
-  isReservedBindingForAnotherProfile,
+  isReservedBindingForProfile,
 } from '../schemas/dictation-profiles';
 import {
   PiInstallationBrowseResultSchema,
@@ -210,7 +210,7 @@ export const invokeRegistry = Object.freeze({
       .superRefine((request, context) => {
         if (
           request.patch.shortcut !== undefined &&
-          isReservedBindingForAnotherProfile(request.id, request.patch.shortcut)
+          isReservedBindingForProfile(request.id, request.patch.shortcut)
         ) {
           context.addIssue({
             code: 'custom',

@@ -8,21 +8,52 @@ import {
   TRANSCRIPT_MAX_UTF8_BYTES,
 } from '../../app/src/shared/schemas/transcription';
 
+const options = {
+  modelId: 'Xenova/whisper-small',
+  sampleRate: 16_000,
+  language: 'ru',
+};
+
 describe('Whisper worker protocol', () => {
-  it('accepts bounded 16 kHz Float32 PCM and rejects malformed messages', () => {
+  it('requires v2, bounded 16 kHz Float32 PCM, and auto or a supported source language', () => {
     const valid = {
-      version: 1,
+      version: 2,
       requestId: 'request-1',
       type: 'transcribe',
       pcm: new Float32Array([0, 0.1]).buffer,
-      options: { modelId: 'Xenova/whisper-small', sampleRate: 16_000 },
+      options,
     };
     expect(WhisperWorkerRequestSchema.safeParse(valid).success).toBe(true);
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        ...valid,
+        options: { ...valid.options, language: 'auto' },
+      }).success,
+    ).toBe(true);
+    expect(WhisperWorkerRequestSchema.safeParse({ ...valid, version: 1 }).success).toBe(false);
     expect(WhisperWorkerRequestSchema.safeParse({ ...valid, extra: true }).success).toBe(false);
     expect(
       WhisperWorkerRequestSchema.safeParse({
         ...valid,
         options: { ...valid.options, sampleRate: 44_100 },
+      }).success,
+    ).toBe(false);
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        ...valid,
+        options: { modelId: valid.options.modelId, sampleRate: 16_000 },
+      }).success,
+    ).toBe(false);
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        ...valid,
+        options: { ...valid.options, language: 'x' },
+      }).success,
+    ).toBe(false);
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        ...valid,
+        options: { ...valid.options, task: 'translate' },
       }).success,
     ).toBe(false);
     expect(
@@ -33,7 +64,7 @@ describe('Whisper worker protocol', () => {
   it('rejects the removed parent-supplied model authorization path', () => {
     expect(
       WhisperWorkerRequestSchema.safeParse({
-        version: 1,
+        version: 2,
         requestId: 'forged-authorization',
         type: 'model-authorize',
         authorization: {
@@ -47,7 +78,7 @@ describe('Whisper worker protocol', () => {
   });
 
   it('requires typed acknowledgement operations and guarded readiness', () => {
-    const envelope = { version: 1, requestId: 'response-1', ok: true };
+    const envelope = { version: 2, requestId: 'response-1', ok: true };
     expect(
       WhisperWorkerResponseSchema.safeParse({
         ...envelope,
@@ -56,7 +87,7 @@ describe('Whisper worker protocol', () => {
     ).toBe(true);
     expect(
       WhisperWorkerRequestSchema.safeParse({
-        version: 1,
+        version: 2,
         requestId: 'cancel-request',
         type: 'session-cancel',
         sessionId: 'session-1',
@@ -90,7 +121,7 @@ describe('Whisper worker protocol', () => {
 
   it('bounds worker transcript responses by characters and UTF-8 bytes', () => {
     const response = (text: string) => ({
-      version: 1,
+      version: 2,
       requestId: 'transcript-response',
       ok: true,
       result: {
@@ -119,7 +150,7 @@ describe('Whisper worker protocol', () => {
 
   it('bounds each streaming push independently of the cumulative session cap', () => {
     const base = {
-      version: 1,
+      version: 2,
       requestId: 'push-1',
       type: 'session-push',
       sessionId: 'session-1',

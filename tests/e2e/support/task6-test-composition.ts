@@ -1,6 +1,9 @@
 import type { HelperNotification } from '../../../app/src/shared/helper/protocol';
+import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+} from '../../../app/src/shared/schemas/dictation-profiles';
 import type { HelperReadiness } from '../../../app/src/shared/schemas/helper-readiness';
-import { shortcutFromLegacyActivation } from '../../../app/src/shared/schemas/shortcut';
 import type { TranscriptionResult } from '../../../app/src/shared/schemas/transcription';
 import type { HistoryStore } from '../../../app/src/main/persistence/history-store';
 import type { SettingsStore } from '../../../app/src/main/persistence/settings-store';
@@ -130,6 +133,7 @@ class DeterministicInsertion implements EchoInsertionPort {
 }
 
 export interface Task6TestDriver {
+  activationComplete(heldMs?: number): void;
   activationDown(alternate?: boolean): void;
   activationUp(alternate?: boolean): void;
   key(key: 'escape' | 'enter'): void;
@@ -156,6 +160,17 @@ export function createTask6TestComposition(
     return controller;
   };
   const driver: Task6TestDriver = Object.freeze({
+    activationComplete: (heldMs = 100) =>
+      helper.emit({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: {
+          phase: 'complete',
+          profileId: 'general',
+          shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
+          heldMs,
+        },
+      }),
     activationDown: (alternate = false) =>
       helper.emit({
         jsonrpc: '2.0',
@@ -163,7 +178,7 @@ export function createTask6TestComposition(
         params: {
           phase: 'down',
           profileId: alternate ? 'prompt' : 'general',
-          shortcut: shortcutFromLegacyActivation('Z', alternate),
+          shortcut: (alternate ? DEFAULT_PROMPT_PROFILE : DEFAULT_GENERAL_PROFILE).shortcut,
         },
       }),
     activationUp: (alternate = false) =>
@@ -173,7 +188,7 @@ export function createTask6TestComposition(
         params: {
           phase: 'up',
           profileId: alternate ? 'prompt' : 'general',
-          shortcut: shortcutFromLegacyActivation('Z', alternate),
+          shortcut: (alternate ? DEFAULT_PROMPT_PROFILE : DEFAULT_GENERAL_PROFILE).shortcut,
         },
       }),
     key: (key: 'escape' | 'enter') =>
@@ -219,15 +234,7 @@ export function createTask6TestComposition(
     welcome,
     driver,
     startPackagedMedia() {
-      helper.emit({
-        jsonrpc: '2.0',
-        method: 'activation.event',
-        params: {
-          phase: 'down',
-          profileId: 'general',
-          shortcut: shortcutFromLegacyActivation('Z', false),
-        },
-      });
+      driver.activationComplete(100);
     },
     bind(next: EchoSessionController) {
       controller = next;

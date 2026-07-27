@@ -174,14 +174,16 @@ pub enum ShortcutValidationError {
     MissingModifier,
     #[error("shortcut keys must be unique")]
     DuplicateKey,
-    #[error("profile ID must be general, prompt, or an RFC UUID")]
+    #[error("profile ID must be general, prompt, markdown, translate-to-english, or an RFC UUID")]
     InvalidProfileId,
-    #[error("activation supports at most 10 bindings")]
+    #[error("activation supports at most 12 bindings")]
     TooManyBindings,
     #[error("activation profile IDs must be distinct")]
     DuplicateProfileId,
     #[error("activation shortcuts must be distinct")]
     DuplicateBinding,
+    #[error("the canonical Alt/Option+X built-in shortcut family is reserved")]
+    ReservedBuiltInFamily,
     #[error("activation bindings with the same modifiers must not prefix one another")]
     PrefixConflict,
 }
@@ -312,6 +314,8 @@ impl ProfileId {
     pub const MAX_BYTES: usize = 36;
     pub const GENERAL: Self = Self::built_in(b"general");
     pub const PROMPT: Self = Self::built_in(b"prompt");
+    pub const MARKDOWN: Self = Self::built_in(b"markdown");
+    pub const TRANSLATE_TO_ENGLISH: Self = Self::built_in(b"translate-to-english");
 
     const fn built_in(value: &[u8]) -> Self {
         let mut bytes = [0; Self::MAX_BYTES];
@@ -327,7 +331,12 @@ impl ProfileId {
     }
 
     pub fn new(value: &str) -> Result<Self, ShortcutValidationError> {
-        if value != "general" && value != "prompt" && !valid_uuid(value.as_bytes()) {
+        if value != "general"
+            && value != "prompt"
+            && value != "markdown"
+            && value != "translate-to-english"
+            && !valid_uuid(value.as_bytes())
+        {
             return Err(ShortcutValidationError::InvalidProfileId);
         }
         let mut bytes = [0; Self::MAX_BYTES];
@@ -419,7 +428,7 @@ impl ActivationBinding {
     }
 }
 
-/// At most ten validated profile-owned shortcuts in deterministic wire order.
+/// At most twelve validated profile-owned shortcuts in deterministic wire order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActivationBindings {
     bindings: [ActivationBinding; Self::MAX],
@@ -427,7 +436,7 @@ pub struct ActivationBindings {
 }
 
 impl ActivationBindings {
-    pub const MAX: usize = 10;
+    pub const MAX: usize = 12;
     const EMPTY_BINDING: ActivationBinding =
         ActivationBinding::new(ProfileId::GENERAL, Shortcut::EMPTY);
 
@@ -436,6 +445,9 @@ impl ActivationBindings {
             return Err(ShortcutValidationError::TooManyBindings);
         }
         for (index, binding) in bindings.iter().copied().enumerate() {
+            if uses_reserved_built_in_family(binding) && !is_built_in_default_binding(binding) {
+                return Err(ShortcutValidationError::ReservedBuiltInFamily);
+            }
             for prior in bindings[..index].iter().copied() {
                 if binding.profile_id == prior.profile_id {
                     return Err(ShortcutValidationError::DuplicateProfileId);
@@ -445,6 +457,7 @@ impl ActivationBindings {
                 }
                 if binding.shortcut.modifiers == prior.shortcut.modifiers
                     && ordered_prefix(binding.shortcut.keys(), prior.shortcut.keys())
+                    && !built_in_default_prefix_conflict_allowed(binding, prior)
                 {
                     return Err(ShortcutValidationError::PrefixConflict);
                 }
@@ -480,6 +493,18 @@ impl ActivationBindings {
     ) -> Option<ActivationBinding> {
         self.iter().find(|binding| {
             binding.shortcut.modifier_mask() == modifiers && binding.shortcut.keys() == keys
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn has_longer_prefix(self, binding: ActivationBinding) -> bool {
+        self.iter().any(|candidate| {
+            candidate.shortcut.modifiers == binding.shortcut.modifiers
+                && candidate.shortcut.keys().len() > binding.shortcut.keys().len()
+                && candidate
+                    .shortcut
+                    .keys()
+                    .starts_with(binding.shortcut.keys())
         })
     }
 }
@@ -519,6 +544,41 @@ impl<'de> Deserialize<'de> for ActivationBindings {
 fn ordered_prefix(left: &[ActivationKey], right: &[ActivationKey]) -> bool {
     let shared = left.len().min(right.len());
     left[..shared] == right[..shared]
+}
+
+fn built_in_default_prefix_conflict_allowed(
+    left: ActivationBinding,
+    right: ActivationBinding,
+) -> bool {
+    left.profile_id != right.profile_id
+        && is_built_in_default_binding(left)
+        && is_built_in_default_binding(right)
+}
+
+fn uses_reserved_built_in_family(binding: ActivationBinding) -> bool {
+    binding.shortcut.modifiers
+        == (ShortcutModifiers {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            meta: false,
+        })
+        && binding.shortcut.keys().first() == Some(&ActivationKey::X)
+}
+
+fn is_built_in_default_binding(binding: ActivationBinding) -> bool {
+    if !uses_reserved_built_in_family(binding) {
+        return false;
+    }
+    match binding.profile_id {
+        ProfileId::GENERAL => binding.shortcut.keys() == [ActivationKey::X],
+        ProfileId::PROMPT => binding.shortcut.keys() == [ActivationKey::X, ActivationKey::P],
+        ProfileId::MARKDOWN => binding.shortcut.keys() == [ActivationKey::X, ActivationKey::M],
+        ProfileId::TRANSLATE_TO_ENGLISH => {
+            binding.shortcut.keys() == [ActivationKey::X, ActivationKey::E]
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -620,6 +680,10 @@ pub enum HelperEvent {
     Activation {
         binding: ActivationBinding,
         phase: EventPhase,
+    },
+    ActivationComplete {
+        binding: ActivationBinding,
+        held_ms: u64,
     },
     SessionKey {
         key: SessionKey,

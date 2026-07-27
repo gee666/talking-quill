@@ -4,7 +4,16 @@ import {
   VoiceCommandSchema,
   type VoiceCommand,
 } from '../../../shared/schemas/commands';
-import { defaultDictationProfiles } from '../../../shared/schemas/dictation-profiles';
+import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+  GENERAL_PROFILE_ID,
+  PROMPT_PROFILE_ID,
+  defaultDictationProfiles,
+  isReservedBindingForProfile,
+} from '../../../shared/schemas/dictation-profiles';
 import { ProcessingModeSchema } from '../../../shared/schemas/history';
 import {
   DEFAULT_SETTINGS,
@@ -12,7 +21,13 @@ import {
   SettingsSchema,
   type Settings,
 } from '../../../shared/schemas/settings';
-import { ShortcutKeySchema, shortcutFromLegacyActivation } from '../../../shared/schemas/shortcut';
+import {
+  ShortcutKeySchema,
+  shortcutFromLegacyActivation,
+  shortcutsConflict,
+  type Shortcut,
+} from '../../../shared/schemas/shortcut';
+import { normalizeWhisperSourceLanguage } from '../../../shared/schemas/whisper-languages';
 import { utf8ByteLength } from '../../../shared/schemas/text-bounds';
 import {
   VOCABULARY_TOTAL_MAX_UTF8_BYTES,
@@ -25,6 +40,12 @@ import type {
   LegacySettingsWithWelcomeProgress,
 } from './legacy-settings-contracts';
 import type { LegacySettingsV20 } from './legacy-settings-v20';
+import {
+  LEGACY_DEFAULT_GENERAL_PROFILE_V21,
+  LEGACY_DEFAULT_PROMPT_PROFILE_V21,
+  LegacySettingsV21Schema,
+  type LegacySettingsV21,
+} from './legacy-settings-v21';
 
 export function migrateRemovedLargeModel(input: unknown): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
@@ -49,10 +70,13 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
   if (
     typeof transcription === 'object' &&
     transcription !== null &&
-    !Array.isArray(transcription) &&
-    (transcription as Record<string, unknown>).modelId === 'Xenova/whisper-large'
+    !Array.isArray(transcription)
   ) {
-    (transcription as Record<string, unknown>).modelId = 'onnx-community/whisper-large-v3-turbo';
+    const legacyTranscription = transcription as Record<string, unknown>;
+    if (legacyTranscription.modelId === 'Xenova/whisper-large') {
+      legacyTranscription.modelId = 'onnx-community/whisper-large-v3-turbo';
+    }
+    legacyTranscription.language = normalizeWhisperSourceLanguage(legacyTranscription.language);
   }
   const welcome = migrated.welcome;
   if (typeof welcome === 'object' && welcome !== null && !Array.isArray(welcome)) {
@@ -85,17 +109,81 @@ export function migrateFiveStepWelcome(input: unknown): unknown {
   return migrated;
 }
 
-export function migrateShortcutChords(legacy: LegacySettingsV20): Settings {
+export function migrateShortcutChords(legacy: LegacySettingsV20): LegacySettingsV21 {
   const { activationKey: _activationKey, ...app } = structuredClone(legacy.app);
   void _activationKey;
-  return SettingsSchema.parse({
+  return LegacySettingsV21Schema.parse({
     ...structuredClone(legacy),
-    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    schemaVersion: 21,
     app,
     dictationProfiles: legacy.dictationProfiles.map(({ activationKey, shift, ...profile }) => ({
       ...structuredClone(profile),
       shortcut: shortcutFromLegacyActivation(activationKey, shift),
     })),
+  });
+}
+
+export function migrateSettingsV21(legacy: LegacySettingsV21): Settings {
+  const existing = legacy.dictationProfiles.map((profile) => {
+    if (legacyProfileEquals(profile, LEGACY_DEFAULT_GENERAL_PROFILE_V21)) {
+      // Upgrade the dormant default prompt, but never opt an existing Raw user into Smart.
+      return {
+        ...structuredClone(DEFAULT_GENERAL_PROFILE),
+        processingMode: profile.processingMode,
+      };
+    }
+    if (legacyProfileEquals(profile, LEGACY_DEFAULT_PROMPT_PROFILE_V21)) {
+      return structuredClone(DEFAULT_PROMPT_PROFILE);
+    }
+    return structuredClone(profile);
+  });
+  const addedBuiltIns = [
+    structuredClone(DEFAULT_MARKDOWN_PROFILE),
+    structuredClone(DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE),
+  ];
+  const addedShortcuts = addedBuiltIns.map((profile) => profile.shortcut);
+  // V21 allowed custom/edited profiles to own Alt+X or an Alt+X-prefixed chord. Current validation
+  // permanently reserves the canonical built-in family so reset can never create an invalid
+  // collision. Keep every profile and all of its content, and move only noncanonical owners that
+  // collide with the new family to the first deterministic free chord.
+  const needsRepair = (profile: (typeof existing)[number]) =>
+    isReservedBindingForProfile(profile.id, profile.shortcut);
+  const occupied = [
+    ...addedShortcuts,
+    ...existing.filter((profile) => !needsRepair(profile)).map((profile) => profile.shortcut),
+  ];
+  const repairedExisting = existing.map((profile) => {
+    if (!needsRepair(profile)) return profile;
+    const shortcut = firstMigrationSafeShortcut(occupied);
+    occupied.push(shortcut);
+    return { ...profile, shortcut };
+  });
+  const existingBuiltIns = repairedExisting.filter(
+    ({ id }) => id === GENERAL_PROFILE_ID || id === PROMPT_PROFILE_ID,
+  );
+  const customProfiles = repairedExisting.filter(
+    ({ id }) => id !== GENERAL_PROFILE_ID && id !== PROMPT_PROFILE_ID,
+  );
+  const dictationProfiles = [...existingBuiltIns, ...addedBuiltIns, ...customProfiles];
+  const general = dictationProfiles.find(({ id }) => id === GENERAL_PROFILE_ID);
+  if (general === undefined) throw new Error('Migrated General profile is missing');
+  return SettingsSchema.parse({
+    ...structuredClone(legacy),
+    // Keep the target literal so a future settings bump cannot silently skip its migration.
+    schemaVersion: 22,
+    // The v21 schema guarantees this compatibility mirror matches General. Preserve both so an
+    // upgrade can never activate Smart/provider processing for an existing Raw user.
+    app: structuredClone(legacy.app),
+    transcription: {
+      ...structuredClone(legacy.transcription),
+      language: normalizeWhisperSourceLanguage(legacy.transcription.language),
+    },
+    dictationProfiles,
+    welcome: {
+      ...structuredClone(legacy.welcome),
+      activationTested: false,
+      activationEvidence: null,
+    },
   });
 }
 
@@ -225,6 +313,34 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
   };
 }
 
+function legacyProfileEquals(
+  profile: LegacySettingsV21['dictationProfiles'][number],
+  expected: typeof LEGACY_DEFAULT_GENERAL_PROFILE_V21 | typeof LEGACY_DEFAULT_PROMPT_PROFILE_V21,
+): boolean {
+  return (
+    profile.id === expected.id &&
+    profile.name === expected.name &&
+    profile.processingMode === expected.processingMode &&
+    profile.smartPrompt === expected.smartPrompt &&
+    JSON.stringify(profile.shortcut) === JSON.stringify(expected.shortcut)
+  );
+}
+
+function firstMigrationSafeShortcut(occupied: readonly Shortcut[]): Shortcut {
+  for (const shift of [false, true]) {
+    for (const key of ShortcutKeySchema.options) {
+      const candidate = shortcutFromLegacyActivation(key, shift);
+      if (
+        !isReservedBindingForProfile('migration', candidate) &&
+        !occupied.some((shortcut) => shortcutsConflict(shortcut, candidate))
+      ) {
+        return candidate;
+      }
+    }
+  }
+  throw new Error('No migration-safe profile shortcut is available');
+}
+
 function migrateWelcomeStep(welcome: Record<string, unknown>): void {
   if (welcome.completedAt !== null && welcome.completedAt !== undefined) {
     welcome.lastStep = 5;
@@ -244,7 +360,7 @@ function migrateLegacyTranscription(
       legacy.modelId === 'Xenova/whisper-large'
         ? 'onnx-community/whisper-large-v3-turbo'
         : legacy.modelId,
-    language: legacy.language,
+    language: normalizeWhisperSourceLanguage(legacy.language),
   };
 }
 

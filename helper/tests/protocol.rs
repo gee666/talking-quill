@@ -334,9 +334,9 @@ fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
 }
 
 fn initialize(server: &mut Server<FakePlatform>, receiver: &Receiver<Outbound>) {
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
     let response = receive(receiver);
-    assert_eq!(response["result"]["protocolVersion"], 3);
+    assert_eq!(response["result"]["protocolVersion"], 5);
     assert!(response["result"].get("defaultActivationKey").is_none());
 }
 
@@ -373,7 +373,7 @@ fn inbound_allowlist_is_exact() {
 }
 
 #[test]
-fn initialization_must_be_first_exactly_once_and_exactly_version_three() {
+fn initialization_must_be_first_exactly_once_and_exactly_version_five() {
     let (mut server, receiver, state, gate) = setup_observable();
     assert!(!gate.is_open());
 
@@ -440,7 +440,7 @@ fn string_request_ids_are_echoed_by_responses_and_paste_commit_notifications() {
     assert!(server.handle_payload(&request_with_id(
         json!("initialize-id"),
         "initialize",
-        json!({"protocolVersion": 3}),
+        json!({"protocolVersion": 5}),
     )));
     assert_eq!(receive(&receiver)["id"], "initialize-id");
 
@@ -586,7 +586,7 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 3})),
+        request(1, "initialize", json!({"protocolVersion": 5})),
         request(2, "ping", json!({})),
         request(3, "shutdown", json!({})),
     ] {
@@ -613,7 +613,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
     let mut eof_input = Vec::new();
     write_frame(
         &mut eof_input,
-        &request(1, "initialize", json!({"protocolVersion": 3})),
+        &request(1, "initialize", json!({"protocolVersion": 5})),
     )
     .unwrap();
     let mut eof_output = Vec::new();
@@ -631,7 +631,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
 fn framed_runner_does_not_wait_for_eof_after_shutdown() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 3})),
+        request(1, "initialize", json!({"protocolVersion": 5})),
         request(2, "shutdown", json!({})),
     ] {
         write_frame(&mut input, &payload).unwrap();
@@ -741,7 +741,7 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
 #[test]
 fn full_framed_coordinator_dispatches_every_registered_method_in_sequence() {
     let calls = [
-        (1, "initialize", json!({"protocolVersion": 3})),
+        (1, "initialize", json!({"protocolVersion": 5})),
         (
             2,
             "activation.configure",
@@ -1056,6 +1056,28 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
         })
     );
 
+    let complete = Outbound::Event(HelperEvent::ActivationComplete {
+        binding: ActivationBinding::new(
+            ProfileId::GENERAL,
+            alt_shortcut_model(ActivationKey::X, false),
+        ),
+        held_ms: 599,
+    });
+    let complete: Value = serde_json::from_slice(&encode_outbound(&complete).unwrap()).unwrap();
+    assert_eq!(
+        complete,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "activation.event",
+            "params": {
+                "phase": "complete",
+                "profileId": "general",
+                "shortcut": alt_shortcut("X", false),
+                "heldMs": 599,
+            },
+        })
+    );
+
     let session = Outbound::Event(HelperEvent::SessionKey {
         key: SessionKey::Escape,
         phase: EventPhase::Up,
@@ -1074,7 +1096,7 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
 #[test]
 fn valid_notifications_are_never_executed_or_answered() {
     let (mut server, receiver, state, gate) = setup_observable();
-    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 3}),)));
+    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 5}),)));
     assert!(receiver.try_recv().is_err());
     assert!(!gate.is_open());
 
@@ -1082,7 +1104,7 @@ fn valid_notifications_are_never_executed_or_answered() {
     state.calls.lock().unwrap().clear();
 
     for (method, params) in [
-        ("initialize", json!({"protocolVersion": 3})),
+        ("initialize", json!({"protocolVersion": 5})),
         (
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
@@ -1129,7 +1151,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
         Arc::clone(&terminal),
     );
 
-    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
+    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
     assert!(!gate.is_open());
     assert_eq!(
         terminal.reason(),
@@ -1159,7 +1181,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
     let _ = outbound_rx.recv().unwrap();
     assert!(gate.is_open());
     drop(outbound_rx);
@@ -1194,7 +1216,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
         Arc::clone(&gate),
         terminal,
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 3}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
     assert!(gate.is_open());
 
     assert!(!server.handle_payload(&request(2, "ping", json!({}))));
@@ -1269,15 +1291,17 @@ proptest! {
 }
 
 #[test]
-fn protocol_v3_configures_ordered_chords_and_preserves_every_wire_field() {
+fn protocol_v5_configures_ordered_chords_and_preserves_every_wire_field() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
     let values = json!({
         "enabled": true,
         "bindings": [
-            binding_value("general", shortcut_value(&["X", "P"], false, true, false, false)),
-            binding_value("prompt", shortcut_value(&["P"], true, false, true, false)),
-            binding_value(&profile_id(2), shortcut_value(&["X"], false, true, true, false))
+            binding_value("general", shortcut_value(&["X"], false, true, false, false)),
+            binding_value("prompt", shortcut_value(&["X", "P"], false, true, false, false)),
+            binding_value("markdown", shortcut_value(&["X", "M"], false, true, false, false)),
+            binding_value("translate-to-english", shortcut_value(&["X", "E"], false, true, false, false)),
+            binding_value(&profile_id(2), shortcut_value(&["Q"], true, true, false, false))
         ]
     });
     assert!(server.handle_payload(&request(90, "activation.configure", values.clone())));
@@ -1290,7 +1314,7 @@ fn protocol_v3_configures_ordered_chords_and_preserves_every_wire_field() {
     );
     assert_eq!(
         configured.iter().next().unwrap().shortcut().keys(),
-        &[ActivationKey::X, ActivationKey::P]
+        &[ActivationKey::X]
     );
     assert_eq!(
         configured.iter().nth(1).unwrap().shortcut().trigger(),
@@ -1299,11 +1323,11 @@ fn protocol_v3_configures_ordered_chords_and_preserves_every_wire_field() {
 }
 
 #[test]
-fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
+fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
 
-    let ten: Vec<_> = (0..10)
+    let twelve: Vec<_> = (0..12)
         .map(|index| {
             let key = char::from(b'A' + index as u8).to_string();
             alt_binding(&profile_id(index), &key, false)
@@ -1312,7 +1336,7 @@ fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
     assert!(server.handle_payload(&request(
         90,
         "activation.configure",
-        json!({"enabled": true, "bindings": ten}),
+        json!({"enabled": true, "bindings": twelve}),
     )));
     assert!(receive(&receiver).get("result").is_some());
 
@@ -1326,7 +1350,7 @@ fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
         json!({"enabled": false, "bindings": []})
     );
 
-    let eleven: Vec<_> = (0..11)
+    let thirteen: Vec<_> = (0..13)
         .map(|index| {
             let key = char::from(b'A' + index as u8).to_string();
             alt_binding(&profile_id(index), &key, false)
@@ -1336,10 +1360,11 @@ fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
     twenty_seven.push("A".to_owned());
     let alt_x = shortcut_value(&["X"], false, true, false, false);
     let alt_x_p = shortcut_value(&["X", "P"], false, true, false, false);
+    let alt_x_q = shortcut_value(&["X", "Q"], false, true, false, false);
     let invalid_profile = "00000000-0000-0000-8000-000000000001";
     let invalid = [
         json!({"enabled": true, "bindings": []}),
-        json!({"enabled": true, "bindings": eleven}),
+        json!({"enabled": true, "bindings": thirteen}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&[], false, true, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A"], false, false, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A", "A"], false, true, false, false))]}),
@@ -1349,8 +1374,9 @@ fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
         json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": {"modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false}, "keys": ["A"], "trigger": "A"}}]}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&twenty_seven.iter().map(String::as_str).collect::<Vec<_>>(), false, true, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("prompt", alt_x.clone())]}),
-        json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("prompt", alt_x_p.clone())]}),
+        json!({"enabled": true, "bindings": [binding_value(&profile_id(2), alt_x.clone()), binding_value(&profile_id(3), alt_x_p.clone())]}),
         json!({"enabled": true, "bindings": [binding_value("general", alt_x_p), binding_value("prompt", alt_x.clone())]}),
+        json!({"enabled": true, "bindings": [binding_value("general", alt_x_q)]}),
         json!({"enabled": true, "bindings": [binding_value("general", alt_x.clone()), binding_value("general", shortcut_value(&["Q"], false, true, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value(invalid_profile, alt_x.clone())]}),
         json!({"enabled": true, "bindings": [{"profileId": "general", "shortcut": alt_x.clone(), "extra": true}]}),
@@ -1365,7 +1391,7 @@ fn protocol_v3_enforces_binding_count_enablement_key_and_conflict_rules() {
 }
 
 #[test]
-fn protocol_v3_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
+fn protocol_v5_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
     let values = json!({

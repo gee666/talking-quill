@@ -94,6 +94,13 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     ).toBeFocused();
     await main.getByRole('button', { name: 'Skip Smart processing' }).click();
     await expect(main.getByRole('heading', { name: 'Ready', exact: true })).toBeFocused();
+    const defaults = main.getByRole('list', { name: 'Built-in dictation profile defaults' });
+    await expect(defaults.getByRole('listitem')).toHaveText([
+      'General: Alt + X (final trigger X) — Smart processing',
+      'Prompt: Alt + X + P (final trigger P) — Smart processing',
+      'Markdown: Alt + X + M (final trigger M) — Smart processing',
+      'Translate to English: Alt + X + E (final trigger E) — Smart processing',
+    ]);
     await main.getByRole('button', { name: 'Start using Talking Quill' }).click();
     await expect(main.getByRole('heading', { name: 'Talking Quill is ready' })).toBeVisible();
 
@@ -108,9 +115,8 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await expect(main.getByRole('heading', { name: 'Welcome' })).toHaveCount(0);
     await driver(application, 'setWelcomePrerequisites', [true]);
 
-    await driver(application, 'activationDown');
+    await driver(application, 'activationComplete', [100]);
     await driver(application, 'frames', [0.2, 15]);
-    await driver(application, 'activationUp');
     await driver(application, 'key', ['enter']);
     await expect
       .poll(() =>

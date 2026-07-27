@@ -98,7 +98,7 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
               jsonrpc: '2.0',
               id: request.id,
               result: {
-                protocolVersion: 3,
+                protocolVersion: 5,
                 helperVersion: '1.0.0',
                 platform: process.platform === 'win32' ? 'windows' : 'macos',
                 architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',

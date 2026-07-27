@@ -339,7 +339,7 @@ pub(crate) fn deliver_callback_event_with_session_arm(
         HelperEvent::Activation {
             phase: EventPhase::Down,
             ..
-        }
+        } | HelperEvent::ActivationComplete { .. }
     );
     if arms_session {
         session_capture.store(true, Ordering::Release);
@@ -505,6 +505,17 @@ mod tests {
 
         assert!(deliver_callback_event_with_session_arm(
             &sender, &terminal, &capture, activation,
+        ));
+        assert!(capture.load(Ordering::Acquire));
+        assert!(matches!(receiver.recv().unwrap(), Outbound::Event(_)));
+
+        capture.store(false, Ordering::Release);
+        let complete = HelperEvent::ActivationComplete {
+            binding: ActivationBinding::new(ProfileId::GENERAL, test_shortcut()),
+            held_ms: 599,
+        };
+        assert!(deliver_callback_event_with_session_arm(
+            &sender, &terminal, &capture, complete,
         ));
         assert!(capture.load(Ordering::Acquire));
         assert!(matches!(receiver.recv().unwrap(), Outbound::Event(_)));

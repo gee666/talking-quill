@@ -860,13 +860,14 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
         };
         let injected = native.flags & LLKHF_INJECTED != 0 || native.dwExtraInfo == INJECTED_MARKER;
         let extended = native.flags & LLKHF_EXTENDED != 0;
-        Some(process_hook_record(
+        Some(process_hook_record_at(
             context,
             native.vkCode as u16,
             native.scanCode,
             extended,
             phase,
             injected,
+            u64::from(native.time),
         ))
     });
 
@@ -894,6 +895,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
     }
 }
 
+#[cfg(test)]
 fn process_hook_record(
     context: &CallbackContext,
     virtual_key: u16,
@@ -901,6 +903,26 @@ fn process_hook_record(
     extended: bool,
     phase: KeyPhase,
     injected: bool,
+) -> bool {
+    process_hook_record_at(
+        context,
+        virtual_key,
+        scan_code,
+        extended,
+        phase,
+        injected,
+        0,
+    )
+}
+
+fn process_hook_record_at(
+    context: &CallbackContext,
+    virtual_key: u16,
+    scan_code: u32,
+    extended: bool,
+    phase: KeyPhase,
+    injected: bool,
+    observed_at_ms: u64,
 ) -> bool {
     // Helper-synthesized and other injected records pass through without
     // changing modifier, physical, reducer, or capture state.
@@ -968,22 +990,26 @@ fn process_hook_record(
     }
     let activation = keyboard.activation;
     let capture = context.state.session_capture.load(Ordering::Acquire);
-    let plan = keyboard.reducer.plan_bindings(
+    let plan = keyboard.reducer.plan_bindings_at(
         input,
         activation.bindings,
         accepting && activation.enabled && keyboard.activation_fenced_letters == 0,
         accepting && capture,
+        observed_at_ms,
     );
     let planned_event = plan.event();
     let delivered = planned_event.is_none()
         || (accepting
             && match planned_event.expect("event presence checked above") {
-                event @ HelperEvent::Activation { .. } => deliver_callback_event_with_session_arm(
-                    &context.outbound,
-                    &context.terminal,
-                    &context.state.session_capture,
-                    event,
-                ),
+                event @ (HelperEvent::Activation { .. }
+                | HelperEvent::ActivationComplete { .. }) => {
+                    deliver_callback_event_with_session_arm(
+                        &context.outbound,
+                        &context.terminal,
+                        &context.state.session_capture,
+                        event,
+                    )
+                }
                 event => deliver_callback_event(&context.outbound, &context.terminal, event),
             });
     if !delivered {
@@ -1109,7 +1135,7 @@ mod tests {
     fn full_bindings() -> ActivationBindings {
         ActivationBindings::new(&[
             ActivationBinding::new(
-                ProfileId::GENERAL,
+                ProfileId::PROMPT,
                 shortcut(
                     ShortcutModifiers {
                         ctrl: false,
@@ -1121,7 +1147,7 @@ mod tests {
                 ),
             ),
             ActivationBinding::new(
-                ProfileId::PROMPT,
+                ProfileId::GENERAL,
                 shortcut(
                     ShortcutModifiers {
                         ctrl: true,

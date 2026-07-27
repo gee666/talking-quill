@@ -17,16 +17,35 @@ fn bindings(shortcuts: &[Shortcut]) -> ActivationBindings {
         .iter()
         .copied()
         .enumerate()
-        .map(|(index, shortcut)| {
-            let profile_id = match index {
-                0 => ProfileId::GENERAL,
-                1 => ProfileId::PROMPT,
-                _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
-            };
-            ActivationBinding::new(profile_id, shortcut)
-        })
+        .map(|(index, shortcut)| test_binding(index, shortcut))
         .collect();
     ActivationBindings::new(&values).unwrap()
+}
+
+fn test_binding(index: usize, shortcut: Shortcut) -> ActivationBinding {
+    let alt = modifiers(false, true, false, false);
+    let profile_id = if shortcut.modifier_mask() == alt {
+        match shortcut.keys() {
+            [ActivationKey::X] => ProfileId::GENERAL,
+            [ActivationKey::X, ActivationKey::P] => ProfileId::PROMPT,
+            [ActivationKey::X, ActivationKey::M] => ProfileId::MARKDOWN,
+            [ActivationKey::X, ActivationKey::E] => ProfileId::TRANSLATE_TO_ENGLISH,
+            _ => indexed_profile_id(index),
+        }
+    } else {
+        indexed_profile_id(index)
+    };
+    ActivationBinding::new(profile_id, shortcut)
+}
+
+fn indexed_profile_id(index: usize) -> ProfileId {
+    match index {
+        0 => ProfileId::GENERAL,
+        1 => ProfileId::PROMPT,
+        2 => ProfileId::MARKDOWN,
+        3 => ProfileId::TRANSLATE_TO_ENGLISH,
+        _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
+    }
 }
 
 fn letter(key: ActivationKey, phase: KeyPhase, mask: ModifierMask) -> KeyInput {
@@ -57,10 +76,241 @@ fn step(
     capture: bool,
     delivered: bool,
 ) -> (Option<HelperEvent>, bool) {
-    let plan = reducer.plan_bindings(input, configured, enabled, capture);
+    step_at(reducer, configured, input, enabled, capture, delivered, 0)
+}
+
+fn step_at(
+    reducer: &mut KeyboardReducer,
+    configured: ActivationBindings,
+    input: KeyInput,
+    enabled: bool,
+    capture: bool,
+    delivered: bool,
+    observed_at_ms: u64,
+) -> (Option<HelperEvent>, bool) {
+    let plan = reducer.plan_bindings_at(input, configured, enabled, capture, observed_at_ms);
     let event = plan.event();
     let swallowed = reducer.apply(plan, delivered);
     (event, swallowed)
+}
+
+#[test]
+fn translate_to_english_binding_keeps_its_exact_full_chord_ownership() {
+    let alt = modifiers(false, true, false, false);
+    let family = [
+        shortcut(alt, &[ActivationKey::X]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+    ];
+    let configured = bindings(&family);
+    let binding = ActivationBinding::new(ProfileId::TRANSLATE_TO_ENGLISH, family[3]);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::E, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding,
+                phase: EventPhase::Down,
+            }),
+            true,
+        )
+    );
+}
+
+#[test]
+fn canonical_general_prefix_completes_on_release_with_physical_hold_duration() {
+    let alt = modifiers(false, true, false, false);
+    let general = shortcut(alt, &[ActivationKey::X]);
+    let configured = bindings(&[
+        general,
+        shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+    ]);
+    let binding = ActivationBinding::new(ProfileId::GENERAL, general);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            true,
+            false,
+            true,
+            100,
+        ),
+        (None, false)
+    );
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Up, alt),
+            true,
+            false,
+            true,
+            725,
+        ),
+        (
+            Some(HelperEvent::ActivationComplete {
+                binding,
+                held_ms: 625,
+            }),
+            false,
+        )
+    );
+}
+
+#[test]
+fn canonical_general_prefix_survives_modifier_release_before_x_release() {
+    let alt = modifiers(false, true, false, false);
+    let general = shortcut(alt, &[ActivationKey::X]);
+    let configured = bindings(&[
+        general,
+        shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+    ]);
+    let binding = ActivationBinding::new(ProfileId::GENERAL, general);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            true,
+            false,
+            true,
+            100,
+        ),
+        (None, false)
+    );
+    reducer.observe_modifiers(ModifierMask::default());
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Up, ModifierMask::default(),),
+            true,
+            false,
+            true,
+            300,
+        ),
+        (
+            Some(HelperEvent::ActivationComplete {
+                binding,
+                held_ms: 200,
+            }),
+            false,
+        )
+    );
+}
+
+#[test]
+fn canonical_general_prefix_is_cancelled_when_a_modifier_is_added() {
+    let alt = modifiers(false, true, false, false);
+    let general = shortcut(alt, &[ActivationKey::X]);
+    let configured = bindings(&[
+        general,
+        shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+    ]);
+
+    for added in [
+        modifiers(true, true, false, false),
+        modifiers(false, true, true, false),
+        modifiers(false, true, false, true),
+    ] {
+        let mut reducer = KeyboardReducer::default();
+        assert_eq!(
+            step_at(
+                &mut reducer,
+                configured,
+                letter(ActivationKey::X, KeyPhase::Down, alt),
+                true,
+                false,
+                true,
+                100,
+            ),
+            (None, false),
+        );
+        reducer.observe_modifiers(added);
+        assert_eq!(
+            step_at(
+                &mut reducer,
+                configured,
+                letter(ActivationKey::X, KeyPhase::Up, added),
+                true,
+                false,
+                true,
+                300,
+            ),
+            (None, false),
+        );
+    }
+}
+
+#[test]
+fn canonical_general_prefix_is_cancelled_when_alt_is_readded() {
+    let alt = modifiers(false, true, false, false);
+    let general = shortcut(alt, &[ActivationKey::X]);
+    let configured = bindings(&[
+        general,
+        shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+    ]);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            true,
+            false,
+            true,
+            100,
+        ),
+        (None, false),
+    );
+    reducer.observe_modifiers(ModifierMask::default());
+    reducer.observe_modifiers(alt);
+    assert_eq!(
+        step_at(
+            &mut reducer,
+            configured,
+            letter(ActivationKey::X, KeyPhase::Up, alt),
+            true,
+            false,
+            true,
+            300,
+        ),
+        (None, false),
+    );
 }
 
 #[test]
@@ -94,7 +344,7 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
         ),
         (
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Down,
             }),
             true,
@@ -134,7 +384,7 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
         ),
         (
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Up,
             }),
             true,
@@ -170,7 +420,7 @@ fn ctrl_shift_p_requires_exact_complete_modifier_mask() {
                 result,
                 (
                     Some(HelperEvent::Activation {
-                        binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                        binding: test_binding(0, accepted),
                         phase: EventPhase::Down,
                     }),
                     true,
@@ -254,7 +504,7 @@ fn fresh_down_after_releasing_an_extra_key_can_complete_the_exact_chord() {
         ),
         (
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Down,
             }),
             true,
@@ -316,7 +566,7 @@ fn repeats_never_add_keys_or_trigger_but_accepted_trigger_repeats_are_swallowed(
 #[test]
 fn configuration_change_after_down_uses_the_exact_accepted_snapshot_on_up() {
     let alt = modifiers(false, true, false, false);
-    let original = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let original = shortcut(alt, &[ActivationKey::A, ActivationKey::P]);
     let original_binding = ActivationBinding::new(ProfileId::GENERAL, original);
     let original_bindings = ActivationBindings::new(&[original_binding]).unwrap();
     let replacement_bindings =
@@ -326,7 +576,7 @@ fn configuration_change_after_down_uses_the_exact_accepted_snapshot_on_up() {
     assert!(
         !step(
             &mut reducer,
-            letter(ActivationKey::X, KeyPhase::Down, alt),
+            letter(ActivationKey::A, KeyPhase::Down, alt),
             original_bindings,
             true,
             false,
@@ -394,7 +644,7 @@ fn failed_activation_down_delivery_fails_open_for_trigger_repeats_and_up() {
         ),
         (
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Down,
             }),
             false,
@@ -495,7 +745,7 @@ fn delivered_activation_up_stays_swallowed_when_up_delivery_fails() {
         ),
         (
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Up,
             }),
             true,
@@ -554,7 +804,7 @@ fn disabled_activation_still_tracks_physical_order_without_emitting() {
 #[test]
 fn accepted_activation_retains_profile_and_shortcut_across_reassignment() {
     let alt = modifiers(false, true, false, false);
-    let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let chord = shortcut(alt, &[ActivationKey::A, ActivationKey::P]);
     let original = ActivationBinding::new(ProfileId::GENERAL, chord);
     let reassigned = ActivationBinding::new(ProfileId::PROMPT, chord);
     let mut reducer = KeyboardReducer::default();
@@ -563,7 +813,7 @@ fn accepted_activation_retains_profile_and_shortcut_across_reassignment() {
     assert_eq!(
         step(
             &mut reducer,
-            letter(ActivationKey::X, KeyPhase::Down, alt),
+            letter(ActivationKey::A, KeyPhase::Down, alt),
             original_bindings,
             true,
             false,
@@ -611,7 +861,7 @@ fn accepted_activation_retains_profile_and_shortcut_across_reassignment() {
 fn modifier_sequence_must_be_nonempty_and_unchanged_until_all_letters_release() {
     let alt = modifiers(false, true, false, false);
     let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
-    let binding = ActivationBinding::new(ProfileId::GENERAL, chord);
+    let binding = ActivationBinding::new(ProfileId::PROMPT, chord);
     let configured = ActivationBindings::new(&[binding]).unwrap();
     let mut reducer = KeyboardReducer::default();
 
@@ -721,7 +971,7 @@ fn modifier_sequence_must_be_nonempty_and_unchanged_until_all_letters_release() 
 fn binding_revision_fences_passive_prefix_but_preserves_accepted_balance() {
     let alt = modifiers(false, true, false, false);
     let chord = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
-    let binding = ActivationBinding::new(ProfileId::GENERAL, chord);
+    let binding = ActivationBinding::new(ProfileId::PROMPT, chord);
     let configured = ActivationBindings::new(&[binding]).unwrap();
     let mut reducer = KeyboardReducer::default();
 
@@ -912,7 +1162,7 @@ fn fail_open_balances_delivered_activation_and_session_downs_then_clears_state()
         reducer.fail_open_balancing_events(),
         [
             Some(HelperEvent::Activation {
-                binding: ActivationBinding::new(ProfileId::GENERAL, accepted),
+                binding: test_binding(0, accepted),
                 phase: EventPhase::Up,
             }),
             Some(HelperEvent::SessionKey {

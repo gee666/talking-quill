@@ -339,7 +339,7 @@ export class EchoCapturePipeline {
       {
         modelId: settings.modelId,
         sampleRate: PCM_SAMPLE_RATE,
-        ...(settings.language === null ? {} : { language: settings.language }),
+        language: settings.language,
       },
       owner.signal,
     );
@@ -464,7 +464,7 @@ export class EchoCapturePipeline {
       {
         modelId: settings.modelId,
         sampleRate: PCM_SAMPLE_RATE,
-        ...(settings.language === null ? {} : { language: settings.language }),
+        language: settings.language,
       },
       owner.signal,
     );

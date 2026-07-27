@@ -5,7 +5,11 @@ import {
   type WhisperPipeline,
 } from '../../app/src/workers/whisper/runtime';
 
-const options = { modelId: 'Xenova/whisper-small' as const, sampleRate: 16_000 as const };
+const options = {
+  modelId: 'Xenova/whisper-small' as const,
+  sampleRate: 16_000 as const,
+  language: 'ru' as const,
+};
 const revisions = {
   'onnx-community/whisper-large-v3-turbo': 'c'.repeat(40),
   'Xenova/whisper-small': 'a'.repeat(40),
@@ -68,13 +72,40 @@ describe('Whisper runtime', () => {
     const warm = await runtime.transcribe(new Float32Array([0.2]), options);
     expect(loads).toBe(1);
     expect(calls).toEqual([
-      { task: 'transcribe', chunk_length_s: 30, stride_length_s: 5 },
-      { task: 'transcribe', chunk_length_s: 30, stride_length_s: 5 },
+      { task: 'transcribe', language: 'ru', chunk_length_s: 30, stride_length_s: 5 },
+      { task: 'transcribe', language: 'ru', chunk_length_s: 30, stride_length_s: 5 },
     ]);
     expect(cold.pipeline).toMatchObject({ loadCount: 1, reused: false });
     expect(warm.pipeline).toMatchObject({ loadCount: 1, reused: true });
     await runtime.shutdown();
   });
+
+  it.each(['onnx-community/whisper-large-v3-turbo', 'Xenova/whisper-small'] as const)(
+    'omits the language hint for auto-detection with %s',
+    async (modelId) => {
+      const pipeline = vi.fn(() =>
+        Promise.resolve({ text: 'detected' }),
+      ) as unknown as WhisperPipeline;
+      const runtime = new WhisperRuntime({
+        cacheDirectory: 'models',
+        revisions,
+        factory: () => Promise.resolve(pipeline),
+      });
+
+      await runtime.transcribe(new Float32Array([0.1]), {
+        modelId,
+        sampleRate: 16_000,
+        language: 'auto',
+      });
+
+      expect(pipeline).toHaveBeenCalledWith(new Float32Array([0.1]), {
+        task: 'transcribe',
+        chunk_length_s: 30,
+        stride_length_s: 5,
+      });
+      await runtime.shutdown();
+    },
+  );
 
   it('uses 30 second windows at exact 20 second sample hops and timestamp central regions', async () => {
     const starts: number[] = [];
@@ -126,7 +157,14 @@ describe('Whisper runtime', () => {
     const result = await runtime.finishSession('session');
     expect(starts).toEqual([0, 20 * 16_000, 40 * 16_000, 60 * 16_000, 80 * 16_000]);
     expect(streamingCalls).toHaveLength(5);
-    expect(streamingCalls.every((call) => call.return_timestamps === true)).toBe(true);
+    expect(streamingCalls).toEqual(
+      Array.from({ length: 5 }, () => ({
+        task: 'transcribe',
+        language: 'ru',
+        chunk_length_s: 0,
+        return_timestamps: true,
+      })),
+    );
     expect(streamingCalls.every((call) => call.return_timestamps !== 'word')).toBe(true);
     expect(result.text).toBe(
       'start repeat repeat boundary-one middle boundary-two later boundary-three near-end boundary-four finish',

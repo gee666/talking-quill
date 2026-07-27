@@ -7,6 +7,11 @@ import { WhisperClientError } from '../../app/src/main/transcription/errors';
 const marker = resolve('tmp', 'tests', 'whisper-active.marker');
 const crashMarker = resolve('tmp', 'tests', 'whisper-crash-active.marker');
 const workerPath = resolve('tests', 'integration', 'whisper-controllable-worker.cjs');
+const transcriptionOptions = {
+  modelId: 'Xenova/whisper-small' as const,
+  sampleRate: 16_000 as const,
+  language: 'en' as const,
+};
 void app.whenReady().then(async () => {
   let order = 0;
   let firstExitOrder = 0;
@@ -55,7 +60,7 @@ void app.whenReady().then(async () => {
     const controller = new AbortController();
     const active = client.transcribe(
       new Float32Array([0.1]),
-      { modelId: 'Xenova/whisper-small', sampleRate: 16_000 },
+      transcriptionOptions,
       controller.signal,
     );
     await waitForFile(marker, 10_000);
@@ -76,7 +81,7 @@ void app.whenReady().then(async () => {
 
     const replacement = await client.transcribe(
       new Float32Array([0.2]),
-      { modelId: 'Xenova/whisper-small', sampleRate: 16_000 },
+      transcriptionOptions,
       new AbortController().signal,
     );
     if (replacement.text !== 'healthy replacement' || currentGeneration() !== 2) {
@@ -85,7 +90,7 @@ void app.whenReady().then(async () => {
 
     const crashingRequest = client.transcribe(
       new Float32Array([0.3]),
-      { modelId: 'Xenova/whisper-small', sampleRate: 16_000 },
+      transcriptionOptions,
       new AbortController().signal,
     );
     await waitForFile(crashMarker, 10_000);
@@ -97,7 +102,7 @@ void app.whenReady().then(async () => {
     await waitForCondition(() => currentGeneration() >= 3, 10_000);
     const afterCrash = await client.transcribe(
       new Float32Array([0.4]),
-      { modelId: 'Xenova/whisper-small', sampleRate: 16_000 },
+      transcriptionOptions,
       new AbortController().signal,
     );
     if (afterCrash.text !== 'healthy replacement' || currentGeneration() !== 3) {

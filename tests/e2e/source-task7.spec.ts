@@ -39,7 +39,7 @@ async function waitForPhase(application: ElectronApplication, phase: string) {
 
 async function quick(application: ElectronApplication, text: string, cancel = false) {
   await driver(application, 'setTranscript', [text]);
-  await driver(application, 'activationDown');
+  await driver(application, 'activationComplete', [100]);
   await expect
     .poll(() =>
       driver<{ readonly recording: { readonly active: boolean } }>(application, 'snapshot').then(
@@ -47,9 +47,8 @@ async function quick(application: ElectronApplication, text: string, cancel = fa
       ),
     )
     .toBe(true);
-  await driver(application, 'frames', [0.2, 15]);
-  await driver(application, 'activationUp');
   await waitForPhase(application, 'recordingQuick');
+  await driver(application, 'frames', [0.2, 15]);
   await driver(application, 'key', [cancel ? 'escape' : 'enter']);
   await waitForPhase(application, cancel ? 'cancelled' : 'completed');
   await waitForPhase(application, 'idle');

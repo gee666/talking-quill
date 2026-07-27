@@ -8,7 +8,7 @@ const marker = markerArgument?.slice('--test-marker='.length);
 const crashMarker = crashMarkerArgument?.slice('--test-crash-marker='.length);
 
 process.parentPort.postMessage({
-  version: 1,
+  version: 2,
   requestId: 'worker-ready',
   ok: true,
   result: { type: 'ready', networkGuarded: true, networkProbeCompleted: false },
@@ -46,5 +46,5 @@ process.parentPort.on('message', (event) => {
 });
 
 function respond(requestId, result) {
-  process.parentPort.postMessage({ version: 1, requestId, ok: true, result });
+  process.parentPort.postMessage({ version: 2, requestId, ok: true, result });
 }

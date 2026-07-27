@@ -4,6 +4,10 @@ import { ProviderError } from '../../app/src/main/providers/errors';
 import { ModelManagerError } from '../../app/src/main/transcription/errors';
 import { authorizeIpc } from '../../app/src/main/security/ipc-authorization';
 import { toPublicError } from '../../app/src/main/security/public-error';
+import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+} from '../../app/src/shared/schemas/dictation-profiles';
 import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 import {
   eventRegistry,
@@ -28,7 +32,7 @@ describe('typed IPC registry', () => {
     expect(
       invokeRegistry['profile:create'].request.safeParse({
         name: 'Reserved',
-        shortcut: shortcutFromLegacyActivation('Z', false),
+        shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
         processingMode: 'raw',
         smartPrompt: null,
       }).success,
@@ -49,7 +53,18 @@ describe('typed IPC registry', () => {
     expect(
       profileUpdate.safeParse({
         id: 'general',
-        patch: { shortcut: shortcutFromLegacyActivation('Z', true) },
+        patch: { shortcut: DEFAULT_PROMPT_PROFILE.shortcut },
+      }).success,
+    ).toBe(false);
+    expect(
+      profileUpdate.safeParse({
+        id: 'general',
+        patch: {
+          shortcut: {
+            modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+            keys: ['X', 'Q'],
+          },
+        },
       }).success,
     ).toBe(false);
     expect(

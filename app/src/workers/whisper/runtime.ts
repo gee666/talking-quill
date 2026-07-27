@@ -10,6 +10,7 @@ import {
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import {
   TranscriptionResultSchema,
+  WHISPER_TRANSCRIPTION_TASK,
   type PipelineReuseMetadata,
   type TranscriptionOptions,
   type TranscriptionResult,
@@ -427,8 +428,10 @@ function transcriptionArguments(
   chunkLongAudio: boolean,
 ): Readonly<Record<string, unknown>> {
   return {
-    task: 'transcribe',
-    ...(options.language === undefined ? {} : { language: options.language }),
+    // Keep translate-to-English mode unreachable. In auto mode, omit the source-language
+    // hint entirely so Whisper can detect the language from the audio.
+    task: WHISPER_TRANSCRIPTION_TASK,
+    ...(options.language === 'auto' ? {} : { language: options.language }),
     ...(chunkLongAudio
       ? { chunk_length_s: WHISPER_CHUNK_SECONDS, stride_length_s: WHISPER_STRIDE_SECONDS }
       : { chunk_length_s: 0 }),

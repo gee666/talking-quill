@@ -894,22 +894,26 @@ fn process_key_event_with_modifiers(
         repeat,
         injected: false,
     };
-    let plan = keyboard.reducer.plan_bindings(
+    let plan = keyboard.reducer.plan_bindings_at(
         input,
         activation.bindings,
         accepting && activation.enabled && keyboard.preheld_letters.is_empty(),
         accepting && capture,
+        event_timestamp / 1_000_000,
     );
     let planned_event = plan.event();
     let delivered = planned_event.is_none()
         || (accepting
             && match planned_event.expect("event presence checked above") {
-                event @ HelperEvent::Activation { .. } => deliver_callback_event_with_session_arm(
-                    &context.outbound,
-                    &context.terminal,
-                    &context.state.session_capture,
-                    event,
-                ),
+                event @ (HelperEvent::Activation { .. }
+                | HelperEvent::ActivationComplete { .. }) => {
+                    deliver_callback_event_with_session_arm(
+                        &context.outbound,
+                        &context.terminal,
+                        &context.state.session_capture,
+                        event,
+                    )
+                }
                 event => deliver_callback_event(&context.outbound, &context.terminal, event),
             });
     if !delivered {
@@ -919,12 +923,15 @@ fn process_key_event_with_modifiers(
         );
     }
     let swallowed = keyboard.reducer.apply(plan, delivered);
-    if let Some(HelperEvent::Activation {
-        phase: crate::keyboard::EventPhase::Down,
-        ..
-    }) = planned_event
-        && delivered
-        && swallowed
+    if matches!(
+        planned_event,
+        Some(
+            HelperEvent::Activation {
+                phase: crate::keyboard::EventPhase::Down,
+                ..
+            } | HelperEvent::ActivationComplete { .. }
+        )
+    ) && delivered
     {
         keyboard.capture_enabled_at = event_timestamp;
     }
@@ -1033,7 +1040,7 @@ mod tests {
     fn bindings() -> ActivationBindings {
         ActivationBindings::new(&[
             ActivationBinding::new(
-                ProfileId::GENERAL,
+                ProfileId::PROMPT,
                 shortcut(
                     ShortcutModifiers {
                         ctrl: false,
@@ -1045,7 +1052,7 @@ mod tests {
                 ),
             ),
             ActivationBinding::new(
-                ProfileId::PROMPT,
+                ProfileId::GENERAL,
                 shortcut(
                     ShortcutModifiers {
                         ctrl: true,

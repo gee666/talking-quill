@@ -49,7 +49,7 @@ function probeMissingModel(requestId) {
           return;
         }
         worker.postMessage({
-          version: 1,
+          version: 2,
           requestId,
           type: 'model-check',
           modelId: 'Xenova/whisper-small',

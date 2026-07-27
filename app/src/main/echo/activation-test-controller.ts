@@ -8,7 +8,10 @@ import {
   IDLE_ACTIVATION_TEST,
   type ActivationTestState,
 } from '../../shared/schemas/activation-test';
-import type { DictationProfile } from '../../shared/schemas/dictation-profiles';
+import {
+  DEFAULT_GENERAL_PROFILE,
+  type DictationProfile,
+} from '../../shared/schemas/dictation-profiles';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 
 type ActivationNotification = Extract<HelperNotification, { method: 'activation.event' }>;
@@ -111,6 +114,32 @@ export class ActivationTestController {
 
   accept(notification: ActivationNotification, profiles: readonly DictationProfile[]): void {
     const now = Date.now();
+    if (notification.params.phase === 'complete') {
+      if (
+        this.#pressedBinding !== null ||
+        notification.params.profileId !== DEFAULT_GENERAL_PROFILE.id ||
+        !shortcutsEqual(notification.params.shortcut, DEFAULT_GENERAL_PROFILE.shortcut)
+      ) {
+        return;
+      }
+      const profile = profiles.find(
+        (candidate) =>
+          candidate.id === notification.params.profileId &&
+          shortcutsEqual(candidate.shortcut, notification.params.shortcut),
+      );
+      if (profile === undefined) return;
+      const binding = freezeActivationBinding(notification.params);
+      this.#state = {
+        active: true,
+        phase: notification.params.heldMs >= ECHO_HOLD_THRESHOLD_MS ? 'extended' : 'quick',
+        profileId: binding.profileId,
+        shortcut: binding.shortcut,
+        elapsedMs: notification.params.heldMs,
+        unavailableReason: null,
+      };
+      this.#publish(this.#state);
+      return;
+    }
     if (notification.params.phase === 'down') {
       if (this.#pressedBinding !== null) return;
       const profile = profiles.find(

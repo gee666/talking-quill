@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import {
-  GENERAL_PROFILE_ID,
+  BuiltInDictationProfileIdSchema,
   MAX_DICTATION_PROFILES,
-  PROMPT_PROFILE_ID,
   RESERVED_DICTATION_BINDINGS,
-  isReservedBindingForAnotherProfile,
+  builtInDictationProfileMetadata,
+  builtInDictationProfileName,
+  dictationProfileBindingsConflict,
+  isReservedBindingForProfile,
   reservedBindingOwner,
   type DictationProfile,
   type DictationProfileCreate,
@@ -66,8 +68,8 @@ export function DictationProfilesSection({
     >
       <p>
         Hold the same nonempty modifier combination while pressing letter keys in order. The final
-        letter is the trigger; its key down/up timing chooses Quick or Extended Dictation. General
-        and Prompt can be edited and reset, but not deleted.
+        letter is the trigger; its key down/up timing chooses Quick or Extended Dictation. Built-in
+        profiles can be edited and reset, but not deleted.
       </p>
       {settings.dictationProfiles.map((profile) => (
         <ProfileEditor
@@ -85,21 +87,22 @@ export function DictationProfilesSection({
               window.talkingQuill.profiles.update(profile.id, profilePatch(profile, next)),
             );
           }}
-          {...(profile.id === GENERAL_PROFILE_ID || profile.id === PROMPT_PROFILE_ID
-            ? {
-                onReset: () => {
-                  void mutate(profile.id, () =>
-                    window.talkingQuill.profiles.reset(
-                      profile.id === GENERAL_PROFILE_ID ? GENERAL_PROFILE_ID : PROMPT_PROFILE_ID,
-                    ),
-                  );
-                },
-              }
-            : {
-                onDelete: () => {
-                  void mutate(profile.id, () => window.talkingQuill.profiles.delete(profile.id));
-                },
-              })}
+          {...(() => {
+            const builtInId = BuiltInDictationProfileIdSchema.safeParse(profile.id);
+            return builtInId.success
+              ? {
+                  onReset: () => {
+                    void mutate(profile.id, () =>
+                      window.talkingQuill.profiles.reset(builtInId.data),
+                    );
+                  },
+                }
+              : {
+                  onDelete: () => {
+                    void mutate(profile.id, () => window.talkingQuill.profiles.delete(profile.id));
+                  },
+                };
+          })()}
         />
       ))}
       {creating ? (
@@ -159,25 +162,30 @@ function ProfileEditor({
 }) {
   const [draft, setDraft] = useState(profile);
   const [shortcutValid, setShortcutValid] = useState(true);
+  const builtInMetadata = builtInDictationProfileMetadata(profile.id);
   const conflictingProfile = profiles.find(
     (candidate) =>
-      candidate.id !== profile.id && shortcutsConflict(candidate.shortcut, draft.shortcut),
+      candidate.id !== profile.id &&
+      dictationProfileBindingsConflict(
+        candidate.id,
+        candidate.shortcut,
+        create ? 'custom' : profile.id,
+        draft.shortcut,
+      ),
   );
   const conflictError =
     conflictingProfile === undefined
       ? undefined
       : profileConflictMessage(draft.shortcut, conflictingProfile, platform);
   const reservationOwner = reservedBindingOwner(draft.shortcut);
-  const reserved = isReservedBindingForAnotherProfile(
-    create ? 'custom' : profile.id,
-    draft.shortcut,
-  );
+  const reserved = isReservedBindingForProfile(create ? 'custom' : profile.id, draft.shortcut);
   const reservationError = reserved
     ? reservedConflictMessage(draft.shortcut, reservationOwner, platform)
     : undefined;
   return (
     <fieldset className="gesture-test">
       <legend>{create ? 'New custom profile' : profile.name}</legend>
+      {builtInMetadata === null ? null : <p>{builtInMetadata.description}</p>}
       <Input
         label={`${profile.name} profile name`}
         value={draft.name}
@@ -218,7 +226,7 @@ function ProfileEditor({
               event.currentTarget.value.trim().length === 0 ? null : event.currentTarget.value,
           })
         }
-        hint="Additional formatting preference. Core safety and same-language rules always apply."
+        hint="Additional cleanup, formatting, or translation instruction. Core content-safety rules always apply."
       />
       <div>
         <Button
@@ -272,7 +280,7 @@ function reservedConflictMessage(
   if (binding === undefined || ownerId === null) {
     return `${candidate} conflicts with a reserved built-in shortcut chord.`;
   }
-  const ownerName = ownerId === GENERAL_PROFILE_ID ? 'General' : 'Prompt';
+  const ownerName = builtInDictationProfileName(ownerId);
   const reservedShortcut = formatKeyboardShortcut(binding.shortcut, platform);
   if (shortcutsEqual(shortcut, binding.shortcut)) {
     return `${candidate} matches the reserved ${ownerName} default ${reservedShortcut}.`;
@@ -306,7 +314,7 @@ function firstAvailableShortcut(profiles: readonly DictationProfile[]): Shortcut
     const shortcut = shortcutFromLegacyActivation(key, false);
     if (
       !profiles.some((profile) => shortcutsConflict(profile.shortcut, shortcut)) &&
-      !isReservedBindingForAnotherProfile('custom', shortcut)
+      !isReservedBindingForProfile('custom', shortcut)
     ) {
       return shortcut;
     }

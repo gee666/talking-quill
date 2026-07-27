@@ -18,7 +18,7 @@ import {
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 21 as const;
+export const SETTINGS_SCHEMA_VERSION = 22 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 
@@ -56,7 +56,7 @@ export const RecordingSettingsSchema = z
 export const TranscriptionSettingsSchema = z
   .object({
     modelId: WhisperModelIdSchema,
-    language: TranscriptionLanguageSchema.nullable(),
+    language: TranscriptionLanguageSchema,
   })
   .strict();
 
@@ -201,7 +201,7 @@ export const DEFAULT_SETTINGS: Settings = deepFreeze({
   app: {
     enabled: true,
     closeToTray: true,
-    defaultProcessingMode: 'raw',
+    defaultProcessingMode: 'smart',
     widgetSize: 'default',
     soundsEnabled: true,
     launchAtLogin: false,
@@ -212,7 +212,7 @@ export const DEFAULT_SETTINGS: Settings = deepFreeze({
   },
   transcription: {
     modelId: 'onnx-community/whisper-large-v3-turbo',
-    language: null,
+    language: 'auto',
   },
   dictationProfiles: defaultDictationProfiles(),
   privacy: {

@@ -8,9 +8,9 @@ Raw stays local. Smart can send the local transcript and context to a configured
 
 1. Install the package for your operating system and processor, then open Talking Quill.
 2. In Welcome, allow microphone access and run the microphone test.
-3. Download and verify a local model: Large v3 Turbo is about 1.09 GB; Small is about 250 MB.
+3. Choose the spoken/source language, then download and verify a local model: Large v3 Turbo is about 1.09 GB; Small is about 250 MB.
 4. Optionally configure and test Smart processing. Skip it to use Raw dictation only.
-5. Review the dynamically listed profiles and shortcuts on the Ready screen.
+5. Review the four built-in Smart reset defaults and their shortcuts on the Ready screen.
 
 On macOS, allow Accessibility and Input Monitoring for shortcuts and text insertion. Screen Recording is needed only for On-Screen Awareness. **Settings** and **Info** can show Welcome again.
 
@@ -20,14 +20,20 @@ Put the cursor in a text field and use a profile shortcut:
 
 | Profile | Shortcut | Mode |
 | --- | --- | --- |
-| General | `Alt+Z` on Windows, `Option+Z` on macOS | Raw |
-| Prompt | `Alt+Shift+Z` on Windows, `Option+Shift+Z` on macOS | Smart |
+| General | `Alt+X` on Windows, `Option+X` on macOS | Smart |
+| Prompt | `Alt+X+P` on Windows, `Option+X+P` on macOS | Smart |
+| Markdown | `Alt+X+M` on Windows, `Option+X+M` on macOS | Smart |
+| Translate to English | `Alt+X+E` on Windows, `Option+X+E` on macOS | Smart |
 
-Talking Quill has the two built-ins and up to ten profiles total. A shortcut chord uses one or more modifiers plus one or more ordered, simultaneously held A–Z keys. Examples include `Alt+X+P` and `Ctrl+Shift+P` on Windows; the same modifiers are shown as `Option` and `Control` on macOS. The last letter pressed is the **final trigger**. Focus a profile’s shortcut field, hold the modifiers and letter keys in order, then release them. `Tab` and `Shift+Tab` leave the field normally.
+Talking Quill has four built-ins and up to twelve profiles total (eight custom profiles). A shortcut chord uses one or more modifiers plus one or more ordered, simultaneously held A–Z keys. The built-in family intentionally shares `Alt/Option+X`: keep X held while pressing P, M, or E for the longer profiles, then release the final suffix and X. The last letter pressed is the **final trigger**. Focus a profile’s shortcut field, hold the modifiers and letter keys in order, then release them. `Tab` and `Shift+Tab` leave the field normally.
 
-Every full chord must be unique. Chords with the same modifiers also cannot prefix one another: for example, `Alt+X` conflicts with `Alt+X+P`. The default General and Prompt chord prefixes stay reserved. Built-ins can be edited or reset but not deleted. Each profile selects Raw or Smart and may add a Smart prompt. `Shift` is only a modifier in the chord; only the final trigger’s down/up timing chooses dictation length.
+Every full chord must be unique. Chords with the same modifiers also cannot prefix one another, except for the exact built-in `Alt/Option+X` default family. For example, unrelated `Alt+A` and `Alt+A+B` still conflict. Custom shortcuts and edited built-in shortcut values cannot claim any noncanonical `Alt/Option+X`-prefixed chord; only the four exact defaults are allowed for their built-in owners. Every default built-in chord prefix stays reserved. Built-ins can be edited or reset but not deleted. Each profile selects Raw or Smart and may add a Smart prompt. `Shift` is only a modifier in the chord; only the final trigger’s down/up timing chooses dictation length.
 
-Global detection does not suppress a chord’s prefix: its modifier and prefix key events pass through to the foreground application before the final trigger is recognized. Choose prefixes that are safe in the applications you use. Secure-input fields, operating-system-reserved shortcuts, and other system-level combinations are not guaranteed to work.
+**Version 21 profile migration:** The upgrade preserves the existing General processing mode and its compatibility mirror; it never changes a Raw user to Smart or enables provider processing, including after completed setup with a cloud provider configured. Fresh installs and an explicit General reset use the new Smart default. Exact old General and Prompt defaults receive the new chord data and may receive updated, privacy-safe prompt text, but the prompt remains dormant while General is Raw.
+
+The four built-ins permanently reserve their reset-safe `Alt/Option+X`, `Alt/Option+X+P`, `Alt/Option+X+M`, and `Alt/Option+X+E` defaults. If an existing noncanonical profile used `Alt/Option+X` or any same-modifier chord with that prefix, the upgrade preserves that profile’s ID, name, processing mode, and Smart prompt but deterministically assigns its shortcut to the first free `Alt/Option+A–Z` chord. This reassignment is unavoidable because retaining the collision would make the current profile list invalid and make a later built-in reset unsafe. Review migrated shortcuts in **Settings → Dictation profiles**.
+
+Global detection does not suppress a chord’s prefix: its modifier and prefix key events pass through to the foreground application before the final trigger is recognized. For the built-in family, `Alt/Option+X` therefore reaches the foreground app; General resolves atomically when X is released if no built-in suffix was pressed. Choose prefixes that are safe in the applications you use. Secure-input fields, operating-system-reserved shortcuts, and other system-level combinations are not guaranteed to work.
 
 ## Quick and Extended dictation
 
@@ -35,13 +41,15 @@ Global detection does not suppress a chord’s prefix: its modifier and prefix k
 - **Extended:** keep the final trigger key down for at least 600 ms. Extended streams transcription locally and does not submit on silence. Submit with `Enter`, the full activation chord again, or the widget’s **Stop** button. The cap is 30 minutes.
 - Press `Escape` or use **Cancel** to cancel either mode.
 
+Because General's `Alt/Option+X` is also the family prefix, the helper resolves General when X is released and classifies Quick or Extended from the physical hold duration. Start speaking after the widget appears. The longer P/M/E chords resolve on their suffix key down as usual.
+
 The floating widget shows status and microphone level; Extended also shows elapsed time. Talking Quill attempts to paste the final text into the currently focused target. If native paste dispatch fails, the text remains copied for manual paste.
 
 ## Raw, Smart, and privacy
 
-**Raw** keeps captured audio in memory and transcribes it with local Whisper without creating an audio recording file or making a Smart cleanup request. It matches the complete transcript against local Voice Commands, inserting a saved snippet on a match or the Raw transcript otherwise. Custom vocabulary does not affect Raw.
+**Raw** keeps captured audio in memory and transcribes it with local Whisper without creating an audio recording file or making a Smart cleanup request. Choose the spoken/source language during Welcome model setup or later in Settings: the pinned local runtime requires this explicit value and does not auto-detect it. Whisper always uses its `transcribe` task, so Raw remains in the source language and never uses Whisper's translate-to-English mode. Raw matches the complete transcript against local Voice Commands, inserting a saved snippet on a match or the Raw transcript otherwise. Custom vocabulary does not affect Raw.
 
-**Smart** also transcribes locally first; audio is not sent to the provider. Smart cleanup sends the transcript and cleanup context, including Smart-only vocabulary, an optional profile prompt, and an optional On-Screen Awareness screenshot. The request also uses the configured provider, model, and authentication. Provider failure or timeout falls back to Raw, although data may already have been sent.
+**Smart** also transcribes locally in the configured source language first; audio is not sent to the provider. General, Markdown, and Prompt ask the Smart model to preserve that language. An ordinary Smart profile with no instruction receives a source-language-preservation fallback. Translate to English asks the Smart model—not Whisper—to translate the locally transcribed text to English, and any explicit profile transformation instruction replaces the fallback. Smart cleanup sends the transcript and cleanup context, including Smart-only vocabulary, an optional profile prompt, and an optional On-Screen Awareness screenshot. The request also uses the configured provider, model, and authentication. Provider failure or timeout falls back to Raw, although data may already have been sent.
 
 A Voice Command match skips the Smart cleanup payload, so its transcript and prepared screenshot are not sent. Providers may run locally, on a LAN, or in the cloud; some uncredentialed LAN endpoints may use HTTP. Provider handling, retention, accounts, and charges are external.
 
@@ -55,7 +63,7 @@ A manually started vision/image-echo test also captures and sends a screenshot; 
 
 - **Dashboard:** enable/disable dictation, inspect readiness, use a test field, and browse History with details, optional thumbnails, Copy, Delete, Delete all, and Load more.
 - **General and profiles:** test shortcuts without recording or insertion; manage profiles, widget size, sounds, launch at login, and close to tray. The tray offers Open, Enable/Disable, and Quit; the window has themes and controls.
-- **Recording and model:** select and live-test a microphone, choose silence detection, manage Whisper, and set language detection.
+- **Recording and model:** select and live-test a microphone, choose silence detection, manage Whisper, and choose the spoken/source language.
 - **Smart processing:** configure/test providers, discover models where supported, and optionally enable vision. Pi adds installation-path and thinking-level settings.
 - **Voice Commands and vocabulary:** manage and preview trigger/snippet pairs, Smart-only vocabulary, and text import/export.
 - **Privacy and Info:** control future history, 7/30/90-day or no expiry, screenshots, diagnostics, and reset. Info includes manual updates, permissions, data/log folders, notices, and Welcome; updates are not automatic.
@@ -72,6 +80,6 @@ Network use includes requested, verified Hugging Face model downloads; provider 
 
 ## Development
 
-Talking Quill uses Electron, React, TypeScript, and a Rust keyboard/paste helper. Helper protocol v3 configures up to ten profile bindings as `{ profileId, shortcut: { modifiers, keys } }` and reports activation down/up events with the same complete canonical shortcut snapshot. Prefix-conflict validation is shared across settings and helper configuration.
+Talking Quill uses Electron, React, TypeScript, and a Rust keyboard/paste helper. Helper protocol v5 configures up to twelve profile bindings as `{ profileId, shortcut: { modifiers, keys } }` and reports exact activation down/up snapshots or an atomic General-prefix completion with its physical hold duration. Prefix-conflict validation, canonical family ownership, and the narrow built-in-family exception are enforced across settings and helper configuration. Local Whisper worker protocol v2 requires an explicit validated source language; the worker fixes the inference task to `transcribe`.
 
 Run `pnpm install`, then `pnpm dev`, `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm test`, or `pnpm validate`. Packaging scripts build Windows and macOS x64/ARM64 artifacts.

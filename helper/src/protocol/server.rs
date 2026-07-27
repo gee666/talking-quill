@@ -10,14 +10,14 @@ use crate::{
     platform::{CallbackGate, Platform, PlatformError, TerminalReason, TerminalSignal},
 };
 
-/// `initialize` params schema: `{ "protocolVersion": 3 }`.
+/// `initialize` params schema: `{ "protocolVersion": 5 }`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct InitializeParams {
     protocol_version: u16,
 }
 
-/// Protocol-v3 `activation.configure` params schema.
+/// Protocol-v5 `activation.configure` params schema.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigureActivationParams {

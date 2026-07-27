@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
 import type { AppStatus } from '../../app/src/shared/schemas/app-state';
+import { DEFAULT_PROMPT_PROFILE } from '../../app/src/shared/schemas/dictation-profiles';
 import { DEFAULT_SETTINGS, type Settings } from '../../app/src/shared/schemas/settings';
 import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 import { PROVIDER_CATALOG } from '../../app/src/main/providers/registry';
@@ -562,14 +563,14 @@ describe('main application shell', () => {
         active: true,
         phase: 'extended',
         profileId: 'prompt',
-        shortcut: shortcutFromLegacyActivation('Z', true),
+        shortcut: DEFAULT_PROMPT_PROFILE.shortcut,
         elapsedMs: 600,
         unavailableReason: null,
       }),
     );
     expect(
       await screen.findByText(
-        'Extended Dictation gesture recognized: Prompt, Alt + Shift + Z (final trigger Z)',
+        'Extended Dictation gesture recognized: Prompt, Alt + X + P (final trigger P)',
       ),
     ).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Stop shortcut test' }));
@@ -646,7 +647,7 @@ describe('main application shell', () => {
     const newer = structuredClone(DEFAULT_SETTINGS);
     const newerGeneral = newer.dictationProfiles[0];
     if (newerGeneral === undefined) throw new Error('Default General profile is missing');
-    newerGeneral.shortcut = shortcutFromLegacyActivation('X', false);
+    newerGeneral.shortcut = shortcutFromLegacyActivation('Y', false);
     newer.welcome.completedAt = 1;
     newer.welcome.lastStep = 5;
     act(() => settingsListener?.(newer));
@@ -660,7 +661,7 @@ describe('main application shell', () => {
     await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'General keyboard shortcut' })).toHaveValue(
-        'Alt + X',
+        'Alt + Y',
       ),
     );
   });

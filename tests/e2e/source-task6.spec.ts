@@ -83,19 +83,16 @@ async function resetSession(application: ElectronApplication) {
 }
 
 async function beginQuick(application: ElectronApplication, captureNumber: number) {
-  await driverCall(application, 'activationDown');
+  await driverCall(application, 'activationComplete', [100]);
   await waitForCapture(application, captureNumber);
-  await driverCall(application, 'frames', [0.2, 15]);
-  await driverCall(application, 'activationUp');
   await waitForPhase(application, 'recordingQuick');
+  await driverCall(application, 'frames', [0.2, 15]);
 }
 
 async function beginExtended(application: ElectronApplication, captureNumber: number) {
-  await driverCall(application, 'activationDown');
+  await driverCall(application, 'activationComplete', [600]);
   await waitForCapture(application, captureNumber);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 650));
   await waitForPhase(application, 'recordingExtended');
-  await driverCall(application, 'activationUp');
   await driverCall(application, 'frames', [0.2, 15]);
 }
 
@@ -126,7 +123,7 @@ test('real Chromium fake media traverses capture, session, and widget with reset
           (await main.evaluate(() => window.talkingQuill.app.getBootstrap())).state.status,
       )
       .toBe('ready');
-    await driverCall(application, 'activationDown');
+    await driverCall(application, 'activationComplete', [100]);
     await expect
       .poll(async () => (await snapshot(application)).session.phase)
       .toMatch(/recording/u);
@@ -263,11 +260,11 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await shortcutInput.focus();
     await expect(shortcutInput).not.toHaveAttribute('aria-busy', 'true');
     await main.keyboard.down('Alt');
-    await main.keyboard.down('x');
-    await main.keyboard.down('p');
-    await expect(shortcutInput).toHaveValue('Alt + X + P');
-    await main.keyboard.up('p');
-    await main.keyboard.up('x');
+    await main.keyboard.down('y');
+    await main.keyboard.down('q');
+    await expect(shortcutInput).toHaveValue('Alt + Y + Q');
+    await main.keyboard.up('q');
+    await main.keyboard.up('y');
     await main.keyboard.up('Alt');
     await main.keyboard.press('Shift+Tab');
     await expect(main.getByRole('textbox', { name: 'General profile name' })).toBeFocused();
@@ -279,8 +276,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
 
     // Safe live gesture test: the same helper event route is used, while capture stays untouched.
     await main.getByRole('button', { name: 'Test activation shortcut' }).click();
-    await driverCall(application, 'activationDown');
-    await driverCall(application, 'activationUp');
+    await driverCall(application, 'activationComplete', [200]);
     await expect(main.getByText('Quick Dictation gesture recognized')).toBeVisible();
     await driverCall(application, 'activationDown', [true]);
     await main.waitForTimeout(650);
@@ -319,9 +315,8 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
 
     // Quick shortcut submit.
     await beginQuick(application, 4);
-    await driverCall(application, 'activationDown');
+    await driverCall(application, 'activationComplete', [100]);
     await waitForPhase(application, 'completed');
-    await driverCall(application, 'activationUp');
     await resetSession(application);
 
     // Extended pointer Stop keeps the target window's keyboard focus throughout.
@@ -383,9 +378,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     // Smart-unavailable raw fallback plus copied-to-clipboard result.
     await main.getByRole('button', { name: 'Dictation profiles' }).click();
     const generalMode = main.getByRole('combobox', { name: 'General processing mode' });
-    await generalMode.selectOption('smart');
     await expect(generalMode).toHaveValue('smart');
-    await main.getByRole('button', { name: 'Save profile' }).first().click();
     await expect
       .poll(() =>
         main.evaluate(async () => {

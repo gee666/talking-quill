@@ -20,14 +20,17 @@ import {
 import { MicrophoneEvidenceSchema } from '../../app/src/shared/schemas/welcome';
 
 describe('shared schema invariants', () => {
-  it('uses one language contract for persisted and runtime transcription options', () => {
+  it('uses one auto-detect or supported source-language contract at persistence and runtime', () => {
     const modelId = 'onnx-community/whisper-large-v3-turbo';
-    for (const language of ['en', 'Mandarin', ' x ', '']) {
+    for (const language of ['auto', 'en', 'zh', 'ru', 'haw', 'Mandarin', ' x ', '', null]) {
       const accepted = TranscriptionLanguageSchema.safeParse(language).success;
       expect(TranscriptionSettingsSchema.safeParse({ modelId, language }).success).toBe(accepted);
       expect(TranscriptionOptionsSchema.safeParse({ modelId, language }).success).toBe(accepted);
     }
-    expect(TranscriptionSettingsSchema.safeParse({ modelId, language: null }).success).toBe(true);
+    expect(TranscriptionOptionsSchema.safeParse({ modelId }).success).toBe(false);
+    expect(
+      TranscriptionOptionsSchema.safeParse({ modelId, language: 'ru', task: 'translate' }).success,
+    ).toBe(false);
   });
 
   it('uses the microphone ID contract at settings, capture, and welcome boundaries', () => {

@@ -1,4 +1,4 @@
-//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 3).
+//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 5).
 //!
 //! # Transport and framing
 //!
@@ -49,8 +49,8 @@
 //! and are Invalid Request.
 //!
 //! - `initialize`
-//!   - Params: `{"protocolVersion":3}`.
-//!   - Result: `{"protocolVersion":3,"helperVersion":string,
+//!   - Params: `{"protocolVersion":5}`.
+//!   - Result: `{"protocolVersion":5,"helperVersion":string,
 //!     "platform":string,"architecture":string,"hookStatus":HOOK_STATUS,
 //!     "permissions":PERMISSIONS}`.
 //! - `activation.configure`
@@ -59,10 +59,11 @@
 //!     `SHORTCUT` is `{"modifiers":{"ctrl":boolean,"alt":boolean,
 //!     "shift":boolean,"meta":boolean},"keys":["A".."Z",...]}`.
 //!     A shortcut contains 1 through 26 ordered unique keys, at least one of
-//!     Ctrl/Alt/Shift/Meta, and the final key is its trigger. At most ten
+//!     Ctrl/Alt/Shift/Meta, and the final key is its trigger. At most twelve
 //!     bindings with distinct profile IDs are accepted. Exact shortcut duplicates
-//!     and same-modifier prefix conflicts are invalid; enabled activation requires
-//!     at least one binding. Windows and macOS both consume this complete bounded
+//!     and same-modifier prefix conflicts are invalid except among the exact canonical
+//!     General/Prompt/Markdown/Translate built-in Alt+X family; enabled activation
+//!     requires at least one binding. Windows and macOS both consume this complete bounded
 //!     representation without reducing modifier or key-order information.
 //! - `session.set_capture`
 //!   - Params: `{"active":boolean}`.
@@ -102,7 +103,7 @@
 //! `"permission_denied"`, `"conflicting_modifiers"`, `"secure_input"`,
 //! `"os_rejected"`, or `"unavailable"`.
 //!
-//! `initialize` with `protocolVersion` exactly 3 must be the first successful
+//! `initialize` with `protocolVersion` exactly 5 must be the first successful
 //! command. Before it succeeds, other allowlisted commands return Invalid
 //! helper state. A failed or incompatible initialization leaves the helper
 //! uninitialized. After success, every later `initialize` returns Invalid
@@ -118,14 +119,18 @@
 //! emit these ID-less JSON-RPC notifications. Platform-neutral reduction uses
 //! exact four-modifier equality and the complete ordered held-letter sequence.
 //! Prefix letters and modifiers pass through (and may therefore leak into the
-//! foreground application). Only an accepted final trigger down, its repeats,
-//! and its matching up are swallowed. Session Escape/Enter capture is independent
+//! foreground application). The ambiguous canonical General prefix passes both
+//! down and up and resolves as one complete event; otherwise only an accepted
+//! final trigger down, its repeats, and its matching up are swallowed. Session
+//! Escape/Enter capture is independent
 //! of activation configuration/modifiers.
 //!
-//! - `activation.event` params:
-//!   `{"phase":"down"|"up","profileId":PROFILE_ID,"shortcut":SHORTCUT}`.
-//!   Down and up carry the same accepted profile-owned binding snapshot even
-//!   if activation configuration changes before the trigger is released.
+//! - `activation.event` params are either
+//!   `{"phase":"down"|"up","profileId":PROFILE_ID,"shortcut":SHORTCUT}` or
+//!   `{"phase":"complete","profileId":PROFILE_ID,"shortcut":SHORTCUT,"heldMs":integer}`.
+//!   A complete event atomically resolves an intentionally ambiguous one-key built-in prefix on
+//!   release. Down and up carry the same accepted profile-owned binding snapshot even if
+//!   activation configuration changes before the trigger is released.
 //! - `session.key` params:
 //!   `{"key":"escape"|"enter","phase":"down"|"up"}`.
 //!
@@ -175,4 +180,4 @@ pub use messages::{
 pub(crate) use server::HandleOutcome;
 pub use server::Server;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 5;

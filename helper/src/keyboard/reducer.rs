@@ -17,6 +17,12 @@ struct ActiveActivation {
     trigger: ActivationKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingActivation {
+    binding: ActivationBinding,
+    started_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HeldLetters {
     keys: [ActivationKey; Shortcut::MAX_KEYS],
@@ -65,9 +71,12 @@ impl Default for HeldLetters {
 /// Fresh A-Z downs are retained in physical order while the keys remain held.
 /// Prefix letters always pass through. A fresh final-key down is accepted only
 /// when the exact four-modifier mask and complete ordered held-key sequence
-/// equal one configured shortcut. After successful down delivery, only that
-/// trigger's down/repeats/up are swallowed; its up emits the accepted shortcut
-/// snapshot even if modifiers, prefixes, or configuration changed meanwhile.
+/// equal one configured shortcut. The canonical one-key General prefix remains
+/// pending while a longer built-in chord can complete and emits one atomic
+/// completion on release. After successful down delivery for every unambiguous
+/// chord, only that trigger's down/repeats/up are swallowed; its up emits the
+/// accepted shortcut snapshot even if modifiers, prefixes, or configuration
+/// changed meanwhile.
 ///
 /// A callback first calls [`KeyboardReducer::plan`], attempts optional
 /// nonblocking delivery, and then calls [`KeyboardReducer::apply`]. Failed
@@ -76,6 +85,7 @@ impl Default for HeldLetters {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardReducer {
     active_activation: Option<ActiveActivation>,
+    pending_activation: Option<PendingActivation>,
     held_letters: HeldLetters,
     modifiers: ModifierMask,
     activation_sequence_modifiers: Option<ModifierMask>,
@@ -125,7 +135,25 @@ impl KeyboardReducer {
         activation_enabled: bool,
         session_capture: bool,
     ) -> DecisionPlan {
-        self.plan_input(input, bindings, activation_enabled, session_capture)
+        self.plan_bindings_at(input, bindings, activation_enabled, session_capture, 0)
+    }
+
+    #[must_use]
+    pub fn plan_bindings_at(
+        &self,
+        input: KeyInput,
+        bindings: ActivationBindings,
+        activation_enabled: bool,
+        session_capture: bool,
+        observed_at_ms: u64,
+    ) -> DecisionPlan {
+        self.plan_input(
+            input,
+            bindings,
+            activation_enabled,
+            session_capture,
+            observed_at_ms,
+        )
     }
 
     fn plan_input(
@@ -134,6 +162,7 @@ impl KeyboardReducer {
         bindings: ActivationBindings,
         activation_enabled: bool,
         session_capture: bool,
+        observed_at_ms: u64,
     ) -> DecisionPlan {
         if input.injected {
             return DecisionPlan::unchanged(self, false);
@@ -152,7 +181,7 @@ impl KeyboardReducer {
                 }
                 let mut observed = self.clone();
                 observed.observe_modifiers(input.modifiers);
-                observed.plan_letter(input, key, bindings, activation_enabled)
+                observed.plan_letter(input, key, bindings, activation_enabled, observed_at_ms)
             }
             PhysicalKey::Escape => {
                 let mut observed = self.clone();
@@ -219,12 +248,21 @@ impl KeyboardReducer {
 
     /// Records an exact modifier transition. Any change while passive letters
     /// are held fences that physical sequence until all of those letters are
-    /// released. Accepted activations remain intact solely for balancing up.
+    /// released. A pending General may survive release of its configured
+    /// Alt/Option modifier, but adding or re-adding any modifier cancels it.
+    /// Accepted activations remain intact solely for balancing up.
     pub fn observe_modifiers(&mut self, modifiers: ModifierMask) {
-        if !self.held_letters.as_slice().is_empty()
-            && self.activation_sequence_modifiers != Some(modifiers)
-        {
-            self.activation_sequence_fenced = true;
+        let added_modifier = (modifiers.ctrl() && !self.modifiers.ctrl())
+            || (modifiers.alt() && !self.modifiers.alt())
+            || (modifiers.shift() && !self.modifiers.shift())
+            || (modifiers.meta() && !self.modifiers.meta());
+        if !self.held_letters.as_slice().is_empty() {
+            if self.activation_sequence_modifiers != Some(modifiers) {
+                self.activation_sequence_fenced = true;
+            }
+            if added_modifier {
+                self.pending_activation = None;
+            }
         }
         self.modifiers = modifiers;
     }
@@ -234,6 +272,7 @@ impl KeyboardReducer {
     pub fn fence_activation_revision(&mut self) {
         if !self.held_letters.as_slice().is_empty() {
             self.activation_sequence_fenced = true;
+            self.pending_activation = None;
         }
     }
 
@@ -267,6 +306,7 @@ impl KeyboardReducer {
         key: ActivationKey,
         bindings: ActivationBindings,
         activation_enabled: bool,
+        observed_at_ms: u64,
     ) -> DecisionPlan {
         if let Some(active) = self.active_activation {
             if active.trigger == key {
@@ -293,7 +333,29 @@ impl KeyboardReducer {
         }
 
         match input.phase {
-            KeyPhase::Up => self.pass_letter(input, key),
+            KeyPhase::Up => {
+                let Some(pending) = self
+                    .pending_activation
+                    .filter(|pending| pending.binding.shortcut().trigger() == key)
+                else {
+                    return self.pass_letter(input, key);
+                };
+                let mut next = self.clone();
+                next.pending_activation = None;
+                next.held_letters.release(key);
+                next.reset_activation_sequence_if_released();
+                DecisionPlan {
+                    delivered_state: next.clone(),
+                    failed_state: next,
+                    event: Some(HelperEvent::ActivationComplete {
+                        binding: pending.binding,
+                        held_ms: observed_at_ms.saturating_sub(pending.started_at_ms),
+                    }),
+                    // The pending prefix down passed through, so its up must also pass through.
+                    swallow_if_delivered: false,
+                    swallow_if_failed: false,
+                }
+            }
             KeyPhase::Down if input.repeat => DecisionPlan::unchanged(self, false),
             KeyPhase::Down => {
                 let mut next = self.clone();
@@ -313,9 +375,22 @@ impl KeyboardReducer {
                     .flatten()
                     .filter(|binding| binding.shortcut().trigger() == key)
                 else {
+                    if next.pending_activation.is_some() {
+                        next.pending_activation = None;
+                        next.activation_sequence_fenced = true;
+                    }
                     return DecisionPlan::same(next, false);
                 };
 
+                if bindings.has_longer_prefix(binding) {
+                    next.pending_activation = Some(PendingActivation {
+                        binding,
+                        started_at_ms: observed_at_ms,
+                    });
+                    return DecisionPlan::same(next, false);
+                }
+
+                next.pending_activation = None;
                 let mut delivered = next.clone();
                 delivered.active_activation = Some(ActiveActivation {
                     binding,

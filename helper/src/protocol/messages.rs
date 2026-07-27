@@ -224,6 +224,7 @@ struct RpcNotification<'a> {
 #[serde(untagged)]
 enum NotificationParams<'a> {
     Activation(ActivationEventParams),
+    ActivationComplete(ActivationCompleteParams),
     Session(SessionKeyEventParams<'a>),
     PasteCommitted(PasteCommittedParams<'a>),
 }
@@ -239,6 +240,15 @@ struct ActivationEventParams {
     phase: EventPhase,
     #[serde(flatten)]
     binding: ActivationBinding,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivationCompleteParams {
+    phase: &'static str,
+    #[serde(flatten)]
+    binding: ActivationBinding,
+    held_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +276,17 @@ pub fn encode_outbound(message: &Outbound) -> Result<Vec<u8>, OutboundEncodingEr
                 params: NotificationParams::Activation(ActivationEventParams {
                     phase: *phase,
                     binding: *binding,
+                }),
+            })
+        }
+        Outbound::Event(HelperEvent::ActivationComplete { binding, held_ms }) => {
+            SerializableOutbound::Notification(RpcNotification {
+                jsonrpc: "2.0",
+                method: "activation.event",
+                params: NotificationParams::ActivationComplete(ActivationCompleteParams {
+                    phase: "complete",
+                    binding: *binding,
+                    held_ms: *held_ms,
                 }),
             })
         }

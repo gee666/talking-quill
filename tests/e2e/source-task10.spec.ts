@@ -45,11 +45,10 @@ async function snapshot(application: ElectronApplication): Promise<DriverSnapsho
 }
 
 async function quickSubmit(application: ElectronApplication, captureNumber: number): Promise<void> {
-  await driver(application, 'activationDown');
+  await driver(application, 'activationComplete', [100]);
   await expect.poll(async () => (await snapshot(application)).recording.starts).toBe(captureNumber);
-  await driver(application, 'frames', [0.2, 15]);
-  await driver(application, 'activationUp');
   await expect.poll(async () => (await snapshot(application)).session.phase).toBe('recordingQuick');
+  await driver(application, 'frames', [0.2, 15]);
   await driver(application, 'key', ['enter']);
 }
 

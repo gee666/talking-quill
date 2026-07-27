@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { WhisperWorkerRequest } from '../../app/src/shared/schemas/whisper-protocol';
 import { WhisperRequestQueue } from '../../app/src/workers/whisper/request-queue';
 
-const options = { modelId: 'Xenova/whisper-small' as const, sampleRate: 16_000 as const };
+const options = {
+  modelId: 'Xenova/whisper-small' as const,
+  sampleRate: 16_000 as const,
+  language: 'en' as const,
+};
 
 describe('Whisper worker request queue', () => {
   it('bounds retained PCM and request count while reserving capacity for controls', async () => {
@@ -44,7 +48,7 @@ describe('Whisper worker request queue', () => {
 
 function transcribe(requestId: string, samples: number): WhisperWorkerRequest {
   return {
-    version: 1,
+    version: 2,
     requestId,
     type: 'transcribe',
     pcm: new Float32Array(samples).buffer,
@@ -57,6 +61,6 @@ function control(
   type: 'session-cancel' | 'session-finish' | 'shutdown',
 ): WhisperWorkerRequest {
   return type === 'shutdown'
-    ? { version: 1, requestId, type }
-    : { version: 1, requestId, type, sessionId: 'session' };
+    ? { version: 2, requestId, type }
+    : { version: 2, requestId, type, sessionId: 'session' };
 }

@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BUILT_IN_DICTATION_PROFILE_METADATA,
   DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
   DEFAULT_PROMPT_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
   DictationProfileCreateSchema,
   DictationProfileListSchema,
   DictationProfilePatchSchema,
+  MAX_DICTATION_PROFILES,
+  defaultDictationProfiles,
 } from '../../app/src/shared/schemas/dictation-profiles';
-import { shortcutFromLegacyActivation, type Shortcut } from '../../app/src/shared/schemas/shortcut';
+import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
+import type { Shortcut } from '../../app/src/shared/schemas/shortcut';
 
-const defaults = () => [
-  structuredClone(DEFAULT_GENERAL_PROFILE),
-  structuredClone(DEFAULT_PROMPT_PROFILE),
-];
+const defaults = () => defaultDictationProfiles();
 const shortcut = (
   keys: Shortcut['keys'],
   modifiers: Partial<Shortcut['modifiers']> = {},
@@ -21,25 +24,82 @@ const shortcut = (
 });
 
 describe('dictation profile contracts', () => {
-  it('defines the complete literal built-in defaults', () => {
+  it('defines complete centralized, frozen built-in defaults', () => {
+    expect(BUILT_IN_DICTATION_PROFILE_METADATA.map(({ id }) => id)).toEqual([
+      'general',
+      'prompt',
+      'markdown',
+      'translate-to-english',
+    ]);
     expect(DEFAULT_GENERAL_PROFILE).toEqual({
       id: 'general',
       name: 'General',
-      shortcut: shortcutFromLegacyActivation('Z', false),
-      processingMode: 'raw',
-      smartPrompt: null,
+      shortcut: shortcut(['X']),
+      processingMode: 'smart',
+      smartPrompt: 'Clean up and format the transcript while preserving its source language.',
     });
-    expect(DEFAULT_PROMPT_PROFILE).toEqual({
+    expect(DEFAULT_PROMPT_PROFILE).toMatchObject({
       id: 'prompt',
       name: 'Prompt',
-      shortcut: shortcutFromLegacyActivation('Z', true),
+      shortcut: shortcut(['X', 'P']),
+      processingMode: 'smart',
+    });
+    expect(DEFAULT_PROMPT_PROFILE.smartPrompt).toContain('Preserve the source language.');
+    expect(DEFAULT_PROMPT_PROFILE.smartPrompt).toContain('clear paragraphs and lists');
+    expect(DEFAULT_MARKDOWN_PROFILE).toEqual({
+      id: 'markdown',
+      name: 'Markdown',
+      shortcut: shortcut(['X', 'M']),
       processingMode: 'smart',
       smartPrompt:
-        'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Use lists, tables, and other formatting when useful.',
+        'Format the transcript as clear Markdown using headings, paragraphs, and lists where useful. Preserve its source language.',
     });
-    expect(Object.isFrozen(DEFAULT_GENERAL_PROFILE.shortcut.modifiers)).toBe(true);
-    expect(Object.isFrozen(DEFAULT_GENERAL_PROFILE.shortcut.keys)).toBe(true);
+    expect(DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE).toEqual({
+      id: 'translate-to-english',
+      name: 'Translate to English',
+      shortcut: shortcut(['X', 'E']),
+      processingMode: 'smart',
+      smartPrompt:
+        'Translate the transcript to natural English while preserving its meaning, tone, facts, names, numbers, and level of detail.',
+    });
+    for (const { defaultProfile } of BUILT_IN_DICTATION_PROFILE_METADATA) {
+      expect(Object.isFrozen(defaultProfile)).toBe(true);
+      expect(Object.isFrozen(defaultProfile.shortcut.modifiers)).toBe(true);
+      expect(Object.isFrozen(defaultProfile.shortcut.keys)).toBe(true);
+    }
     expect(DictationProfileListSchema.safeParse(defaults()).success).toBe(true);
+    expect(DEFAULT_SETTINGS.app.defaultProcessingMode).toBe('smart');
+    expect(DEFAULT_SETTINGS.transcription.language).toBe('auto');
+  });
+
+  it('accepts twelve total profiles and rejects thirteen', () => {
+    const profiles = defaults();
+    for (let index = 0; index < 8; index += 1) {
+      profiles.push({
+        id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+        name: `Custom ${String(index)}`,
+        shortcut: shortcut([String.fromCharCode(65 + index) as Shortcut['keys'][number]], {
+          ctrl: true,
+          alt: false,
+        }),
+        processingMode: 'raw',
+        smartPrompt: null,
+      });
+    }
+    expect(profiles).toHaveLength(MAX_DICTATION_PROFILES);
+    expect(DictationProfileListSchema.safeParse(profiles).success).toBe(true);
+    expect(
+      DictationProfileListSchema.safeParse([
+        ...profiles,
+        {
+          id: '00000000-0000-4000-8000-000000000099',
+          name: 'Too many',
+          shortcut: shortcut(['Y'], { ctrl: true, alt: false }),
+          processingMode: 'raw',
+          smartPrompt: null,
+        },
+      ]).success,
+    ).toBe(false);
   });
 
   it('rejects duplicate full identities while allowing different modifiers and order', () => {
@@ -66,11 +126,10 @@ describe('dictation profile contracts', () => {
       smartPrompt: null,
     });
     expect(DictationProfileListSchema.safeParse(valid).success).toBe(true);
-    const custom = valid[2];
-    if (custom === undefined) throw new Error('Custom profile is missing');
-    const other = valid[3];
-    if (other === undefined) throw new Error('Other profile is missing');
-    valid[3] = { ...other, shortcut: structuredClone(custom.shortcut) };
+    const custom = valid[4];
+    const other = valid[5];
+    if (custom === undefined || other === undefined) throw new Error('Custom profiles are missing');
+    valid[5] = { ...other, shortcut: structuredClone(custom.shortcut) };
     expect(DictationProfileListSchema.safeParse(valid).success).toBe(false);
   });
 
@@ -111,12 +170,21 @@ describe('dictation profile contracts', () => {
     ).toBe(true);
   });
 
-  it('reserves both built-in default chord prefixes even after their owners move away', () => {
-    const moved = [
-      { ...structuredClone(DEFAULT_GENERAL_PROFILE), shortcut: shortcut(['G']) },
-      { ...structuredClone(DEFAULT_PROMPT_PROFILE), shortcut: shortcut(['P'], { shift: true }) },
-    ];
-    for (const reservedShortcut of [shortcut(['Z', 'A']), shortcut(['Z', 'A'], { shift: true })]) {
+  it('reserves every built-in default chord prefix even after its owner moves away', () => {
+    const moved = defaults().map((profile, index) => ({
+      ...profile,
+      shortcut: shortcut([String.fromCharCode(71 + index) as Shortcut['keys'][number]], {
+        ctrl: true,
+        alt: false,
+      }),
+    }));
+    for (const reservedShortcut of [
+      shortcut(['X']),
+      shortcut(['X', 'P']),
+      shortcut(['X', 'M']),
+      shortcut(['X', 'E']),
+      shortcut(['X', 'Q']),
+    ]) {
       expect(
         DictationProfileListSchema.safeParse([
           ...moved,
@@ -130,11 +198,23 @@ describe('dictation profile contracts', () => {
         ]).success,
       ).toBe(false);
     }
+    const editedGeneral = defaults();
+    const general = editedGeneral[0];
+    if (general === undefined) throw new Error('General profile is missing');
+    editedGeneral[0] = { ...general, shortcut: shortcut(['X', 'Q']) };
+    expect(DictationProfileListSchema.safeParse(editedGeneral).success).toBe(false);
+
+    const renamedGeneral = defaults();
+    const canonicalGeneral = renamedGeneral[0];
+    if (canonicalGeneral === undefined) throw new Error('General profile is missing');
+    renamedGeneral[0] = { ...canonicalGeneral, name: 'Renamed General' };
+    expect(DictationProfileListSchema.safeParse(renamedGeneral).success).toBe(true);
+
     expect(DictationProfileListSchema.safeParse(defaults()).success).toBe(true);
     expect(
       DictationProfileCreateSchema.safeParse({
         name: 'Reserved custom',
-        shortcut: shortcut(['Z'], { shift: true }),
+        shortcut: shortcut(['X', 'E']),
         processingMode: 'raw',
         smartPrompt: null,
       }).success,
@@ -157,7 +237,12 @@ describe('dictation profile contracts', () => {
     );
   });
 
-  it('requires both nondeletable built-in identities', () => {
-    expect(DictationProfileListSchema.safeParse([DEFAULT_GENERAL_PROFILE]).success).toBe(false);
+  it('requires all nondeletable built-in identities', () => {
+    for (const profile of defaults()) {
+      expect(
+        DictationProfileListSchema.safeParse(defaults().filter(({ id }) => id !== profile.id))
+          .success,
+      ).toBe(false);
+    }
   });
 });

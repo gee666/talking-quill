@@ -89,7 +89,7 @@ export function SettingsScreen({
     {
       title: 'Dictation profiles',
       keywords:
-        'Dictation profiles shortcut chord binding Ctrl Control Alt Option Shift Win Command General Prompt custom raw smart processing prompt reset',
+        'Dictation profiles shortcuts shortcut chord binding Ctrl Control Alt Option Shift Win Command General Prompt Markdown Translate English custom add create delete raw smart processing prompt reset formatting',
       node: (
         <DictationProfilesSection
           settings={settings}
@@ -107,7 +107,7 @@ export function SettingsScreen({
     {
       title: 'Transcription model',
       keywords:
-        'Transcription model Whisper small large selected status download progress pause cancel retry delete redownload repair corrupt offline cache location language auto detect',
+        'Transcription model Whisper small large selected status download progress pause cancel retry delete redownload repair corrupt offline cache location spoken source language transcription',
       node: <TranscriptionModelSection settings={settings} onSettingsSaved={onSettingsSaved} />,
     },
     {

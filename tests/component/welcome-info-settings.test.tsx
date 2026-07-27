@@ -156,6 +156,40 @@ describe('Welcome, Info, and settings completion', () => {
     expect(onComplete).toHaveBeenCalledWith({ completedAt: 10, lastStep: 5, reopened: false });
   });
 
+  it('shows and persists auto-detection or a source-language hint during local-model onboarding', async () => {
+    const user = userEvent.setup();
+    const configured = settings();
+    configured.welcome.lastStep = 3;
+    configured.transcription.language = 'en';
+    const saved = structuredClone(configured);
+    saved.transcription.language = 'fr';
+    const update = (api.settings as { update: ReturnType<typeof vi.fn> }).update;
+    update.mockResolvedValueOnce(saved);
+    const onSettingsSaved = vi.fn();
+
+    render(
+      <WelcomeWizard
+        settings={configured}
+        state={state}
+        platform="win32"
+        reopened={false}
+        onSettingsSaved={onSettingsSaved}
+        onComplete={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const language = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    expect(language).toHaveValue('en');
+    expect(screen.getByText(/without translating it/i)).toBeVisible();
+    await user.selectOptions(language, 'fr');
+    await user.click(screen.getByRole('button', { name: 'Save source language' }));
+
+    expect(update).toHaveBeenCalledWith({ transcription: { language: 'fr' } });
+    expect(onSettingsSaved).toHaveBeenCalledWith(saved);
+    expect(await screen.findByText('Source language saved.')).toBeVisible();
+  });
+
   it('uses authoritative step responses and follows persisted progress rollbacks', async () => {
     const user = userEvent.setup();
     const configured = settings();
@@ -228,7 +262,7 @@ describe('Welcome, Info, and settings completion', () => {
     expect(screen.getByRole('heading', { name: 'Microphone' })).toHaveFocus();
   });
 
-  it('lists every configured profile with its current shortcut and processing mode', () => {
+  it('lists exactly the four Smart built-in reset defaults on the final screen', () => {
     const configured = settings();
     configured.welcome.lastStep = 5;
     const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
@@ -244,13 +278,14 @@ describe('Welcome, Info, and settings completion', () => {
           modifiers: { ctrl: true, alt: false, shift: true, meta: false },
           keys: ['P'],
         },
+        processingMode: 'raw',
       },
       {
         id: '11111111-1111-4111-8111-111111111111',
         name: 'Meeting notes',
         shortcut: {
           modifiers: { ctrl: false, alt: true, shift: false, meta: false },
-          keys: ['X', 'P'],
+          keys: ['Y', 'Q'],
         },
         processingMode: 'raw',
         smartPrompt: null,
@@ -268,16 +303,19 @@ describe('Welcome, Info, and settings completion', () => {
         onClose={vi.fn()}
       />,
     );
-    const profiles = screen.getByRole('list', { name: 'Configured dictation profiles' });
+    const profiles = screen.getByRole('list', { name: 'Built-in dictation profile defaults' });
     expect(
       within(profiles)
         .getAllByRole('listitem')
         .map((item) => item.textContent),
     ).toEqual([
-      'Prompt: Alt + Shift + Z (final trigger Z) — Smart processing',
-      'General: Ctrl + Shift + P (final trigger P) — Raw processing',
-      'Meeting notes: Alt + X + P (final trigger P) — Raw processing',
+      'General: Alt + X (final trigger X) — Smart processing',
+      'Prompt: Alt + X + P (final trigger P) — Smart processing',
+      'Markdown: Alt + X + M (final trigger M) — Smart processing',
+      'Translate to English: Alt + X + E (final trigger E) — Smart processing',
     ]);
+    expect(screen.getByText(/existing or migrated profile settings may differ/i)).toBeVisible();
+    expect(within(profiles).queryByText('Meeting notes')).not.toBeInTheDocument();
     expect(screen.getByText(/Shortcuts can be changed anytime in Settings/i)).toBeVisible();
     expect(screen.queryByText(/Test activation shortcut/i)).not.toBeInTheDocument();
   });
@@ -391,20 +429,20 @@ describe('Welcome, Info, and settings completion', () => {
     expect(cancel).toHaveBeenCalledWith(check.mock.calls[0]?.[0]);
   });
 
-  it('saves one-character language drafts and restores authoritative state on rejection', async () => {
+  it('offers only supported source languages and restores authoritative state on rejection', async () => {
     const user = userEvent.setup();
     const configured = settings();
     configured.transcription.language = 'en';
     const update = vi.fn(() => Promise.reject(new Error('write failed')));
     (api.settings as { update: typeof update }).update = update;
     render(<TranscriptionLanguageSetting settings={configured} onSettingsSaved={vi.fn()} />);
-    const input = screen.getByRole('textbox', { name: 'Transcription language' });
-    await user.clear(input);
-    await user.type(input, 'x');
-    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
-    expect(update).toHaveBeenCalledWith({ transcription: { language: 'x' } });
+    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    await user.selectOptions(input, 'ru');
+    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
+    expect(update).toHaveBeenCalledWith({ transcription: { language: 'ru' } });
     expect(await screen.findByText(/previous value was restored/i)).toBeVisible();
     expect(input).toHaveValue('en');
+    expect(screen.getByRole('option', { name: /auto-detect/i })).toBeVisible();
   });
 
   it('applies language saves after the StrictMode effect replay', async () => {
@@ -421,9 +459,9 @@ describe('Welcome, Info, and settings completion', () => {
       </StrictMode>,
     );
 
-    const input = screen.getByRole('textbox', { name: 'Transcription language' });
+    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
     fireEvent.change(input, { target: { value: 'fr' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
 
     await waitFor(() => expect(onSettingsSaved).toHaveBeenCalledWith(saved));
     expect(input).toHaveValue('fr');
@@ -448,11 +486,11 @@ describe('Welcome, Info, and settings completion', () => {
       );
     (api.settings as { update: typeof update }).update = update;
     render(<TranscriptionLanguageSetting settings={configured} onSettingsSaved={vi.fn()} />);
-    const input = screen.getByRole('textbox', { name: 'Transcription language' });
+    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
     fireEvent.change(input, { target: { value: 'fr' } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
     fireEvent.change(input, { target: { value: 'de' } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole('button', { name: /source language/i }));
     const newest = settings();
     newest.transcription.language = 'de';
     resolveSecond(newest);

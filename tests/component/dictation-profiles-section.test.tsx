@@ -7,7 +7,11 @@ import { DictationProfilesSection } from '../../app/src/renderer/main/settings/D
 import type { MainApi } from '../../app/src/shared/bridge/api';
 import {
   DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
   DEFAULT_PROMPT_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+  builtInDictationProfile,
+  defaultDictationProfiles,
   type CustomDictationProfileId,
   type DictationProfile,
 } from '../../app/src/shared/schemas/dictation-profiles';
@@ -29,9 +33,13 @@ afterEach(() => {
 });
 
 function settingsWith(profiles: readonly DictationProfile[]): Settings {
+  const complete = profiles.map((profile) => structuredClone(profile));
+  for (const builtIn of defaultDictationProfiles()) {
+    if (!complete.some(({ id }) => id === builtIn.id)) complete.push(builtIn);
+  }
   return {
     ...structuredClone(DEFAULT_SETTINGS),
-    dictationProfiles: profiles.map((profile) => structuredClone(profile)),
+    dictationProfiles: complete,
   };
 }
 
@@ -128,7 +136,7 @@ describe('DictationProfilesSection', () => {
     const initial = settingsWith([DEFAULT_GENERAL_PROFILE, DEFAULT_PROMPT_PROFILE]);
     const captured: Shortcut = {
       modifiers: { ctrl: false, alt: true, shift: false, meta: false },
-      keys: ['X', 'P'],
+      keys: ['Y', 'Q'],
     };
     const movedGeneral = { ...DEFAULT_GENERAL_PROFILE, shortcut: captured };
     const update = vi.fn<MainApi['profiles']['update']>(() =>
@@ -141,14 +149,14 @@ describe('DictationProfilesSection', () => {
     });
     input.focus();
     await waitFor(() => expect(input).not.toHaveAttribute('aria-busy'));
-    expect(fireEvent.keyDown(input, { key: 'x', code: 'KeyX', altKey: true })).toBe(false);
-    expect(input).toHaveValue('Alt + X');
-    expect(fireEvent.keyDown(input, { key: 'p', code: 'KeyP', altKey: true })).toBe(false);
-    expect(input).toHaveValue('Alt + X + P');
-    fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
-    fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
+    expect(fireEvent.keyDown(input, { key: 'y', code: 'KeyY', altKey: true })).toBe(false);
+    expect(input).toHaveValue('Alt + Y');
+    expect(fireEvent.keyDown(input, { key: 'q', code: 'KeyQ', altKey: true })).toBe(false);
+    expect(input).toHaveValue('Alt + Y + Q');
+    fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
+    fireEvent.keyUp(input, { key: 'y', code: 'KeyY', altKey: true });
     expect(within(group('General')).getByRole('status')).toHaveTextContent(
-      'Alt + X + P captured. P is the final trigger.',
+      'Alt + Y + Q captured. Q is the final trigger.',
     );
 
     await user.click(within(group('General')).getByRole('button', { name: 'Save profile' }));
@@ -190,7 +198,7 @@ describe('DictationProfilesSection', () => {
     expect(screen.queryByRole('group', { name: 'Daily notes' })).not.toBeInTheDocument();
   });
 
-  it('resets General and Prompt independently without replacing the other profile', async () => {
+  it('resets every built-in independently without replacing the other profiles', async () => {
     const modifiedGeneral = {
       ...DEFAULT_GENERAL_PROFILE,
       name: 'Changed General',
@@ -207,7 +215,12 @@ describe('DictationProfilesSection', () => {
       authoritative = settingsWith(
         authoritative.dictationProfiles.map((profile) =>
           profile.id === id
-            ? structuredClone(id === 'general' ? DEFAULT_GENERAL_PROFILE : DEFAULT_PROMPT_PROFILE)
+            ? structuredClone(
+                builtInDictationProfile(id) ??
+                  (() => {
+                    throw new Error('Missing built-in');
+                  })(),
+              )
             : profile,
         ),
       );
@@ -230,14 +243,26 @@ describe('DictationProfilesSection', () => {
 
     await user.click(within(group('Changed Prompt')).getByRole('button', { name: 'Reset' }));
     expect(await screen.findByRole('group', { name: 'Prompt' })).toBeInTheDocument();
-    expect(reset.mock.calls.map(([id]) => id)).toEqual(['general', 'prompt']);
+    await user.click(within(group('Markdown')).getByRole('button', { name: 'Reset' }));
+    await user.click(within(group('Translate to English')).getByRole('button', { name: 'Reset' }));
+    expect(reset.mock.calls.map(([id]) => id)).toEqual([
+      'general',
+      'prompt',
+      'markdown',
+      'translate-to-english',
+    ]);
   });
 
   it('blocks and accessibly announces exact, prefix, and reserved full-chord conflicts', async () => {
-    const generalShortcut = shortcutFromLegacyActivation('X', false);
     const initial = settingsWith([
-      { ...DEFAULT_GENERAL_PROFILE, shortcut: generalShortcut },
-      { ...DEFAULT_PROMPT_PROFILE, shortcut: shortcutFromLegacyActivation('Y', true) },
+      { ...DEFAULT_GENERAL_PROFILE, shortcut: shortcutFromLegacyActivation('G', true) },
+      { ...DEFAULT_PROMPT_PROFILE, shortcut: shortcutFromLegacyActivation('P', true) },
+      { ...DEFAULT_MARKDOWN_PROFILE, shortcut: shortcutFromLegacyActivation('M', true) },
+      {
+        ...DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+        shortcut: shortcutFromLegacyActivation('E', true),
+      },
+      CUSTOM,
     ]);
     const create = vi.fn<MainApi['profiles']['create']>();
     const user = renderProfiles(initial, profileApi({ create }));
@@ -248,43 +273,76 @@ describe('DictationProfilesSection', () => {
       name: 'New profile keyboard shortcut',
     });
 
-    await captureShortcut(input, 'KeyX', { altKey: true });
+    await captureShortcut(input, 'KeyQ', { altKey: true });
     expect(
-      within(editor).getByText('Alt + X is already used by General (Alt + X).', {
+      within(editor).getByText('Alt + Q is already used by Notes (Alt + Q).', {
         selector: '.me-field__error',
       }),
     ).toBeVisible();
     expect(within(editor).getByRole('status')).toHaveTextContent(
-      'Alt + X is already used by General (Alt + X).',
+      'Alt + Q is already used by Notes (Alt + Q).',
     );
     expect(within(editor).getByRole('button', { name: 'Create profile' })).toBeDisabled();
+
+    fireEvent.keyDown(input, { key: 'q', code: 'KeyQ', altKey: true });
+    fireEvent.keyDown(input, { key: 'p', code: 'KeyP', altKey: true });
+    fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
+    fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
+    expect(
+      within(editor).getByText(
+        'Alt + Q + P conflicts with Notes (Alt + Q) because one chord is a prefix of the other.',
+        { selector: '.me-field__error' },
+      ),
+    ).toBeVisible();
+    expect(within(editor).getByRole('status')).toHaveTextContent('Alt + Q + P');
 
     fireEvent.keyDown(input, { key: 'x', code: 'KeyX', altKey: true });
     fireEvent.keyDown(input, { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
     expect(
-      within(editor).getByText(
-        'Alt + X + P conflicts with General (Alt + X) because one chord is a prefix of the other.',
-        { selector: '.me-field__error' },
-      ),
+      within(editor).getByText('Alt + X + P matches the reserved Prompt default Alt + X + P.', {
+        selector: '.me-field__error',
+      }),
     ).toBeVisible();
     expect(within(editor).getByRole('status')).toHaveTextContent('Alt + X + P');
-
-    await captureShortcut(input, 'KeyZ', { altKey: true, shiftKey: true });
-    expect(
-      within(editor).getByText(
-        'Alt + Shift + Z matches the reserved Prompt default Alt + Shift + Z.',
-        { selector: '.me-field__error' },
-      ),
-    ).toBeVisible();
-    expect(within(editor).getByRole('status')).toHaveTextContent('Alt + Shift + Z');
 
     await captureShortcut(input, 'KeyP', { ctrlKey: true, shiftKey: true });
     expect(input).toHaveValue('Ctrl + Shift + P');
     expect(within(editor).queryByText(/conflicts|already used|reserved/i)).toBeNull();
     expect(within(editor).getByRole('button', { name: 'Create profile' })).toBeEnabled();
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it('reserves every noncanonical Alt+X descendant from an edited General shortcut', async () => {
+    renderProfiles(
+      settingsWith([
+        DEFAULT_GENERAL_PROFILE,
+        DEFAULT_PROMPT_PROFILE,
+        DEFAULT_MARKDOWN_PROFILE,
+        DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+      ]),
+      profileApi(),
+    );
+    const editor = group('General');
+    const input = within(editor).getByRole('textbox', {
+      name: 'General keyboard shortcut',
+    });
+
+    input.focus();
+    await waitFor(() => expect(input).not.toHaveAttribute('aria-busy'));
+    fireEvent.keyDown(input, { key: 'x', code: 'KeyX', altKey: true });
+    fireEvent.keyDown(input, { key: 'q', code: 'KeyQ', altKey: true });
+    fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
+    fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
+
+    expect(
+      within(editor).getByText(
+        'Alt + X + Q conflicts with the reserved General default Alt + X because one chord is a prefix of the other.',
+        { selector: '.me-field__error' },
+      ),
+    ).toBeVisible();
+    expect(within(editor).getByRole('button', { name: 'Save profile' })).toBeDisabled();
   });
 
   it('guides unsupported input without changing the shortcut or blocking a name-only save', async () => {
@@ -302,7 +360,7 @@ describe('DictationProfilesSection', () => {
     document.addEventListener('keydown', bubbled);
 
     expect(await captureShortcut(input, 'KeyQ', {})).toBe(false);
-    expect(input).toHaveValue('Alt + Z');
+    expect(input).toHaveValue('Alt + X');
     expect(input).not.toHaveAttribute('aria-invalid');
     expect(within(editor).getByRole('status')).toHaveTextContent(/first letter must be pressed/i);
     expect(bubbled).not.toHaveBeenCalled();
@@ -337,7 +395,7 @@ describe('DictationProfilesSection', () => {
         isComposing: true,
       }),
     ).toBe(false);
-    expect(input).toHaveValue('Alt + Z');
+    expect(input).toHaveValue('Alt + X');
 
     await user.clear(within(editor).getByLabelText('General profile name'));
     await user.type(within(editor).getByLabelText('General profile name'), 'Renamed General');

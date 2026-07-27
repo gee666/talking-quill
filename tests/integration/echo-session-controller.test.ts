@@ -31,6 +31,12 @@ import { SmartTranscriptionService } from '../../app/src/main/smart/smart-transc
 import type { ActivationBinding, HelperNotification } from '../../app/src/shared/helper/protocol';
 import type { HelperReadiness } from '../../app/src/shared/schemas/helper-readiness';
 import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+} from '../../app/src/shared/schemas/dictation-profiles';
+import {
   DEFAULT_SETTINGS,
   SettingsSchema,
   type Settings,
@@ -43,6 +49,12 @@ import {
 } from '../../app/src/shared/schemas/shortcut';
 
 const profileBinding = (profileId: string, shortcut: Shortcut) => ({ profileId, shortcut });
+const builtInBindings = (
+  generalShortcut: Shortcut = DEFAULT_GENERAL_PROFILE.shortcut,
+): ActivationBinding[] =>
+  DEFAULT_SETTINGS.dictationProfiles.map((profile) =>
+    profileBinding(profile.id, profile.id === 'general' ? generalShortcut : profile.shortcut),
+  );
 
 function fixture(
   options: {
@@ -72,6 +84,10 @@ function fixture(
   let captureCallbacks: DictationCaptureCallbacks | null = null;
   const captureCallbackHistory: DictationCaptureCallbacks[] = [];
   let current = structuredClone(DEFAULT_SETTINGS);
+  current.dictationProfiles = current.dictationProfiles.map((profile) =>
+    profile.id === 'general' ? { ...profile, processingMode: 'raw' as const } : profile,
+  );
+  current.app.defaultProcessingMode = 'raw';
   const settingsListeners = new Set<(settings: Settings) => void>();
   const settings = {
     get: () => structuredClone(current),
@@ -276,13 +292,32 @@ function fixture(
 function activation(
   phase: 'down' | 'up',
   shift = false,
-  keyValue: ShortcutKey = 'Z',
+  keyValue?: ShortcutKey,
   profileId = shift ? 'prompt' : 'general',
+): HelperNotification {
+  const defaultProfile = DEFAULT_SETTINGS.dictationProfiles.find(({ id }) => id === profileId);
+  return {
+    jsonrpc: '2.0',
+    method: 'activation.event',
+    params: {
+      phase,
+      profileId,
+      shortcut:
+        keyValue === undefined && defaultProfile !== undefined
+          ? defaultProfile.shortcut
+          : shortcutFromLegacyActivation(keyValue ?? 'Z', shift),
+    },
+  };
+}
+function activationComplete(
+  heldMs: number,
+  shortcut: Shortcut = DEFAULT_GENERAL_PROFILE.shortcut,
+  profileId = 'general',
 ): HelperNotification {
   return {
     jsonrpc: '2.0',
     method: 'activation.event',
-    params: { phase, profileId, shortcut: shortcutFromLegacyActivation(keyValue, shift) },
+    params: { phase: 'complete', profileId, shortcut, heldMs },
   };
 }
 function chordActivation(
@@ -364,10 +399,7 @@ describe('EchoSessionController integration', () => {
     test.spies.configureActivation.mockClear();
 
     await test.controller.startShortcutCapture(7, onDestroyed);
-    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(false, [
-      profileBinding('general', shortcutFromLegacyActivation('Z', false)),
-      profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-    ]);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(false, builtInBindings());
 
     test.notify(activation('down'));
     await settle();
@@ -452,10 +484,7 @@ describe('EchoSessionController integration', () => {
         2,
       );
     });
-    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, [
-      profileBinding('general', shortcutFromLegacyActivation('Z', false)),
-      profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-    ]);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
   });
 
   it('keeps the processing mirror atomic and resets each built-in to its reserved default', async () => {
@@ -475,31 +504,59 @@ describe('EchoSessionController integration', () => {
     await expect(
       test.controller.createProfile({
         name: 'Reserved thief',
-        shortcut: shortcutFromLegacyActivation('Z', false),
+        shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
         processingMode: 'raw',
         smartPrompt: null,
       }),
     ).rejects.toThrow(/reserved/i);
 
     settings = await test.controller.resetProfile('general');
-    expect(settings.dictationProfiles.find((profile) => profile.id === 'general')).toEqual({
-      id: 'general',
-      name: 'General',
-      shortcut: shortcutFromLegacyActivation('Z', false),
-      processingMode: 'raw',
+    expect(settings.dictationProfiles.find((profile) => profile.id === 'general')).toEqual(
+      DEFAULT_GENERAL_PROFILE,
+    );
+    expect(settings.app).toMatchObject({ defaultProcessingMode: 'smart' });
+    settings = await test.controller.resetProfile('prompt');
+    expect(settings.dictationProfiles.find((profile) => profile.id === 'prompt')).toEqual(
+      DEFAULT_PROMPT_PROFILE,
+    );
+    settings = await test.controller.resetProfile('markdown');
+    expect(settings.dictationProfiles.find((profile) => profile.id === 'markdown')).toEqual(
+      DEFAULT_MARKDOWN_PROFILE,
+    );
+    settings = await test.controller.resetProfile('translate-to-english');
+    expect(
+      settings.dictationProfiles.find((profile) => profile.id === 'translate-to-english'),
+    ).toEqual(DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE);
+    expect(settings.app).toMatchObject({ defaultProcessingMode: 'smart' });
+  });
+
+  it('rejects built-in deletion and custom reset at the profile coordinator boundary', async () => {
+    const test = fixture();
+    const created = await test.controller.createProfile({
+      name: 'Custom boundary profile',
+      shortcut: shortcutFromLegacyActivation('Q', false),
+      processingMode: 'smart',
       smartPrompt: null,
     });
-    expect(settings.app).toMatchObject({ defaultProcessingMode: 'raw' });
-    settings = await test.controller.resetProfile('prompt');
-    expect(settings.dictationProfiles.find((profile) => profile.id === 'prompt')).toEqual({
-      id: 'prompt',
-      name: 'Prompt',
-      shortcut: shortcutFromLegacyActivation('Z', true),
-      processingMode: 'smart',
-      smartPrompt:
-        'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Use lists, tables, and other formatting when useful.',
+    const custom = created.dictationProfiles.find(({ name }) => name === 'Custom boundary profile');
+    if (custom === undefined) throw new Error('Custom profile was not created');
+    test.spies.configureActivation.mockClear();
+
+    await expect(test.controller.deleteProfile('general')).rejects.toThrow(
+      'Built-in dictation profiles cannot be deleted',
+    );
+    await expect(test.controller.resetProfile(custom.id)).rejects.toThrow(
+      'Only built-in profiles can be reset',
+    );
+    expect(test.spies.configureActivation).not.toHaveBeenCalled();
+
+    const authoritative = await test.controller.updateProfile(custom.id, {
+      name: 'Custom profile still present',
     });
-    expect(settings.app).toMatchObject({ defaultProcessingMode: 'raw' });
+    expect(authoritative.dictationProfiles.find(({ id }) => id === 'general')).toBeDefined();
+    expect(authoritative.dictationProfiles.find(({ id }) => id === custom.id)?.name).toBe(
+      'Custom profile still present',
+    );
   });
 
   it('serializes complete profile CRUD transactions without losing concurrent updates', async () => {
@@ -531,8 +588,8 @@ describe('EchoSessionController integration', () => {
     firstConfiguration.resolve({
       enabled: true,
       bindings: [
-        profileBinding('general', shortcutFromLegacyActivation('Z', false)),
-        profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
+        profileBinding('general', DEFAULT_GENERAL_PROFILE.shortcut),
+        profileBinding('prompt', DEFAULT_PROMPT_PROFILE.shortcut),
         profileBinding(
           '00000000-0000-4000-8000-000000000001',
           shortcutFromLegacyActivation('Q', false),
@@ -574,10 +631,10 @@ describe('EchoSessionController integration', () => {
       committed.dictationProfiles.find((profile) => profile.id === 'general')?.shortcut,
     ).toEqual(shortcutFromLegacyActivation('Q', false));
     await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalledTimes(3));
-    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, [
-      profileBinding('general', shortcutFromLegacyActivation('Q', false)),
-      profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-    ]);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(
+      true,
+      builtInBindings(shortcutFromLegacyActivation('Q', false)),
+    );
   });
 
   it('compensates rejected helper configuration from authoritative settings', async () => {
@@ -594,10 +651,7 @@ describe('EchoSessionController integration', () => {
       }),
     ).rejects.toThrow('registration failed');
 
-    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, [
-      profileBinding('general', shortcutFromLegacyActivation('Z', false)),
-      profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-    ]);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
   });
 
   it('serializes General and profile mutations and compensates failures from authoritative settings', async () => {
@@ -629,8 +683,8 @@ describe('EchoSessionController integration', () => {
     firstConfiguration.resolve({
       enabled: false,
       bindings: [
-        profileBinding('general', shortcutFromLegacyActivation('Z', false)),
-        profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
+        profileBinding('general', DEFAULT_GENERAL_PROFILE.shortcut),
+        profileBinding('prompt', DEFAULT_PROMPT_PROFILE.shortcut),
       ],
     });
 
@@ -641,10 +695,10 @@ describe('EchoSessionController integration', () => {
       authoritative.dictationProfiles.find((profile) => profile.id === 'general')?.shortcut,
     ).toEqual(shortcutFromLegacyActivation('Q', false));
     await vi.waitFor(() =>
-      expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, [
-        profileBinding('general', shortcutFromLegacyActivation('Q', false)),
-        profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-      ]),
+      expect(test.spies.configureActivation).toHaveBeenLastCalledWith(
+        true,
+        builtInBindings(shortcutFromLegacyActivation('Q', false)),
+      ),
     );
   });
 
@@ -686,7 +740,7 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down', true));
     await settle();
     expect(test.controller.snapshot.processingMode).toBe('smart');
-    expect(test.controller.snapshot.alternate).toBe(true);
+    expect(test.controller.snapshot.alternate).toBe(false);
     await test.controller.updateProfile('prompt', { smartPrompt: 'Mutated preference.' });
     await test.controller.resetProfile('prompt');
     await test.controller.deleteProfile(custom.id);
@@ -700,7 +754,7 @@ describe('EchoSessionController integration', () => {
     expect(beginSession).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'prompt',
-        shortcut: shortcutFromLegacyActivation('Z', true),
+        shortcut: DEFAULT_PROMPT_PROFILE.shortcut,
         processingMode: 'smart',
         smartPrompt: 'Original Prompt preference.',
       }),
@@ -752,7 +806,7 @@ describe('EchoSessionController integration', () => {
     expect(promptsUsed).toEqual(['Deleted profile preference.']);
   });
 
-  it('selects exact key-and-Shift profiles while General remains raw', async () => {
+  it('selects exact profile-owned chords while General remains raw', async () => {
     const beginSession = vi.fn();
     const test = fixture({
       smartProcessor: { beginSession } as unknown as SmartTranscriptProcessor,
@@ -765,12 +819,12 @@ describe('EchoSessionController integration', () => {
     await settle();
     expect(test.controller.snapshot.phase).toBe('idle');
 
-    test.notify(activation('down', false, 'Z'));
+    test.notify(activation('down'));
     await settle();
     expect(test.controller.snapshot.processingMode).toBe('raw');
     expect(test.controller.snapshot.alternate).toBe(false);
     test.frame();
-    test.notify(activation('up', false, 'Z'));
+    test.notify(activation('up'));
     test.notify(key('enter'));
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
     expect(beginSession).not.toHaveBeenCalled();
@@ -1038,6 +1092,91 @@ describe('EchoSessionController integration', () => {
     });
   });
 
+  it('forwards the configured non-English source language to one-shot transcription', async () => {
+    const test = fixture();
+    await test.controller.updateGeneral({ transcription: { language: 'ru' } });
+    test.notify(activation('down'));
+    await settle();
+    test.frame();
+    test.notify(activation('up'));
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+
+    expect(test.spies.transcribe).toHaveBeenCalledWith(
+      expect.any(Float32Array),
+      {
+        modelId: DEFAULT_SETTINGS.transcription.modelId,
+        sampleRate: 16_000,
+        language: 'ru',
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('forwards the configured non-English source language when opening a stream', async () => {
+    vi.useFakeTimers();
+    const test = fixture();
+    await test.controller.updateGeneral({ transcription: { language: 'uk' } });
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.spies.startSession).toHaveBeenCalledWith(
+      {
+        modelId: DEFAULT_SETTINGS.transcription.modelId,
+        sampleRate: 16_000,
+        language: 'uk',
+      },
+      expect.any(AbortSignal),
+    );
+    test.controller.cancel();
+    await vi.runAllTimersAsync();
+  });
+
+  it('runs Translate to English through Smart after source-language Whisper transcription', async () => {
+    const process = vi.fn(() => Promise.resolve({ text: 'Hello world', screenshotFilename: null }));
+    const beginSession = vi.fn<
+      Extract<SmartTranscriptProcessor, { beginSession: unknown }>['beginSession']
+    >(() => ({
+      providerId: 'openai',
+      modelId: 'gpt-4.1',
+      prepare: () => Promise.resolve(),
+      process,
+      commitScreenshot: vi.fn(),
+      cleanup: vi.fn(),
+    }));
+    const test = fixture({ smartProcessor: { beginSession } });
+    await test.controller.updateGeneral({ transcription: { language: 'ru' } });
+
+    test.notify(
+      chordActivation(
+        'down',
+        DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut,
+        'translate-to-english',
+      ),
+    );
+    await settle();
+    test.frame();
+    test.notify(
+      chordActivation('up', DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut, 'translate-to-english'),
+    );
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+
+    expect(test.spies.transcribe).toHaveBeenCalledWith(
+      expect.any(Float32Array),
+      expect.objectContaining({ language: 'ru' }),
+      expect.any(AbortSignal),
+    );
+    expect(beginSession).toHaveBeenCalledWith(DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE);
+    expect(process).toHaveBeenCalledWith('locally transcribed', expect.any(AbortSignal));
+    expect(test.spies.insert).toHaveBeenCalledWith(
+      'Hello world',
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
   it('keeps final capture frames that arrive while microphone stop is draining', async () => {
     const stopped = deferred<undefined>();
     const test = fixture({
@@ -1267,7 +1406,7 @@ describe('EchoSessionController integration', () => {
 
   it('rejects an idle down whose profile ID does not own the current shortcut', async () => {
     const test = fixture();
-    const general = shortcutFromLegacyActivation('Z', false);
+    const general = DEFAULT_GENERAL_PROFILE.shortcut;
 
     test.notify(chordActivation('down', general, 'prompt'));
     await settle();
@@ -1276,6 +1415,29 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.startDictation).not.toHaveBeenCalled();
     expect(test.spies.setSessionCapture).toHaveBeenLastCalledWith(false);
   });
+
+  it('rejects an atomic completion for any binding other than exact General default', async () => {
+    const test = fixture();
+    test.notify(activationComplete(100, DEFAULT_PROMPT_PROFILE.shortcut, 'prompt'));
+    await settle();
+    expect(test.controller.snapshot.phase).toBe('idle');
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.spies.setSessionCapture).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [599, 'recordingQuick', 'quick'],
+    [600, 'recordingExtended', 'extended'],
+  ] as const)(
+    'classifies an atomic General prefix completion held for %i ms',
+    async (heldMs, phase, mode) => {
+      const test = fixture();
+      test.notify(activationComplete(heldMs));
+      await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe(phase));
+      expect(test.controller.snapshot.dictationMode).toBe(mode);
+      await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    },
+  );
 
   it('pairs Quick release with the exact full trigger-P shortcut snapshot', async () => {
     const test = fixture();
@@ -1309,7 +1471,7 @@ describe('EchoSessionController integration', () => {
 
   it('requires exact profile ownership for a recording shortcut submit', async () => {
     const test = fixture();
-    const general = shortcutFromLegacyActivation('Z', false);
+    const general = DEFAULT_GENERAL_PROFILE.shortcut;
     test.notify(chordActivation('down', general, 'general'));
     await settle();
     test.frame();
@@ -1329,7 +1491,7 @@ describe('EchoSessionController integration', () => {
   it('submits a frozen-profile recording with its edited shortcut and pairs the edited snapshot', async () => {
     const transcription = deferred<Awaited<ReturnType<WhisperWorkerClient['transcribe']>>>();
     const test = fixture({ transcribe: () => transcription.promise });
-    const original = shortcutFromLegacyActivation('Z', false);
+    const original = DEFAULT_GENERAL_PROFILE.shortcut;
     const edited = shortcutFromLegacyActivation('Q', false);
     test.notify(chordActivation('down', original, 'general'));
     await settle();
@@ -1394,7 +1556,7 @@ describe('EchoSessionController integration', () => {
 
   it('accepts the frozen profile-owned up after its configured shortcut changes', async () => {
     const test = fixture();
-    const original = shortcutFromLegacyActivation('Z', false);
+    const original = DEFAULT_GENERAL_PROFILE.shortcut;
 
     test.notify(chordActivation('down', original, 'general'));
     await settle();
@@ -1552,7 +1714,7 @@ describe('EchoSessionController integration', () => {
       active: true,
       phase: 'extended',
       profileId: 'prompt',
-      shortcut: shortcutFromLegacyActivation('Z', true),
+      shortcut: DEFAULT_PROMPT_PROFILE.shortcut,
     });
     expect(test.spies.startDictation).not.toHaveBeenCalled();
     expect(test.controller.stopActivationTest(42).phase).toBe('idle');
@@ -2760,9 +2922,9 @@ describe('EchoSessionController integration', () => {
     expect(result.dictationProfiles.find((profile) => profile.id === 'general')?.shortcut).toEqual(
       shortcut,
     );
-    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, [
-      profileBinding('general', shortcut),
-      profileBinding('prompt', shortcutFromLegacyActivation('Z', true)),
-    ]);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(
+      true,
+      builtInBindings(shortcut),
+    );
   });
 });

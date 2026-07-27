@@ -1,8 +1,14 @@
 import { z } from 'zod';
-import { DictationProfileIdSchema } from '../schemas/dictation-profiles';
-import { ShortcutSchema, shortcutIdentity, shortcutsConflict } from '../schemas/shortcut';
+import {
+  DictationProfileIdSchema,
+  MAX_DICTATION_PROFILES,
+  dictationProfileBindingsConflict,
+  isBuiltInDefaultBinding,
+  isReservedBindingForProfile,
+} from '../schemas/dictation-profiles';
+import { ShortcutSchema, shortcutIdentity } from '../schemas/shortcut';
 
-export const HELPER_PROTOCOL_VERSION = 3 as const;
+export const HELPER_PROTOCOL_VERSION = 5 as const;
 export const HELPER_MAX_FRAME_BYTES = 16 * 1024;
 const HelperNumericRequestIdSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const HelperStringRequestIdSchema = z
@@ -86,17 +92,24 @@ export const ActivationBindingSchema = z
   .strict();
 export const ActivationBindingsSchema = z
   .array(ActivationBindingSchema)
-  .max(10)
+  .max(MAX_DICTATION_PROFILES)
   .superRefine((bindings, context) => {
     const profileIds = new Set<string>();
     const identities = new Set<string>();
-    const prior: z.infer<typeof ShortcutSchema>[] = [];
+    const prior: z.infer<typeof ActivationBindingSchema>[] = [];
     for (const [index, binding] of bindings.entries()) {
       if (profileIds.has(binding.profileId)) {
         context.addIssue({
           code: 'custom',
           path: [index, 'profileId'],
           message: 'Activation profile IDs must be distinct',
+        });
+      }
+      if (isReservedBindingForProfile(binding.profileId, binding.shortcut)) {
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'shortcut'],
+          message: 'The canonical built-in shortcut family is reserved for its exact owners',
         });
       }
       const identity = shortcutIdentity(binding.shortcut);
@@ -106,16 +119,26 @@ export const ActivationBindingsSchema = z
           path: [index, 'shortcut'],
           message: 'Activation shortcuts must be distinct',
         });
-      } else if (prior.some((candidate) => shortcutsConflict(candidate, binding.shortcut))) {
+      } else if (
+        prior.some((candidate) =>
+          dictationProfileBindingsConflict(
+            candidate.profileId,
+            candidate.shortcut,
+            binding.profileId,
+            binding.shortcut,
+          ),
+        )
+      ) {
         context.addIssue({
           code: 'custom',
           path: [index, 'shortcut'],
-          message: 'Activation shortcuts with the same modifiers must not prefix one another',
+          message:
+            'Activation shortcuts with the same modifiers must not prefix one another outside the built-in default family',
         });
       }
       profileIds.add(binding.profileId);
       identities.add(identity);
-      prior.push(binding.shortcut);
+      prior.push(binding);
     }
   });
 const configureActivationParamsSchema = z
@@ -195,13 +218,31 @@ export const HelperNotificationSchema = z.discriminatedUnion('method', [
     .object({
       jsonrpc: z.literal('2.0'),
       method: z.literal('activation.event'),
-      params: z
-        .object({
-          phase: z.enum(['down', 'up']),
-          profileId: DictationProfileIdSchema,
-          shortcut: ShortcutSchema,
-        })
-        .strict(),
+      params: z.discriminatedUnion('phase', [
+        z
+          .object({
+            phase: z.enum(['down', 'up']),
+            profileId: DictationProfileIdSchema,
+            shortcut: ShortcutSchema,
+          })
+          .strict(),
+        z
+          .object({
+            phase: z.literal('complete'),
+            profileId: DictationProfileIdSchema,
+            shortcut: ShortcutSchema,
+            heldMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+          })
+          .strict()
+          .refine(
+            (value) =>
+              value.profileId === 'general' &&
+              isBuiltInDefaultBinding(value.profileId, value.shortcut),
+            {
+              message: 'Only the exact General built-in default may complete atomically',
+            },
+          ),
+      ]),
     })
     .strict(),
   z

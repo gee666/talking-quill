@@ -1,12 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULT_GENERAL_PROFILE,
-  DEFAULT_PROMPT_PROFILE,
+  BuiltInDictationProfileIdSchema,
   DictationProfileCreateSchema,
   DictationProfileListSchema,
   DictationProfilePatchSchema,
-  GENERAL_PROFILE_ID,
-  PROMPT_PROFILE_ID,
+  builtInDictationProfile,
   type DictationProfile,
   type DictationProfileCreate,
   type DictationProfilePatch,
@@ -130,7 +128,7 @@ export class ProfileActivationCoordinator {
 
   deleteProfile(id: string): Promise<Settings> {
     return this.#serializeTransaction(() => {
-      if (id === GENERAL_PROFILE_ID || id === PROMPT_PROFILE_ID) {
+      if (BuiltInDictationProfileIdSchema.safeParse(id).success) {
         throw new Error('Built-in dictation profiles cannot be deleted');
       }
       const current = this.#settings.get().dictationProfiles;
@@ -143,12 +141,7 @@ export class ProfileActivationCoordinator {
 
   resetProfile(id: string): Promise<Settings> {
     return this.#serializeTransaction(() => {
-      const replacement =
-        id === GENERAL_PROFILE_ID
-          ? DEFAULT_GENERAL_PROFILE
-          : id === PROMPT_PROFILE_ID
-            ? DEFAULT_PROMPT_PROFILE
-            : null;
+      const replacement = builtInDictationProfile(id);
       if (replacement === null) throw new Error('Only built-in profiles can be reset');
       return this.#replaceProfiles(
         this.#settings

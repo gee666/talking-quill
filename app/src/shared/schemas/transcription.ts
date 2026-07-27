@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { WHISPER_SAMPLE_RATE } from '../constants/whisper';
 import { WhisperModelIdSchema } from './model-manifest';
 import { boundedUtf8String } from './text-bounds';
+import { WhisperLanguageSchema } from './whisper-languages';
 
 export const TRANSCRIPT_MAX_CHARACTERS = 1_000_000;
 export const TRANSCRIPT_MAX_UTF8_BYTES = 1_000_000;
@@ -58,13 +59,14 @@ export const ModelProgressSchema = z
   })
   .strict();
 
-export const TranscriptionLanguageSchema = z.string().trim().min(1).max(80);
+export const WHISPER_TRANSCRIPTION_TASK = 'transcribe' as const;
+export const TranscriptionLanguageSchema = WhisperLanguageSchema;
 
 export const TranscriptionOptionsSchema = z
   .object({
     modelId: WhisperModelIdSchema,
     sampleRate: z.literal(WHISPER_SAMPLE_RATE).default(WHISPER_SAMPLE_RATE),
-    language: TranscriptionLanguageSchema.optional(),
+    language: TranscriptionLanguageSchema,
   })
   .strict();
 

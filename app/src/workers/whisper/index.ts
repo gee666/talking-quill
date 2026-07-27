@@ -1,6 +1,6 @@
 import { freemem, totalmem } from 'node:os';
 import rawManifest from '../../../../scripts/model-manifest.json';
-import { WHISPER_MAX_SAMPLES } from '../../shared/constants/whisper';
+import { WHISPER_MAX_SAMPLES, WHISPER_PROTOCOL_VERSION } from '../../shared/constants/whisper';
 import { ModelManifestSchema, type WhisperModelId } from '../../shared/schemas/model-manifest';
 import {
   WhisperWorkerRequestSchema,
@@ -103,7 +103,7 @@ async function startWorker(): Promise<void> {
 
   process.parentPort.postMessage(
     WhisperWorkerResponseSchema.parse({
-      version: 1,
+      version: WHISPER_PROTOCOL_VERSION,
       requestId: 'worker-ready',
       ok: true,
       result: {
@@ -139,7 +139,11 @@ async function execute(
   pressureTimer: ReturnType<typeof setInterval>,
   networkProbeCompleted: boolean,
 ): Promise<WhisperWorkerResponse> {
-  const base = { version: 1 as const, requestId: request.requestId, ok: true as const };
+  const base = {
+    version: WHISPER_PROTOCOL_VERSION,
+    requestId: request.requestId,
+    ok: true as const,
+  };
   switch (request.type) {
     case 'transcribe':
       return {
@@ -200,7 +204,7 @@ function readManifestModel(
 function postFailure(requestId: string, code: WhisperWorkerErrorCode, message: string): void {
   process.parentPort.postMessage(
     WhisperWorkerResponseSchema.parse({
-      version: 1,
+      version: WHISPER_PROTOCOL_VERSION,
       requestId,
       ok: false,
       error: { code, message },

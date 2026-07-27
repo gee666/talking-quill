@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Settings } from '../../../shared/schemas/settings';
-import { Button, Card, Input, Status } from '../../design';
+import {
+  WHISPER_AUTO_LANGUAGE,
+  WHISPER_SOURCE_LANGUAGES,
+  type WhisperLanguage,
+} from '../../../shared/schemas/whisper-languages';
+import { Button, Card, Select, Status } from '../../design';
 import { ModelSetup } from '../setup/ModelSetup';
 
 export function TranscriptionModelSection({
@@ -26,7 +31,7 @@ export function TranscriptionLanguageSetting({
   readonly settings: Settings;
   readonly onSettingsSaved: (settings: Settings) => void;
 }) {
-  const authoritative = settings.transcription.language ?? '';
+  const authoritative = settings.transcription.language;
   const [draft, setDraft] = useState(authoritative);
   const [observedAuthoritative, setObservedAuthoritative] = useState(authoritative);
   const [message, setMessage] = useState<string | null>(null);
@@ -50,24 +55,21 @@ export function TranscriptionLanguageSetting({
   const saveLanguage = async () => {
     const operation = ++saveSequence.current;
     const submittedDraft = draft;
-    const normalized = submittedDraft.trim();
     setSaving(true);
     setMessage(null);
     try {
       const saved = await window.talkingQuill.settings.update({
-        transcription: { language: normalized.length === 0 ? null : normalized },
+        transcription: { language: submittedDraft },
       });
       if (!mounted.current || operation !== saveSequence.current) return;
       onSettingsSaved(saved);
-      setDraft(saved.transcription.language ?? '');
-      setMessage('Transcription language saved.');
+      setDraft(saved.transcription.language);
+      setMessage('Source language saved.');
     } catch {
       if (!mounted.current || operation !== saveSequence.current) return;
       // The parent settings event/bootstrap remains authoritative after a rejected write.
       setDraft(authoritative);
-      setMessage(
-        'The transcription language could not be saved. Your previous value was restored.',
-      );
+      setMessage('The source language could not be saved. Your previous value was restored.');
     } finally {
       if (mounted.current && operation === saveSequence.current) setSaving(false);
     }
@@ -75,26 +77,25 @@ export function TranscriptionLanguageSetting({
 
   return (
     <>
-      <Input
-        label="Transcription language"
+      <Select
+        label="Spoken/source language"
         value={draft}
-        placeholder="Auto-detect"
-        hint="Leave empty to detect automatically, or enter a language name or code."
+        hint="Auto-detect transcribes the language spoken in the audio without translating it. Choose a language only to provide an explicit source-language hint."
         disabled={saving}
         onChange={(event) => {
-          setDraft(event.currentTarget.value);
+          setDraft(event.currentTarget.value as WhisperLanguage);
           setMessage(null);
         }}
-        onBlur={() => void saveLanguage()}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            void saveLanguage();
-          }
-        }}
-      />
+      >
+        <option value={WHISPER_AUTO_LANGUAGE}>Auto-detect (recommended)</option>
+        {WHISPER_SOURCE_LANGUAGES.map(([code, name]) => (
+          <option key={code} value={code}>
+            {name} ({code})
+          </option>
+        ))}
+      </Select>
       <Button disabled={saving || draft === authoritative} onClick={() => void saveLanguage()}>
-        {saving ? 'Saving language' : 'Save language'}
+        {saving ? 'Saving source language' : 'Save source language'}
       </Button>
       {message === null ? null : (
         <Status tone={message.includes('could not') ? 'error' : 'success'} live>

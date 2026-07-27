@@ -12,6 +12,12 @@ import {
   helperParamsSchemas,
   helperResultSchemas,
 } from '../../app/src/shared/helper/protocol';
+import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+} from '../../app/src/shared/schemas/dictation-profiles';
 import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 
 const binding = (profileId: string, shortcut: unknown) => ({ profileId, shortcut });
@@ -59,11 +65,11 @@ describe('native helper framing', () => {
 });
 
 describe('native helper JSON-RPC schemas', () => {
-  it('requires protocol v3 and has no lossy default activation key handshake field', () => {
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 3 }).success).toBe(true);
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 2 }).success).toBe(false);
+  it('requires protocol v5 and has no lossy default activation key handshake field', () => {
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 5 }).success).toBe(true);
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 4 }).success).toBe(false);
     const initialized = {
-      protocolVersion: 3,
+      protocolVersion: 5,
       helperVersion: '1.0.0',
       platform: 'windows',
       architecture: 'x86_64',
@@ -128,9 +134,37 @@ describe('native helper JSON-RPC schemas', () => {
     ).toBe(false);
   });
 
-  it('rejects empty enabled sets, duplicates, prefixes, and malformed chord keys', () => {
+  it('allows only the canonical built-in prefix family and rejects unrelated conflicts', () => {
     const schema = helperParamsSchemas['activation.configure'];
     const altA = shortcutFromLegacyActivation('A', false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', DEFAULT_GENERAL_PROFILE.shortcut),
+          binding('prompt', DEFAULT_PROMPT_PROFILE.shortcut),
+          binding('markdown', DEFAULT_MARKDOWN_PROFILE.shortcut),
+          binding('translate-to-english', DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut),
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [
+          binding('general', {
+            modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+            keys: ['X', 'Q'],
+          }),
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: [binding('general', DEFAULT_PROMPT_PROFILE.shortcut)],
+      }).success,
+    ).toBe(false);
     expect(schema.safeParse({ enabled: true, bindings: [] }).success).toBe(false);
     expect(schema.safeParse({ enabled: false, bindings: [] }).success).toBe(true);
     expect(
@@ -216,7 +250,18 @@ describe('native helper JSON-RPC schemas', () => {
     expect(
       schema.safeParse({
         enabled: true,
-        bindings: Array.from({ length: 11 }, (_, index) =>
+        bindings: Array.from({ length: 12 }, (_, index) =>
+          binding(customProfileId(index), {
+            ...altA,
+            keys: [String.fromCharCode(65 + index)],
+          }),
+        ),
+      }).success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        enabled: true,
+        bindings: Array.from({ length: 13 }, (_, index) =>
           binding(customProfileId(index), {
             ...altA,
             keys: [String.fromCharCode(65 + index)],
@@ -271,11 +316,46 @@ describe('native helper JSON-RPC schemas', () => {
         method: 'activation.event',
         params: {
           phase: 'down',
-          profileId: 'prompt',
-          shortcut: shortcutFromLegacyActivation('Z', true),
+          profileId: 'translate-to-english',
+          shortcut: DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut,
         },
       }).success,
     ).toBe(true);
+    expect(
+      HelperNotificationSchema.safeParse({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: {
+          phase: 'complete',
+          profileId: 'general',
+          shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
+          heldMs: 599,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      HelperNotificationSchema.safeParse({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: {
+          phase: 'complete',
+          profileId: 'general',
+          shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      HelperNotificationSchema.safeParse({
+        jsonrpc: '2.0',
+        method: 'activation.event',
+        params: {
+          phase: 'complete',
+          profileId: 'prompt',
+          shortcut: DEFAULT_PROMPT_PROFILE.shortcut,
+          heldMs: 100,
+        },
+      }).success,
+    ).toBe(false);
     expect(
       HelperNotificationSchema.safeParse({
         jsonrpc: '2.0',

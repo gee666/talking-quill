@@ -50,7 +50,7 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 3 });
+const initialized = await request('initialize', { protocolVersion: 5 });
 await request('activation.configure', { enabled: false, bindings: [] });
 await request('session.set_capture', { active: false });
 const permissions = await request('permissions.get', {});
@@ -81,15 +81,31 @@ async function configureActivationCoverage(initialization, permissions) {
         'Native hook or permissions unavailable; full-chord runtime coverage requires an interactive trusted host.',
     };
   }
+  const expectedBindings = fullChordBindings();
   const configuration = await request('activation.configure', {
     enabled: true,
-    bindings: fullChordBindings(),
+    bindings: expectedBindings,
   });
+  if (
+    configuration.bindings.length !== expectedBindings.length ||
+    expectedBindings.some((expected, index) => {
+      const actual = configuration.bindings[index];
+      return (
+        actual?.profileId !== expected.profileId ||
+        !shortcutMatches(actual.shortcut, expected.shortcut.keys, expected.shortcut.modifiers)
+      );
+    })
+  ) {
+    throw new Error(
+      `Native helper did not round-trip all 12 profile bindings exactly: ${JSON.stringify({ expectedBindings, actualBindings: configuration.bindings })}`,
+    );
+  }
   return {
     configuredChords:
       process.platform === 'win32'
-        ? ['Alt+KeyX+KeyP', 'Ctrl+Shift+KeyP']
-        : ['Option+KeyX+KeyP', 'Control+Shift+KeyP'],
+        ? ['Alt+KeyX', 'Alt+KeyX+KeyP', 'Alt+KeyX+KeyM', 'Alt+KeyX+KeyE']
+        : ['Option+KeyX', 'Option+KeyX+KeyP', 'Option+KeyX+KeyM', 'Option+KeyX+KeyE'],
+    bindingCount: configuration.bindings.length,
     configuration,
   };
 }
@@ -108,28 +124,32 @@ async function runInteractive() {
     });
     console.log(
       windows
-        ? 'For 20 seconds, focus the editor and hold Alt+X, press/hold P, then release P. Next press Ctrl+Shift+P. X/modifiers may leak into the editor; each P trigger must not.'
-        : 'For 20 seconds, focus the editor and hold Option+X, press/hold P, then release P. Next press Control+Shift+P. X/modifiers may leak into the editor; each P trigger must not.',
+        ? 'For 20 seconds, focus the editor and perform Alt+X, then Alt+X+P, Alt+X+M, and Alt+X+E. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; P/M/E triggers must not.'
+        : 'For 20 seconds, focus the editor and perform Option+X, then Option+X+P, Option+X+M, and Option+X+E. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; P/M/E triggers must not.',
     );
     await delay(20_000);
     await request('activation.configure', { enabled: false, bindings: [] });
     const activations = printObserved('activation.event');
     assertPairedEvents(activations, 'activation.event');
-    const activationDowns = activations.filter((event) => event.params.phase === 'down');
+    const activationStarts = activations.filter((event) =>
+      ['down', 'complete'].includes(event.params.phase),
+    );
     const expectedShortcuts = [
-      ['general', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }],
-      ['prompt', ['P'], { ctrl: true, alt: false, shift: true, meta: false }],
+      ['general', ['X'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['prompt', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['markdown', ['X', 'M'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['translate-to-english', ['X', 'E'], { ctrl: false, alt: true, shift: false, meta: false }],
     ];
     for (const [profileId, keys, modifiers] of expectedShortcuts) {
       if (
-        !activationDowns.some(
+        !activationStarts.some(
           (event) =>
             event.params.profileId === profileId &&
             shortcutMatches(event.params.shortcut, keys, modifiers),
         )
       ) {
         throw new Error(
-          `No ${JSON.stringify({ profileId, keys, modifiers })} activation-down event was observed`,
+          `No ${JSON.stringify({ profileId, keys, modifiers })} activation start event was observed`,
         );
       }
     }
@@ -176,13 +196,15 @@ function assertPairedEvents(events, label) {
       shortcut: event.params.shortcut,
       ...(event.params.key === undefined ? {} : { key: event.params.key }),
     });
-    const count = counts.get(identity) ?? { down: 0, up: 0 };
+    const count = counts.get(identity) ?? { down: 0, up: 0, complete: 0 };
     count[event.params.phase] += 1;
     counts.set(identity, count);
   }
   if (
     counts.size === 0 ||
-    [...counts.values()].some((count) => count.down === 0 || count.down !== count.up)
+    [...counts.values()].some(
+      (count) => count.complete === 0 && (count.down === 0 || count.down !== count.up),
+    )
   ) {
     throw new Error(`${label} did not contain exact paired down/up events`);
   }
@@ -190,8 +212,22 @@ function assertPairedEvents(events, label) {
 
 function fullChordBindings() {
   return [
-    binding('general', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }),
-    binding('prompt', ['P'], { ctrl: true, alt: false, shift: true, meta: false }),
+    binding('general', ['X'], { ctrl: false, alt: true, shift: false, meta: false }),
+    binding('prompt', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }),
+    binding('markdown', ['X', 'M'], { ctrl: false, alt: true, shift: false, meta: false }),
+    binding('translate-to-english', ['X', 'E'], {
+      ctrl: false,
+      alt: true,
+      shift: false,
+      meta: false,
+    }),
+    ...Array.from({ length: 8 }, (_, index) =>
+      binding(
+        `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        [String.fromCharCode('A'.charCodeAt(0) + index)],
+        { ctrl: true, alt: true, shift: false, meta: false },
+      ),
+    ),
   ];
 }
 

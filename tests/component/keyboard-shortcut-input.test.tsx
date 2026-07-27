@@ -43,6 +43,19 @@ function Harness({
 }
 
 describe('KeyboardShortcutInput capture lifecycle', () => {
+  it('explains simultaneous multi-letter holds and foreground pass-through behavior', () => {
+    installCaptureApi(
+      vi.fn(() => Promise.resolve()),
+      vi.fn(() => Promise.resolve()),
+    );
+    render(<Harness disabled={false} onChange={vi.fn()} onValidity={vi.fn()} />);
+
+    expect(screen.getByText(/all letters remain held simultaneously/i)).toBeVisible();
+    expect(
+      screen.getByText(/modifiers and prefix letters pass through to the foreground app/i),
+    ).toBeVisible();
+  });
+
   it('requires one nonempty exact modifier mask and fences mismatches until all letters release', async () => {
     const start = vi.fn(() => Promise.resolve());
     const stop = vi.fn(() => Promise.resolve());

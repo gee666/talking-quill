@@ -90,7 +90,7 @@ export class EchoSessionController {
   #teardownInFlight: Promise<void> | null = null;
   #sessionSettings: Readonly<Settings> | null = null;
   #sessionProfile: Readonly<DictationProfile> | null = null;
-  #activationDownBinding: Readonly<ActivationBinding> | null = null;
+  #activeBinding: Readonly<ActivationBinding> | null = null;
   #shutdownOperation: Promise<void> | null = null;
   #disposed = false;
 
@@ -350,25 +350,34 @@ export class EchoSessionController {
   #onHelperNotification(notification: HelperNotification): void {
     if (this.#disposed || notification.method === 'paste.committed') return;
     if (notification.method === 'activation.event') {
-      if (notification.params.phase === 'down') {
-        // Native backends arm session-key capture before publishing activation.down. Mark the
+      if (
+        notification.params.phase === 'complete' &&
+        (notification.params.profileId !== DEFAULT_GENERAL_PROFILE.id ||
+          !shortcutsEqual(notification.params.shortcut, DEFAULT_GENERAL_PROFILE.shortcut))
+      ) {
+        this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+        return;
+      }
+      const startsActivation = notification.params.phase !== 'up';
+      if (startsActivation) {
+        // Native backends arm session-key capture before publishing an activation start. Mark the
         // applied state unknown so every rejection/test path explicitly confirms it disabled.
         this.#captureReconciler.markNativeCaptureArmed();
       }
       if (this.#profiles.shortcutCaptureActive) {
-        if (notification.params.phase === 'down') {
+        if (startsActivation) {
           this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
         }
         return;
       }
       if (this.#activationTest.state.active) {
         this.#activationTest.accept(notification, this.#settings.get().dictationProfiles);
-        if (notification.params.phase === 'down') {
+        if (startsActivation) {
           this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
         }
         return;
       }
-      if (notification.params.phase === 'down') {
+      if (startsActivation) {
         if (this.#state.phase === 'idle') {
           const settings = this.#settings.get();
           if (
@@ -390,14 +399,21 @@ export class EchoSessionController {
           }
           this.#sessionSettings = settings;
           this.#sessionProfile = deepFreezeProfile(profile);
-          this.#activationDownBinding = freezeActivationBinding(notification.params);
+          const now = Date.now();
+          this.#activeBinding =
+            notification.params.phase === 'complete'
+              ? null
+              : freezeActivationBinding(notification.params);
           this.#dispatch({
             type: 'shortcut-down',
             sessionId: randomUUID(),
             alternate: profile.shortcut.modifiers.shift,
             processingMode: profile.processingMode,
-            now: Date.now(),
+            now: notification.params.phase === 'complete' ? now - notification.params.heldMs : now,
           });
+          if (notification.params.phase === 'complete') {
+            this.#dispatch({ type: 'shortcut-up', now });
+          }
         } else if (
           this.#state.phase === 'recordingQuick' ||
           this.#state.phase === 'recordingExtended'
@@ -406,7 +422,10 @@ export class EchoSessionController {
             this.#sessionProfile !== null &&
             this.#sessionProfile.id === notification.params.profileId
           ) {
-            this.#activationDownBinding = freezeActivationBinding(notification.params);
+            this.#activeBinding =
+              notification.params.phase === 'complete'
+                ? null
+                : freezeActivationBinding(notification.params);
             this.#dispatch({ type: 'submit', source: 'shortcut' });
           } else {
             this.#captureReconciler.requestBestEffort(
@@ -415,7 +434,7 @@ export class EchoSessionController {
             );
           }
         } else {
-          // Every activation down arms native Esc/Enter capture. Active phases which do not own
+          // Every activation start arms native Esc/Enter capture. Active phases which do not own
           // this new shortcut must explicitly disarm it instead of waiting for terminal reset.
           this.#captureReconciler.requestBestEffort(
             isCapturePhase(this.#state.phase),
@@ -424,12 +443,12 @@ export class EchoSessionController {
         }
       } else {
         if (
-          this.#activationDownBinding === null ||
-          !activationBindingsEqual(this.#activationDownBinding, notification.params)
+          this.#activeBinding === null ||
+          !activationBindingsEqual(this.#activeBinding, notification.params)
         ) {
           return;
         }
-        this.#activationDownBinding = null;
+        this.#activeBinding = null;
         this.#dispatch({ type: 'shortcut-up', now: Date.now() });
       }
       return;
@@ -462,7 +481,7 @@ export class EchoSessionController {
   }
 
   #manageSessionTransition(previous: EchoSessionState, next: EchoSessionState): void {
-    if (next.phase === 'idle' || isTerminalPhase(next.phase)) this.#activationDownBinding = null;
+    if (next.phase === 'idle' || isTerminalPhase(next.phase)) this.#activeBinding = null;
     if (previous.phase === 'idle' && next.phase === 'arming') {
       this.#capture.beginGeneration();
       this.#abort = new AbortController();

@@ -1,0 +1,143 @@
+{
+  "v21-full-profile-cap-and-language-aliases": {
+    "schemaVersion": 21,
+    "app": {
+      "enabled": false,
+      "closeToTray": false,
+      "defaultProcessingMode": "raw",
+      "widgetSize": "max",
+      "soundsEnabled": false,
+      "launchAtLogin": true
+    },
+    "recording": { "preferredMicrophoneId": "v21-microphone", "silencePreset": "relaxed" },
+    "transcription": { "modelId": "Xenova/whisper-small", "language": "Russian" },
+    "dictationProfiles": [
+      {
+        "id": "general",
+        "name": "Existing General",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["Q"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "prompt",
+        "name": "Existing Prompt",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": true, "meta": false },
+          "keys": ["P"]
+        },
+        "processingMode": "smart",
+        "smartPrompt": "Keep this prompt"
+      },
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "Old Alt X",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["X"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "name": "Old Alt T",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["T"]
+        },
+        "processingMode": "smart",
+        "smartPrompt": "Keep this custom prompt"
+      },
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "name": "Custom A",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["A"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "name": "Custom B",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["B"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555",
+        "name": "Custom C",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["C"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "66666666-6666-4666-8666-666666666666",
+        "name": "Custom D",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["D"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "77777777-7777-4777-8777-777777777777",
+        "name": "Custom E",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["E"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      },
+      {
+        "id": "88888888-8888-4888-8888-888888888888",
+        "name": "Custom F",
+        "shortcut": {
+          "modifiers": { "ctrl": false, "alt": true, "shift": false, "meta": false },
+          "keys": ["F"]
+        },
+        "processingMode": "raw",
+        "smartPrompt": null
+      }
+    ],
+    "privacy": {
+      "historyEnabled": false,
+      "historyRetentionDays": 90,
+      "retainSmartScreenshots": true,
+      "diagnosticLoggingEnabled": true
+    },
+    "smartProcessing": {
+      "selectedProviderId": "ollama",
+      "providers": { "ollama": { "baseUrl": "http://127.0.0.1:11434", "keepAlive": 300 } },
+      "credentialEpochs": {},
+      "piInstallationPath": null,
+      "onScreenAwarenessEnabled": false,
+      "visionOverrides": []
+    },
+    "voiceCommands": [],
+    "customVocabulary": [],
+    "welcome": {
+      "completedAt": null,
+      "lastStep": 5,
+      "microphoneTested": true,
+      "activationTested": false,
+      "microphoneEvidence": null,
+      "activationEvidence": null,
+      "modelEvidence": null,
+      "revision": 6
+    }
+  }
+}

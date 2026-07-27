@@ -15,6 +15,7 @@ import {
   SettingsPatchSchema,
   SettingsSchema,
 } from '../../app/src/shared/schemas/settings';
+import { defaultDictationProfiles } from '../../app/src/shared/schemas/dictation-profiles';
 import {
   shortcutFromLegacyActivation,
   shortcutTrigger,
@@ -93,11 +94,13 @@ function legacyV19Settings() {
       ...current.app,
       activationKey: shortcutTrigger(general.shortcut),
     },
-    dictationProfiles: current.dictationProfiles.map(({ shortcut, ...profile }) => ({
-      ...profile,
-      activationKey: shortcutTrigger(shortcut),
-      shift: shortcut.modifiers.shift,
-    })),
+    dictationProfiles: current.dictationProfiles
+      .filter(({ id }) => id === 'general' || id === 'prompt')
+      .map(({ shortcut, ...profile }) => ({
+        ...profile,
+        activationKey: shortcutTrigger(shortcut),
+        shift: shortcut.modifiers.shift,
+      })),
     welcome: { ...current.welcome, lastStep: 1 as 1 | 2 | 3 | 4 | 5 | 6 },
   };
 }
@@ -107,7 +110,11 @@ function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
   if (typeof v20 !== 'object' || v20 === null || Array.isArray(v20)) {
     throw new Error('V19 migration did not emit settings');
   }
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[20]?.(v20 as Readonly<Record<string, unknown>>));
+  const v21 = SETTINGS_MIGRATIONS[20]?.(v20 as Readonly<Record<string, unknown>>);
+  if (typeof v21 !== 'object' || v21 === null || Array.isArray(v21)) {
+    throw new Error('V20 migration did not emit settings');
+  }
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(v21 as Readonly<Record<string, unknown>>));
 }
 
 function validSettings(
@@ -216,23 +223,11 @@ describe('SettingsStore', () => {
       language: 'ru',
     });
     expect(migrated.welcome.modelEvidence).toBeNull();
-    expect(migrated.dictationProfiles).toEqual([
-      {
-        id: 'general',
-        name: 'General',
-        shortcut: shortcutFromLegacyActivation('Z', false),
-        processingMode: 'raw',
-        smartPrompt: null,
-      },
-      {
-        id: 'prompt',
-        name: 'Prompt',
-        shortcut: shortcutFromLegacyActivation('Z', true),
-        processingMode: 'smart',
-        smartPrompt:
-          'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Use lists, tables, and other formatting when useful.',
-      },
-    ]);
+    const expectedProfiles = defaultDictationProfiles();
+    const expectedGeneral = expectedProfiles.find(({ id }) => id === 'general');
+    if (expectedGeneral === undefined) throw new Error('Expected General profile is missing');
+    expectedGeneral.shortcut = shortcutFromLegacyActivation('Z', false);
+    expect(migrated.dictationProfiles).toEqual(expectedProfiles);
   });
 
   it('migrates exact legacy General key/mode mirrors for default and non-default values', () => {
@@ -266,7 +261,7 @@ describe('SettingsStore', () => {
         name: 'General',
         shortcut: shortcutFromLegacyActivation(activationKey, false),
         processingMode: defaultProcessingMode,
-        smartPrompt: null,
+        smartPrompt: 'Clean up and format the transcript while preserving its source language.',
       });
       expect(migrated.app).toMatchObject({ defaultProcessingMode });
       expect(migrated.app).not.toHaveProperty('activationKey');
@@ -547,7 +542,7 @@ describe('SettingsStore', () => {
         schemaVersion: SETTINGS_SCHEMA_VERSION,
         app: { enabled: false, soundsEnabled: false },
         privacy: { historyEnabled: false, retainSmartScreenshots: true },
-        transcription: { language: 'x' },
+        transcription: { language: 'auto' },
         smartProcessing: {
           selectedProviderId: 'generic-openai',
           providers: { 'generic-openai': { baseUrl, modelId: 'legacy-model' } },
@@ -571,7 +566,7 @@ describe('SettingsStore', () => {
       expect(restarted.get()).toMatchObject({
         app: { enabled: false, soundsEnabled: false, launchAtLogin: true },
         privacy: { historyEnabled: false, retainSmartScreenshots: true },
-        transcription: { language: 'x' },
+        transcription: { language: 'auto' },
         smartProcessing: {
           providers: {
             'generic-openai': {
@@ -1525,7 +1520,7 @@ describe('SettingsStore', () => {
     expect(
       SettingsSchema.safeParse({
         ...structuredClone(DEFAULT_SETTINGS),
-        app: { ...structuredClone(DEFAULT_SETTINGS.app), defaultProcessingMode: 'smart' },
+        app: { ...structuredClone(DEFAULT_SETTINGS.app), defaultProcessingMode: 'raw' },
       }).success,
     ).toBe(false);
 

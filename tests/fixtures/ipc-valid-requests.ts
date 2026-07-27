@@ -31,7 +31,7 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
     name: 'Fixture profile',
     shortcut: {
       modifiers: { ctrl: false, alt: true, shift: false, meta: false },
-      keys: ['X', 'P'],
+      keys: ['Y', 'Q'],
     },
     processingMode: 'raw',
     smartPrompt: null,

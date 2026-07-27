@@ -42,7 +42,7 @@ class FakeWorker extends EventEmitter {
 
   ready(): void {
     this.emit('message', {
-      version: 1,
+      version: 2,
       requestId: 'worker-ready',
       ok: true,
       result: { type: 'ready', networkGuarded: true, networkProbeCompleted: false },
@@ -89,7 +89,7 @@ class FakeWorker extends EventEmitter {
     const request = [...requests].reverse().find((candidate) => candidate.type === requestType);
     if (request === undefined) throw new Error('No matching worker request');
     this.emit('message', {
-      version: 1,
+      version: 2,
       requestId: request.requestId,
       ok: false,
       error: { code, message },
@@ -107,11 +107,15 @@ class FakeWorker extends EventEmitter {
   }
 
   private respond(requestId: string, result: unknown): void {
-    this.emit('message', { version: 1, requestId, ok: true, result });
+    this.emit('message', { version: 2, requestId, ok: true, result });
   }
 }
 
-const options = { modelId: 'Xenova/whisper-small' as const, sampleRate: 16_000 as const };
+const options = {
+  modelId: 'Xenova/whisper-small' as const,
+  sampleRate: 16_000 as const,
+  language: 'en' as const,
+};
 const readyAcquirer: ModelUseAcquirer = (modelId) =>
   Promise.resolve({
     status: {
