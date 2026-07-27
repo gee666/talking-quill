@@ -162,6 +162,7 @@ const piFields = Object.freeze([
     kind: 'select' as const,
     required: true,
     secret: false,
+    description: 'Off or Minimal is fastest for transcript cleanup; higher levels take longer.',
     defaultValue: 'off',
     options: Object.freeze(
       [

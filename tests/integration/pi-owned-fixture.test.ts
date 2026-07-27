@@ -70,6 +70,7 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
         },
       }),
     );
+    await writeFile(resolve(agent, 'APPEND_SYSTEM.md'), 'GLOBAL_APPEND_SYSTEM_EVIDENCE');
     await writeFile(
       resolve(agent, 'extensions', 'evidence.ts'),
       `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(extensionMarker)}, 'loaded');\nexport default function evidence() {}\n`,
@@ -94,7 +95,7 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     if (root) await removeTestDirectory(root);
   });
 
-  it('proves list parity, fixed Test Connection, exact runtime argv/stdin, extensions, and disabled tools', async () => {
+  it('proves list parity, fixed Test Connection, exact argv/stdin, extensions, and disabled tools', async () => {
     const environment = {
       ...process.env,
       PATH: `${prefix}${delimiter}${process.env.PATH ?? ''}`,
@@ -133,7 +134,7 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     const logged = await readFile(argsLog, 'utf8');
     expect(logged).toContain('--list-models');
     expect(logged).toContain(
-      '-p --model talking-quill-local/mock-model --thinking high --no-tools --no-session --no-context-files --no-approve',
+      '-p --model talking-quill-local/mock-model --thinking high --no-tools --no-session --no-context-files --no-approve --no-skills --no-prompt-templates --no-themes --offline',
     );
     expect(await readFile(extensionMarker, 'utf8')).toBe('loaded');
     const completionRequests = server.requests.filter(({ url }) =>
@@ -142,7 +143,10 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     expect(completionRequests).toHaveLength(2);
     expect(JSON.stringify(completionRequests[0]?.body)).toContain('TALKING_QUILL_CONNECTION_OK');
     expect(JSON.stringify(completionRequests[1]?.body)).toContain('EXACT_STDIN_PROMPT');
-    for (const request of completionRequests) expect(request.body).not.toHaveProperty('tools');
+    for (const request of completionRequests) {
+      expect(request.body).not.toHaveProperty('tools');
+      expect(JSON.stringify(request.body)).toContain('GLOBAL_APPEND_SYSTEM_EVIDENCE');
+    }
   }, 90_000);
 
   it('cancels a real Pi command blocked on the localhost provider', async () => {

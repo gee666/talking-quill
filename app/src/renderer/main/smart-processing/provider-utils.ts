@@ -26,7 +26,7 @@ const ACTIONABLE_ERRORS: Readonly<Record<string, string>> = Object.freeze({
   PI_NOT_FOUND: 'A compatible Pi executable was not found. Install Pi or choose its path.',
   PI_CONFIG_INVALID: 'The configured Pi executable or directory is invalid.',
   PI_INCOMPATIBLE:
-    'This Pi command does not expose the required print, model, thinking, and list options.',
+    'This Pi version lacks required print, model, or isolation options. Update Pi and retry.',
   PI_LAUNCH_FAILED: 'Pi could not start or did not complete its bounded capability check.',
   AUTHENTICATION_FAILED: 'The provider rejected the API key. Replace it and try again.',
   RATE_LIMITED: 'The provider rate limit was reached. Wait, then retry.',

@@ -116,7 +116,13 @@ export class PiProvider implements SmartProvider {
     const config = this.#runtimeConfig(invocation.config);
     const identity = await this.#resolveIdentity(signal);
     const models = parsePiModels(
-      await this.#runResolved(identity, ['--list-models'], null, signal, DEFAULT_TIMEOUT_MS),
+      await this.#runResolved(
+        identity,
+        ['--list-models', ...identity.safetyFlags],
+        null,
+        signal,
+        DEFAULT_TIMEOUT_MS,
+      ),
     );
     if (models.length > 0 && !models.some(({ id }) => id === config.modelId))
       throw new ProviderError('MODEL_NOT_FOUND');
@@ -147,7 +153,13 @@ export class PiProvider implements SmartProvider {
       return this.#models.models;
     this.#observeEgress('provider');
     const models = parsePiModels(
-      await this.#runResolved(identity, ['--list-models'], null, signal, DEFAULT_TIMEOUT_MS),
+      await this.#runResolved(
+        identity,
+        ['--list-models', ...identity.safetyFlags],
+        null,
+        signal,
+        DEFAULT_TIMEOUT_MS,
+      ),
     );
     this.#models = { key, models, expiresAt: this.#now() + MODEL_CACHE_TTL_MS };
     return models;

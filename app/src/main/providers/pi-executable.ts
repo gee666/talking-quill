@@ -11,7 +11,16 @@ import {
 
 const PROBE_TIMEOUT_MS = 15_000;
 const REQUIRED_FLAGS = ['--list-models', '--model', '--thinking'] as const;
-const SAFETY_FLAGS = ['--no-tools', '--no-session', '--no-context-files', '--no-approve'] as const;
+const SAFETY_FLAGS = [
+  '--no-tools',
+  '--no-session',
+  '--no-context-files',
+  '--no-approve',
+  '--no-skills',
+  '--no-prompt-templates',
+  '--no-themes',
+  '--offline',
+] as const;
 
 export interface PiCliIdentity {
   readonly canonicalPath: string;
@@ -69,30 +78,19 @@ export async function validatePiExecutable(
     );
     const help = await runBoundedPiProcess(
       canonical,
-      ['--help'],
-      environment,
-      platform,
-      signal,
-      PROBE_TIMEOUT_MS,
-    );
-    const list = await runBoundedPiProcess(
-      canonical,
-      ['--list-models'],
+      ['--help', ...SAFETY_FLAGS],
       environment,
       platform,
       signal,
       PROBE_TIMEOUT_MS,
     );
     const helpText = `${help.stdout}\n${help.stderr}`;
-    const listText = `${list.stdout}\n${list.stderr}`;
     if (
       version.code !== 0 ||
       help.code !== 0 ||
-      list.code !== 0 ||
       version.stdout.trim().length === 0 ||
       !hasHelpOption(helpText, '-p') ||
-      !REQUIRED_FLAGS.every((flag) => hasHelpOption(helpText, flag)) ||
-      /unknown (?:option|argument)[^\r\n]*list-models/iu.test(listText)
+      ![...REQUIRED_FLAGS, ...SAFETY_FLAGS].every((flag) => hasHelpOption(helpText, flag))
     )
       throw new ProviderError('PI_INCOMPATIBLE');
     const versionText = version.stdout.trim().split(/\r?\n/u)[0]?.slice(0, 64) ?? 'compatible';
@@ -100,7 +98,7 @@ export async function validatePiExecutable(
       canonicalPath: canonical,
       packageVersion: versionText,
       ...(discoverySource === undefined ? {} : { discoverySource }),
-      safetyFlags: Object.freeze(SAFETY_FLAGS.filter((flag) => hasHelpOption(helpText, flag))),
+      safetyFlags: Object.freeze([...SAFETY_FLAGS]),
       fileIdentity,
     });
   } catch (error: unknown) {

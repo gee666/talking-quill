@@ -17,10 +17,21 @@ import {
   type PiCliIdentity,
 } from '../../app/src/main/providers/pi-discovery';
 
+const PI_ISOLATION_FLAGS = [
+  '--no-tools',
+  '--no-session',
+  '--no-context-files',
+  '--no-approve',
+  '--no-skills',
+  '--no-prompt-templates',
+  '--no-themes',
+  '--offline',
+] as const;
+
 const identity: PiCliIdentity = Object.freeze({
   canonicalPath: 'C:\\Users\\Example User\\AppData\\Local\\pnpm\\Pi.CMD',
   packageVersion: '99.0.0-future',
-  safetyFlags: ['--no-tools', '--no-session', '--no-context-files', '--no-approve'],
+  safetyFlags: PI_ISOLATION_FLAGS,
   fileIdentity: { dev: '1', ino: '1', size: 1, mtimeMs: 1 },
 });
 
@@ -137,18 +148,9 @@ describe('external Pi adapter', () => {
       ),
     ).resolves.toMatchObject({ ok: true, modelCount: 1 });
     expect(calls).toHaveLength(2);
+    expect(calls[0]?.args).toEqual(['--list-models', ...PI_ISOLATION_FLAGS]);
     expect(calls[1]).toEqual({
-      args: [
-        '-p',
-        '--model',
-        'future/model-v2',
-        '--thinking',
-        'high',
-        '--no-tools',
-        '--no-session',
-        '--no-context-files',
-        '--no-approve',
-      ],
+      args: ['-p', '--model', 'future/model-v2', '--thinking', 'high', ...PI_ISOLATION_FLAGS],
       input: 'Reply with exactly: TALKING_QUILL_CONNECTION_OK',
     });
     expect(observeEgress).toHaveBeenCalledTimes(1);
@@ -324,7 +326,7 @@ describe('external Pi adapter', () => {
     expect(output).toBe('cleaned words');
     expect(calls).toHaveLength(1);
     expect(calls[0]?.args[3]).toBe(
-      '""C:\\Users\\Example User\\AppData\\Local\\pnpm\\Pi.CMD" -p --model future/model-v2 --thinking xhigh --no-tools --no-session --no-context-files --no-approve"',
+      `""C:\\Users\\Example User\\AppData\\Local\\pnpm\\Pi.CMD" -p --model future/model-v2 --thinking xhigh ${PI_ISOLATION_FLAGS.join(' ')}"`,
     );
     expect(calls[0]?.input).toBe('prompt & never shell-expanded');
     expect(calls[0]?.env.PI_CODING_AGENT_DIR).toBe('C:\\Users\\me\\.pi-custom');
