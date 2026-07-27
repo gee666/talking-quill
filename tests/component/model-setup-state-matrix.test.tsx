@@ -62,7 +62,7 @@ describe('model setup state matrix', () => {
 
   it('prevents a cancel action from overlapping a pending pause', async () => {
     const downloading = {
-      modelId: 'onnx-community/whisper-large-v3-turbo' as const,
+      modelId: DEFAULT_SETTINGS.transcription.modelId,
       state: 'downloading' as const,
       downloadedBytes: 5,
       totalBytes: 10,
@@ -105,7 +105,7 @@ describe('model setup state matrix', () => {
 
   it('continues applying model actions after the StrictMode effect replay', async () => {
     const status = {
-      modelId: 'onnx-community/whisper-large-v3-turbo' as const,
+      modelId: DEFAULT_SETTINGS.transcription.modelId,
       state: 'missing' as const,
       downloadedBytes: 0,
       totalBytes: 10,
@@ -145,7 +145,7 @@ describe('model setup state matrix', () => {
     const status = vi
       .fn()
       .mockResolvedValueOnce({
-        modelId: 'onnx-community/whisper-large-v3-turbo',
+        modelId: DEFAULT_SETTINGS.transcription.modelId,
         state: 'missing',
         downloadedBytes: 0,
         totalBytes: 10,
@@ -153,7 +153,7 @@ describe('model setup state matrix', () => {
         repairable: false,
       })
       .mockResolvedValueOnce({
-        modelId: 'onnx-community/whisper-large-v3-turbo',
+        modelId: DEFAULT_SETTINGS.transcription.modelId,
         state: 'error',
         downloadedBytes: 10,
         totalBytes: 10,

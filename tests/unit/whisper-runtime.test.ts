@@ -81,25 +81,31 @@ describe('Whisper runtime', () => {
   });
 
   it.each(['onnx-community/whisper-large-v3-turbo', 'Xenova/whisper-small'] as const)(
-    'omits the language hint for auto-detection with %s',
+    'detects and pins a concrete source language before auto transcription with %s',
     async (modelId) => {
-      const pipeline = vi.fn(() =>
-        Promise.resolve({ text: 'detected' }),
+      const detectLanguage = vi.fn(() => Promise.resolve('ru' as const));
+      const pipeline = Object.assign(
+        vi.fn(() => Promise.resolve({ text: 'распознано' })),
+        { detectLanguage },
       ) as unknown as WhisperPipeline;
       const runtime = new WhisperRuntime({
         cacheDirectory: 'models',
         revisions,
         factory: () => Promise.resolve(pipeline),
       });
+      const pcm = new Float32Array([0.1]);
 
-      await runtime.transcribe(new Float32Array([0.1]), {
+      await runtime.transcribe(pcm, {
         modelId,
         sampleRate: 16_000,
         language: 'auto',
       });
 
-      expect(pipeline).toHaveBeenCalledWith(new Float32Array([0.1]), {
+      expect(detectLanguage).toHaveBeenCalledOnce();
+      expect(detectLanguage).toHaveBeenCalledWith(pcm);
+      expect(pipeline).toHaveBeenCalledWith(pcm, {
         task: 'transcribe',
+        language: 'ru',
         chunk_length_s: 30,
         stride_length_s: 5,
       });
@@ -172,6 +178,40 @@ describe('Whisper runtime', () => {
     expect(result.text.match(/repeat/g)).toHaveLength(2);
     expect(result.text).not.toContain('duplicate-overlap');
     expect(result.pipeline).toMatchObject({ loadCount: 1, reused: false });
+  });
+
+  it('detects once and pins the language across an auto-detected streaming session', async () => {
+    const detectLanguage = vi.fn(() => Promise.resolve('ru' as const));
+    const calls: Readonly<Record<string, unknown>>[] = [];
+    const pipeline = Object.assign(
+      (_pcm: Float32Array, args: Readonly<Record<string, unknown>>) => {
+        calls.push(args);
+        return Promise.resolve(timestampOutput([[' текст', 6]]));
+      },
+      { detectLanguage },
+    ) as WhisperPipeline;
+    const runtime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory: () => Promise.resolve(pipeline),
+    });
+    runtime.openSession('auto', { ...options, language: 'auto' });
+    for (let index = 0; index < 4; index += 1) {
+      await runtime.pushSession('auto', new Float32Array(10 * 16_000).fill(0.1));
+    }
+    await runtime.finishSession('auto');
+
+    expect(detectLanguage).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(2);
+    expect(calls).toEqual(
+      Array.from({ length: 2 }, () => ({
+        task: 'transcribe',
+        language: 'ru',
+        chunk_length_s: 0,
+        return_timestamps: true,
+      })),
+    );
+    await runtime.shutdown();
   });
 
   it('takes ownership of pushed audio and reuses one inference-window scratch buffer', async () => {

@@ -211,7 +211,7 @@ export const DEFAULT_SETTINGS: Settings = deepFreeze({
     silencePreset: 'average',
   },
   transcription: {
-    modelId: 'onnx-community/whisper-large-v3-turbo',
+    modelId: 'Xenova/whisper-small',
     language: 'auto',
   },
   dictationProfiles: defaultDictationProfiles(),

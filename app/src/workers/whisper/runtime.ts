@@ -8,6 +8,7 @@ import {
   WHISPER_STRIDE_SECONDS,
 } from '../../shared/constants/whisper';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
+import type { WhisperSourceLanguage } from '../../shared/schemas/whisper-languages';
 import {
   TranscriptionResultSchema,
   WHISPER_TRANSCRIPTION_TASK,
@@ -18,6 +19,7 @@ import {
 
 export interface WhisperPipeline {
   (pcm: Float32Array, options: Readonly<Record<string, unknown>>): Promise<unknown>;
+  detectLanguage?(pcm: Float32Array): Promise<WhisperSourceLanguage>;
   dispose?(): Promise<unknown>;
 }
 
@@ -50,6 +52,7 @@ interface StreamingState {
   readonly audio: PcmQueue;
   readonly textParts: string[];
   readonly startedAt: number;
+  detectedLanguage: WhisperSourceLanguage | null;
   totalSamples: number;
   processedWindows: number;
   pipelineMetadata: PipelineReuseMetadata | null;
@@ -101,9 +104,10 @@ export class WhisperRuntime {
   async transcribe(pcm: Float32Array, options: TranscriptionOptions): Promise<TranscriptionResult> {
     validatePcm(pcm, WHISPER_MAX_SAMPLES);
     const startedAt = performance.now();
-    const call = await this.#withPipeline(options.modelId, (pipeline) =>
-      pipeline(pcm, transcriptionArguments(options, true)),
-    );
+    const call = await this.#withPipeline(options.modelId, async (pipeline) => {
+      const language = await resolveLanguage(pipeline, pcm, options.language);
+      return pipeline(pcm, transcriptionArguments(language, true));
+    });
     return resultFromOutput(
       call.value,
       options.modelId,
@@ -119,6 +123,7 @@ export class WhisperRuntime {
       audio: new PcmQueue(),
       textParts: [],
       startedAt: performance.now(),
+      detectedLanguage: options.language === 'auto' ? null : options.language,
       totalSamples: 0,
       processedWindows: 0,
       pipelineMetadata: null,
@@ -140,9 +145,10 @@ export class WhisperRuntime {
       const window = state.windowScratch ?? new Float32Array(windowSamples);
       state.windowScratch = window;
       state.audio.copyTo(window);
-      const call = await this.#withPipeline(state.options.modelId, (pipeline) =>
-        pipeline(window, streamingArguments(state.options)),
-      );
+      const call = await this.#withPipeline(state.options.modelId, async (pipeline) => {
+        const language = await resolveSessionLanguage(state, pipeline, window);
+        return pipeline(window, streamingArguments(language));
+      });
       state.pipelineMetadata = mergePipelineMetadata(state.pipelineMetadata, call.metadata);
       state.textParts.push(
         selectCentralTranscript(
@@ -162,9 +168,11 @@ export class WhisperRuntime {
     this.#sessions.delete(sessionId);
     if (state.audio.length > 0) {
       const durationSeconds = state.audio.length / WHISPER_SAMPLE_RATE;
-      const call = await this.#withPipeline(state.options.modelId, (pipeline) =>
-        pipeline(state.audio.takeAll(), streamingArguments(state.options)),
-      );
+      const remaining = state.audio.takeAll();
+      const call = await this.#withPipeline(state.options.modelId, async (pipeline) => {
+        const language = await resolveSessionLanguage(state, pipeline, remaining);
+        return pipeline(remaining, streamingArguments(language));
+      });
       state.pipelineMetadata = mergePipelineMetadata(state.pipelineMetadata, call.metadata);
       state.textParts.push(
         selectCentralTranscript(
@@ -424,25 +432,47 @@ function mergePipelineMetadata(
 }
 
 function transcriptionArguments(
-  options: TranscriptionOptions,
+  language: WhisperSourceLanguage,
   chunkLongAudio: boolean,
 ): Readonly<Record<string, unknown>> {
   return {
-    // Keep translate-to-English mode unreachable. In auto mode, omit the source-language
-    // hint entirely so Whisper can detect the language from the audio.
+    // Always provide both prompt tokens. Transformers.js 3.8.1 defaults a missing language to
+    // English, and Whisper's translate token must remain unreachable.
     task: WHISPER_TRANSCRIPTION_TASK,
-    ...(options.language === 'auto' ? {} : { language: options.language }),
+    language,
     ...(chunkLongAudio
       ? { chunk_length_s: WHISPER_CHUNK_SECONDS, stride_length_s: WHISPER_STRIDE_SECONDS }
       : { chunk_length_s: 0 }),
   };
 }
 
-function streamingArguments(options: TranscriptionOptions): Readonly<Record<string, unknown>> {
+function streamingArguments(language: WhisperSourceLanguage): Readonly<Record<string, unknown>> {
   return {
-    ...transcriptionArguments(options, false),
+    ...transcriptionArguments(language, false),
     return_timestamps: true,
   };
+}
+
+async function resolveLanguage(
+  pipeline: WhisperPipeline,
+  pcm: Float32Array,
+  requested: TranscriptionOptions['language'],
+): Promise<WhisperSourceLanguage> {
+  if (requested !== 'auto') return requested;
+  if (pipeline.detectLanguage === undefined) {
+    throw new Error('The Whisper runtime does not support automatic language detection.');
+  }
+  return pipeline.detectLanguage(pcm);
+}
+
+async function resolveSessionLanguage(
+  state: StreamingState,
+  pipeline: WhisperPipeline,
+  pcm: Float32Array,
+): Promise<WhisperSourceLanguage> {
+  if (state.detectedLanguage !== null) return state.detectedLanguage;
+  state.detectedLanguage = await resolveLanguage(pipeline, pcm, 'auto');
+  return state.detectedLanguage;
 }
 
 function validatePcm(pcm: Float32Array, maximumSamples: number): void {

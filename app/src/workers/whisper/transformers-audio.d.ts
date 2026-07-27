@@ -6,6 +6,10 @@ declare module '@huggingface/transformers' {
     cacheDir: string;
   };
 
+  export class LogitsProcessorList {
+    push(processor: (inputIds: unknown, logits: unknown) => unknown): void;
+  }
+
   export function pipeline(
     task: 'automatic-speech-recognition',
     modelId: string,

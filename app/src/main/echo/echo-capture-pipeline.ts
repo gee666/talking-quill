@@ -203,11 +203,14 @@ export class EchoCapturePipeline {
     // The widget renderer is preloaded. Show its truthful arming state before any device, model,
     // or helper round trip so the global shortcut always receives immediate visual feedback.
     this.#windows.showWidget(this.#getWidgetSize(), null);
-    // Model readiness and native key-capture confirmation are independent. Start both gates
-    // immediately so a cold model lease does not add its latency to the helper round trip.
+    // A shortcut acknowledgement must not wait for model loading, helper IPC, or microphone
+    // startup. Beep first so the user can speak immediately and so the cue is not recorded once
+    // capture begins opening below.
+    this.#playSound();
+
+    // Model readiness, native key capture, and microphone startup are independent. Open all three
+    // concurrently so none of their latencies are added together and opening speech is retained.
     const helperCaptureOpening = this.#captureReconciler.request(true, owner.generation);
-    await raceWithAbort(Promise.all([this.#modelUseOpening, helperCaptureOpening]), owner.signal);
-    if (!this.#isActive(owner) || !isCapturePhase(this.#getState().phase)) return;
     owner.captureOpening = true;
     let capturePromise: ReturnType<EchoRecordingPort['startDictation']>;
     try {
@@ -226,39 +229,23 @@ export class EchoCapturePipeline {
     void capturePromise.then(
       async (capture) => {
         owner.captureOpening = false;
-        if (
-          !this.#isActive(owner) ||
-          owner.signal.aborted ||
-          !isCapturePhase(this.#getState().phase)
-        ) {
+        if (!this.#captureStillCurrent(owner)) {
           await this.#recording.stopDictation(capture.captureId).catch(() => undefined);
+          return;
         }
+        this.#captureId = capture.captureId;
+        if (!this.#getState().audioReady) this.#armFirstAudioTimer(owner);
       },
       () => {
         owner.captureOpening = false;
       },
     );
-    const capture = await raceWithAbort(capturePromise, owner.signal);
-    if (!this.#captureStillCurrent(owner)) {
-      await this.#recording.stopDictation(capture.captureId).catch(() => undefined);
-      return;
-    }
-    this.#captureId = capture.captureId;
-    if (!this.#getState().audioReady) {
-      this.#audioStartTimer = setTimeout(() => {
-        if (!this.#isActive(owner)) return;
-        this.#audioStartTimer = null;
-        if (this.#getState().audioReady || !isCapturePhase(this.#getState().phase)) return;
-        this.#abort();
-        this.#dispatch({ type: 'fail', message: 'The microphone did not provide audio.' });
-      }, FIRST_AUDIO_TIMEOUT_MS);
-      this.#audioStartTimer.unref();
-    }
 
-    // Audio and UI feedback follow confirmed microphone activation without entering the helper's
-    // serial foreground-app path. Emit them before the reducer boundary so an early first frame
-    // plus pending submit cannot suppress activation feedback.
-    this.#playSound();
+    await raceWithAbort(
+      Promise.all([this.#modelUseOpening, helperCaptureOpening, capturePromise]),
+      owner.signal,
+    );
+    if (!this.#captureStillCurrent(owner)) return;
     this.#dispatch({ type: 'capture-started' });
   }
 
@@ -433,7 +420,11 @@ export class EchoCapturePipeline {
       this.#dispatch({ type: 'level', rms, elapsedMs });
     }
     if (!draining && this.#silence !== null) {
-      const decision = this.#silence.observe({ rms, durationMs: PCM_FRAME_DURATION_MS, elapsedMs });
+      const decision = this.#silence.observe({
+        rms,
+        durationMs: (copy.length / PCM_SAMPLE_RATE) * 1_000 || PCM_FRAME_DURATION_MS,
+        elapsedMs,
+      });
       if (decision !== null) {
         if (this.#getState().phase === 'recordingQuick') {
           this.#dispatch({
@@ -558,6 +549,18 @@ export class EchoCapturePipeline {
 
   #captureStillCurrent(owner: CaptureSessionOwner): boolean {
     return this.#isActive(owner) && isCapturePhase(this.#getState().phase);
+  }
+
+  #armFirstAudioTimer(owner: CaptureSessionOwner): void {
+    if (this.#audioStartTimer !== null) clearTimeout(this.#audioStartTimer);
+    this.#audioStartTimer = setTimeout(() => {
+      if (!this.#isActive(owner)) return;
+      this.#audioStartTimer = null;
+      if (this.#getState().audioReady || !isCapturePhase(this.#getState().phase)) return;
+      this.#abort();
+      this.#dispatch({ type: 'fail', message: 'The microphone did not provide audio.' });
+    }, FIRST_AUDIO_TIMEOUT_MS);
+    this.#audioStartTimer.unref();
   }
 
   #replaceCapTimer(owner: CaptureSessionOwner | null, milliseconds: number): void {

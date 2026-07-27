@@ -29,6 +29,8 @@ export class SilencePolicy {
   #noiseFloor = INITIAL_NOISE_FLOOR;
   #speechDurationMs = 0;
   #silenceDurationMs = 0;
+  #neutralDurationMs = 0;
+  #speaking = false;
   #armed = false;
   #decision: SilenceStopReason | null = null;
 
@@ -59,7 +61,10 @@ export class SilencePolicy {
     if (!this.#armed) {
       if (isSpeech) {
         this.#speechDurationMs += observation.durationMs;
-        if (this.#speechDurationMs >= SPEECH_ARMING_MS) this.#armed = true;
+        if (this.#speechDurationMs >= SPEECH_ARMING_MS) {
+          this.#armed = true;
+          this.#speaking = true;
+        }
       } else {
         this.#speechDurationMs = 0;
         this.#updateNoiseFloor(observation.rms, observation.durationMs, enterThreshold);
@@ -68,8 +73,27 @@ export class SilencePolicy {
     }
 
     if (this.#mode === 'extended') return null;
-    if (isSpeech) this.#silenceDurationMs = 0;
-    else if (isSilence) this.#silenceDurationMs += observation.durationMs;
+    if (isSpeech) {
+      this.#speaking = true;
+      this.#neutralDurationMs = 0;
+      this.#silenceDurationMs = 0;
+    } else if (isSilence) {
+      this.#speaking = false;
+      this.#silenceDurationMs += this.#neutralDurationMs + observation.durationMs;
+      this.#neutralDurationMs = 0;
+    } else if (this.#speaking) {
+      // A real microphone commonly settles between the enter and exit thresholds after speech.
+      // Confirm that neutral run briefly, then count it retroactively as trailing silence so the
+      // hysteresis band can never leave an otherwise quiet session listening forever.
+      this.#neutralDurationMs += observation.durationMs;
+      if (this.#neutralDurationMs >= SPEECH_ARMING_MS) {
+        this.#speaking = false;
+        this.#silenceDurationMs += this.#neutralDurationMs;
+        this.#neutralDurationMs = 0;
+      }
+    } else {
+      this.#silenceDurationMs += observation.durationMs;
+    }
 
     return this.#silenceDurationMs >= this.#trailingSilenceMs
       ? this.#decide('trailing-silence')
@@ -86,6 +110,8 @@ export class SilencePolicy {
     this.#noiseFloor = INITIAL_NOISE_FLOOR;
     this.#speechDurationMs = 0;
     this.#silenceDurationMs = 0;
+    this.#neutralDurationMs = 0;
+    this.#speaking = false;
     this.#armed = false;
     this.#decision = null;
   }

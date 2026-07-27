@@ -54,6 +54,23 @@ describe('SilencePolicy', () => {
     expect(feed(policy, 0.001, 20, 2_420)).toBe('trailing-silence');
   });
 
+  it('eventually counts sustained hysteresis-band room noise as trailing silence', () => {
+    const policy = new SilencePolicy({ mode: 'quick', preset: 'aggressive' });
+    feed(policy, 0.1, 300, 0);
+    expect(policy.armed).toBe(true);
+    expect(feed(policy, 0.01, 980, 300)).toBeNull();
+    expect(feed(policy, 0.01, 20, 1_280)).toBe('trailing-silence');
+  });
+
+  it('does not count a brief hysteresis-band dip when clear speech resumes', () => {
+    const policy = new SilencePolicy({ mode: 'quick', preset: 'aggressive' });
+    feed(policy, 0.1, 300, 0);
+    feed(policy, 0.01, 280, 300);
+    feed(policy, 0.1, 20, 580);
+    expect(feed(policy, 0.001, 980, 600)).toBeNull();
+    expect(feed(policy, 0.001, 20, 1_580)).toBe('trailing-silence');
+  });
+
   it('adapts a bounded noise floor without learning speech as noise', () => {
     const policy = new SilencePolicy({ mode: 'quick', preset: 'average' });
     const initialFloor = policy.noiseFloor;

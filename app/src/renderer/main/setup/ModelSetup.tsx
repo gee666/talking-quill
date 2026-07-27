@@ -6,11 +6,11 @@ import { Button, Progress, Select, Status, Toast } from '../../design';
 type WhisperModelId = Settings['transcription']['modelId'];
 
 const MODEL_ENTRIES = {
+  'Xenova/whisper-small': { name: 'Whisper Small', size: 'about 250 MB' },
   'onnx-community/whisper-large-v3-turbo': {
-    name: 'Whisper Large v3 Turbo (Recommended)',
+    name: 'Whisper Large v3 Turbo (High quality - longer transcription)',
     size: 'about 1.09 GB',
   },
-  'Xenova/whisper-small': { name: 'Whisper Small (Lower quality)', size: 'about 250 MB' },
 } as const satisfies Record<WhisperModelId, { readonly name: string; readonly size: string }>;
 
 function modelOptionLabel(id: WhisperModelId): string {
@@ -143,7 +143,9 @@ export function ModelSetup({
       <Select
         label="Transcription model"
         hint={
-          modelId === 'onnx-community/whisper-large-v3-turbo' ? '(Recommended)' : '(Lower quality)'
+          modelId === 'onnx-community/whisper-large-v3-turbo'
+            ? '(High quality - longer transcription)'
+            : '(Faster transcription)'
         }
         value={modelId}
         disabled={
@@ -151,10 +153,10 @@ export function ModelSetup({
         }
         onChange={(event) => void saveModelSelection(event.currentTarget.value as WhisperModelId)}
       >
+        <option value="Xenova/whisper-small">{modelOptionLabel('Xenova/whisper-small')}</option>
         <option value="onnx-community/whisper-large-v3-turbo">
           {modelOptionLabel('onnx-community/whisper-large-v3-turbo')}
         </option>
-        <option value="Xenova/whisper-small">{modelOptionLabel('Xenova/whisper-small')}</option>
       </Select>
       <div className="group">
         <div className="model-setup__row">

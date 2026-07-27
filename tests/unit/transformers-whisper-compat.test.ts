@@ -28,6 +28,12 @@ describe('@huggingface/transformers 3.8.1 Whisper compatibility', () => {
     expect(pipelineTypes).toContain("{ language: 'french', task: 'transcribe' }");
     expect(pipelineTypes).toContain("{ language: 'french', task: 'translate' }");
     expect(modelSource).toContain("generation_config.task_to_id[task ?? 'transcribe']");
+    // Auto mode must keep using our detector until the pinned library implements this itself.
+    expect(modelSource).toContain('// TODO: Implement language detection');
+    expect(modelSource).toContain("language = 'en';");
+    expect(modelSource).toContain(
+      'const init_tokens = kwargs.decoder_input_ids ?? this._retrieve_init_tokens(generation_config);',
+    );
     for (const [code, name] of WHISPER_SOURCE_LANGUAGES) {
       expect(languageSource).toContain(`["${code}", "${name.toLowerCase()}"]`);
     }

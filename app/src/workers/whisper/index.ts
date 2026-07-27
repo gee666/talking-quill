@@ -9,8 +9,12 @@ import {
   type WhisperWorkerRequest,
   type WhisperWorkerResponse,
 } from '../../shared/schemas/whisper-protocol';
+import {
+  withWhisperLanguageDetection,
+  type LogitsProcessorListFactory,
+} from './language-detection';
 import { WhisperRequestQueue } from './request-queue';
-import { WhisperRuntime, type WhisperPipeline } from './runtime';
+import { WhisperRuntime } from './runtime';
 import { WorkerModelVerificationError, verifyModelFiles } from './verify-model';
 
 const MAX_PENDING_WORKER_REQUESTS = 64;
@@ -24,7 +28,7 @@ void startWorker().catch(() => {
 });
 
 async function startWorker(): Promise<void> {
-  const { env, pipeline } = await import('@huggingface/transformers');
+  const { env, pipeline, LogitsProcessorList } = await import('@huggingface/transformers');
   const manifest = ModelManifestSchema.parse(rawManifest);
   const cacheDirectory = readRequiredArgument('--model-cache=');
   const idleUnloadMs = readOptionalPositiveIntegerArgument('--idle-unload-ms=');
@@ -53,8 +57,10 @@ async function startWorker(): Promise<void> {
         dtype: model.dtype,
         local_files_only: true,
       });
-      if (typeof loaded !== 'function') throw new Error('Whisper pipeline did not load.');
-      return loaded as WhisperPipeline;
+      return withWhisperLanguageDetection(
+        loaded,
+        (() => new LogitsProcessorList()) as LogitsProcessorListFactory,
+      );
     },
   });
 

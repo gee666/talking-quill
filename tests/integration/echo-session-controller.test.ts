@@ -2191,7 +2191,7 @@ describe('EchoSessionController integration', () => {
     },
   );
 
-  it('shows immediate arming feedback, then fails without a start sound when helper capture enable fails', async () => {
+  it('shows and sounds immediate arming feedback, then cleans up if helper capture enable fails', async () => {
     vi.useFakeTimers();
     let enableAttempts = 0;
     const test = fixture({
@@ -2203,16 +2203,16 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
-    expect(test.spies.stopDictation).not.toHaveBeenCalled();
+    expect(test.spies.stopDictation).toHaveBeenCalledOnce();
     expect(test.spies.showWidget).toHaveBeenCalledOnce();
-    expect(test.spies.sound).not.toHaveBeenCalled();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
 
     await vi.advanceTimersByTimeAsync(1_200);
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledTimes(2));
-    expect(test.spies.sound).toHaveBeenCalledOnce();
+    expect(test.spies.sound).toHaveBeenCalledTimes(2);
     test.controller.cancel();
     await test.controller.shutdown();
   });
@@ -2585,7 +2585,7 @@ describe('EchoSessionController integration', () => {
     },
   );
 
-  it('overlaps model acquisition with helper capture confirmation', async () => {
+  it('overlaps microphone startup with model acquisition and helper capture confirmation', async () => {
     const model = deferred<EchoModelUseGrant>();
     const helperEnable = deferred<{ active: boolean }>();
     const test = fixture({
@@ -2596,13 +2596,14 @@ describe('EchoSessionController integration', () => {
 
     test.notify(activation('down'));
     await vi.waitFor(() => expect(test.spies.setSessionCapture).toHaveBeenCalledWith(true));
-    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).toHaveBeenCalledOnce();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
 
     model.resolve({ status: { state: 'ready' }, release: vi.fn() });
     await Promise.resolve();
-    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.controller.snapshot.phase).toBe('arming');
     helperEnable.resolve({ active: true });
-    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('arming'));
     test.controller.cancel();
     await test.controller.shutdown();
   });
@@ -2636,7 +2637,7 @@ describe('EchoSessionController integration', () => {
     await test.controller.shutdown();
   });
 
-  it('confirms helper capture before microphone startup and releases the Quick model lease', async () => {
+  it('starts the microphone before helper confirmation and releases the Quick model lease', async () => {
     const helperEnable = deferred<{ active: boolean }>();
     const release = vi.fn();
     const test = fixture({
@@ -2647,10 +2648,10 @@ describe('EchoSessionController integration', () => {
 
     test.notify(activation('down'));
     await Promise.resolve();
-    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).toHaveBeenCalledOnce();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
     helperEnable.resolve({ active: true });
     await settle();
-    expect(test.spies.startDictation).toHaveBeenCalledOnce();
 
     test.frame();
     test.notify(key('enter'));

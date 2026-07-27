@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 // Keep this inventory aligned with Transformers.js 3.8.1
-// src/models/whisper/common_whisper.js. These values are optional source-language
-// hints; omitting the hint lets Whisper detect the spoken language.
+// src/models/whisper/common_whisper.js. Auto mode detects one of these languages first,
+// then supplies the concrete source-language prompt to Whisper transcription.
 export const WHISPER_AUTO_LANGUAGE = 'auto' as const;
 
 export const WHISPER_SOURCE_LANGUAGES = [
