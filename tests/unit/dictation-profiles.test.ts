@@ -4,6 +4,7 @@ import {
   DEFAULT_GENERAL_PROFILE,
   DEFAULT_MARKDOWN_PROFILE,
   DEFAULT_PROMPT_PROFILE,
+  DEFAULT_PROMPT_TO_ENGLISH_PROFILE,
   DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
   DictationProfileCreateSchema,
   DictationProfileListSchema,
@@ -28,6 +29,7 @@ describe('dictation profile contracts', () => {
     expect(BUILT_IN_DICTATION_PROFILE_METADATA.map(({ id }) => id)).toEqual([
       'general',
       'prompt',
+      'prompt-to-english',
       'markdown',
       'translate-to-english',
     ]);
@@ -46,6 +48,15 @@ describe('dictation profile contracts', () => {
     });
     expect(DEFAULT_PROMPT_PROFILE.smartPrompt).toContain('Preserve the source language.');
     expect(DEFAULT_PROMPT_PROFILE.smartPrompt).toContain('clear paragraphs and lists');
+    expect(DEFAULT_PROMPT_TO_ENGLISH_PROFILE).toMatchObject({
+      id: 'prompt-to-english',
+      name: 'Prompt to English',
+      shortcut: shortcut(['X', 'P', 'E']),
+      processingMode: 'smart',
+    });
+    expect(DEFAULT_PROMPT_TO_ENGLISH_PROFILE.smartPrompt).toContain(
+      'Translate the result to natural English',
+    );
     expect(DEFAULT_MARKDOWN_PROFILE).toEqual({
       id: 'markdown',
       name: 'Markdown',
@@ -72,7 +83,7 @@ describe('dictation profile contracts', () => {
     expect(DEFAULT_SETTINGS.transcription.language).toBe('auto');
   });
 
-  it('accepts twelve total profiles and rejects thirteen', () => {
+  it('accepts thirteen total profiles and rejects fourteen', () => {
     const profiles = defaults();
     for (let index = 0; index < 8; index += 1) {
       profiles.push({
@@ -126,10 +137,10 @@ describe('dictation profile contracts', () => {
       smartPrompt: null,
     });
     expect(DictationProfileListSchema.safeParse(valid).success).toBe(true);
-    const custom = valid[4];
-    const other = valid[5];
+    const custom = valid[5];
+    const other = valid[6];
     if (custom === undefined || other === undefined) throw new Error('Custom profiles are missing');
-    valid[5] = { ...other, shortcut: structuredClone(custom.shortcut) };
+    valid[6] = { ...other, shortcut: structuredClone(custom.shortcut) };
     expect(DictationProfileListSchema.safeParse(valid).success).toBe(false);
   });
 
@@ -181,6 +192,7 @@ describe('dictation profile contracts', () => {
     for (const reservedShortcut of [
       shortcut(['X']),
       shortcut(['X', 'P']),
+      shortcut(['X', 'P', 'E']),
       shortcut(['X', 'M']),
       shortcut(['X', 'E']),
       shortcut(['X', 'Q']),

@@ -198,7 +198,7 @@ function ProfileEditor({
         shortcut={draft.shortcut}
         platform={platform}
         disabled={disabled}
-        error={conflictError ?? reservationError}
+        error={reservationError ?? conflictError}
         onChange={(shortcut) => setDraft({ ...draft, shortcut })}
         onCaptureValidityChange={setShortcutValid}
       />

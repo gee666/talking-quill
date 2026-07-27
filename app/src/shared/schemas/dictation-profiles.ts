@@ -12,10 +12,12 @@ import {
 export const GENERAL_PROFILE_ID = 'general' as const;
 export const PROMPT_PROFILE_ID = 'prompt' as const;
 export const MARKDOWN_PROFILE_ID = 'markdown' as const;
+export const PROMPT_TO_ENGLISH_PROFILE_ID = 'prompt-to-english' as const;
 export const TRANSLATE_TO_ENGLISH_PROFILE_ID = 'translate-to-english' as const;
 export const BUILT_IN_DICTATION_PROFILE_IDS = [
   GENERAL_PROFILE_ID,
   PROMPT_PROFILE_ID,
+  PROMPT_TO_ENGLISH_PROFILE_ID,
   MARKDOWN_PROFILE_ID,
   TRANSLATE_TO_ENGLISH_PROFILE_ID,
 ] as const;
@@ -34,6 +36,7 @@ export const DictationProfileSmartPromptSchema = z.string().trim().max(4_096).nu
 
 export const DEFAULT_GENERAL_SHORTCUT = builtInAltShortcut(['X']);
 export const DEFAULT_PROMPT_SHORTCUT = builtInAltShortcut(['X', 'P']);
+export const DEFAULT_PROMPT_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'P', 'E']);
 export const DEFAULT_MARKDOWN_SHORTCUT = builtInAltShortcut(['X', 'M']);
 export const DEFAULT_TRANSLATE_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'E']);
 
@@ -60,6 +63,18 @@ export const BUILT_IN_DICTATION_PROFILE_METADATA = deepFreeze([
       processingMode: 'smart',
       smartPrompt:
         'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Preserve the source language. Organize the result into clear paragraphs and lists when useful, and use tables or other formatting when helpful.',
+    },
+  },
+  {
+    id: PROMPT_TO_ENGLISH_PROFILE_ID,
+    description: 'Default: turns dictated ideas into a concise, structured English prompt.',
+    defaultProfile: {
+      id: PROMPT_TO_ENGLISH_PROFILE_ID,
+      name: 'Prompt to English',
+      shortcut: DEFAULT_PROMPT_TO_ENGLISH_SHORTCUT,
+      processingMode: 'smart',
+      smartPrompt:
+        'Make dictated prompts focused, concise, and clear. Remove duplication and make them as short as possible while retaining dense information and a human-readable structure. Translate the result to natural English while preserving its meaning, tone, facts, names, numbers, and level of detail. Organize the result into clear paragraphs and lists when useful, and use tables or other formatting when helpful.',
     },
   },
   {
@@ -237,9 +252,11 @@ export const DEFAULT_GENERAL_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[0]
   .defaultProfile as DictationProfile;
 export const DEFAULT_PROMPT_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[1]
   .defaultProfile as DictationProfile;
-export const DEFAULT_MARKDOWN_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[2]
+export const DEFAULT_PROMPT_TO_ENGLISH_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[2]
   .defaultProfile as DictationProfile;
-export const DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[3]
+export const DEFAULT_MARKDOWN_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[3]
+  .defaultProfile as DictationProfile;
+export const DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[4]
   .defaultProfile as DictationProfile;
 
 export function builtInDictationProfileMetadata(

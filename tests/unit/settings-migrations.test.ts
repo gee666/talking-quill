@@ -27,10 +27,18 @@ const PRIMARY_RAW_FIXTURES = [
 ];
 const RAW_FIXTURES = [...PRIMARY_RAW_FIXTURES, ...readRawFixtures('legacy-forked-versions.json')];
 
+function migrateV21ToCurrent(input: Readonly<Record<string, unknown>>) {
+  const v22 = SETTINGS_MIGRATIONS[21]?.(input);
+  if (typeof v22 !== 'object' || v22 === null) throw new Error('V21 migration did not emit v22');
+  return SettingsSchema.parse(
+    SETTINGS_MIGRATIONS[22]?.(v22 as Readonly<Record<string, unknown>>),
+  );
+}
+
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 21 }, (_, index) => index + 1),
+      Array.from({ length: 22 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
@@ -57,12 +65,13 @@ describe('frozen settings migrations', () => {
       keys: ['Q'],
     });
 
-    const current = SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(v21));
-    expect(current.schemaVersion).toBe(22);
+    const current = migrateV21ToCurrent(v21);
+    expect(current.schemaVersion).toBe(23);
     expect(current.transcription.language).toBe('fr');
     expect(current.dictationProfiles.map(({ id }) => id)).toEqual([
       'general',
       'prompt',
+      'prompt-to-english',
       'markdown',
       'translate-to-english',
       '11111111-1111-4111-8111-111111111111',
@@ -93,7 +102,7 @@ describe('frozen settings migrations', () => {
     };
     const legacy = LegacySettingsV21Schema.parse(source);
 
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(legacy));
+    const migrated = migrateV21ToCurrent(legacy);
     expect(migrated.welcome.completedAt).toBe(1_700_000_000_000);
     expect(migrated.smartProcessing).toMatchObject({
       selectedProviderId: 'openai',
@@ -126,7 +135,7 @@ describe('frozen settings migrations', () => {
     const fixture = readRawFixtures('legacy-v21.json')[0];
     if (fixture === undefined) throw new Error('Missing v21 fixture');
     const source = LegacySettingsV21Schema.parse(fixture.source);
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(source));
+    const migrated = migrateV21ToCurrent(source);
 
     for (const legacyProfile of source.dictationProfiles) {
       const migratedProfile = migrated.dictationProfiles.find(({ id }) => id === legacyProfile.id);
@@ -141,10 +150,11 @@ describe('frozen settings migrations', () => {
       }
     }
     expect(migrated.transcription.language).toBe('ru');
-    expect(migrated.dictationProfiles).toHaveLength(12);
+    expect(migrated.dictationProfiles).toHaveLength(13);
     expect(migrated.dictationProfiles.map(({ name }) => name)).toEqual([
       'Existing General',
       'Existing Prompt',
+      'Prompt to English',
       'Markdown',
       'Translate to English',
       'Old Alt X',
@@ -187,7 +197,7 @@ describe('frozen settings migrations', () => {
       keys: ['Y'],
     };
 
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(source));
+    const migrated = migrateV21ToCurrent(source);
     expect(migrated.app.defaultProcessingMode).toBe('raw');
     expect(migrated.dictationProfiles.find(({ id }) => id === 'general')).toMatchObject({
       name: 'Existing General',
@@ -218,7 +228,7 @@ describe('frozen settings migrations', () => {
     if (transcription === null) throw new Error('Missing transcription settings');
     (transcription as Record<string, unknown>).language = language;
 
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(source));
+    const migrated = migrateV21ToCurrent(source);
     expect(migrated.transcription.language).toBe(expected);
   });
 

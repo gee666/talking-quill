@@ -98,6 +98,7 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await expect(defaults.getByRole('listitem')).toHaveText([
       'General: Alt + X (final trigger X) — Smart processing',
       'Prompt: Alt + X + P (final trigger P) — Smart processing',
+      'Prompt to English: Alt + X + P + E (final trigger E) — Smart processing',
       'Markdown: Alt + X + M (final trigger M) — Smart processing',
       'Translate to English: Alt + X + E (final trigger E) — Smart processing',
     ]);

@@ -262,7 +262,7 @@ describe('Welcome, Info, and settings completion', () => {
     expect(screen.getByRole('heading', { name: 'Microphone' })).toHaveFocus();
   });
 
-  it('lists exactly the four Smart built-in reset defaults on the final screen', () => {
+  it('lists exactly the five Smart built-in reset defaults on the final screen', () => {
     const configured = settings();
     configured.welcome.lastStep = 5;
     const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
@@ -311,6 +311,7 @@ describe('Welcome, Info, and settings completion', () => {
     ).toEqual([
       'General: Alt + X (final trigger X) — Smart processing',
       'Prompt: Alt + X + P (final trigger P) — Smart processing',
+      'Prompt to English: Alt + X + P + E (final trigger E) — Smart processing',
       'Markdown: Alt + X + M (final trigger M) — Smart processing',
       'Translate to English: Alt + X + E (final trigger E) — Smart processing',
     ]);

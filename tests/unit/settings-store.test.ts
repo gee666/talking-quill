@@ -114,7 +114,13 @@ function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
   if (typeof v21 !== 'object' || v21 === null || Array.isArray(v21)) {
     throw new Error('V20 migration did not emit settings');
   }
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[21]?.(v21 as Readonly<Record<string, unknown>>));
+  const v22 = SETTINGS_MIGRATIONS[21]?.(v21 as Readonly<Record<string, unknown>>);
+  if (typeof v22 !== 'object' || v22 === null) {
+    throw new Error('V21 migration did not emit settings');
+  }
+  return SettingsSchema.parse(
+    SETTINGS_MIGRATIONS[22]?.(v22 as Readonly<Record<string, unknown>>),
+  );
 }
 
 function validSettings(

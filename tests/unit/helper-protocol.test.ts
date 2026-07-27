@@ -261,7 +261,7 @@ describe('native helper JSON-RPC schemas', () => {
     expect(
       schema.safeParse({
         enabled: true,
-        bindings: Array.from({ length: 13 }, (_, index) =>
+        bindings: Array.from({ length: 14 }, (_, index) =>
           binding(customProfileId(index), {
             ...altA,
             keys: [String.fromCharCode(65 + index)],

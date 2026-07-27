@@ -8,6 +8,7 @@ import {
   DEFAULT_GENERAL_PROFILE,
   DEFAULT_MARKDOWN_PROFILE,
   DEFAULT_PROMPT_PROFILE,
+  DEFAULT_PROMPT_TO_ENGLISH_PROFILE,
   DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
   GENERAL_PROFILE_ID,
   PROMPT_PROFILE_ID,
@@ -35,6 +36,10 @@ import {
   VocabularyListSchema,
   type VocabularyEntry,
 } from '../../../shared/schemas/vocabulary';
+import {
+  LegacySettingsV22Schema,
+  type LegacySettingsV22,
+} from './legacy-settings-v22';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
@@ -123,7 +128,7 @@ export function migrateShortcutChords(legacy: LegacySettingsV20): LegacySettings
   });
 }
 
-export function migrateSettingsV21(legacy: LegacySettingsV21): Settings {
+export function migrateSettingsV21(legacy: LegacySettingsV21): LegacySettingsV22 {
   const existing = legacy.dictationProfiles.map((profile) => {
     if (legacyProfileEquals(profile, LEGACY_DEFAULT_GENERAL_PROFILE_V21)) {
       // Upgrade the dormant default prompt, but never opt an existing Raw user into Smart.
@@ -167,9 +172,8 @@ export function migrateSettingsV21(legacy: LegacySettingsV21): Settings {
   const dictationProfiles = [...existingBuiltIns, ...addedBuiltIns, ...customProfiles];
   const general = dictationProfiles.find(({ id }) => id === GENERAL_PROFILE_ID);
   if (general === undefined) throw new Error('Migrated General profile is missing');
-  return SettingsSchema.parse({
+  return LegacySettingsV22Schema.parse({
     ...structuredClone(legacy),
-    // Keep the target literal so a future settings bump cannot silently skip its migration.
     schemaVersion: 22,
     // The v21 schema guarantees this compatibility mirror matches General. Preserve both so an
     // upgrade can never activate Smart/provider processing for an existing Raw user.
@@ -184,6 +188,17 @@ export function migrateSettingsV21(legacy: LegacySettingsV21): Settings {
       activationTested: false,
       activationEvidence: null,
     },
+  });
+}
+
+export function migrateSettingsV22(legacy: LegacySettingsV22): Settings {
+  const profiles = legacy.dictationProfiles.map((profile) => structuredClone(profile));
+  const promptIndex = profiles.findIndex(({ id }) => id === PROMPT_PROFILE_ID);
+  profiles.splice(promptIndex + 1, 0, structuredClone(DEFAULT_PROMPT_TO_ENGLISH_PROFILE));
+  return SettingsSchema.parse({
+    ...structuredClone(legacy),
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    dictationProfiles: profiles,
   });
 }
 
