@@ -1,9 +1,22 @@
+![Talking Quill dashboard](docs/assets/talking-quill-dashboard.png)
+
 # Talking Quill
 
-Local-first, system-wide dictation for Windows and macOS, with optional Smart transcript cleanup through a provider you configure.
+**Speak naturally. Get polished text wherever you type.**
 
-## **[Read the Talking Quill user guide →](docs/README.md)**
+Talking Quill is a local-first, system-wide dictation app for Windows and macOS. Your voice is transcribed on your computer, then optional Smart workflows can clean up rough speech, organize ideas, turn notes into well-structured text, translate into another language, or follow your own custom instructions. Use it for messages, documents, prompts, Markdown, and any repeatable writing workflow—without changing how you work.
 
-The guide covers setup, customizable shortcut chords, Quick and Extended dictation, Raw and Smart privacy, settings, local data, and development.
+## Build an installable package
 
-Licensed under the [MIT License](LICENSE).
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/gee666/talking-quill.git
+   cd talking-quill
+   ```
+
+2. Point your coding agent to [`AGENTS-BUILD.md`](AGENTS-BUILD.md) and ask:
+
+   > Follow AGENTS-BUILD.md, install the required toolchain, validate the project, and give me the native installer for this computer.
+
+The agent will detect Windows, macOS, or WSL, prepare the correct build environment, and produce an easy-to-install package for the supported native platform.

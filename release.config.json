@@ -11,6 +11,7 @@
     ".node-version",
     ".npmrc",
     ".prettierignore",
+    "AGENTS-BUILD.md",
     "LICENSE",
     "README.md",
     "app",
