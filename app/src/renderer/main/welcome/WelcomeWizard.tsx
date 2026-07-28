@@ -81,7 +81,7 @@ export function WelcomeWizard({
         setOptimisticStep({ step: saved.lastStep, source: settings.welcome });
       }
     } catch (cause: unknown) {
-      setError(publicErrorMessage(cause, 'Welcome progress could not be saved.'));
+      setError(publicErrorMessage(cause, 'Your progress could not be saved. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -99,7 +99,7 @@ export function WelcomeWizard({
         setOptimisticStep({ step: welcome.lastStep, source: settings.welcome });
       }
     } catch (cause: unknown) {
-      setError(publicErrorMessage(cause, 'Raw processing preference could not be saved.'));
+      setError(publicErrorMessage(cause, 'That choice could not be saved. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -111,7 +111,7 @@ export function WelcomeWizard({
       const welcome = await window.talkingQuill.welcome.complete();
       onComplete(welcome);
     } catch (cause: unknown) {
-      setError(publicErrorMessage(cause, 'Setup completion could not be saved.'));
+      setError(publicErrorMessage(cause, 'Setup could not be finished. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -119,107 +119,112 @@ export function WelcomeWizard({
 
   return (
     <main className="welcome" aria-labelledby="welcome-heading">
-      <div className="welcome__brand">
-        <img
-          className="welcome__brand-logo"
-          src={theme === 'light' ? logoLight : logoDark}
-          alt=""
-          aria-hidden="true"
-        />
-        <span className="welcome__brand-copy">
-          <span className="welcome__brand-wordmark">Talking Quill</span>
-          <span className="welcome__brand-tagline">Speak naturally. Write effortlessly.</span>
-        </span>
-      </div>
-      <header className="welcome__header">
-        <h1 id="welcome-heading" ref={heading} tabIndex={-1} className="welcome__title">
-          {STEP_NAMES[step - 1]}
-        </h1>
-        <div className="welcome__header-meta">
-          <p className="eyebrow welcome__counter">Setup · Step {step} of 5</p>
-          {reopened ? (
-            <Button variant="quiet" onClick={onClose}>
-              Exit Welcome
-            </Button>
-          ) : null}
+      <div className="welcome__column">
+        <div className="welcome__brand">
+          <img
+            className="welcome__brand-logo"
+            src={theme === 'light' ? logoLight : logoDark}
+            alt=""
+            aria-hidden="true"
+          />
+          <span className="welcome__brand-copy">
+            <span className="welcome__brand-wordmark">Talking Quill</span>
+            <span className="welcome__brand-tagline">Speak naturally. Write effortlessly.</span>
+          </span>
         </div>
-      </header>
-      <ol className="welcome__progress" aria-label="Setup progress">
-        {STEP_NAMES.map((name, index) => {
-          const position = index + 1;
-          const progressState =
-            position < step ? 'complete' : position === step ? 'current' : 'upcoming';
-          return (
-            <li
-              key={name}
-              data-state={progressState}
-              aria-current={progressState === 'current' ? 'step' : undefined}
-            >
-              <span className="welcome__progress-marker" aria-hidden="true" />
-              <span className="welcome__progress-label">{name}</span>
-            </li>
-          );
-        })}
-      </ol>
-      <section
-        ref={content}
-        className="welcome__content"
-        aria-label={`${STEP_NAMES[step - 1] ?? 'Welcome'} setup controls`}
-        aria-busy={saving}
-        inert={saving ? true : undefined}
-        tabIndex={contentScrollable ? 0 : undefined}
-      >
-        {renderStep(step)}
-      </section>
-      {error === null ? null : (
-        <p role="alert" className="operation-message operation-message--error">
-          {error}
-        </p>
-      )}
-      <footer className="welcome__actions">
-        <Button
-          variant="secondary"
-          disabled={saving || step === 1}
-          onClick={() => void move((step - 1) as WelcomeStep)}
+        <header className="welcome__header">
+          <h1 id="welcome-heading" ref={heading} tabIndex={-1} className="welcome__title">
+            {STEP_NAMES[step - 1]}
+          </h1>
+          <div className="welcome__header-meta">
+            <p className="eyebrow welcome__counter">Setup · Step {step} of 5</p>
+            {reopened ? (
+              <Button variant="quiet" onClick={onClose}>
+                Exit Welcome
+              </Button>
+            ) : null}
+          </div>
+        </header>
+        <ol className="welcome__progress" aria-label="Setup progress">
+          {STEP_NAMES.map((name, index) => {
+            const position = index + 1;
+            const progressState =
+              position < step ? 'complete' : position === step ? 'current' : 'upcoming';
+            return (
+              <li
+                key={name}
+                data-state={progressState}
+                aria-current={progressState === 'current' ? 'step' : undefined}
+              >
+                <span className="welcome__progress-marker" aria-hidden="true" />
+                <span className="welcome__progress-label">{name}</span>
+              </li>
+            );
+          })}
+        </ol>
+        <section
+          ref={content}
+          className="welcome__content"
+          aria-label={`${STEP_NAMES[step - 1] ?? 'Welcome'} setup controls`}
+          aria-busy={saving}
+          inert={saving ? true : undefined}
+          tabIndex={contentScrollable ? 0 : undefined}
         >
-          Back
-        </Button>
-        {step === 4 ? (
-          <>
-            <Button variant="quiet" busy={saving} onClick={() => void skipSmartProcessing()}>
-              Skip Smart processing
-            </Button>
-            <Button busy={saving} onClick={() => void move(5)}>
+          {renderStep(step)}
+        </section>
+        {error === null ? null : (
+          <p role="alert" className="operation-message operation-message--error">
+            {error}
+          </p>
+        )}
+        <footer className="welcome__actions">
+          <Button
+            variant="secondary"
+            disabled={saving || step === 1}
+            onClick={() => void move((step - 1) as WelcomeStep)}
+          >
+            Back
+          </Button>
+          {step === 4 ? (
+            <>
+              <Button variant="quiet" busy={saving} onClick={() => void skipSmartProcessing()}>
+                Skip Smart processing
+              </Button>
+              <Button busy={saving} onClick={() => void move(5)}>
+                Continue
+              </Button>
+            </>
+          ) : step < 5 ? (
+            <Button busy={saving} onClick={() => void move((step + 1) as WelcomeStep)}>
               Continue
             </Button>
-          </>
-        ) : step < 5 ? (
-          <Button busy={saving} onClick={() => void move((step + 1) as WelcomeStep)}>
-            Continue
-          </Button>
-        ) : (
-          <Button busy={saving} onClick={() => void complete()}>
-            Start using Talking Quill
-          </Button>
-        )}
-      </footer>
+          ) : (
+            <Button busy={saving} onClick={() => void complete()}>
+              Start using Talking Quill
+            </Button>
+          )}
+        </footer>
+      </div>
     </main>
   );
 
   function renderStep(current: WelcomeStep) {
     if (current === 1)
       return (
-        <Card title="Private dictation, ready anywhere">
+        <Card
+          title="Talk, and Talking Quill types"
+          description="Setting up takes a couple of minutes. You can change anything later."
+        >
           <p className="body-copy">
-            Talking Quill turns speech into text locally and inserts it into the application you are
-            using.
+            Press a shortcut, say what you want to write, and the words appear in whatever you are
+            using — an email, a document, a chat window.
+          </p>
+          <p className="body-copy">
+            Your voice is turned into text on your own computer. Nothing is sent anywhere unless you
+            later choose to let an AI service tidy your words up.
           </p>
           <p>
             <strong>Free to use — no account, no usage limits.</strong>
-          </p>
-          <p className="body-copy">
-            Optional cloud providers may charge for their own service. Raw transcription never sends
-            audio or text to a provider.
           </p>
         </Card>
       );
@@ -227,24 +232,31 @@ export function WelcomeWizard({
     if (current === 3)
       return (
         <Card
-          title="Download local Whisper"
-          description="The model is downloaded once and then works offline."
+          title="Get the speech model"
+          description="This is what understands your voice. You download it once, then it works without internet."
         >
           <ModelSetup settings={settings} onSettingsSaved={onSettingsSaved} />
           <div className="setting-divider" />
           <TranscriptionLanguageSetting settings={settings} onSettingsSaved={onSettingsSaved} />
           <Status tone={state.modelReady ? 'success' : 'warning'}>
-            {state.modelReady ? 'Selected model ready' : 'Download required'}
+            {state.modelReady ? 'Model ready' : 'Download needed'}
           </Status>
         </Card>
       );
     if (current === 4)
       return (
         <>
-          <Card title="Optional Smart processing">
+          <Card
+            title="Smart processing"
+            description="Optional. Let an AI service clean up your words before they go in."
+          >
             <p className="body-copy">
-              Skip this step for fully local Raw transcription. Ollama is highlighted as a local
-              option; cloud providers may charge your account.
+              Smart processing fixes filler words, punctuation and stray phrasing. Skip it and
+              Talking Quill writes exactly what you said, entirely on your computer.
+            </p>
+            <p className="body-copy">
+              Ollama runs on your own machine and stays private. If you pick a cloud service
+              instead, that cloud provider may charge you for its own service.
             </p>
           </Card>
           {showSmartProcessing ? (
@@ -260,8 +272,11 @@ export function WelcomeWizard({
       );
     return (
       <>
-        <Card title="Talking Quill is ready">
-          <p>Built-in profile defaults:</p>
+        <Card
+          title="Talking Quill is ready"
+          description="Here is how to use it. Nothing else to do."
+        >
+          <p>Your ready-made shortcuts:</p>
           <ul aria-label="Built-in dictation profile defaults">
             {BUILT_IN_DICTATION_PROFILE_METADATA.map(({ id, defaultProfile }) => (
               <li key={id}>
@@ -271,37 +286,44 @@ export function WelcomeWizard({
               </li>
             ))}
           </ul>
-          <p className="body-copy">
-            These are the reset defaults. Existing or migrated profile settings may differ.
+          <p className="hint">
+            These are the shortcuts Talking Quill starts with. If you have already changed one, your
+            version is kept.
           </p>
+          <h3 className="subhead">How to dictate</h3>
           <ul>
             <li>
-              Quick Dictation starts when you release the shortcut&apos;s final letter key before{' '}
-              {String(ECHO_HOLD_THRESHOLD_MS)} ms and submits after trailing silence.
+              <strong>Quick note:</strong> press your shortcut and let go of the last key straight
+              away. Talking Quill types your words once you stop talking.
             </li>
             <li>
-              Extended Dictation starts when you keep the shortcut&apos;s final letter key down for{' '}
-              {String(ECHO_HOLD_THRESHOLD_MS)} ms and keeps recording through silence until you
-              press Enter, press the full shortcut chord again, or use Stop.
+              <strong>Longer note:</strong> hold that last key for more than{' '}
+              {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses until
+              you press Enter, use the shortcut again, or click Stop.
             </li>
-            <li>Escape cancels either mode.</li>
+            <li>Press Escape at any point to throw the recording away.</li>
           </ul>
           <p>Shortcuts can be changed anytime in Settings under Dictation profiles.</p>
           <Status
             tone={state.modelReady && state.helper.status === 'ready' ? 'success' : 'warning'}
           >
             {state.modelReady && state.helper.status === 'ready'
-              ? 'Ready for first dictation'
-              : 'Setup can be revisited from Info'}
+              ? 'Ready for your first dictation'
+              : 'You can finish this later from About'}
           </Status>
         </Card>
         {platform === 'darwin' ? (
-          <Card title="macOS permissions">
+          <Card
+            title="One more thing on your Mac"
+            description="macOS asks you to approve two things before Talking Quill can work everywhere."
+          >
             <p className="body-copy">
-              Allow Accessibility and Input Monitoring so global shortcuts and text insertion work.
+              Accessibility lets Talking Quill type for you. Input Monitoring lets it notice your
+              shortcut while you are in another app. Open each screen below and switch Talking Quill
+              on.
             </p>
             <Status tone={state.helper.status === 'ready' ? 'success' : 'warning'}>
-              {state.helper.status === 'ready' ? 'Permissions ready' : 'Permission setup required'}
+              {state.helper.status === 'ready' ? 'Permissions ready' : 'Permissions still needed'}
             </Status>
             <div className="provider-actions">
               <Button

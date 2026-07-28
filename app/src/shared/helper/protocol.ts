@@ -234,14 +234,9 @@ export const HelperNotificationSchema = z.discriminatedUnion('method', [
             heldMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
           })
           .strict()
-          .refine(
-            (value) =>
-              value.profileId === 'general' &&
-              isBuiltInDefaultBinding(value.profileId, value.shortcut),
-            {
-              message: 'Only the exact General built-in default may complete atomically',
-            },
-          ),
+          .refine((value) => isBuiltInDefaultBinding(value.profileId, value.shortcut), {
+            message: 'Only an exact built-in default may complete atomically',
+          }),
       ]),
     })
     .strict(),

@@ -59,10 +59,10 @@
 //!     `SHORTCUT` is `{"modifiers":{"ctrl":boolean,"alt":boolean,
 //!     "shift":boolean,"meta":boolean},"keys":["A".."Z",...]}`.
 //!     A shortcut contains 1 through 26 ordered unique keys, at least one of
-//!     Ctrl/Alt/Shift/Meta, and the final key is its trigger. At most twelve
+//!     Ctrl/Alt/Shift/Meta, and the final key is its trigger. At most thirteen
 //!     bindings with distinct profile IDs are accepted. Exact shortcut duplicates
 //!     and same-modifier prefix conflicts are invalid except among the exact canonical
-//!     General/Prompt/Markdown/Translate built-in Alt+X family; enabled activation
+//!     General/Prompt/Prompt-to-English/Markdown/Translate built-in Alt+X family; enabled activation
 //!     requires at least one binding. Windows and macOS both consume this complete bounded
 //!     representation without reducing modifier or key-order information.
 //! - `session.set_capture`
@@ -119,7 +119,7 @@
 //! emit these ID-less JSON-RPC notifications. Platform-neutral reduction uses
 //! exact four-modifier equality and the complete ordered held-letter sequence.
 //! Prefix letters and modifiers pass through (and may therefore leak into the
-//! foreground application). The ambiguous canonical General prefix passes both
+//! foreground application). An ambiguous canonical built-in prefix passes both
 //! down and up and resolves as one complete event; otherwise only an accepted
 //! final trigger down, its repeats, and its matching up are swallowed. Session
 //! Escape/Enter capture is independent
@@ -128,8 +128,8 @@
 //! - `activation.event` params are either
 //!   `{"phase":"down"|"up","profileId":PROFILE_ID,"shortcut":SHORTCUT}` or
 //!   `{"phase":"complete","profileId":PROFILE_ID,"shortcut":SHORTCUT,"heldMs":integer}`.
-//!   A complete event atomically resolves an intentionally ambiguous one-key built-in prefix on
-//!   release. Down and up carry the same accepted profile-owned binding snapshot even if
+//!   A complete event atomically resolves an intentionally ambiguous built-in prefix on release.
+//!   Down and up carry the same accepted profile-owned binding snapshot even if
 //!   activation configuration changes before the trigger is released.
 //! - `session.key` params:
 //!   `{"key":"escape"|"enter","phase":"down"|"up"}`.

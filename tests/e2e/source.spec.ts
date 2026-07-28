@@ -41,7 +41,8 @@ async function readEgressCategories(profile: string): Promise<string[]> {
 async function toggleCloseToTrayAndCloseImmediately(page: Page) {
   await page.evaluate(() => {
     const label = [...document.querySelectorAll('label')].find(
-      (candidate) => candidate.textContent.trim() === 'Close to tray',
+      (candidate) =>
+        candidate.textContent.trim() === 'Keep running in the tray when I close the window',
     );
     const toggle = label?.htmlFor === '' ? null : document.getElementById(label?.htmlFor ?? '');
     const close = document.querySelector<HTMLButtonElement>('button[aria-label="Close window"]');
@@ -105,7 +106,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
   let application = await launch(profile);
   const { main, widget, capture } = await rendererPages(application);
 
-  await expect(main.getByRole('heading', { name: 'Dictation needs local setup' })).toBeVisible();
+  await expect(main.getByRole('heading', { name: 'Almost there' })).toBeVisible();
   await expect(widget.getByText('Ready', { exact: true })).toBeAttached();
   await expectAccessible(main, 'Dashboard screen');
   await expectAccessible(widget, 'Widget shell');
@@ -252,9 +253,9 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
     .getAttribute('content');
   expect(csp).toContain("default-src 'none'");
 
-  await expect(main.getByRole('heading', { name: 'Dictation needs local setup' })).toBeFocused();
+  await expect(main.getByRole('heading', { name: 'Almost there' })).toBeFocused();
   await main.keyboard.press('Shift+Tab');
-  const info = main.getByRole('button', { name: 'Info' });
+  const info = main.getByRole('button', { name: 'About' });
   await expect(info).toBeFocused();
   const focusAppearance = await info.evaluate((element) => {
     const style = getComputedStyle(element);
@@ -266,10 +267,11 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
   await main.keyboard.press('Shift+Tab');
   await expect(main.getByRole('button', { name: 'Settings' })).toBeFocused();
   await main.keyboard.press('Enter');
-  await expect(main.getByRole('heading', { name: 'General settings' })).toBeFocused();
+  // The Settings heading now mirrors the selected section, which defaults to General.
+  await expect(main.getByRole('heading', { level: 1, name: 'General' })).toBeFocused();
   await expectAccessible(main, 'Settings screen');
   await main.keyboard.press('Shift+Tab');
-  await expect(main.getByRole('button', { name: 'Info' })).toBeFocused();
+  await expect(main.getByRole('button', { name: 'About' })).toBeFocused();
   await main.keyboard.press('Enter');
   await expect(main.getByRole('heading', { name: 'About Talking Quill' })).toBeFocused();
   await expectAccessible(main, 'Info screen');
@@ -321,8 +323,12 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
     .toBe(true);
 
   await main.getByRole('button', { name: 'Settings' }).click();
-  await main.getByRole('checkbox', { name: 'Close to tray' }).click();
-  await expect(main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
+  await main
+    .getByRole('checkbox', { name: 'Keep running in the tray when I close the window' })
+    .click();
+  await expect(
+    main.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+  ).not.toBeChecked();
   await expect(main.getByText('Close behavior saved on this device.')).toBeVisible();
   const secret = 'e2e-secret-never-rendered';
   const vaultStatus = await main.evaluate(async (value) => {
@@ -350,8 +356,12 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
   application = await launch(profile);
   const restarted = (await rendererPages(application)).main;
   await restarted.getByRole('button', { name: 'Settings' }).click();
-  await expect(restarted.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
-  await expect(restarted.getByRole('checkbox', { name: 'Enable Talking Quill' })).not.toBeChecked();
+  await expect(
+    restarted.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+  ).not.toBeChecked();
+  await expect(
+    restarted.getByRole('checkbox', { name: 'Turn Talking Quill on' }),
+  ).not.toBeChecked();
   expect(
     await restarted.evaluate(() => window.talkingQuill.providers.secretStatus('groq')),
   ).toMatchObject({ providerId: 'groq', configured: true });
@@ -433,7 +443,7 @@ test('Pi settings expose not-found recovery and explicit retry discovery', async
     await main.getByRole('searchbox', { name: 'Search providers' }).fill('Pi');
     await main.locator('#pi[role="option"]').click();
     await expect(main.getByText(/Pi is unavailable.*installation path and retry/i)).toBeVisible();
-    await main.getByRole('button', { name: 'Retry discovery' }).click();
+    await main.getByRole('button', { name: 'Refresh list' }).click();
     await expect(main.getByText(/Pi is unavailable.*installation path and retry/i)).toBeVisible();
   } finally {
     await Promise.race([
@@ -521,20 +531,23 @@ test('provider UI and a fresh-renderer canary prove secrets stay outside rendere
     await main.getByRole('searchbox', { name: 'Search providers' }).fill('Generic OpenAI');
     await main.getByRole('option', { name: /^Generic OpenAI.*Connect/ }).click();
     await main.getByLabel('Endpoint URL').fill(`http://127.0.0.1:${String(address.port)}/v1`);
-    await main.getByRole('textbox', { name: 'Model', exact: true }).fill('manual-safe-model');
+    const modelSelect = main.getByRole('combobox', { name: 'Model', exact: true });
+    await modelSelect.selectOption('\u0000custom-model');
+    await main.getByRole('textbox', { name: 'Model name', exact: true }).fill('manual-safe-model');
     await main.getByRole('button', { name: 'Save configuration' }).click();
-    await expect(main.getByText('Draft saved')).toBeVisible();
+    await expect(main.getByText('Saved', { exact: true })).toBeVisible();
 
     const password = main.locator('input[type="password"]');
     await password.fill(secret);
     await main.getByRole('button', { name: 'Store API key' }).click();
     await expect(password).toHaveValue('');
     await expect(main.getByText('Configured', { exact: true })).toBeVisible();
-    await main.getByRole('button', { name: 'Discover models' }).click();
+    // Model discovery now runs automatically, so the safe model appears as an option on its own.
+    await expect(modelSelect.locator('option[value="manual-safe-model"]')).toHaveCount(1);
     await expect(main.getByText('1 model found')).toBeVisible();
     await main.getByRole('button', { name: 'Test connection' }).click();
     await expect(main.getByText(/Connection verified/)).toBeVisible();
-    await expect(main.getByText(/Local destination — verified/)).toBeVisible();
+    await expect(main.getByText(/Runs on this computer — checked/)).toBeVisible();
 
     const rendererEvidence = await main.evaluate(async () => {
       const bootstrap = await window.talkingQuill.app.getBootstrap();
@@ -563,11 +576,11 @@ test('provider UI and a fresh-renderer canary prove secrets stay outside rendere
 
     await main.getByLabel('Endpoint URL').fill(`http://127.0.0.1:${String(addressB.port)}/v1`);
     await expect(
-      main.getByText(/Provider destination changed.*re-enter credentials/i),
+      main.getByText(/You changed where this service lives.*enter the key again/i),
     ).toBeVisible();
     await main.getByRole('button', { name: 'Save configuration' }).click();
     await expect(main.getByText('Not configured')).toBeVisible();
-    await main.getByRole('button', { name: 'Discover models' }).click();
+    await main.getByRole('button', { name: 'Refresh list' }).click();
     await expect(main.getByText('1 model found')).toBeVisible();
     expect(oldAuthorizationSentToEndpointB).toBe(false);
 
@@ -614,7 +627,9 @@ for (const attempt of [0, 1, 2]) {
     try {
       let main = (await rendererPages(application)).main;
       await main.getByRole('button', { name: 'Settings' }).click();
-      await expect(main.getByRole('checkbox', { name: 'Close to tray' })).toBeVisible();
+      await expect(
+        main.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+      ).toBeVisible();
 
       await closeWithDiagnostics(application, `case ${String(attempt + 1)} immediate quit`, () =>
         toggleCloseToTrayAndCloseImmediately(main),
@@ -623,8 +638,12 @@ for (const attempt of [0, 1, 2]) {
       application = await launch(profile);
       main = (await rendererPages(application)).main;
       await main.getByRole('button', { name: 'Settings' }).click();
-      await expect(main.getByRole('checkbox', { name: 'Close to tray' })).toBeVisible();
-      await expect(main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
+      await expect(
+        main.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+      ).toBeVisible();
+      await expect(
+        main.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+      ).not.toBeChecked();
 
       await toggleCloseToTrayAndCloseImmediately(main);
       await expect
@@ -658,28 +677,38 @@ test('categorized source egress proof exposes only explicit user-triggered choke
   const application = await launch(profile, true);
   try {
     const { main } = await rendererPages(application);
-    await expect(main.getByRole('heading', { name: 'Dictation needs local setup' })).toBeVisible();
+    await expect(main.getByRole('heading', { name: 'Almost there' })).toBeVisible();
     expect(await readEgressCategories(profile)).toEqual([]);
 
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Smart processing' }).click();
-    const providerForm = main.locator('.provider-form');
-    await providerForm.getByLabel('Model').fill('proof-model');
-    await providerForm.getByRole('button', { name: 'Save configuration' }).click();
-    await expect(providerForm.getByText('Draft saved')).toBeVisible();
-    await main.getByRole('button', { name: 'Test connection' }).click();
+    // Opening Smart processing now starts automatic model discovery, which is the first
+    // categorized provider choke point the proof observer records.
     await expect.poll(() => readEgressCategories(profile)).toEqual(['provider']);
+    const providerForm = main.locator('form.stack');
+    await providerForm
+      .getByRole('combobox', { name: 'Model', exact: true })
+      .selectOption('\u0000custom-model');
+    await providerForm
+      .getByRole('textbox', { name: 'Model name', exact: true })
+      .fill('proof-model');
+    await providerForm.getByRole('button', { name: 'Save configuration' }).click();
+    await expect(providerForm.getByText('Saved', { exact: true })).toBeVisible();
+    await main.getByRole('button', { name: 'Test connection' }).click();
+    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'provider']);
 
-    await main.getByRole('button', { name: 'Info' }).click();
+    await main.getByRole('button', { name: 'About' }).click();
     await main.getByRole('button', { name: 'Check for updates' }).click();
-    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'update']);
+    await expect
+      .poll(() => readEgressCategories(profile))
+      .toEqual(['provider', 'provider', 'update']);
 
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Transcription model' }).click();
-    await main.getByRole('button', { name: 'Download model' }).click();
+    await main.getByRole('button', { name: 'Download', exact: true }).click();
     await expect
       .poll(() => readEgressCategories(profile))
-      .toEqual(['provider', 'update', 'model-download']);
+      .toEqual(['provider', 'provider', 'update', 'model-download']);
   } finally {
     await application.close();
   }

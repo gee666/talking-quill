@@ -15,8 +15,7 @@ export function App() {
         if (active) setBootstrap(data);
       })
       .catch(() => {
-        if (active)
-          setError('Talking Quill could not load its local settings. Restart the application.');
+        if (active) setError('Talking Quill could not load your settings. Please restart the app.');
       });
     return () => {
       active = false;
@@ -26,7 +25,7 @@ export function App() {
   if (error !== null) {
     return (
       <main className="startup-state">
-        <EmptyState title="Unable to start" description={error} />
+        <EmptyState title="Talking Quill could not start" description={error} />
       </main>
     );
   }

@@ -50,6 +50,35 @@ describe('design primitives', () => {
     expect(onToggle).toHaveBeenCalledOnce();
   });
 
+  it('keeps labels and descriptions intact in both field layouts', () => {
+    render(
+      <div>
+        <Input label="Row input" layout="row" hint="Row hint" />
+        <Input label="Stacked input" layout="stacked" hint="Stacked hint" />
+        <Select label="Row select" layout="row" hint="Row select hint" defaultValue="raw">
+          <option value="raw">Raw</option>
+        </Select>
+        <Select label="Stacked select" layout="stacked" hint="Stacked select hint">
+          <option value="raw">Raw</option>
+        </Select>
+        <TextArea label="Row notes" layout="row" hint="Row notes hint" />
+        <TextArea label="Stacked notes" hint="Stacked notes hint" />
+      </div>,
+    );
+    for (const [name, description, layout] of [
+      ['Row input', 'Row hint', 'row'],
+      ['Stacked input', 'Stacked hint', 'stacked'],
+      ['Row select', 'Row select hint', 'row'],
+      ['Stacked select', 'Stacked select hint', 'stacked'],
+      ['Row notes', 'Row notes hint', 'row'],
+      ['Stacked notes', 'Stacked notes hint', 'stacked'],
+    ] as const) {
+      const control = screen.getByLabelText(name);
+      expect(control).toHaveAccessibleDescription(description);
+      expect(control.closest('.me-field')).toHaveClass(`me-field--${layout}`);
+    }
+  });
+
   it('activates interactive cards from Enter and Space while respecting disabled state', async () => {
     const user = userEvent.setup();
     const activate = vi.fn();

@@ -108,7 +108,7 @@
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  min-height: 30px;
+  min-height: 32px;
   padding: 0 var(--space-2) 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);
@@ -152,6 +152,9 @@
   border-radius: 1px;
   background: var(--color-accent);
 }
+.nav-item:focus-visible {
+  z-index: 1;
+}
 
 /* =============================================================== Content */
 .content {
@@ -180,7 +183,7 @@
   line-height: 1.25;
 }
 .screen__header p:not(.eyebrow) {
-  max-width: 64ch;
+  max-width: var(--measure);
   margin: 2px 0 0;
   color: var(--color-secondary);
   font-size: var(--fs-sm);
@@ -195,30 +198,12 @@
 }
 .screen__grid {
   display: grid;
-  gap: var(--space-5);
-}
-.body-copy {
-  margin: 0;
-  color: var(--color-secondary);
-  font-size: var(--fs-sm);
+  gap: var(--space-6);
 }
 
 /* ======================================================= Shared patterns */
-.group {
-  display: grid;
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
-}
-.group > * + * {
-  border-top: 1px solid var(--color-border);
-}
-.setting-divider {
-  height: 1px;
-  background: var(--color-border);
-}
+/* `.stack`, `.rows`, `.group`, `.subhead`, `.hint`, `.body-copy`, `.panel` and
+   `.setting-divider` are defined once in `design/components.css`. */
 .readiness-row,
 .setting-action {
   display: flex;
@@ -232,32 +217,24 @@
   min-width: 0;
 }
 .setting-action p {
+  max-width: var(--measure);
   margin: 2px 0 0;
   color: var(--color-secondary);
   font-size: var(--fs-xs);
 }
-.details-list {
-  display: grid;
-  min-width: 0;
-  overflow: hidden;
-  margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
-}
-.details-list div {
+.details-list > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  min-height: var(--row-height);
-  padding: var(--space-2) var(--space-3);
-}
-.details-list div + div {
-  border-top: 1px solid var(--color-border);
+  min-width: 0;
 }
 .details-list dt {
-  flex: none;
+  /* User-editable names live here (dictation profiles), so the term must be
+     able to shrink and wrap instead of pushing the value out of the row. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--color-secondary);
   font-size: var(--fs-sm);
 }
@@ -273,28 +250,13 @@
   font-size: var(--fs-sm);
   text-align: right;
 }
-.settings-list {
-  display: grid;
-  min-width: 0;
-  overflow: hidden;
-  padding: 0;
-  margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
-  list-style: none;
-}
-.settings-list li {
+.settings-list > li {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  min-height: var(--row-height);
-  padding: var(--space-2) var(--space-3);
+  min-width: 0;
   overflow-wrap: anywhere;
-}
-.settings-list li + li {
-  border-top: 1px solid var(--color-border);
 }
 .settings-list li > div:first-child {
   display: grid;

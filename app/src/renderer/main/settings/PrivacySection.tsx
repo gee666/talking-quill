@@ -7,9 +7,11 @@ export function PrivacySection({
   settings,
   disabled,
   onSave,
+  heading = 'Privacy & data',
 }: {
   readonly settings: Settings;
   readonly disabled: boolean;
+  readonly heading?: string | null;
   readonly onSave: (
     patch: Parameters<typeof window.talkingQuill.settings.update>[0],
     success: string,
@@ -47,13 +49,16 @@ export function PrivacySection({
       // successful invoke as the forced fallback when that event was dropped during relaunch.
       setResetAccepted(true);
     } catch {
-      setResetError('The reset could not be prepared. No application data was removed.');
+      setResetError('Nothing was deleted — the reset couldn’t start. Please try again.');
       setResetting(false);
     }
   };
 
   return (
-    <Card title="Privacy & data" description="Control local history storage and retention.">
+    <Card
+      {...(heading === null ? {} : { title: heading })}
+      description="Your dictations stay on this computer. Here you decide what gets kept, and for how long."
+    >
       <Toggle
         checked={settings.privacy.historyEnabled}
         disabled={disabled}
@@ -63,10 +68,9 @@ export function PrivacySection({
             'History preference saved.',
           )
         }
-        label="Store completed dictations in the history"
-        hint="Turning this off prevents future entries. Existing entries remain until you explicitly delete them."
+        label="Keep a history of what you dictated"
+        hint="A list on this computer of the text you dictated, so you can copy something again later. Turn it off and nothing new is saved — what you already have stays until you delete it."
       />
-      <div className="setting-divider" />
       <Toggle
         checked={settings.privacy.retainSmartScreenshots}
         disabled={disabled || !settings.privacy.historyEnabled}
@@ -76,15 +80,14 @@ export function PrivacySection({
             'Screenshot retention preference saved.',
           )
         }
-        label="Retain On-Screen Awareness screenshots"
-        hint="Off by default. When enabled, successful Smart entries keep an user-profile JPEG and thumbnail until that history entry is deleted. Screenshots are otherwise used once and never written to disk."
+        label="Keep the picture of your screen with each entry"
+        hint="Smart mode can look at your screen to understand what you are working on. Off by default: the picture is used once and never saved. Turn it on to keep it with that history entry until you delete the entry."
       />
-      <div className="setting-divider" />
       <Select
-        label="History retention"
+        label="How long to keep history"
         value={settings.privacy.historyRetentionDays?.toString() ?? 'off'}
         disabled={disabled}
-        hint="Old entries are pruned locally when Talking Quill starts. Off keeps entries until you delete them."
+        hint="Older entries are deleted from this computer when Talking Quill starts."
         onChange={(event) => {
           const value = event.currentTarget.value;
           const days = value === 'off' ? null : Number(value);
@@ -92,12 +95,11 @@ export function PrivacySection({
           void onSave({ privacy: { historyRetentionDays: days } }, 'Retention preference saved.');
         }}
       >
-        <option value="off">Off</option>
+        <option value="off">Keep until I delete it</option>
         <option value="7">7 days</option>
         <option value="30">30 days</option>
         <option value="90">90 days</option>
       </Select>
-      <div className="setting-divider" />
       <Toggle
         checked={settings.privacy.diagnosticLoggingEnabled}
         disabled={disabled}
@@ -109,16 +111,17 @@ export function PrivacySection({
               : 'Diagnostic logging disabled.',
           )
         }
-        label="Diagnostic logging"
-        hint="Off by default. Logs contain only bounded operational event codes, never audio, transcripts, screenshots, prompts, credentials, request headers, bodies, or provider responses."
+        label="Write a technical log to help with problems"
+        hint="Off by default. Only technical event names are written — never your words, audio, screenshots or keys."
       />
       <div className="setting-divider" />
       <div className="setting-action">
         <div>
-          <strong>Reset all application data</strong>
-          <p>
-            Removes settings, history, credentials, downloaded Whisper models, screenshots, logs,
-            and temporary files. It never removes Ollama or Ollama models.
+          <strong>Start over</strong>
+          <p className="body-copy">
+            Deletes everything Talking Quill keeps on this computer: your settings, your history,
+            any saved keys, the downloaded speech model, screenshots and logs. Ollama and its models
+            are left alone.
           </p>
         </div>
         <Button
@@ -130,13 +133,13 @@ export function PrivacySection({
             setResetOpen(true);
           }}
         >
-          Reset all application data
+          Delete everything
         </Button>
       </div>
       <Dialog
         open={resetOpen}
-        title="Reset all application data?"
-        description="Talking Quill will restart with first-run defaults. This cannot be undone."
+        title="Delete everything and start over?"
+        description="Your settings, history, saved keys and the downloaded speech model will be removed, and Talking Quill will restart as if it were brand new. This can’t be undone."
         onClose={closeReset}
         actions={
           <>
@@ -149,7 +152,7 @@ export function PrivacySection({
               disabled={confirmation !== RESET_CONFIRMATION}
               onClick={() => void resetAll()}
             >
-              Reset and restart
+              Delete everything and restart
             </Button>
           </>
         }
@@ -157,6 +160,7 @@ export function PrivacySection({
         <Input
           data-autofocus
           label={`Type ${RESET_CONFIRMATION} to confirm`}
+          hint="This is here so it can’t happen by accident."
           value={confirmation}
           disabled={resetting}
           autoComplete="off"
@@ -165,7 +169,7 @@ export function PrivacySection({
         />
         {resetAccepted ? (
           <p role="status" aria-live="assertive">
-            Reset accepted. Talking Quill will now relaunch.
+            Confirmed. Talking Quill will restart now.
           </p>
         ) : null}
         {resetError === null ? null : <p role="alert">{resetError}</p>}

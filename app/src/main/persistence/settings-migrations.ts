@@ -6,12 +6,14 @@ import { LegacySettingsV19Schema } from './settings-migrations/legacy-settings-v
 import { LegacySettingsV20Schema } from './settings-migrations/legacy-settings-v20';
 import { LegacySettingsV21Schema } from './settings-migrations/legacy-settings-v21';
 import { LegacySettingsV22Schema } from './settings-migrations/legacy-settings-v22';
+import { LegacySettingsV23Schema } from './settings-migrations/legacy-settings-v23';
 import {
   migrateFiveStepWelcome,
   migrateLegacy,
   migrateShortcutChords,
   migrateSettingsV21,
   migrateSettingsV22,
+  migrateSettingsV23,
   migrateRemovedLargeModel,
   migrateUnverifiedWelcome,
   stripDiagnosticLoggingField,
@@ -144,4 +146,5 @@ export const SETTINGS_MIGRATIONS: SettingsMigrations = Object.freeze({
   20: (input) => migrateShortcutChords(LegacySettingsV20Schema.parse(input)),
   21: (input) => migrateSettingsV21(LegacySettingsV21Schema.parse(input)),
   22: (input) => migrateSettingsV22(LegacySettingsV22Schema.parse(input)),
+  23: (input) => migrateSettingsV23(LegacySettingsV23Schema.parse(input)),
 });

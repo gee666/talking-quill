@@ -51,7 +51,7 @@ describe('dictation profile contracts', () => {
     expect(DEFAULT_PROMPT_TO_ENGLISH_PROFILE).toMatchObject({
       id: 'prompt-to-english',
       name: 'Prompt to English',
-      shortcut: shortcut(['X', 'P', 'E']),
+      shortcut: shortcut(['X', 'Q']),
       processingMode: 'smart',
     });
     expect(DEFAULT_PROMPT_TO_ENGLISH_PROFILE.smartPrompt).toContain(
@@ -68,7 +68,7 @@ describe('dictation profile contracts', () => {
     expect(DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE).toEqual({
       id: 'translate-to-english',
       name: 'Translate to English',
-      shortcut: shortcut(['X', 'E']),
+      shortcut: shortcut(['X', 'T']),
       processingMode: 'smart',
       smartPrompt:
         'Translate the transcript to natural English while preserving its meaning, tone, facts, names, numbers, and level of detail.',
@@ -196,6 +196,7 @@ describe('dictation profile contracts', () => {
       shortcut(['X', 'M']),
       shortcut(['X', 'E']),
       shortcut(['X', 'Q']),
+      shortcut(['X', 'T']),
     ]) {
       expect(
         DictationProfileListSchema.safeParse([

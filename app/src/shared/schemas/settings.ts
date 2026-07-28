@@ -18,7 +18,7 @@ import {
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 23 as const;
+export const SETTINGS_SCHEMA_VERSION = 24 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 

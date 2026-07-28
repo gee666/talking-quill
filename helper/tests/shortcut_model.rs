@@ -21,8 +21,9 @@ fn profile_id(index: usize) -> ProfileId {
     match index {
         0 => ProfileId::GENERAL,
         1 => ProfileId::PROMPT,
-        2 => ProfileId::MARKDOWN,
-        3 => ProfileId::TRANSLATE_TO_ENGLISH,
+        2 => ProfileId::PROMPT_TO_ENGLISH,
+        3 => ProfileId::MARKDOWN,
+        4 => ProfileId::TRANSLATE_TO_ENGLISH,
         _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
     }
 }
@@ -80,7 +81,7 @@ fn shortcut_accepts_exactly_twenty_six_unique_letters_and_rejects_twenty_seven()
 
 #[test]
 fn bindings_are_bounded_ordered_and_reject_exact_duplicates() {
-    let values: Vec<_> = (0..12)
+    let values: Vec<_> = (0..13)
         .map(|index| {
             shortcut(
                 modifiers(false, true, false, false),
@@ -95,13 +96,13 @@ fn bindings_are_bounded_ordered_and_reject_exact_duplicates() {
         .map(|(index, shortcut)| binding(index, shortcut))
         .collect();
     let bindings = ActivationBindings::new(&binding_values).unwrap();
-    assert_eq!(bindings.len(), 12);
+    assert_eq!(bindings.len(), 13);
     assert_eq!(bindings.iter().collect::<Vec<_>>(), binding_values);
 
     let mut too_many = binding_values;
     too_many.push(binding(
-        12,
-        shortcut(modifiers(false, true, false, false), &[ActivationKey::M]),
+        13,
+        shortcut(modifiers(false, true, false, false), &[ActivationKey::N]),
     ));
     assert_eq!(
         ActivationBindings::new(&too_many),
@@ -131,21 +132,23 @@ fn only_the_exact_built_in_family_allows_same_modifier_prefixes() {
     let ctrl_shift = modifiers(true, false, true, false);
     let prefix = shortcut(alt, &[ActivationKey::X]);
     let prompt = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let prompt_to_english = shortcut(alt, &[ActivationKey::X, ActivationKey::Q]);
     let markdown = shortcut(alt, &[ActivationKey::X, ActivationKey::M]);
-    let translate = shortcut(alt, &[ActivationKey::X, ActivationKey::E]);
+    let translate = shortcut(alt, &[ActivationKey::X, ActivationKey::T]);
 
     assert!(
         ActivationBindings::new(&[
             binding(0, prefix),
             binding(1, prompt),
-            binding(2, markdown),
-            binding(3, translate),
+            binding(2, prompt_to_english),
+            binding(3, markdown),
+            binding(4, translate),
         ])
         .is_ok()
     );
     for reserved in [
-        binding(4, prefix),
-        binding(4, prompt),
+        binding(5, prefix),
+        binding(5, prompt),
         binding(0, shortcut(alt, &[ActivationKey::X, ActivationKey::Q])),
     ] {
         assert_eq!(
@@ -157,13 +160,13 @@ fn only_the_exact_built_in_family_allows_same_modifier_prefixes() {
     let unrelated_prefix = shortcut(alt, &[ActivationKey::A]);
     let unrelated_longer = shortcut(alt, &[ActivationKey::A, ActivationKey::B]);
     assert_eq!(
-        ActivationBindings::new(&[binding(4, unrelated_prefix), binding(5, unrelated_longer)]),
+        ActivationBindings::new(&[binding(5, unrelated_prefix), binding(6, unrelated_longer)]),
         Err(ShortcutValidationError::PrefixConflict),
     );
 
     let different_modifiers = shortcut(ctrl_shift, &[ActivationKey::X, ActivationKey::P]);
     assert!(
-        ActivationBindings::new(&[binding(0, prefix), binding(4, different_modifiers)]).is_ok()
+        ActivationBindings::new(&[binding(0, prefix), binding(5, different_modifiers)]).is_ok()
     );
 }
 
@@ -185,6 +188,13 @@ fn bindings_wire_value_contains_strict_profile_id_and_shortcut_objects() {
             }
         },
         {
+            "profileId": "prompt-to-english",
+            "shortcut": {
+                "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
+                "keys": ["X", "Q"]
+            }
+        },
+        {
             "profileId": "markdown",
             "shortcut": {
                 "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
@@ -195,7 +205,7 @@ fn bindings_wire_value_contains_strict_profile_id_and_shortcut_objects() {
             "profileId": "translate-to-english",
             "shortcut": {
                 "modifiers": {"ctrl": false, "alt": true, "shift": false, "meta": false},
-                "keys": ["X", "E"]
+                "keys": ["X", "T"]
             }
         }
     ]);

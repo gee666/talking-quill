@@ -28,8 +28,9 @@ fn test_binding(index: usize, shortcut: Shortcut) -> ActivationBinding {
         match shortcut.keys() {
             [ActivationKey::X] => ProfileId::GENERAL,
             [ActivationKey::X, ActivationKey::P] => ProfileId::PROMPT,
+            [ActivationKey::X, ActivationKey::Q] => ProfileId::PROMPT_TO_ENGLISH,
             [ActivationKey::X, ActivationKey::M] => ProfileId::MARKDOWN,
-            [ActivationKey::X, ActivationKey::E] => ProfileId::TRANSLATE_TO_ENGLISH,
+            [ActivationKey::X, ActivationKey::T] => ProfileId::TRANSLATE_TO_ENGLISH,
             _ => indexed_profile_id(index),
         }
     } else {
@@ -42,8 +43,9 @@ fn indexed_profile_id(index: usize) -> ProfileId {
     match index {
         0 => ProfileId::GENERAL,
         1 => ProfileId::PROMPT,
-        2 => ProfileId::MARKDOWN,
-        3 => ProfileId::TRANSLATE_TO_ENGLISH,
+        2 => ProfileId::PROMPT_TO_ENGLISH,
+        3 => ProfileId::MARKDOWN,
+        4 => ProfileId::TRANSLATE_TO_ENGLISH,
         _ => ProfileId::new(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap(),
     }
 }
@@ -101,7 +103,7 @@ fn translate_to_english_binding_keeps_its_exact_full_chord_ownership() {
         shortcut(alt, &[ActivationKey::X]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
-        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
     ];
     let configured = bindings(&family);
     let binding = ActivationBinding::new(ProfileId::TRANSLATE_TO_ENGLISH, family[3]);
@@ -121,7 +123,7 @@ fn translate_to_english_binding_keeps_its_exact_full_chord_ownership() {
     assert_eq!(
         step(
             &mut reducer,
-            letter(ActivationKey::E, KeyPhase::Down, alt),
+            letter(ActivationKey::T, KeyPhase::Down, alt),
             configured,
             true,
             false,
@@ -145,7 +147,7 @@ fn canonical_general_prefix_completes_on_release_with_physical_hold_duration() {
         general,
         shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
-        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
     ]);
     let binding = ActivationBinding::new(ProfileId::GENERAL, general);
     let mut reducer = KeyboardReducer::default();
@@ -183,6 +185,50 @@ fn canonical_general_prefix_completes_on_release_with_physical_hold_duration() {
 }
 
 #[test]
+fn canonical_prompt_has_an_unambiguous_single_suffix() {
+    let alt = modifiers(false, true, false, false);
+    let prompt = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
+    let configured = bindings(&[
+        shortcut(alt, &[ActivationKey::X]),
+        prompt,
+        shortcut(alt, &[ActivationKey::X, ActivationKey::Q]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
+    ]);
+    let binding = ActivationBinding::new(ProfileId::PROMPT, prompt);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false)
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::P, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (
+            Some(HelperEvent::Activation {
+                binding,
+                phase: EventPhase::Down,
+            }),
+            true,
+        )
+    );
+}
+
+#[test]
 fn canonical_general_prefix_survives_modifier_release_before_x_release() {
     let alt = modifiers(false, true, false, false);
     let general = shortcut(alt, &[ActivationKey::X]);
@@ -190,7 +236,7 @@ fn canonical_general_prefix_survives_modifier_release_before_x_release() {
         general,
         shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
-        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
     ]);
     let binding = ActivationBinding::new(ProfileId::GENERAL, general);
     let mut reducer = KeyboardReducer::default();
@@ -236,7 +282,7 @@ fn canonical_general_prefix_is_cancelled_when_a_modifier_is_added() {
         general,
         shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
-        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
     ]);
 
     for added in [
@@ -281,7 +327,7 @@ fn canonical_general_prefix_is_cancelled_when_alt_is_readded() {
         general,
         shortcut(alt, &[ActivationKey::X, ActivationKey::P]),
         shortcut(alt, &[ActivationKey::X, ActivationKey::M]),
-        shortcut(alt, &[ActivationKey::X, ActivationKey::E]),
+        shortcut(alt, &[ActivationKey::X, ActivationKey::T]),
     ]);
     let mut reducer = KeyboardReducer::default();
 

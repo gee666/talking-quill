@@ -11,12 +11,17 @@ import { ModelSetup } from '../setup/ModelSetup';
 export function TranscriptionModelSection({
   settings,
   onSettingsSaved,
+  heading = 'Transcription model',
 }: {
   readonly settings: Settings;
   readonly onSettingsSaved: (settings: Settings) => void;
+  readonly heading?: string | null;
 }) {
   return (
-    <Card title="Transcription model" description="Download and manage the local Whisper model.">
+    <Card
+      {...(heading === null ? {} : { title: heading })}
+      description="This is what turns your voice into text. You download it once, then it works on this computer without internet."
+    >
       <ModelSetup settings={settings} onSettingsSaved={onSettingsSaved} />
       <div className="setting-divider" />
       <TranscriptionLanguageSetting settings={settings} onSettingsSaved={onSettingsSaved} />
@@ -64,12 +69,12 @@ export function TranscriptionLanguageSetting({
       if (!mounted.current || operation !== saveSequence.current) return;
       onSettingsSaved(saved);
       setDraft(saved.transcription.language);
-      setMessage('Source language saved.');
+      setMessage('Language saved.');
     } catch {
       if (!mounted.current || operation !== saveSequence.current) return;
       // The parent settings event/bootstrap remains authoritative after a rejected write.
       setDraft(authoritative);
-      setMessage('The source language could not be saved. Your previous value was restored.');
+      setMessage('That language couldn’t be saved, so your previous choice is still in use.');
     } finally {
       if (mounted.current && operation === saveSequence.current) setSaving(false);
     }
@@ -78,27 +83,30 @@ export function TranscriptionLanguageSetting({
   return (
     <>
       <Select
-        label="Spoken/source language"
+        label="Language you speak"
         value={draft}
-        hint="Auto-detect transcribes the language spoken in the audio without translating it. Choose a language only to provide an explicit source-language hint."
         disabled={saving}
         onChange={(event) => {
           setDraft(event.currentTarget.value as WhisperLanguage);
           setMessage(null);
         }}
       >
-        <option value={WHISPER_AUTO_LANGUAGE}>Auto-detect (recommended)</option>
+        <option value={WHISPER_AUTO_LANGUAGE}>Detect it automatically (recommended)</option>
         {WHISPER_SOURCE_LANGUAGES.map(([code, name]) => (
           <option key={code} value={code}>
             {name} ({code})
           </option>
         ))}
       </Select>
-      <Button disabled={saving || draft === authoritative} onClick={() => void saveLanguage()}>
-        {saving ? 'Saving source language' : 'Save source language'}
+      <Button
+        className="language-save-button"
+        disabled={saving || draft === authoritative}
+        onClick={() => void saveLanguage()}
+      >
+        {saving ? 'Saving language' : 'Save language'}
       </Button>
       {message === null ? null : (
-        <Status tone={message.includes('could not') ? 'error' : 'success'} live>
+        <Status tone={message.includes('couldn’t') ? 'error' : 'success'} live>
           {message}
         </Status>
       )}

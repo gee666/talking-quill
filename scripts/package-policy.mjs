@@ -202,6 +202,8 @@ const REQUIRED_RENDERER_CHUNKS = Object.freeze([
   ['audio', 'js'],
   ['echo-session', 'js'],
   ['echo-session', 'css'],
+  ['Dialog', 'js'],
+  ['HistoryScreen', 'js'],
   ['InfoScreen', 'js'],
   ['SettingsScreen', 'js'],
   ['SmartProcessingSection', 'js'],

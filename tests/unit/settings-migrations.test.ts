@@ -9,7 +9,11 @@ import {
   LEGACY_DEFAULT_PROMPT_PROFILE_V21,
   LegacySettingsV21Schema,
 } from '../../app/src/main/persistence/settings-migrations/legacy-settings-v21';
-import { SETTINGS_SCHEMA_VERSION, SettingsSchema } from '../../app/src/shared/schemas/settings';
+import {
+  DEFAULT_SETTINGS,
+  SETTINGS_SCHEMA_VERSION,
+  SettingsSchema,
+} from '../../app/src/shared/schemas/settings';
 import { normalizeWhisperSourceLanguage } from '../../app/src/shared/schemas/whisper-languages';
 
 interface RawFixture {
@@ -30,15 +34,15 @@ const RAW_FIXTURES = [...PRIMARY_RAW_FIXTURES, ...readRawFixtures('legacy-forked
 function migrateV21ToCurrent(input: Readonly<Record<string, unknown>>) {
   const v22 = SETTINGS_MIGRATIONS[21]?.(input);
   if (typeof v22 !== 'object' || v22 === null) throw new Error('V21 migration did not emit v22');
-  return SettingsSchema.parse(
-    SETTINGS_MIGRATIONS[22]?.(v22 as Readonly<Record<string, unknown>>),
-  );
+  const v23 = SETTINGS_MIGRATIONS[22]?.(v22 as Readonly<Record<string, unknown>>);
+  if (typeof v23 !== 'object' || v23 === null) throw new Error('V22 migration did not emit v23');
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>));
 }
 
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 22 }, (_, index) => index + 1),
+      Array.from({ length: 23 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
@@ -66,7 +70,7 @@ describe('frozen settings migrations', () => {
     });
 
     const current = migrateV21ToCurrent(v21);
-    expect(current.schemaVersion).toBe(23);
+    expect(current.schemaVersion).toBe(24);
     expect(current.transcription.language).toBe('fr');
     expect(current.dictationProfiles.map(({ id }) => id)).toEqual([
       'general',
@@ -76,6 +80,39 @@ describe('frozen settings migrations', () => {
       'translate-to-english',
       '11111111-1111-4111-8111-111111111111',
     ]);
+  });
+
+  it('moves only the old English built-in defaults to unambiguous one-letter suffixes', () => {
+    const source = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    source.schemaVersion = 23;
+    const profiles = source.dictationProfiles;
+    if (!Array.isArray(profiles)) throw new Error('Missing v23 profiles');
+    const profileValues = profiles as unknown[];
+    const promptToEnglish = profileValues.find(
+      (profile) => readRecord(profile)?.id === 'prompt-to-english',
+    );
+    const translateToEnglish = profileValues.find(
+      (profile) => readRecord(profile)?.id === 'translate-to-english',
+    );
+    if (!isRecord(promptToEnglish) || !isRecord(translateToEnglish)) {
+      throw new Error('Missing English built-in profiles');
+    }
+    (promptToEnglish as Record<string, unknown>).shortcut = {
+      modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+      keys: ['X', 'P', 'E'],
+    };
+    (translateToEnglish as Record<string, unknown>).shortcut = {
+      modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+      keys: ['X', 'E'],
+    };
+
+    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[23]?.(source));
+    expect(
+      migrated.dictationProfiles.find(({ id }) => id === 'prompt-to-english')?.shortcut.keys,
+    ).toEqual(['X', 'Q']);
+    expect(
+      migrated.dictationProfiles.find(({ id }) => id === 'translate-to-english')?.shortcut.keys,
+    ).toEqual(['X', 'T']);
   });
 
   it('upgrades privacy-safe v21 defaults without enabling Smart for a completed cloud setup', () => {

@@ -8,10 +8,7 @@ import {
   IDLE_ACTIVATION_TEST,
   type ActivationTestState,
 } from '../../shared/schemas/activation-test';
-import {
-  DEFAULT_GENERAL_PROFILE,
-  type DictationProfile,
-} from '../../shared/schemas/dictation-profiles';
+import type { DictationProfile } from '../../shared/schemas/dictation-profiles';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 
 type ActivationNotification = Extract<HelperNotification, { method: 'activation.event' }>;
@@ -115,13 +112,7 @@ export class ActivationTestController {
   accept(notification: ActivationNotification, profiles: readonly DictationProfile[]): void {
     const now = Date.now();
     if (notification.params.phase === 'complete') {
-      if (
-        this.#pressedBinding !== null ||
-        notification.params.profileId !== DEFAULT_GENERAL_PROFILE.id ||
-        !shortcutsEqual(notification.params.shortcut, DEFAULT_GENERAL_PROFILE.shortcut)
-      ) {
-        return;
-      }
+      if (this.#pressedBinding !== null) return;
       const profile = profiles.find(
         (candidate) =>
           candidate.id === notification.params.profileId &&

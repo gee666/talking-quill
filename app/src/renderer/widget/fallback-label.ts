@@ -35,17 +35,24 @@ export function piFallbackLabel(category: PiFallbackCategory | null): string | n
 
 export interface WidgetPresentation {
   readonly heading: string;
-  readonly badge: 'Raw' | 'Smart';
+  readonly badge: 'Raw' | 'Smart' | 'Error';
   readonly secondary: string;
 }
 
 export function widgetPresentation(session: EchoSessionSnapshot): WidgetPresentation {
+  if (session.phase === 'error') {
+    return {
+      heading: 'Could not complete',
+      badge: 'Error',
+      secondary: session.message ?? 'Talking Quill encountered an error.',
+    };
+  }
   const rawFallback =
     session.message === 'Falling back to raw' ||
     session.fallbackCategory !== null ||
     session.abortReason === 'provider-error' ||
     session.abortReason === 'timeout';
-  const fallbackApplied = rawFallback && session.phase !== 'cancelled' && session.phase !== 'error';
+  const fallbackApplied = rawFallback && session.phase !== 'cancelled';
   if (session.message === 'Cancelling insertion' && session.phase !== 'cancelled') {
     return {
       heading: 'Cancelling',
@@ -102,13 +109,13 @@ function normalSecondary(session: EchoSessionSnapshot): string {
   if (session.phase === 'cancelled') return 'Talking Quill';
   if (session.message !== null) return session.message;
   if (session.phase === 'arming') {
-    return 'Release the final trigger for Quick Dictation or keep it held';
+    return 'Let go for a quick note, or keep holding for a longer one';
   }
   if (session.phase === 'recordingQuick') {
-    return 'Pause or press Enter to submit; press Escape to cancel';
+    return 'Stop talking or press Enter when you are done; Escape cancels';
   }
   if (session.phase === 'recordingExtended') {
-    return 'Press the full shortcut chord to stop or Escape to cancel';
+    return 'Press Enter or your shortcut again to finish; Escape cancels';
   }
   return 'Talking Quill';
 }

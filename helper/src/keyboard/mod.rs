@@ -174,7 +174,7 @@ pub enum ShortcutValidationError {
     MissingModifier,
     #[error("shortcut keys must be unique")]
     DuplicateKey,
-    #[error("profile ID must be general, prompt, markdown, translate-to-english, or an RFC UUID")]
+    #[error("profile ID must be a known built-in profile or an RFC UUID")]
     InvalidProfileId,
     #[error("activation supports at most 12 bindings")]
     TooManyBindings,
@@ -314,6 +314,7 @@ impl ProfileId {
     pub const MAX_BYTES: usize = 36;
     pub const GENERAL: Self = Self::built_in(b"general");
     pub const PROMPT: Self = Self::built_in(b"prompt");
+    pub const PROMPT_TO_ENGLISH: Self = Self::built_in(b"prompt-to-english");
     pub const MARKDOWN: Self = Self::built_in(b"markdown");
     pub const TRANSLATE_TO_ENGLISH: Self = Self::built_in(b"translate-to-english");
 
@@ -333,6 +334,7 @@ impl ProfileId {
     pub fn new(value: &str) -> Result<Self, ShortcutValidationError> {
         if value != "general"
             && value != "prompt"
+            && value != "prompt-to-english"
             && value != "markdown"
             && value != "translate-to-english"
             && !valid_uuid(value.as_bytes())
@@ -428,7 +430,7 @@ impl ActivationBinding {
     }
 }
 
-/// At most twelve validated profile-owned shortcuts in deterministic wire order.
+/// At most thirteen validated profile-owned shortcuts in deterministic wire order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActivationBindings {
     bindings: [ActivationBinding; Self::MAX],
@@ -436,7 +438,7 @@ pub struct ActivationBindings {
 }
 
 impl ActivationBindings {
-    pub const MAX: usize = 12;
+    pub const MAX: usize = 13;
     const EMPTY_BINDING: ActivationBinding =
         ActivationBinding::new(ProfileId::GENERAL, Shortcut::EMPTY);
 
@@ -573,9 +575,12 @@ fn is_built_in_default_binding(binding: ActivationBinding) -> bool {
     match binding.profile_id {
         ProfileId::GENERAL => binding.shortcut.keys() == [ActivationKey::X],
         ProfileId::PROMPT => binding.shortcut.keys() == [ActivationKey::X, ActivationKey::P],
+        ProfileId::PROMPT_TO_ENGLISH => {
+            binding.shortcut.keys() == [ActivationKey::X, ActivationKey::Q]
+        }
         ProfileId::MARKDOWN => binding.shortcut.keys() == [ActivationKey::X, ActivationKey::M],
         ProfileId::TRANSLATE_TO_ENGLISH => {
-            binding.shortcut.keys() == [ActivationKey::X, ActivationKey::E]
+            binding.shortcut.keys() == [ActivationKey::X, ActivationKey::T]
         }
         _ => false,
     }

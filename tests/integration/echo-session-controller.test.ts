@@ -214,10 +214,12 @@ function fixture(
     options.insert ?? (() => Promise.resolve({ inserted: true, copied: false })),
   );
   const insertion = { insert } as unknown as InsertionService;
-  const showWidget = vi.fn();
+  const showWidget = vi.fn(() => true);
+  const showMain = vi.fn();
   const windows = {
     showWidget,
     hideWidget: vi.fn(),
+    showMain,
   } as unknown as WindowManager;
   const events = { send: vi.fn() } as unknown as IpcEventEmitter;
   const sound = vi.fn();
@@ -258,6 +260,7 @@ function fixture(
       finish,
       cancelStream,
       showWidget,
+      showMain,
       sound,
       historyRecord,
     },
@@ -384,6 +387,36 @@ describe('EchoSessionController integration', () => {
 
     expect(laterSubscriber).toHaveBeenCalled();
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
+  });
+
+  it('shows an actionable widget error when native shortcut registration fails', async () => {
+    vi.useFakeTimers();
+    const test = fixture({
+      configureActivation: () => Promise.reject(new Error('invalid native bindings')),
+    });
+
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
+    expect(test.controller.snapshot.message).toBe(
+      'Keyboard shortcuts could not be enabled. Restart Talking Quill or reinstall the app.',
+    );
+    expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
+    await test.controller.shutdown();
+  });
+
+  it('shows the main window when an error widget renderer is unavailable', async () => {
+    const test = fixture();
+    await settle();
+    test.spies.showWidget.mockReturnValue(false);
+
+    test.setHelperReadiness({
+      status: 'unavailable',
+      reason: 'hook-fault',
+      helperVersion: '1.0.0',
+      permissions: test.helper.readiness.permissions,
+    });
+
+    expect(test.controller.snapshot.phase).toBe('error');
+    expect(test.spies.showMain).toHaveBeenCalledOnce();
   });
 
   it('disables native activation during shortcut capture and restores the latest bindings', async () => {
@@ -1012,6 +1045,41 @@ describe('EchoSessionController integration', () => {
     );
   });
 
+  it('preserves a committed insertion before showing a later helper failure', async () => {
+    vi.useFakeTimers();
+    const restoration = deferred<undefined>();
+    const test = fixture({
+      insert: async (_text, _signal, onCommitted) => {
+        onCommitted?.();
+        await restoration.promise;
+        return { inserted: true, copied: false };
+      },
+    });
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    test.frame();
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('restoringClipboard'));
+
+    test.setHelperReadiness({
+      status: 'unavailable',
+      reason: 'hook-fault',
+      helperVersion: '1.0.0',
+      permissions: test.helper.readiness.permissions,
+    });
+    expect(test.controller.snapshot.phase).toBe('restoringClipboard');
+
+    restoration.resolve(undefined);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.controller.snapshot.message).toBe('Inserted');
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'Keyboard shortcuts are unavailable. Restart Talking Quill or reinstall the app.',
+    });
+    await test.controller.shutdown();
+  });
+
   it('does not erase or misclassify committed command history when restoration fails', async () => {
     const command = {
       id: '11111111-1111-4111-8111-111111111111',
@@ -1416,13 +1484,13 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.setSessionCapture).toHaveBeenLastCalledWith(false);
   });
 
-  it('rejects an atomic completion for any binding other than exact General default', async () => {
+  it('accepts an atomic completion for an exact built-in prefix binding', async () => {
     const test = fixture();
     test.notify(activationComplete(100, DEFAULT_PROMPT_PROFILE.shortcut, 'prompt'));
-    await settle();
-    expect(test.controller.snapshot.phase).toBe('idle');
-    expect(test.spies.startDictation).not.toHaveBeenCalled();
-    expect(test.spies.setSessionCapture).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('recordingQuick'));
+    expect(test.controller.snapshot.processingMode).toBe('smart');
+    expect(test.spies.startDictation).toHaveBeenCalledOnce();
+    test.controller.cancel();
   });
 
   it.each([

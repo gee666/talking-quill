@@ -18,6 +18,29 @@
   display: grid;
   gap: 2px;
 }
+/* The rail is only 176px wide: the search field must always be stacked and
+   full width, whatever layout the screen passes to `Input`. */
+.settings-rail .me-field {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--space-1);
+  width: 100%;
+}
+.settings-rail .me-field > * {
+  grid-column: 1;
+  grid-row: auto;
+}
+.settings-rail .me-field__label {
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.settings-rail .me-field__control {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
 .settings-panel {
   display: grid;
   gap: var(--space-5);
@@ -35,13 +58,54 @@
   gap: var(--space-2);
   min-width: 0;
 }
-.settings-domain__form--row {
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
+.settings-preview-card {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-raised);
+  box-shadow: var(--shadow-1);
 }
-.settings-domain__preview {
+.settings-preview-card h3 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.inline-field-action {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  align-items: start;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+.inline-field-action > .me-field {
+  display: contents;
+}
+.inline-field-action > .me-field > .me-field__label {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+.inline-field-action > .me-field > .me-field__control {
+  grid-column: 1;
+  grid-row: 2;
+}
+.inline-field-action > .me-field > :is(.me-field__hint, .me-field__error) {
+  grid-column: 1 / -1;
+}
+.inline-field-action__actions {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: start;
+}
+.language-save-button {
+  display: inline-flex;
+  justify-content: center;
+  justify-self: start;
+  width: fit-content;
+  min-width: 9rem;
+  text-align: center;
 }
 .settings-results {
   display: grid;
@@ -49,14 +113,10 @@
 }
 
 /* ========================================================== Gesture test */
+/* The shell itself is the `.panel` rule set in `design/components.css`; the
+   user asked to keep this block and the profile editor bordered. */
 .gesture-test {
-  display: grid;
-  gap: var(--space-2);
   justify-items: start;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
 }
 .gesture-test strong {
   font-size: var(--fs-md);
@@ -73,34 +133,18 @@ fieldset.gesture-test {
   justify-items: stretch;
   margin: 0;
 }
+fieldset.gesture-test + fieldset.gesture-test {
+  margin-top: var(--space-3);
+}
 fieldset.gesture-test > * + * {
   margin-top: var(--space-2);
 }
 fieldset.gesture-test > .me-field--row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 240px);
-  align-items: center;
-  gap: var(--space-1) var(--space-3);
   min-height: var(--row-height);
-}
-fieldset.gesture-test > .me-field--row > .me-field__label {
-  grid-column: 1;
-  grid-row: 1;
-  color: var(--color-text);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  letter-spacing: 0;
-}
-fieldset.gesture-test > .me-field--row > .me-field__control {
-  grid-column: 2;
-  grid-row: 1;
 }
 fieldset.gesture-test > .me-field--row > input[readonly] {
   cursor: text;
   font-family: var(--font-mono);
-}
-fieldset.gesture-test > .me-field--row > .me-field__hint,
-fieldset.gesture-test > .me-field--row > .me-field__error {
-  grid-column: 1 / -1;
 }
 fieldset.gesture-test > legend {
   padding-inline: var(--space-1);
@@ -137,8 +181,9 @@ fieldset.gesture-test > div:not(.me-field) {
   background: var(--color-error-soft);
 }
 .permission-guidance p {
+  max-width: var(--measure);
   margin: 0;
-  color: var(--color-secondary);
+  color: var(--color-text);
   font-size: var(--fs-sm);
 }
 
@@ -254,16 +299,17 @@ fieldset.gesture-test > div:not(.me-field) {
 .credential-panel__heading {
   justify-content: space-between;
 }
+/* Ordinary content: no border, no fill. Hierarchy comes from spacing. */
 .provider-form,
 .credential-panel,
 .connection-panel,
 .provider-pending {
   display: grid;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .provider-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -285,9 +331,10 @@ fieldset.gesture-test > div:not(.me-field) {
 .credential-panel p,
 .connection-panel p,
 .provider-pending p {
+  max-width: var(--measure);
   margin: 0;
   color: var(--color-secondary);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
 }
 .vision-test-code {
   padding: var(--space-3);
@@ -321,9 +368,19 @@ fieldset.gesture-test > div:not(.me-field) {
   .provider-form > * {
     grid-column: 1;
   }
-  .settings-domain__form--row,
-  .settings-domain__preview {
-    grid-template-columns: 1fr;
+  .inline-field-action {
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+  }
+  .inline-field-action > .me-field {
+    display: grid;
+  }
+  .inline-field-action > .me-field > * {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .inline-field-action__actions {
+    grid-column: 1;
+    grid-row: auto;
   }
 }

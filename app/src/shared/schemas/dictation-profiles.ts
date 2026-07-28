@@ -36,9 +36,9 @@ export const DictationProfileSmartPromptSchema = z.string().trim().max(4_096).nu
 
 export const DEFAULT_GENERAL_SHORTCUT = builtInAltShortcut(['X']);
 export const DEFAULT_PROMPT_SHORTCUT = builtInAltShortcut(['X', 'P']);
-export const DEFAULT_PROMPT_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'P', 'E']);
+export const DEFAULT_PROMPT_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'Q']);
 export const DEFAULT_MARKDOWN_SHORTCUT = builtInAltShortcut(['X', 'M']);
-export const DEFAULT_TRANSLATE_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'E']);
+export const DEFAULT_TRANSLATE_TO_ENGLISH_SHORTCUT = builtInAltShortcut(['X', 'T']);
 
 export const BUILT_IN_DICTATION_PROFILE_METADATA = deepFreeze([
   {

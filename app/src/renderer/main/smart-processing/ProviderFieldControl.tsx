@@ -6,15 +6,22 @@ import type {
 } from '../../../shared/schemas/providers';
 import type { ProviderSettingsDraft } from '../../../shared/schemas/settings';
 import { Button, Input, Select, Status } from '../../design';
-import type { RequestState } from './provider-utils';
+import { formatOperationElapsed, type RequestState } from './provider-utils';
 
 const MAX_VISIBLE_MODELS = 200;
+
+/**
+ * Sentinel option value that switches the single model select into free-text entry. It contains a
+ * NUL so it can never collide with a real model id (Ollama model names are user-chosen).
+ */
+export const CUSTOM_MODEL_OPTION = '\u0000custom-model';
 
 export function ProviderFieldControl({
   field,
   value,
   models,
   modelState,
+  modelElapsedMs,
   modelDiscovery,
   error,
   controlsDisabled,
@@ -27,6 +34,7 @@ export function ProviderFieldControl({
   readonly value: ProviderSettingsDraft[keyof ProviderSettingsDraft];
   readonly models: readonly ModelInfo[];
   readonly modelState: RequestState;
+  readonly modelElapsedMs: number;
   readonly modelDiscovery: ProviderCatalogEntry['modelDiscovery'];
   readonly error?: string | undefined;
   readonly controlsDisabled: boolean;
@@ -35,15 +43,14 @@ export function ProviderFieldControl({
   readonly onDiscover: () => void;
   readonly onCancel: () => void;
 }) {
-  const [manualModelEntry, setManualModelEntry] = useState(false);
+  const [customChosen, setCustomChosen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const modelValue = typeof value === 'string' ? value : '';
-  const selectedOutsideCatalog =
+  const outsideCatalog =
     field.kind === 'model' &&
     modelValue.length > 0 &&
     !models.some((model) => model.id === modelValue);
-  const showManualEntry =
-    field.kind === 'model' && (models.length === 0 || manualModelEntry || selectedOutsideCatalog);
+  const customMode = field.kind === 'model' && (customChosen || outsideCatalog);
   const visibleModels = useMemo(() => {
     if (field.kind !== 'model') return [];
     const query = modelSearch.trim().toLocaleLowerCase();
@@ -59,9 +66,9 @@ export function ProviderFieldControl({
   }, [field.kind, modelSearch, modelValue, models]);
 
   if (field.kind === 'model') {
-    return (
-      <div className="model-field">
-        {showManualEntry ? (
+    if (modelDiscovery === 'azure-deployment') {
+      return (
+        <div className="model-field stack">
           <Input
             label={field.label}
             required={field.required}
@@ -69,88 +76,107 @@ export function ProviderFieldControl({
             placeholder={field.placeholder}
             error={error}
             disabled={controlsDisabled}
-            hint="Enter the exact provider/model ID. Discovery never clears a manual selection."
+            hint="Type the deployment name exactly as you created it in Azure."
             onChange={(event) => onChange(event.currentTarget.value)}
           />
-        ) : (
-          <>
-            {models.length > MAX_VISIBLE_MODELS ? (
-              <Input
-                type="search"
-                label="Search discovered models"
-                value={modelSearch}
-                disabled={controlsDisabled}
-                hint={`Showing at most ${String(MAX_VISIBLE_MODELS)} matching models.`}
-                onChange={(event) => setModelSearch(event.currentTarget.value)}
-              />
-            ) : null}
-            <Select
-              label={field.label}
-              required={field.required}
-              value={modelValue}
-              error={error}
-              disabled={controlsDisabled}
-              onChange={(event) => onChange(event.currentTarget.value)}
-            >
-              <option value="">Select a discovered model</option>
-              {visibleModels.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </Select>
-          </>
-        )}
-        {models.length > 0 ? (
+          <Status tone="info">
+            Azure keeps its deployment list behind a separate management login, so Talking Quill
+            cannot list them for you.
+          </Status>
+        </div>
+      );
+    }
+
+    // The surrounding section already explains that a provider-managed service picks its own model.
+    if (modelDiscovery === 'provider-managed') return null;
+
+    const discovering = modelState === 'loading';
+    const selectValue = customMode ? CUSTOM_MODEL_OPTION : modelValue;
+    const searchNeeded = !customMode && models.length > MAX_VISIBLE_MODELS;
+
+    return (
+      <div className="model-field stack">
+        {discovering ? (
+          <Status tone="info" live>
+            Looking for available models… {formatOperationElapsed(modelElapsedMs)}
+          </Status>
+        ) : null}
+        {searchNeeded ? (
+          <Input
+            type="search"
+            label="Search models"
+            value={modelSearch}
+            disabled={controlsDisabled}
+            hint={`There are a lot of models here. Type to narrow the list down to ${String(MAX_VISIBLE_MODELS)} at a time.`}
+            onChange={(event) => setModelSearch(event.currentTarget.value)}
+          />
+        ) : null}
+        <Select
+          label={field.label}
+          required={field.required}
+          value={selectValue}
+          hint={field.description}
+          error={customMode ? undefined : error}
+          disabled={controlsDisabled}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            if (next === CUSTOM_MODEL_OPTION) {
+              setCustomChosen(true);
+              return;
+            }
+            setCustomChosen(false);
+            setModelSearch('');
+            onChange(next);
+          }}
+        >
+          {selectValue === '' ? <option value="">Choose a model…</option> : null}
+          {visibleModels.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.name}
+            </option>
+          ))}
+          <option value={CUSTOM_MODEL_OPTION}>Type a model name myself…</option>
+        </Select>
+        {customMode ? (
+          <Input
+            label={`${field.label} name`}
+            required={field.required}
+            value={modelValue}
+            placeholder={field.placeholder}
+            error={error}
+            disabled={controlsDisabled}
+            hint="Type the exact model name, for example llama3.1:8b."
+            onChange={(event) => {
+              // Typing here keeps free-text mode until a real option is picked, so an arriving
+              // catalogue cannot swap this control for the picker mid-keystroke.
+              setCustomChosen(true);
+              onChange(event.currentTarget.value);
+            }}
+          />
+        ) : null}
+        <div className="provider-actions">
           <Button
             variant="quiet"
-            disabled={controlsDisabled}
-            onClick={() => {
-              setModelSearch('');
-              if (showManualEntry) {
-                if (selectedOutsideCatalog) onChange('');
-                setManualModelEntry(false);
-              } else {
-                setManualModelEntry(true);
-              }
-            }}
+            busy={discovering}
+            disabled={controlsDisabled || operationsDisabled}
+            onClick={onDiscover}
           >
-            {showManualEntry ? 'Choose a discovered model' : 'Enter model ID manually'}
+            Refresh list
           </Button>
-        ) : null}
-        {modelDiscovery === 'remote' ? (
-          <div className="provider-actions">
-            <Button
-              variant="secondary"
-              busy={modelState === 'loading'}
-              disabled={controlsDisabled || operationsDisabled}
-              onClick={onDiscover}
-            >
-              {modelState === 'error' || modelState === 'cancelled'
-                ? 'Retry discovery'
-                : 'Discover models'}
+          {discovering ? (
+            <Button variant="quiet" onClick={onCancel}>
+              Stop searching
             </Button>
-            {modelState === 'loading' ? (
-              <Button variant="quiet" onClick={onCancel}>
-                Cancel discovery
-              </Button>
-            ) : null}
-            {modelState === 'empty' ? <Status tone="warning">No models found</Status> : null}
-            {modelState === 'success' ? (
-              <Status tone="success">
-                {String(models.length)} {models.length === 1 ? 'model' : 'models'} found
-              </Status>
-            ) : null}
-          </div>
-        ) : modelDiscovery === 'azure-deployment' ? (
-          <Status tone="info">
-            Deployment discovery requires Azure management-plane credentials.
-          </Status>
-        ) : (
-          <Status tone="info">
-            This provider uses its currently loaded model; Talking Quill does not select one.
-          </Status>
-        )}
+          ) : null}
+          {modelState === 'empty' ? (
+            <Status tone="warning">No models found — you can type a name instead.</Status>
+          ) : null}
+          {modelState === 'success' ? (
+            <Status tone="success">
+              {String(models.length)} {models.length === 1 ? 'model' : 'models'} found
+            </Status>
+          ) : null}
+        </div>
       </div>
     );
   }

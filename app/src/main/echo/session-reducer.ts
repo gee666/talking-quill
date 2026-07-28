@@ -51,6 +51,7 @@ export type EchoSessionEvent =
   | { readonly type: 'insertion-cancelled' }
   | { readonly type: 'inserted'; readonly copied: boolean }
   | { readonly type: 'fail'; readonly message: string; readonly transcript?: string }
+  | { readonly type: 'operational-failure'; readonly message: string }
   | { readonly type: 'reset' };
 
 export type EchoSessionEffect =
@@ -93,6 +94,10 @@ export function reduceEchoSession(
   event: EchoSessionEvent,
 ): EchoTransition {
   if (event.type === 'reset') return transition(IDLE_ECHO_SESSION);
+  if (event.type === 'operational-failure') {
+    if (state.phase !== 'idle') return transition(state);
+    return transition({ ...IDLE_ECHO_SESSION, phase: 'error', message: event.message });
+  }
   if (event.type === 'shortcut-down') {
     if (state.phase !== 'idle') {
       if (isRecording(state.phase))

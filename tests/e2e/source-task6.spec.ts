@@ -256,7 +256,9 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
 
     // Renderer capture retains physical held-key order and leaves Tab navigation available.
     await main.getByRole('button', { name: 'Dictation profiles' }).click();
-    const shortcutInput = main.getByRole('textbox', { name: 'General keyboard shortcut' });
+    // Profile fields are now labelled generically and scoped by the profile fieldset legend.
+    const generalProfile = main.getByRole('group', { name: 'General', exact: true });
+    const shortcutInput = generalProfile.getByRole('textbox', { name: 'Shortcut', exact: true });
     await shortcutInput.focus();
     await expect(shortcutInput).not.toHaveAttribute('aria-busy', 'true');
     await main.keyboard.down('Alt');
@@ -267,21 +269,23 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await main.keyboard.up('y');
     await main.keyboard.up('Alt');
     await main.keyboard.press('Shift+Tab');
-    await expect(main.getByRole('textbox', { name: 'General profile name' })).toBeFocused();
+    await expect(generalProfile.getByRole('textbox', { name: 'Name', exact: true })).toBeFocused();
     await shortcutInput.focus();
     await expect(shortcutInput).not.toHaveAttribute('aria-busy', 'true');
     await main.keyboard.press('Tab');
-    await expect(main.getByRole('combobox', { name: 'General processing mode' })).toBeFocused();
+    await expect(
+      generalProfile.getByRole('combobox', { name: 'What happens to your words', exact: true }),
+    ).toBeFocused();
     await main.getByRole('button', { name: 'General' }).click();
 
     // Safe live gesture test: the same helper event route is used, while capture stays untouched.
     await main.getByRole('button', { name: 'Test activation shortcut' }).click();
     await driverCall(application, 'activationComplete', [200]);
-    await expect(main.getByText('Quick Dictation gesture recognized')).toBeVisible();
+    await expect(main.getByText('That was quick dictation')).toBeVisible();
     await driverCall(application, 'activationDown', [true]);
     await main.waitForTimeout(650);
     await driverCall(application, 'activationUp', [true]);
-    await expect(main.getByText('Extended Dictation gesture recognized')).toBeVisible();
+    await expect(main.getByText('That was extended dictation')).toBeVisible();
     expect((await snapshot(application)).recording.starts).toBe(0);
     await main.getByRole('button', { name: 'Stop shortcut test' }).click();
 
@@ -377,7 +381,9 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
 
     // Smart-unavailable raw fallback plus copied-to-clipboard result.
     await main.getByRole('button', { name: 'Dictation profiles' }).click();
-    const generalMode = main.getByRole('combobox', { name: 'General processing mode' });
+    const generalMode = main
+      .getByRole('group', { name: 'General', exact: true })
+      .getByRole('combobox', { name: 'What happens to your words', exact: true });
     await expect(generalMode).toHaveValue('smart');
     await expect
       .poll(() =>
@@ -404,8 +410,8 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     // insert the snippet, and persist a typed history outcome.
     await driverCall(application, 'setCopied', [false]);
     await main.getByRole('button', { name: 'Voice Commands' }).click();
-    await main.getByLabel(/Trigger phrase/).fill('archive this project');
-    await main.getByLabel('Snippet').fill('Project archived successfully');
+    await main.getByLabel(/When I say/).fill('archive this project');
+    await main.getByLabel('Type this instead').fill('Project archived successfully');
     await main.getByRole('button', { name: 'Add voice command' }).click();
     await expect(main.getByText(/Say “archive this project”/)).toBeVisible();
     await driverCall(application, 'setTranscript', ['Archive this project!']);

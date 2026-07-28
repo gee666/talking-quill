@@ -1299,8 +1299,9 @@ fn protocol_v5_configures_ordered_chords_and_preserves_every_wire_field() {
         "bindings": [
             binding_value("general", shortcut_value(&["X"], false, true, false, false)),
             binding_value("prompt", shortcut_value(&["X", "P"], false, true, false, false)),
+            binding_value("prompt-to-english", shortcut_value(&["X", "Q"], false, true, false, false)),
             binding_value("markdown", shortcut_value(&["X", "M"], false, true, false, false)),
-            binding_value("translate-to-english", shortcut_value(&["X", "E"], false, true, false, false)),
+            binding_value("translate-to-english", shortcut_value(&["X", "T"], false, true, false, false)),
             binding_value(&profile_id(2), shortcut_value(&["Q"], true, true, false, false))
         ]
     });
@@ -1327,7 +1328,7 @@ fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
 
-    let twelve: Vec<_> = (0..12)
+    let thirteen: Vec<_> = (0..13)
         .map(|index| {
             let key = char::from(b'A' + index as u8).to_string();
             alt_binding(&profile_id(index), &key, false)
@@ -1336,7 +1337,7 @@ fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
     assert!(server.handle_payload(&request(
         90,
         "activation.configure",
-        json!({"enabled": true, "bindings": twelve}),
+        json!({"enabled": true, "bindings": thirteen}),
     )));
     assert!(receive(&receiver).get("result").is_some());
 
@@ -1350,7 +1351,7 @@ fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
         json!({"enabled": false, "bindings": []})
     );
 
-    let thirteen: Vec<_> = (0..13)
+    let fourteen: Vec<_> = (0..14)
         .map(|index| {
             let key = char::from(b'A' + index as u8).to_string();
             alt_binding(&profile_id(index), &key, false)
@@ -1364,7 +1365,7 @@ fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
     let invalid_profile = "00000000-0000-0000-8000-000000000001";
     let invalid = [
         json!({"enabled": true, "bindings": []}),
-        json!({"enabled": true, "bindings": thirteen}),
+        json!({"enabled": true, "bindings": fourteen}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&[], false, true, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A"], false, false, false, false))]}),
         json!({"enabled": true, "bindings": [binding_value("general", shortcut_value(&["A", "A"], false, true, false, false))]}),

@@ -317,13 +317,49 @@ describe('Dictation history', () => {
       screen.getByRole('button', { name: 'Copy transcript: A locally stored transcript.' }),
     );
     expect(copy).toHaveBeenCalledWith(item.id);
-    expect(await screen.findByText('Transcript copied to the clipboard.')).toBeVisible();
+    expect(await screen.findByText('Copied to your clipboard.')).toBeVisible();
     await user.click(
       screen.getByRole('button', { name: 'Delete transcript: A locally stored transcript.' }),
     );
     expect(remove).toHaveBeenCalledWith(item.id);
     changed?.(1);
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  });
+
+  it('separates the dictation and processing mode chips for both sighted and screen-reader users', async () => {
+    list.mockResolvedValueOnce({
+      items: [
+        item,
+        {
+          ...item,
+          id: '33333333-3333-4333-8333-333333333333',
+          dictationMode: 'extended',
+          processingMode: 'smart',
+          outcome: 'smart-completed',
+          processedText: 'Second polished transcript.',
+        },
+      ],
+      nextCursor: null,
+      revision: 0,
+    });
+    const { container } = render(<DictationHistory />);
+
+    await screen.findByText('A locally stored transcript.');
+    const chips = [...container.querySelectorAll('.history-entry__chips')];
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Quick · Raw', 'Extended · Smart']);
+    // The separator is decorative, so the accessible text still needs its own spacing.
+    const accessible = chips.map((chip) =>
+      [...chip.childNodes]
+        .filter(
+          (node) => !(node instanceof HTMLElement && node.getAttribute('aria-hidden') === 'true'),
+        )
+        .map((node) => node.textContent ?? '')
+        .join('')
+        .replace(/\s+/gu, ' ')
+        .trim(),
+    );
+    expect(accessible).toEqual(['Quick Raw', 'Extended Smart']);
   });
 
   it('displays accessible Smart provider, model, and explicit fallback metadata', async () => {
@@ -347,7 +383,7 @@ describe('Dictation history', () => {
       'Provider: pi · Model: anthropic/claude-test',
     );
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Fell back to Raw because Pi authentication failed.',
+      'The AI service could not sign in, so your words were inserted exactly as you said them.',
     );
   });
 
@@ -409,10 +445,10 @@ describe('Dictation history', () => {
     );
     expect(
       await screen.findByText(
-        'The entry was deleted, but screenshot cleanup is incomplete and will be retried.',
+        'Deleted. The screenshot is taking a moment to clear and will go shortly.',
       ),
     ).toBeVisible();
-    expect(screen.queryByText('The entry could not be deleted.')).not.toBeInTheDocument();
+    expect(screen.queryByText('That entry could not be deleted.')).not.toBeInTheDocument();
   });
 
   it('warns truthfully and closes confirmation after partial Delete All cleanup', async () => {
@@ -428,7 +464,7 @@ describe('Dictation history', () => {
     await user.click(screen.getByRole('button', { name: /^Delete all$/ }));
     expect(
       await screen.findByText(
-        'All history entries were deleted, but screenshot cleanup is incomplete and will be retried.',
+        'Your dictation history is now empty. The screenshots are taking a moment to clear and will go shortly.',
       ),
     ).toBeVisible();
     expect(screen.queryByRole('dialog', { name: 'Delete all history?' })).not.toBeInTheDocument();
@@ -437,11 +473,12 @@ describe('Dictation history', () => {
   it('renders empty and bounded public-error states', async () => {
     list.mockResolvedValueOnce({ items: [], nextCursor: null, revision: 0 });
     const { unmount } = render(<DictationHistory />);
-    expect(await screen.findByText('No dictations yet')).toBeVisible();
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
     unmount();
     list.mockRejectedValueOnce(new Error('private database path'));
     render(<DictationHistory />);
-    expect(await screen.findByText('The dictation history could not be loaded.')).toBeVisible();
+    expect(await screen.findByText('History could not be loaded')).toBeVisible();
+    expect(screen.getByText('Your dictation history could not be loaded.')).toBeVisible();
     expect(screen.queryByText(/private database path/i)).not.toBeInTheDocument();
   });
 });

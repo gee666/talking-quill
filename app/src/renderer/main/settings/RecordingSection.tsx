@@ -12,9 +12,11 @@ interface Notice {
 export function RecordingSection({
   settings,
   platform,
+  heading = 'Recording',
 }: {
   readonly settings: Settings;
   readonly platform: string;
+  readonly heading?: string | null;
 }) {
   const [devices, setDevices] = useState<MicrophoneDeviceList | null>(null);
   const [testState, setTestState] = useState<MicrophoneTestState>({
@@ -62,7 +64,7 @@ export function RecordingSection({
       (next) => applyDevices(next),
       () => {
         if (mounted.current) {
-          setNotice({ tone: 'error', message: 'Microphones could not be listed.' });
+          setNotice({ tone: 'error', message: 'Talking Quill couldn’t find your microphones.' });
         }
       },
     );
@@ -130,7 +132,7 @@ export function RecordingSection({
         recording: { preferredMicrophoneId: value.length === 0 ? null : value },
       });
       if (!isCurrentOperation(currentOperation)) return;
-      setNotice({ tone: 'success', message: 'Preferred microphone saved.' });
+      setNotice({ tone: 'success', message: 'Microphone saved.' });
       if (restart) {
         const restarted = await window.talkingQuill.recording.startTest();
         if (isCurrentOperation(currentOperation)) {
@@ -142,7 +144,10 @@ export function RecordingSection({
       }
     } catch {
       if (isCurrentOperation(currentOperation)) {
-        setNotice({ tone: 'error', message: 'The preferred microphone could not be saved.' });
+        setNotice({
+          tone: 'error',
+          message: 'That microphone couldn’t be saved. Please try again.',
+        });
       }
     } finally {
       if (isCurrentOperation(currentOperation)) setSaving(false);
@@ -155,7 +160,10 @@ export function RecordingSection({
       await window.talkingQuill.recording.openMicrophoneSettings();
     } catch {
       if (mounted.current) {
-        setNotice({ tone: 'error', message: 'Microphone settings could not be opened.' });
+        setNotice({
+          tone: 'error',
+          message: 'Talking Quill couldn’t open your microphone settings.',
+        });
       }
     }
   };
@@ -165,9 +173,12 @@ export function RecordingSection({
     setNotice(null);
     try {
       await window.talkingQuill.settings.update({ recording: { silencePreset: value } });
-      setNotice({ tone: 'success', message: 'Silence detection preset saved.' });
+      setNotice({ tone: 'success', message: 'Pause length saved.' });
     } catch {
-      setNotice({ tone: 'error', message: 'The silence detection preset could not be saved.' });
+      setNotice({
+        tone: 'error',
+        message: 'That pause length couldn’t be saved. Please try again.',
+      });
     } finally {
       if (mounted.current) setSaving(false);
     }
@@ -184,27 +195,30 @@ export function RecordingSection({
     testState.status !== 'unavailable'
       ? null
       : testState.reason === 'no-device'
-        ? 'No microphone was detected. Connect or enable an input device, then test again.'
+        ? 'No microphone found. Plug one in or turn it on, then test again.'
         : testState.reason === 'device-unavailable'
-          ? 'The selected microphone is disconnected, busy, or does not support the requested format.'
+          ? 'That microphone isn’t available. It may be unplugged or in use by another app. Pick a different one, or close the app using it.'
           : testState.reason === 'permission-unavailable'
-            ? 'Talking Quill could not complete Electron’s microphone authorization. Restart Talking Quill and test again; do not change Windows privacy settings unless Windows reports access is blocked.'
+            ? 'Talking Quill couldn’t ask for microphone access. Restart Talking Quill and test again.'
             : testState.reason === 'unsupported-audio-format'
-              ? 'This microphone does not provide a supported audio format.'
-              : 'The dedicated microphone capture window is unavailable. Restart Talking Quill and test again.';
+              ? 'Talking Quill can’t record from this microphone. Try another one.'
+              : 'Talking Quill couldn’t start recording. Restart it and test again.';
 
   return (
-    <Card title="Recording" description="Microphone input stays on this device.">
+    <Card
+      {...(heading === null ? {} : { title: heading })}
+      description="Choose which microphone to listen with and how long a pause should end a dictation. Your audio never leaves this computer."
+    >
       <Select
         label="Microphone"
-        hint="A disconnected preference is retained and used again when it returns."
+        hint="If you unplug the one you picked, Talking Quill remembers it and uses it again when it comes back."
         value={preferred ?? ''}
         disabled={saving || devices === null}
         onChange={(event) => void saveMicrophone(event.currentTarget.value)}
       >
-        <option value="">System default</option>
+        <option value="">Whatever my computer normally uses</option>
         {preferredMissing ? (
-          <option value={preferred}>Preferred microphone (disconnected)</option>
+          <option value={preferred}>Your chosen microphone (not connected)</option>
         ) : null}
         {devices?.devices
           .filter((device) => device.deviceId !== 'default')
@@ -215,32 +229,32 @@ export function RecordingSection({
           ))}
       </Select>
       <div className="recording-test">
-        <Progress label="Microphone level" value={level} max={1} disabled={!testing} />
+        <Progress label="How loud you are" value={level} max={1} disabled={!testing} />
         <div className="recording-test__actions">
           <Button disabled={saving} onClick={() => void (testing ? stopTest() : startTest())}>
             {testState.status === 'starting'
-              ? 'Cancel microphone test'
+              ? 'Cancel'
               : testing
-                ? 'Stop microphone test'
-                : 'Test microphone'}
+                ? 'Stop test'
+                : 'Test my microphone'}
           </Button>
           <Status tone={blocked || unavailable ? 'error' : testing ? 'success' : 'neutral'} live>
             {testState.status === 'starting'
-              ? 'Requesting microphone access'
+              ? 'Asking for permission'
               : testState.status === 'active'
-                ? 'Microphone active'
+                ? 'Listening — say something'
                 : blocked
-                  ? 'Microphone access denied'
+                  ? 'Microphone blocked'
                   : unavailable
-                    ? 'Microphone unavailable'
-                    : 'Test stopped'}
+                    ? 'Microphone not available'
+                    : 'Not testing'}
           </Status>
         </div>
       </div>
       {blocked ? (
         <div className="permission-guidance" role="alert">
           <p>
-            The operating system reports that microphone access is blocked. Allow Talking Quill in{' '}
+            Your computer is blocking microphone access. Allow Talking Quill in{' '}
             {platform === 'darwin'
               ? 'System Settings → Privacy & Security → Microphone.'
               : 'Settings → Privacy & security → Microphone.'}
@@ -256,8 +270,8 @@ export function RecordingSection({
       )}
       <div className="setting-divider" />
       <Select
-        label="Silence detection"
-        hint={`Quick Dictation can submit only after at least ${String(SPEECH_ARMING_MS)} ms of detected speech.`}
+        label="How long a pause ends a dictation"
+        hint={`When you stop talking for this long, Talking Quill decides you are done. Quick dictation waits until it has heard at least ${formatSeconds(SPEECH_ARMING_MS)} of speech first.`}
         value={settings.recording.silencePreset}
         disabled={saving}
         onChange={(event) =>
@@ -265,10 +279,10 @@ export function RecordingSection({
         }
       >
         <option value="aggressive">
-          Aggressive — {formatSeconds(SILENCE_PRESET_MS.aggressive)}
+          Short pause — {formatSeconds(SILENCE_PRESET_MS.aggressive)}
         </option>
-        <option value="average">Average — {formatSeconds(SILENCE_PRESET_MS.average)}</option>
-        <option value="relaxed">Relaxed — {formatSeconds(SILENCE_PRESET_MS.relaxed)}</option>
+        <option value="average">Normal pause — {formatSeconds(SILENCE_PRESET_MS.average)}</option>
+        <option value="relaxed">Long pause — {formatSeconds(SILENCE_PRESET_MS.relaxed)}</option>
       </Select>
       {notice === null ? null : (
         <Toast tone={notice.tone} message={notice.message} onDismiss={() => setNotice(null)} />

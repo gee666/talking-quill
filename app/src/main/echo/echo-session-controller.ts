@@ -15,6 +15,7 @@ import {
   type EchoSessionSnapshot,
   type PiFallbackCategory,
 } from '../../shared/schemas/echo-session';
+import type { HelperReadiness } from '../../shared/schemas/helper-readiness';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
@@ -91,6 +92,7 @@ export class EchoSessionController {
   #sessionSettings: Readonly<Settings> | null = null;
   #sessionProfile: Readonly<DictationProfile> | null = null;
   #activeBinding: Readonly<ActivationBinding> | null = null;
+  #pendingOperationalError: string | null = null;
   #shutdownOperation: Promise<void> | null = null;
   #disposed = false;
 
@@ -131,6 +133,10 @@ export class EchoSessionController {
       settings: this.#settings,
       helper: this.#helper,
       isModelReady: this.#isModelReady,
+      onSyncFailure: () =>
+        this.#reportOperationalFailure(
+          'Keyboard shortcuts could not be enabled. Restart Talking Quill or reinstall the app.',
+        ),
     });
     this.#outcomes = new SessionOutcomeWriter({
       history: options.history ?? null,
@@ -168,7 +174,9 @@ export class EchoSessionController {
         this.#captureReconciler.markAppliedUnknown();
         this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
         if (this.#activationTest.state.active) this.#activationTest.stop();
-        if (this.#state.phase !== 'idle') this.abort('target-lost');
+        const message = helperReadinessError(readiness);
+        if (message !== null) this.#reportOperationalFailure(message);
+        else if (this.#state.phase !== 'idle') this.abort('target-lost');
       }
     });
     this.#removeSettings = this.#settings.subscribe((next) => {
@@ -208,7 +216,9 @@ export class EchoSessionController {
 
   initialize(): void {
     this.#profiles.requestSync();
-    this.#publish();
+    const message = helperReadinessError(this.#helper.readiness);
+    if (message !== null) this.#reportOperationalFailure(message);
+    else this.#publish();
   }
 
   startActivationTest(
@@ -217,10 +227,10 @@ export class EchoSessionController {
   ): ActivationTestState {
     const unavailableReason = !this.#settings.get().app.enabled
       ? 'app-disabled'
-      : this.#state.phase !== 'idle'
-        ? 'session-active'
-        : this.#helper.readiness.status !== 'ready'
-          ? 'helper-unavailable'
+      : this.#helper.readiness.status !== 'ready'
+        ? 'helper-unavailable'
+        : this.#state.phase !== 'idle'
+          ? 'session-active'
           : null;
     return this.#activationTest.start(ownerWebContentsId, onDestroyed, unavailableReason);
   }
@@ -258,7 +268,15 @@ export class EchoSessionController {
   }
 
   acceptHelperNotification(notification: HelperNotification): void {
-    this.#onHelperNotification(notification);
+    try {
+      this.#onHelperNotification(notification);
+    } catch {
+      // Native backends arm Enter/Escape capture before notifying us. A consumer failure must
+      // always disarm it and become visible instead of leaving the app apparently unresponsive.
+      this.#captureReconciler.markNativeCaptureArmed();
+      this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+      this.#reportOperationalFailure('Dictation could not start. Please try again.');
+    }
   }
 
   stop(): void {
@@ -350,14 +368,6 @@ export class EchoSessionController {
   #onHelperNotification(notification: HelperNotification): void {
     if (this.#disposed || notification.method === 'paste.committed') return;
     if (notification.method === 'activation.event') {
-      if (
-        notification.params.phase === 'complete' &&
-        (notification.params.profileId !== DEFAULT_GENERAL_PROFILE.id ||
-          !shortcutsEqual(notification.params.shortcut, DEFAULT_GENERAL_PROFILE.shortcut))
-      ) {
-        this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
-        return;
-      }
       const startsActivation = notification.params.phase !== 'up';
       if (startsActivation) {
         // Native backends arm session-key capture before publishing an activation start. Mark the
@@ -478,6 +488,18 @@ export class EchoSessionController {
     // strand the state machine after its state has already advanced.
     for (const effect of transition.effects) this.#enqueueEffect(effect);
     this.#publish();
+    if (
+      transition.state.phase === 'error' &&
+      transition.state.sessionId === null &&
+      previous.phase === 'idle'
+    ) {
+      this.#scheduleTerminalReset();
+    }
+    if (event.type === 'reset' && this.#pendingOperationalError !== null) {
+      const message = this.#pendingOperationalError;
+      this.#pendingOperationalError = null;
+      this.#reportOperationalFailure(message);
+    }
   }
 
   #manageSessionTransition(previous: EchoSessionState, next: EchoSessionState): void {
@@ -719,6 +741,34 @@ export class EchoSessionController {
     return this.#abort?.signal ?? AbortSignal.abort();
   }
 
+  #reportOperationalFailure(message: string): void {
+    if (this.#disposed) return;
+    if (
+      this.#state.phase === 'inserting' ||
+      this.#state.phase === 'restoringClipboard' ||
+      isTerminalPhase(this.#state.phase)
+    ) {
+      // Never overwrite an insertion that may already have committed. Show this independent
+      // operational failure after the current outcome has finished its truthful display.
+      this.#pendingOperationalError = message;
+      return;
+    }
+    if (this.#state.phase === 'idle') {
+      this.#dispatch({ type: 'operational-failure', message });
+    } else {
+      this.#abort?.abort();
+      this.#dispatch({ type: 'fail', message });
+    }
+    try {
+      if (!this.#windows.showWidget(this.#appPreferences.widgetSize, null)) {
+        this.#windows.showMain();
+      }
+    } catch {
+      // If the widget renderer itself is unavailable, keep the main window as the visible fallback.
+      this.#windows.showMain();
+    }
+  }
+
   #playSound(): void {
     if (!this.#appPreferences.soundsEnabled) return;
     try {
@@ -773,6 +823,16 @@ function piFallbackCategory(providerId: string, error: unknown): PiFallbackCateg
 function publicSessionError(error: unknown): string {
   void error;
   return 'Dictation could not be completed.';
+}
+
+function helperReadinessError(readiness: HelperReadiness): string | null {
+  if (readiness.status === 'permission-required') {
+    return 'Keyboard shortcuts need system permission. Open Talking Quill Settings to fix it.';
+  }
+  if (readiness.status === 'unavailable' || readiness.status === 'incompatible') {
+    return 'Keyboard shortcuts are unavailable. Restart Talking Quill or reinstall the app.';
+  }
+  return null;
 }
 
 function withDeadline<Value>(

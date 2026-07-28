@@ -63,7 +63,7 @@ export function SettingsScreen({
       } catch {
         // The settings event stream remains authoritative if shutdown prevents a reload.
       }
-      setNotice({ tone: 'error', message: 'The setting could not be saved.' });
+      setNotice({ tone: 'error', message: 'That change didn’t save. Please try again.' });
     } finally {
       setSaving(false);
     }
@@ -76,62 +76,83 @@ export function SettingsScreen({
   }[] = [
     {
       title: 'General',
-      keywords: 'Enable Talking Quill launch at login close to tray widget size sounds startup',
+      keywords:
+        'Enable Talking Quill turn on off launch at login start with computer close to tray widget size sounds startup try your shortcut safely test activation shortcut',
       node: (
         <GeneralSection
           settings={settings}
           platform={platform}
           disabled={saving}
           onSave={saveGeneral}
+          heading={null}
         />
       ),
     },
     {
       title: 'Dictation profiles',
       keywords:
-        'Dictation profiles shortcuts shortcut chord binding Ctrl Control Alt Option Shift Win Command General Prompt Markdown Translate English custom add create delete raw smart processing prompt reset formatting',
+        'Dictation profiles shortcuts shortcut chord binding keyboard Ctrl Control Alt Option Shift Win Command General Prompt Markdown Translate English custom add create delete raw smart processing what happens to your words type it exactly clean it up extra instructions prompt reset formatting',
       node: (
         <DictationProfilesSection
           settings={settings}
           platform={platform}
           onSettingsSaved={onSettingsSaved}
+          heading={null}
         />
       ),
     },
     {
       title: 'Recording',
       keywords:
-        'Recording microphone preferred device audio live level test permission silence detection aggressive average relaxed system default disconnected',
-      node: <RecordingSection settings={settings} platform={platform} />,
+        'Recording microphone preferred device audio live level test my microphone permission pause silence detection how long a pause aggressive average relaxed short medium long system default disconnected',
+      node: <RecordingSection settings={settings} platform={platform} heading={null} />,
     },
     {
       title: 'Transcription model',
       keywords:
-        'Transcription model Whisper small large selected status download progress pause cancel retry delete redownload repair corrupt offline cache location spoken source language transcription',
-      node: <TranscriptionModelSection settings={settings} onSettingsSaved={onSettingsSaved} />,
+        'Transcription model speech model Whisper small large faster more accurate offline selected status download progress pause cancel retry delete redownload repair corrupt offline cache location spoken source language transcription auto detect',
+      node: (
+        <TranscriptionModelSection
+          settings={settings}
+          onSettingsSaved={onSettingsSaved}
+          heading={null}
+        />
+      ),
     },
     {
       title: 'Privacy & data',
       keywords:
-        'Privacy data dictation history enabled screenshots retention duration delete all reset diagnostic logging',
-      node: <PrivacySection settings={settings} disabled={saving} onSave={saveGeneral} />,
+        'Privacy data dictation history enabled keep a list of what you dictated screenshots picture of your screen retention how long duration delete everything delete all reset start over diagnostic logging technical event names',
+      node: (
+        <PrivacySection settings={settings} disabled={saving} onSave={saveGeneral} heading={null} />
+      ),
     },
     {
       title: 'Smart processing',
       keywords:
         'Smart processing provider model discovery connection test Local LAN Cloud cloud cost Ollama OpenAI Anthropic Gemini Azure AWS Bedrock Cohere on-screen awareness screenshot vision override credentials API key endpoint',
-      node: <SmartProcessingSection settings={settings} onSettingsSaved={onSettingsSaved} />,
+      node: (
+        <SmartProcessingSection
+          settings={settings}
+          onSettingsSaved={onSettingsSaved}
+          heading={null}
+          // A search match can make this the rendered section without the user choosing it; only an
+          // explicit selection may let it contact the configured AI service.
+          autoDiscover={selected === 'Smart processing'}
+        />
+      ),
     },
     {
       title: 'Voice Commands',
-      keywords: 'Voice Commands command trigger phrase snippet create edit delete match preview',
-      node: <VoiceCommandsSection commands={settings.voiceCommands} />,
+      keywords:
+        'Voice Commands command trigger phrase snippet shortcut for text say my address create edit delete match preview',
+      node: <VoiceCommandsSection commands={settings.voiceCommands} heading={null} />,
     },
     {
       title: 'Custom Vocabulary',
       keywords:
-        'Custom Vocabulary words phrases entries import export text applies to Smart only create edit delete',
-      node: <CustomVocabularySection entries={settings.customVocabulary} />,
+        'Custom Vocabulary words names phrases spelling entries import export text applies to Smart only create edit delete',
+      node: <CustomVocabularySection entries={settings.customVocabulary} heading={null} />,
     },
   ];
   const visible = sections.filter(({ title, keywords }) => {
@@ -145,22 +166,24 @@ export function SettingsScreen({
         <div>
           <p className="eyebrow">Settings</p>
           <h1 ref={headingRef} tabIndex={-1}>
-            General settings
+            {active?.title ?? 'Settings'}
           </h1>
-          <p>Search and manage validated local preferences.</p>
+          <p className="body-copy">
+            Everything you change here is saved on this computer right away.
+          </p>
         </div>
         <div className="provider-actions">
           <Button id="reopen-welcome" variant="secondary" onClick={onOpenWelcome}>
-            Show Welcome
+            Run setup again
           </Button>
-          <Status tone={saving ? 'info' : notice?.tone === 'error' ? 'error' : 'success'} live>
-            {saving ? 'Saving' : notice?.tone === 'error' ? 'Save failed' : 'Saved locally'}
+          <Status tone={saving ? 'info' : notice?.tone === 'error' ? 'error' : 'neutral'} live>
+            {saving ? 'Saving' : notice?.tone === 'error' ? 'Not saved' : 'Saved on this computer'}
           </Status>
         </div>
       </header>
       <p className="sr-only" role="status" aria-live="polite">
         {visible.length === 0
-          ? 'No matching settings.'
+          ? 'Nothing matches your search.'
           : `${String(visible.length)} settings sections shown.`}
       </p>
       <div className="settings-layout">
@@ -189,8 +212,8 @@ export function SettingsScreen({
         <div className="settings-panel">
           {active === undefined ? (
             <EmptyState
-              title="No matching settings"
-              description="Try a broader word or clear the search."
+              title="Nothing matches your search"
+              description="Try a simpler word, or clear the search box to see everything again."
             />
           ) : (
             <section key={active.title} aria-label={active.title}>

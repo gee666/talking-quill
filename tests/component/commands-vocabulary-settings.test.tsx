@@ -64,15 +64,22 @@ describe('Task 8 settings', () => {
     render(<VoiceCommandsSection commands={[command]} />);
     expect(screen.getByText(/Say “send report”/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Edit send report' })).toBeVisible();
-    await user.type(screen.getByLabelText(/Trigger phrase/), 'archive project');
-    await user.type(screen.getByRole('textbox', { name: 'Snippet' }), 'Archived');
+    const previewRegion = screen.getByRole('region', { name: 'Try it out' });
+    const commandForm = screen.getByLabelText(/When I say/).closest('form');
+    expect(commandForm).not.toBeNull();
+    if (commandForm === null) throw new Error('Expected command form');
+    expect(
+      previewRegion.compareDocumentPosition(commandForm) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await user.type(screen.getByLabelText(/When I say/), 'archive project');
+    await user.type(screen.getByRole('textbox', { name: 'Type this instead' }), 'Archived');
     await user.click(screen.getByRole('button', { name: 'Add voice command' }));
     expect(api.createCommand).toHaveBeenCalledWith({
       trigger: 'archive project',
       snippet: 'Archived',
     });
-    await user.type(screen.getByLabelText('Match preview transcript'), 'send report');
-    await user.click(screen.getByRole('button', { name: 'Preview match' }));
+    await user.type(screen.getByLabelText('What would you say?'), 'send report');
+    await user.click(screen.getByRole('button', { name: 'Check for a match' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Exact match');
     expect(api.preview).toHaveBeenCalledWith('send report');
   });
@@ -84,15 +91,17 @@ describe('Task 8 settings', () => {
     const user = userEvent.setup();
     render(<VoiceCommandsSection commands={[command]} />);
 
-    const transcript = screen.getByLabelText('Match preview transcript');
+    const transcript = screen.getByLabelText('What would you say?');
     await user.type(transcript, 'send report');
-    await user.click(screen.getByRole('button', { name: 'Preview match' }));
+    await user.click(screen.getByRole('button', { name: 'Check for a match' }));
     await user.clear(transcript);
     await user.type(transcript, 'archive project');
     pending.resolve(null);
 
     await waitForMicrotasks();
-    expect(screen.queryByText('No voice command matches the full transcript.')).toBeNull();
+    expect(
+      screen.queryByText('Nothing matched — you need to say the whole phrase on its own.'),
+    ).toBeNull();
   });
 
   it('announces preview and command delete IPC failures', async () => {
@@ -102,8 +111,8 @@ describe('Task 8 settings', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     const user = userEvent.setup();
     render(<VoiceCommandsSection commands={[command]} />);
-    await user.type(screen.getByLabelText('Match preview transcript'), 'send report');
-    await user.click(screen.getByRole('button', { name: 'Preview match' }));
+    await user.type(screen.getByLabelText('What would you say?'), 'send report');
+    await user.click(screen.getByRole('button', { name: 'Check for a match' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Preview unavailable.');
     await user.click(screen.getByRole('button', { name: 'Delete send report' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Delete unavailable.');
@@ -113,13 +122,20 @@ describe('Task 8 settings', () => {
     const api = installApi();
     const user = userEvent.setup();
     render(<CustomVocabularySection entries={[entry]} />);
-    expect(screen.getByText(/applies to Smart Transcription only/)).toBeVisible();
+    expect(screen.getByText(/used when Smart mode cleans up your words/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Edit GraphQL' })).toBeVisible();
-    await user.type(screen.getByLabelText(/Word or phrase/), 'AnythingLLM');
-    await user.click(screen.getByRole('button', { name: 'Add to vocabulary' }));
+    const vocabularyInput = screen.getByLabelText(/Word or phrase/);
+    const vocabularyAction = screen.getByRole('button', { name: 'Add to vocabulary' });
+    const inlineFieldAction = vocabularyInput.closest('.inline-field-action');
+    expect(inlineFieldAction).not.toBeNull();
+    expect(vocabularyInput.closest('.me-field')?.nextElementSibling).toBe(
+      vocabularyAction.closest('.inline-field-action__actions'),
+    );
+    await user.type(vocabularyInput, 'AnythingLLM');
+    await user.click(vocabularyAction);
     expect(api.createVocabulary).toHaveBeenCalledWith('AnythingLLM');
-    await user.click(screen.getByRole('button', { name: 'Import plain text' }));
-    expect(await screen.findByRole('status')).toHaveTextContent('Imported 2');
+    await user.click(screen.getByRole('button', { name: 'Import from a text file' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Added 2 words.');
   });
 
   it('announces vocabulary delete IPC failures', async () => {

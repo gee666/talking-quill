@@ -74,6 +74,7 @@ test('Task 7 records completion, excludes cancellation, and supports local histo
   try {
     const { main } = await rendererPages(application);
     await quick(application, 'first retained dictation');
+    await main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(main.getByText('first retained dictation')).toBeVisible();
     await quick(application, 'cancelled private dictation', true);
     await expect(main.getByText('cancelled private dictation')).toHaveCount(0);
@@ -82,7 +83,7 @@ test('Task 7 records completion, excludes cancellation, and supports local histo
     ).toHaveCount(1);
 
     await main.getByRole('button', { name: 'Copy' }).click();
-    await expect(main.getByText('Transcript copied to the clipboard.')).toBeVisible();
+    await expect(main.getByText('Copied to your clipboard.')).toBeVisible();
     expect(await application.evaluate(({ clipboard }) => clipboard.readText())).toBe(
       'first retained dictation',
     );
@@ -92,27 +93,28 @@ test('Task 7 records completion, excludes cancellation, and supports local histo
       .getByRole('button', { name: 'Delete' })
       .click();
     await expect(main.getByText('first retained dictation')).toHaveCount(0);
-    await expect(main.getByText('No dictations yet')).toBeVisible();
+    await expect(main.getByText('Nothing here yet')).toBeVisible();
 
     await quick(application, 'second retained dictation');
     await expect(main.getByText('second retained dictation')).toBeVisible();
     await main.getByRole('button', { name: 'Delete all history' }).click();
     await expect(main.getByRole('dialog', { name: 'Delete all history?' })).toBeVisible();
     await main.getByRole('button', { name: 'Delete all', exact: true }).click();
-    await expect(main.getByText('No dictations yet')).toBeVisible();
+    await expect(main.getByText('Nothing here yet')).toBeVisible();
 
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Privacy & data' }).click();
     const historyEnabled = main.getByRole('checkbox', {
-      name: 'Store completed dictations in the history',
+      name: 'Keep a history of what you dictated',
     });
     await historyEnabled.click();
     await expect(main.getByText('History preference saved.')).toBeVisible();
     await expect(historyEnabled).not.toBeChecked();
     await main.getByRole('button', { name: 'Dashboard' }).click();
     await quick(application, 'history disabled dictation');
+    await main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(main.getByText('history disabled dictation')).toHaveCount(0);
-    await expect(main.getByText('No dictations yet')).toBeVisible();
+    await expect(main.getByText('Nothing here yet')).toBeVisible();
   } finally {
     await application.close();
   }
@@ -129,6 +131,7 @@ test('Task 7 prunes expired history at startup using the configured retention', 
   try {
     const main = (await rendererPages(application)).main;
     await quick(application, 'expired dictation');
+    await main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(main.getByText('expired dictation')).toBeVisible();
   } finally {
     await application.close();
@@ -139,7 +142,7 @@ test('Task 7 prunes expired history at startup using the configured retention', 
     const main = (await rendererPages(application)).main;
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Privacy & data' }).click();
-    await main.getByRole('combobox', { name: 'History retention' }).selectOption('7');
+    await main.getByRole('combobox', { name: 'How long to keep history' }).selectOption('7');
     await expect(main.getByText('Retention preference saved.')).toBeVisible();
     await main.getByRole('button', { name: 'Dashboard' }).click();
     await quick(application, 'retained dictation');
@@ -150,6 +153,7 @@ test('Task 7 prunes expired history at startup using the configured retention', 
   application = await launch(profile, currentNow);
   try {
     const main = (await rendererPages(application)).main;
+    await main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(main.getByText('expired dictation')).toHaveCount(0);
     await expect(main.getByText('retained dictation')).toBeVisible();
   } finally {

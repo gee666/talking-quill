@@ -34,9 +34,9 @@ test('Settings UI exports and imports vocabulary through typed IPC and dialog fi
       await expect(vocabulary.getByText(value, { exact: true })).toBeVisible();
     }
 
-    await main.getByRole('button', { name: 'Export plain text' }).click();
+    await main.getByRole('button', { name: 'Save to a text file' }).click();
     await expect(
-      main.getByText(`Exported ${String(VALUES.length)} vocabulary entries.`, { exact: true }),
+      main.getByText(`Saved ${String(VALUES.length)} words to a file.`, { exact: true }),
     ).toBeVisible();
     expect(await readFile(resolve(profile, EXPORTED_FILENAME), 'utf8')).toBe(
       `${VALUES.join('\n')}\n`,
@@ -46,11 +46,11 @@ test('Settings UI exports and imports vocabulary through typed IPC and dialog fi
       await main.getByRole('button', { name: `Delete ${value}` }).click();
       await expect(main.getByText(value, { exact: true })).toHaveCount(0);
     }
-    await expect(main.getByText('Custom vocabulary is empty')).toBeVisible();
+    await expect(main.getByText('No words yet')).toBeVisible();
 
-    await main.getByRole('button', { name: 'Import plain text' }).click();
+    await main.getByRole('button', { name: 'Import from a text file' }).click();
     await expect(
-      main.getByText(`Imported ${String(VALUES.length)} vocabulary entries.`, { exact: true }),
+      main.getByText(`Added ${String(VALUES.length)} words.`, { exact: true }),
     ).toBeVisible();
     const imported = main.getByRole('list', { name: 'Custom vocabulary' });
     for (const value of VALUES) {

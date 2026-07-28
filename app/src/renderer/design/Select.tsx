@@ -4,6 +4,13 @@ export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   readonly label: string;
   readonly hint?: string | undefined;
   readonly error?: string | undefined;
+  /**
+   * Fields are stacked (label above a full-width control) everywhere by default.
+   * `row` opts the field into the two-column settings row (label left, control
+   * right) — but only when it is a direct child of `.section__body` or `.rows`.
+   * Pass `stacked` to keep a field stacked even inside a settings list.
+   */
+  readonly layout?: 'row' | 'stacked';
   readonly children: ReactNode;
 }
 
@@ -13,6 +20,7 @@ export function Select({
   error,
   id,
   required,
+  layout = 'row',
   className = '',
   children,
   ...props
@@ -22,7 +30,7 @@ export function Select({
   const hintId = hint === undefined ? undefined : `${controlId}-hint`;
   const errorId = error === undefined ? undefined : `${controlId}-error`;
   return (
-    <div className="me-field me-field--row">
+    <div className={`me-field me-field--${layout}`}>
       <label className="me-field__label" htmlFor={controlId}>
         {label}
         {required ? (

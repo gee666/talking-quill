@@ -1,13 +1,7 @@
-import { Menu, Tray, nativeImage, type NativeImage } from 'electron';
+import { Menu, Tray } from 'electron';
 import { APP_NAME } from '../../shared/constants/app';
+import { createTrayImage } from './tray-icon';
 import type { AppStateService } from './app-state-service';
-
-// Single-colour silhouette so the icon stays crisp at 16px and works as a macOS template image.
-const TRAY_SVG = `
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-  <path d="M25.4 2.6C18.2 3.6 13.2 9.2 12 21.6c5.9-2.5 11.4-8.9 13.4-19Z" fill="#F6EBD6"/>
-  <path d="M12.4 20.4 7.6 29.4" stroke="#F6EBD6" stroke-width="2.2" stroke-linecap="round"/>
-</svg>`;
 
 export interface TrayActions {
   readonly showMain: () => void;
@@ -92,12 +86,4 @@ export class TrayController {
     }
     this.refresh();
   }
-}
-
-function createTrayImage(): NativeImage {
-  const data = Buffer.from(TRAY_SVG).toString('base64');
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${data}`);
-  image.setTemplateImage(process.platform === 'darwin');
-  const size = process.platform === 'darwin' ? 18 : 16;
-  return image.resize({ width: size, height: size });
 }

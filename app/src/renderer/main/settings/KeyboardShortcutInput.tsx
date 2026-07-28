@@ -8,16 +8,8 @@ import {
 import { Input } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 
-const ALT_Y_Q_EXAMPLE: Shortcut = {
-  modifiers: { ctrl: false, alt: true, shift: false, meta: false },
-  keys: ['Y', 'Q'],
-};
-const CTRL_SHIFT_P_EXAMPLE: Shortcut = {
-  modifiers: { ctrl: true, alt: false, shift: true, meta: false },
-  keys: ['P'],
-};
 const MODIFIER_MISMATCH_GUIDANCE =
-  'Keep the exact same modifiers held for every letter. Release all letter keys and start again. Your saved shortcut is unchanged.';
+  'Hold the same modifier keys the whole time. Let go of the letters and start again. Your saved shortcut hasn’t changed.';
 
 export function KeyboardShortcutInput({
   label,
@@ -73,7 +65,7 @@ export function KeyboardShortcutInput({
         () => {
           if (!reportFailure || !mounted.current) return;
           setCaptureError(
-            'Global shortcuts could not be restored. Refocus this field, then Tab away to retry.',
+            'Your shortcuts couldn’t be switched back on. Click this field again, then press Tab to leave it.',
           );
           onCaptureValidityChange(false);
         },
@@ -148,9 +140,8 @@ export function KeyboardShortcutInput({
 
   const captureHint =
     captureState === 'preparing'
-      ? 'Preparing shortcut capture…'
-      : (captureGuidance ??
-        `Focus this field, hold one or more modifiers unchanged, then press and keep each letter held in order—for example ${formatKeyboardShortcut(ALT_Y_Q_EXAMPLE, platform)} or ${formatKeyboardShortcut(CTRL_SHIFT_P_EXAMPLE, platform)}. For a multi-letter chord, all letters remain held simultaneously and the final letter is the trigger. Outside this field, the modifiers and prefix letters pass through to the foreground app before the trigger, so choose a safe chord. Tab moves away.`);
+      ? 'Getting ready…'
+      : (captureGuidance ?? 'Click here and press the shortcut you want.');
 
   return (
     <>
@@ -187,7 +178,7 @@ export function KeyboardShortcutInput({
               resetHeldSequence();
               setCaptureState('idle');
               setCaptureGuidance(undefined);
-              setCaptureError('Shortcut capture is unavailable. Try again.');
+              setCaptureError('Talking Quill can’t read your keys right now. Try again.');
               onCaptureValidityChange(false);
             },
           );
@@ -196,7 +187,7 @@ export function KeyboardShortcutInput({
         onKeyDownCapture={(event) => {
           if (!preventCommand(event)) return;
           if (captureState !== 'ready') {
-            setCaptureGuidance('Shortcut capture is still preparing. Try again.');
+            setCaptureGuidance('Still getting ready — try again in a moment.');
             return;
           }
           if (event.repeat || event.nativeEvent.isComposing) return;
@@ -204,16 +195,14 @@ export function KeyboardShortcutInput({
             if (fenceChangedModifiers(event) || sequenceFenced.current) {
               setCaptureGuidance(MODIFIER_MISMATCH_GUIDANCE);
             } else {
-              setCaptureGuidance(
-                'Keep at least one modifier held, then press one or more letters.',
-              );
+              setCaptureGuidance('Keep holding, then tap one or more letters.');
             }
             return;
           }
           const key = shortcutKeyFromCode(event.code);
           if (key === null) {
             setCaptureGuidance(
-              'Only physical letter keys A–Z can be part of a shortcut chord. Your saved shortcut is unchanged.',
+              'A shortcut can only use the letters A to Z. Your saved shortcut hasn’t changed.',
             );
             return;
           }
@@ -223,14 +212,14 @@ export function KeyboardShortcutInput({
           if (sequenceFenced.current) {
             setCaptureGuidance(
               sequenceFenceGuidance.current ??
-                'Release all letter keys, then start the shortcut chord again. Your saved shortcut is unchanged.',
+                'Let go of the letters and start again. Your saved shortcut hasn’t changed.',
             );
             return;
           }
           if (sequenceModifiers.current === null) {
             if (!hasModifier(modifiers)) {
               const guidance =
-                'The first letter must be pressed with Ctrl, Alt, Shift, or Win on Windows—or Control, Option, Shift, or Command on macOS. Release all letter keys and start again. Your saved shortcut is unchanged.';
+                'Hold Ctrl, Alt, Shift or the Windows key (Control, Option, Shift or Command on a Mac) before the first letter. Let go of the letters and start again. Your saved shortcut hasn’t changed.';
               sequenceFenced.current = true;
               sequenceFenceGuidance.current = guidance;
               setCaptureGuidance(guidance);
@@ -249,7 +238,7 @@ export function KeyboardShortcutInput({
           };
           setCaptureError(undefined);
           setCaptureGuidance(
-            `${formatKeyboardShortcut(candidate, platform)} captured. ${key} is the final trigger.`,
+            `Got it: ${formatKeyboardShortcut(candidate, platform)}. ${key} is the key that starts dictation.`,
           );
           onCaptureValidityChange(true);
           onChange(candidate);

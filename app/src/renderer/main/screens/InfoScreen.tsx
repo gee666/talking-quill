@@ -33,7 +33,7 @@ export function InfoScreen({
       () => {
         if (active) {
           setPermissionError(true);
-          setNotice('Permission status could not be refreshed.');
+          setNotice('Talking Quill could not read your permission settings.');
         }
       },
     );
@@ -48,7 +48,7 @@ export function InfoScreen({
       setPermissions(await window.talkingQuill.info.status());
     } catch {
       setPermissionError(true);
-      setNotice('Permission status could not be refreshed.');
+      setNotice('Talking Quill could not read your permission settings.');
     }
   };
   const runAction = async (action: () => Promise<void>, failure: string) => {
@@ -74,7 +74,7 @@ export function InfoScreen({
         setNotice(
           publicErrorMessage(
             cause,
-            'Updates could not be checked. Verify the network connection and try again.',
+            'Talking Quill could not check for updates. Check your internet connection and try again.',
           ),
         );
       }
@@ -91,7 +91,7 @@ export function InfoScreen({
     try {
       setNotices(await window.talkingQuill.info.notices());
     } catch {
-      setNotice('Third-party notices could not be loaded.');
+      setNotice('The list of open-source notices could not be loaded.');
       setNoticesOpen(false);
     }
   };
@@ -99,18 +99,21 @@ export function InfoScreen({
     <div className="screen">
       <header className="screen__header">
         <div>
-          <p className="eyebrow">Info</p>
+          <p className="eyebrow">About</p>
           <h1 ref={headingRef} tabIndex={-1}>
             About Talking Quill
           </h1>
-          <p>Version, privacy, permissions, updates, and local application data.</p>
+          <p>Your version, how your words are handled, and where your files live.</p>
         </div>
         <Status tone="info">
           Version {bootstrap.appVersion} · source {bootstrap.sourceRevision ?? 'development'}
         </Status>
       </header>
       <div className="screen__grid">
-        <Card title="Updates" description="Checks only when you ask; no background update traffic.">
+        <Card
+          title="Version and updates"
+          description="Talking Quill only looks for a new version when you ask it to. It never checks in the background."
+        >
           <div className="info-actions provider-actions">
             <Button busy={checking} onClick={() => void check()}>
               Check for updates
@@ -138,7 +141,7 @@ export function InfoScreen({
           )}
           {update === null ? (
             updateFeedback === null ? (
-              <p className="body-copy">No update check has been made.</p>
+              <p className="body-copy">You have not checked for updates yet.</p>
             ) : null
           ) : (
             <Status tone={update.status === 'available' ? 'info' : 'success'} live>
@@ -154,7 +157,7 @@ export function InfoScreen({
                 onClick={() =>
                   void runAction(
                     () => window.talkingQuill.info.openRelease(update.releaseUrl),
-                    'The release page could not be opened.',
+                    'The release page could not be opened in your browser.',
                   )
                 }
               >
@@ -163,43 +166,51 @@ export function InfoScreen({
             </div>
           ) : null}
         </Card>
-        <Card title="Raw and Smart transcription">
+        <Card title="Raw and Smart dictation" description="Two ways to turn your voice into text.">
           <p className="body-copy">
-            <strong>Raw</strong> transcribes locally and performs no provider request.{' '}
-            <strong>Smart</strong> sends the transcript, custom vocabulary, and an optional
-            one-session screenshot only to the provider you configure.
+            <strong>Raw</strong> writes down exactly what you said. It all happens on your computer
+            and nothing is sent anywhere.
           </p>
           <p className="body-copy">
-            Free to use — no account required and no usage limits. A cloud provider may charge for
-            its own service.
+            <strong>Smart</strong> asks an AI service to tidy your words up first. Only your
+            transcript, your word list, and — if you switch it on — a single screenshot are sent to
+            the service you chose.
+          </p>
+          <p className="body-copy">
+            <strong>Free to use — no account, no usage limits.</strong> If you pick a cloud AI
+            service for Smart dictation, that cloud provider may charge you for its own service.
           </p>
         </Card>
-        <Card title="Privacy">
+        <Card
+          title="Your privacy"
+          description="What Talking Quill does, and does not, do with your words."
+        >
           <p className="body-copy">
-            Audio stays on this device. There is no telemetry. Diagnostic logging is off by default
-            and the dictation history can be disabled or deleted.
+            Your recordings stay on your computer. Nothing about how you use the app is collected or
+            sent anywhere. Extra logging stays off unless you turn it on, and you can switch off or
+            clear your dictation history whenever you like.
           </p>
         </Card>
         <Card
           title="Permissions"
-          description="Open the relevant operating-system pane when access needs attention."
+          description="Talking Quill needs your permission to hear you and to type for you. Open the right system screen from here if something is missing."
         >
           {permissionError ? (
             <div className="info-alert" role="alert">
-              <p>Permission status is unavailable.</p>
+              <p>Talking Quill could not read your permission settings.</p>
               <Button variant="secondary" onClick={() => void refreshPermissions()}>
-                Retry permission check
+                Try again
               </Button>
             </div>
           ) : permissions === null ? (
             <p className="body-copy" role="status">
-              Checking permissions…
+              Checking your permissions…
             </p>
           ) : (
             <div className="permission-list">
               <div className="info-actions">
                 <Button variant="secondary" onClick={() => void refreshPermissions()}>
-                  Refresh permission status
+                  Check again
                 </Button>
               </div>
               <div className="group">
@@ -207,7 +218,7 @@ export function InfoScreen({
                   label="Microphone"
                   value={permissions.microphone}
                   open={() => window.talkingQuill.info.openPermissionSettings('microphone')}
-                  onError={() => setNotice('Microphone settings could not be opened.')}
+                  onError={() => setNotice('The microphone settings could not be opened.')}
                 />
                 {bootstrap.platform === 'darwin' ? (
                   <>
@@ -215,7 +226,7 @@ export function InfoScreen({
                       label="Accessibility"
                       value={permissions.helper.permissions.accessibility}
                       open={() => window.talkingQuill.info.openPermissionSettings('accessibility')}
-                      onError={() => setNotice('Accessibility settings could not be opened.')}
+                      onError={() => setNotice('The Accessibility settings could not be opened.')}
                     />
                     <PermissionRow
                       label="Input Monitoring"
@@ -223,7 +234,9 @@ export function InfoScreen({
                       open={() =>
                         window.talkingQuill.info.openPermissionSettings('input-monitoring')
                       }
-                      onError={() => setNotice('Input Monitoring settings could not be opened.')}
+                      onError={() =>
+                        setNotice('The Input Monitoring settings could not be opened.')
+                      }
                     />
                     <PermissionRow
                       label="Screen Recording"
@@ -231,7 +244,9 @@ export function InfoScreen({
                       open={() =>
                         window.talkingQuill.info.openPermissionSettings('screen-recording')
                       }
-                      onError={() => setNotice('Screen Recording settings could not be opened.')}
+                      onError={() =>
+                        setNotice('The Screen Recording settings could not be opened.')
+                      }
                     />
                   </>
                 ) : null}
@@ -239,7 +254,10 @@ export function InfoScreen({
             </div>
           )}
         </Card>
-        <Card title="Help and local data">
+        <Card
+          title="Help and your data"
+          description="Walk through setup again, or open the folders where Talking Quill keeps your files."
+        >
           <div className="info-actions provider-actions">
             <Button id="reopen-welcome" variant="secondary" onClick={onOpenWelcome}>
               Reopen Welcome
@@ -270,6 +288,10 @@ export function InfoScreen({
               Third-party notices
             </Button>
           </div>
+          <p className="hint">
+            Your settings, your word lists and your history live in the data folder. The logs folder
+            only holds diagnostic files.
+          </p>
         </Card>
       </div>
       <Dialog
@@ -284,7 +306,7 @@ export function InfoScreen({
           tabIndex={0}
           aria-label="Third-party notices text"
         >
-          {notices ?? 'Loading notices…'}
+          {notices ?? 'Loading the notices…'}
         </pre>
       </Dialog>
       {notice === null ? null : (
@@ -310,11 +332,12 @@ function PermissionRow({
       <span>{label}</span>
       <div className="info-actions provider-actions">
         <Status tone={ready ? 'success' : value === 'denied' ? 'error' : 'warning'}>
-          {ready ? 'Allowed' : value === 'denied' ? 'Denied' : 'Needs review'}
+          {ready ? 'Allowed' : value === 'denied' ? 'Blocked' : 'Not decided yet'}
         </Status>
         {ready ? null : (
           <Button
             variant="quiet"
+            aria-label={`Open ${label} settings`}
             onClick={() => {
               void open().catch(onError);
             }}

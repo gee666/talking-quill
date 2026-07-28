@@ -97,14 +97,20 @@ async function configureActivationCoverage(initialization, permissions) {
     })
   ) {
     throw new Error(
-      `Native helper did not round-trip all 12 profile bindings exactly: ${JSON.stringify({ expectedBindings, actualBindings: configuration.bindings })}`,
+      `Native helper did not round-trip all 13 profile bindings exactly: ${JSON.stringify({ expectedBindings, actualBindings: configuration.bindings })}`,
     );
   }
   return {
     configuredChords:
       process.platform === 'win32'
-        ? ['Alt+KeyX', 'Alt+KeyX+KeyP', 'Alt+KeyX+KeyM', 'Alt+KeyX+KeyE']
-        : ['Option+KeyX', 'Option+KeyX+KeyP', 'Option+KeyX+KeyM', 'Option+KeyX+KeyE'],
+        ? ['Alt+KeyX', 'Alt+KeyX+KeyP', 'Alt+KeyX+KeyQ', 'Alt+KeyX+KeyM', 'Alt+KeyX+KeyT']
+        : [
+            'Option+KeyX',
+            'Option+KeyX+KeyP',
+            'Option+KeyX+KeyQ',
+            'Option+KeyX+KeyM',
+            'Option+KeyX+KeyT',
+          ],
     bindingCount: configuration.bindings.length,
     configuration,
   };
@@ -124,8 +130,8 @@ async function runInteractive() {
     });
     console.log(
       windows
-        ? 'For 20 seconds, focus the editor and perform Alt+X, then Alt+X+P, Alt+X+M, and Alt+X+E. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; P/M/E triggers must not.'
-        : 'For 20 seconds, focus the editor and perform Option+X, then Option+X+P, Option+X+M, and Option+X+E. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; P/M/E triggers must not.',
+        ? 'For 20 seconds, focus the editor and perform Alt+X, Alt+X+P, Alt+X+Q, Alt+X+M, and Alt+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; final triggers must not.'
+        : 'For 20 seconds, focus the editor and perform Option+X, Option+X+P, Option+X+Q, Option+X+M, and Option+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; final triggers must not.',
     );
     await delay(20_000);
     await request('activation.configure', { enabled: false, bindings: [] });
@@ -137,8 +143,9 @@ async function runInteractive() {
     const expectedShortcuts = [
       ['general', ['X'], { ctrl: false, alt: true, shift: false, meta: false }],
       ['prompt', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['prompt-to-english', ['X', 'Q'], { ctrl: false, alt: true, shift: false, meta: false }],
       ['markdown', ['X', 'M'], { ctrl: false, alt: true, shift: false, meta: false }],
-      ['translate-to-english', ['X', 'E'], { ctrl: false, alt: true, shift: false, meta: false }],
+      ['translate-to-english', ['X', 'T'], { ctrl: false, alt: true, shift: false, meta: false }],
     ];
     for (const [profileId, keys, modifiers] of expectedShortcuts) {
       if (
@@ -214,8 +221,14 @@ function fullChordBindings() {
   return [
     binding('general', ['X'], { ctrl: false, alt: true, shift: false, meta: false }),
     binding('prompt', ['X', 'P'], { ctrl: false, alt: true, shift: false, meta: false }),
+    binding('prompt-to-english', ['X', 'Q'], {
+      ctrl: false,
+      alt: true,
+      shift: false,
+      meta: false,
+    }),
     binding('markdown', ['X', 'M'], { ctrl: false, alt: true, shift: false, meta: false }),
-    binding('translate-to-english', ['X', 'E'], {
+    binding('translate-to-english', ['X', 'T'], {
       ctrl: false,
       alt: true,
       shift: false,

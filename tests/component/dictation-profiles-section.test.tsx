@@ -46,6 +46,7 @@ function settingsWith(profiles: readonly DictationProfile[]): Settings {
 function renderProfiles(
   initial: Settings,
   profiles: MainApi['profiles'],
+  heading: string | null = 'Dictation profiles',
 ): ReturnType<typeof userEvent.setup> {
   Object.defineProperty(window, 'talkingQuill', {
     configurable: true,
@@ -64,6 +65,7 @@ function renderProfiles(
         settings={settings}
         platform="win32"
         onSettingsSaved={setSettings}
+        heading={heading}
       />
     );
   }
@@ -103,6 +105,28 @@ async function captureShortcut(
 }
 
 describe('DictationProfilesSection', () => {
+  it('removes all section lead copy while keeping built-in editor descriptions', () => {
+    renderProfiles(settingsWith([DEFAULT_GENERAL_PROFILE]), profileApi());
+
+    expect(screen.queryByText(/A profile is a keyboard shortcut/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/You can have several/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/keys before the last one still reach whatever app you are in/i),
+    ).not.toBeInTheDocument();
+    expect(
+      within(group('General')).getByText(
+        'Default: cleans up and formats the transcript in its source language.',
+      ),
+    ).toBeVisible();
+  });
+
+  it('omits its own title when the screen already renders one', () => {
+    renderProfiles(settingsWith([DEFAULT_GENERAL_PROFILE]), profileApi(), null);
+
+    expect(screen.queryByRole('heading', { name: 'Dictation profiles' })).toBeNull();
+    expect(group('General')).toBeVisible();
+  });
+
   it('creates a custom profile and renders the authoritative API result', async () => {
     const initial = settingsWith([DEFAULT_GENERAL_PROFILE, DEFAULT_PROMPT_PROFILE]);
     const created = {
@@ -116,9 +140,10 @@ describe('DictationProfilesSection', () => {
     const user = renderProfiles(initial, profileApi({ create }));
 
     await user.click(screen.getByRole('button', { name: 'Add custom profile' }));
-    await user.clear(screen.getByLabelText('New profile profile name'));
-    await user.type(screen.getByLabelText('New profile profile name'), 'Meeting notes');
-    await user.click(screen.getByRole('button', { name: 'Create profile' }));
+    const newEditor = group('New custom profile');
+    await user.clear(within(newEditor).getByLabelText('Name'));
+    await user.type(within(newEditor).getByLabelText('Name'), 'Meeting notes');
+    await user.click(within(newEditor).getByRole('button', { name: 'Create profile' }));
 
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(create).toHaveBeenCalledWith(
@@ -145,7 +170,7 @@ describe('DictationProfilesSection', () => {
     const user = renderProfiles(initial, profileApi({ update }));
 
     const input = within(group('General')).getByRole('textbox', {
-      name: 'General keyboard shortcut',
+      name: 'Shortcut',
     });
     input.focus();
     await waitFor(() => expect(input).not.toHaveAttribute('aria-busy'));
@@ -156,7 +181,7 @@ describe('DictationProfilesSection', () => {
     fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
     fireEvent.keyUp(input, { key: 'y', code: 'KeyY', altKey: true });
     expect(within(group('General')).getByRole('status')).toHaveTextContent(
-      'Alt + Y + Q captured. Q is the final trigger.',
+      'Got it: Alt + Y + Q. Q is the key that starts dictation.',
     );
 
     await user.click(within(group('General')).getByRole('button', { name: 'Save profile' }));
@@ -178,10 +203,10 @@ describe('DictationProfilesSection', () => {
     );
     const user = renderProfiles(initial, profileApi({ update, delete: remove }));
 
-    await user.clear(within(group('Notes')).getByLabelText('Notes profile name'));
-    await user.type(within(group('Notes')).getByLabelText('Notes profile name'), 'Daily notes');
+    await user.clear(within(group('Notes')).getByLabelText('Name'));
+    await user.type(within(group('Notes')).getByLabelText('Name'), 'Daily notes');
     await user.selectOptions(
-      within(group('Notes')).getByLabelText('Notes processing mode'),
+      within(group('Notes')).getByLabelText('What happens to your words'),
       'smart',
     );
     await user.click(within(group('Notes')).getByRole('button', { name: 'Save profile' }));
@@ -228,17 +253,12 @@ describe('DictationProfilesSection', () => {
     });
     const user = renderProfiles(authoritative, profileApi({ reset }));
 
-    await user.clear(within(group('Changed Prompt')).getByLabelText('Changed Prompt profile name'));
-    await user.type(
-      within(group('Changed Prompt')).getByLabelText('Changed Prompt profile name'),
-      'Unsaved Prompt',
-    );
+    await user.clear(within(group('Changed Prompt')).getByLabelText('Name'));
+    await user.type(within(group('Changed Prompt')).getByLabelText('Name'), 'Unsaved Prompt');
     await user.click(within(group('Changed General')).getByRole('button', { name: 'Reset' }));
     expect(await screen.findByRole('group', { name: 'General' })).toBeInTheDocument();
     expect(
-      within(screen.getByRole('group', { name: 'Changed Prompt' })).getByLabelText(
-        'Changed Prompt profile name',
-      ),
+      within(screen.getByRole('group', { name: 'Changed Prompt' })).getByLabelText('Name'),
     ).toHaveValue('Unsaved Prompt');
 
     await user.click(within(group('Changed Prompt')).getByRole('button', { name: 'Reset' }));
@@ -270,17 +290,20 @@ describe('DictationProfilesSection', () => {
     await user.click(screen.getByRole('button', { name: 'Add custom profile' }));
     const editor = group('New custom profile');
     const input = within(editor).getByRole('textbox', {
-      name: 'New profile keyboard shortcut',
+      name: 'Shortcut',
     });
 
     await captureShortcut(input, 'KeyQ', { altKey: true });
     expect(
-      within(editor).getByText('Alt + Q is already used by Notes (Alt + Q).', {
-        selector: '.me-field__error',
-      }),
+      within(editor).getByText(
+        'Alt + Q is already used by Notes (Alt + Q). Pick a different one.',
+        {
+          selector: '.me-field__error',
+        },
+      ),
     ).toBeVisible();
     expect(within(editor).getByRole('status')).toHaveTextContent(
-      'Alt + Q is already used by Notes (Alt + Q).',
+      'Alt + Q is already used by Notes (Alt + Q). Pick a different one.',
     );
     expect(within(editor).getByRole('button', { name: 'Create profile' })).toBeDisabled();
 
@@ -290,7 +313,7 @@ describe('DictationProfilesSection', () => {
     fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
     expect(
       within(editor).getByText(
-        'Alt + Q + P conflicts with Notes (Alt + Q) because one chord is a prefix of the other.',
+        'Alt + Q + P gets in the way of Notes (Alt + Q) — one shortcut starts with the other, so Talking Quill can’t tell them apart. Pick a different one.',
         { selector: '.me-field__error' },
       ),
     ).toBeVisible();
@@ -301,15 +324,16 @@ describe('DictationProfilesSection', () => {
     fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
     expect(
-      within(editor).getByText('Alt + X + P matches the reserved Prompt default Alt + X + P.', {
-        selector: '.me-field__error',
-      }),
+      within(editor).getByText(
+        'Alt + X + P is the original shortcut for Prompt (Alt + X + P), which stays reserved. Pick a different one.',
+        { selector: '.me-field__error' },
+      ),
     ).toBeVisible();
     expect(within(editor).getByRole('status')).toHaveTextContent('Alt + X + P');
 
     await captureShortcut(input, 'KeyP', { ctrlKey: true, shiftKey: true });
     expect(input).toHaveValue('Ctrl + Shift + P');
-    expect(within(editor).queryByText(/conflicts|already used|reserved/i)).toBeNull();
+    expect(within(editor).queryByText(/gets in the way|already used|reserved/i)).toBeNull();
     expect(within(editor).getByRole('button', { name: 'Create profile' })).toBeEnabled();
     expect(create).not.toHaveBeenCalled();
   });
@@ -326,19 +350,19 @@ describe('DictationProfilesSection', () => {
     );
     const editor = group('General');
     const input = within(editor).getByRole('textbox', {
-      name: 'General keyboard shortcut',
+      name: 'Shortcut',
     });
 
     input.focus();
     await waitFor(() => expect(input).not.toHaveAttribute('aria-busy'));
     fireEvent.keyDown(input, { key: 'x', code: 'KeyX', altKey: true });
-    fireEvent.keyDown(input, { key: 'q', code: 'KeyQ', altKey: true });
-    fireEvent.keyUp(input, { key: 'q', code: 'KeyQ', altKey: true });
+    fireEvent.keyDown(input, { key: 'e', code: 'KeyE', altKey: true });
+    fireEvent.keyUp(input, { key: 'e', code: 'KeyE', altKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
 
     expect(
       within(editor).getByText(
-        'Alt + X + Q conflicts with the reserved General default Alt + X because one chord is a prefix of the other.',
+        'Alt + X + E gets in the way of the original General shortcut (Alt + X) — one starts with the other. Pick a different one.',
         { selector: '.me-field__error' },
       ),
     ).toBeVisible();
@@ -354,7 +378,7 @@ describe('DictationProfilesSection', () => {
     const user = renderProfiles(initial, profileApi({ update }));
     const editor = group('General');
     const input = within(editor).getByRole('textbox', {
-      name: 'General keyboard shortcut',
+      name: 'Shortcut',
     });
     const bubbled = vi.fn();
     document.addEventListener('keydown', bubbled);
@@ -362,16 +386,18 @@ describe('DictationProfilesSection', () => {
     expect(await captureShortcut(input, 'KeyQ', {})).toBe(false);
     expect(input).toHaveValue('Alt + X');
     expect(input).not.toHaveAttribute('aria-invalid');
-    expect(within(editor).getByRole('status')).toHaveTextContent(/first letter must be pressed/i);
+    expect(within(editor).getByRole('status')).toHaveTextContent(
+      /Hold Ctrl, Alt, Shift or the Windows key .* before the first letter/i,
+    );
     expect(bubbled).not.toHaveBeenCalled();
 
     expect(fireEvent.keyDown(input, { key: 'F1', code: 'F1' })).toBe(false);
-    expect(within(editor).getByRole('status')).toHaveTextContent(/Only physical letter keys A–Z/i);
+    expect(within(editor).getByRole('status')).toHaveTextContent(/only use the letters A to Z/i);
     expect(fireEvent.keyDown(input, { key: 'Shift', code: 'ShiftLeft', shiftKey: true })).toBe(
       false,
     );
     expect(within(editor).getByRole('status')).toHaveTextContent(
-      /Keep at least one modifier held/i,
+      /Keep holding, then tap one or more letters/i,
     );
     expect(fireEvent.keyDown(input, { key: 'Tab', code: 'Tab' })).toBe(true);
     expect(fireEvent.keyDown(input, { key: 'Tab', code: 'Tab', shiftKey: true })).toBe(true);
@@ -397,8 +423,8 @@ describe('DictationProfilesSection', () => {
     ).toBe(false);
     expect(input).toHaveValue('Alt + X');
 
-    await user.clear(within(editor).getByLabelText('General profile name'));
-    await user.type(within(editor).getByLabelText('General profile name'), 'Renamed General');
+    await user.clear(within(editor).getByLabelText('Name'));
+    await user.type(within(editor).getByLabelText('Name'), 'Renamed General');
     await user.click(within(editor).getByRole('button', { name: 'Save profile' }));
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith('general', { name: 'Renamed General' }),
@@ -412,20 +438,15 @@ describe('DictationProfilesSection', () => {
     const update = vi.fn<MainApi['profiles']['update']>().mockRejectedValue(new Error('failed'));
     const user = renderProfiles(initial, profileApi({ update }));
 
-    await user.clear(within(group('Notes')).getByLabelText('Notes profile name'));
-    await user.type(within(group('Notes')).getByLabelText('Notes profile name'), 'Unsaved Notes');
-    await user.clear(within(group('General')).getByLabelText('General profile name'));
-    await user.type(
-      within(group('General')).getByLabelText('General profile name'),
-      'Broken General',
-    );
+    await user.clear(within(group('Notes')).getByLabelText('Name'));
+    await user.type(within(group('Notes')).getByLabelText('Name'), 'Unsaved Notes');
+    await user.clear(within(group('General')).getByLabelText('Name'));
+    await user.type(within(group('General')).getByLabelText('Name'), 'Broken General');
     await user.click(within(group('General')).getByRole('button', { name: 'Save profile' }));
 
-    expect(await screen.findByText(/profile could not be saved/i)).toBeVisible();
-    expect(within(group('General')).getByLabelText('General profile name')).toHaveValue('General');
-    expect(within(group('Notes')).getByLabelText('Notes profile name')).toHaveValue(
-      'Unsaved Notes',
-    );
+    expect(await screen.findByText(/profile couldn’t be saved/i)).toBeVisible();
+    expect(within(group('General')).getByLabelText('Name')).toHaveValue('General');
+    expect(within(group('Notes')).getByLabelText('Name')).toHaveValue('Unsaved Notes');
   });
 
   it('preserves a failed create draft and closes it only after a successful create', async () => {
@@ -445,17 +466,12 @@ describe('DictationProfilesSection', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add custom profile' }));
     const createEditor = group('New custom profile');
-    await user.clear(within(createEditor).getByLabelText('New profile profile name'));
-    await user.type(
-      within(createEditor).getByLabelText('New profile profile name'),
-      'Draft profile',
-    );
+    await user.clear(within(createEditor).getByLabelText('Name'));
+    await user.type(within(createEditor).getByLabelText('Name'), 'Draft profile');
     await user.click(within(createEditor).getByRole('button', { name: 'Create profile' }));
 
-    expect(await screen.findByText(/profile could not be saved/i)).toBeVisible();
-    expect(
-      within(group('New custom profile')).getByLabelText('New profile profile name'),
-    ).toHaveValue('Draft profile');
+    expect(await screen.findByText(/profile couldn’t be saved/i)).toBeVisible();
+    expect(within(group('New custom profile')).getByLabelText('Name')).toHaveValue('Draft profile');
 
     await user.click(
       within(group('New custom profile')).getByRole('button', { name: 'Create profile' }),
@@ -476,16 +492,16 @@ describe('DictationProfilesSection', () => {
       );
     const user = renderProfiles(initial, profileApi({ update }));
 
-    const name = within(group('Notes')).getByLabelText('Notes profile name');
+    const name = within(group('Notes')).getByLabelText('Name');
     await user.clear(name);
     await user.type(name, 'Unsaved notes');
     await user.click(within(group('Notes')).getByRole('button', { name: 'Save profile' }));
 
-    expect(await screen.findByText(/profile could not be saved/i)).toBeInTheDocument();
-    expect(within(group('Notes')).getByLabelText('Notes profile name')).toHaveValue('Notes');
+    expect(await screen.findByText(/profile couldn’t be saved/i)).toBeInTheDocument();
+    expect(within(group('Notes')).getByLabelText('Name')).toHaveValue('Notes');
 
-    await user.clear(within(group('Notes')).getByLabelText('Notes profile name'));
-    await user.type(within(group('Notes')).getByLabelText('Notes profile name'), 'Recovered notes');
+    await user.clear(within(group('Notes')).getByLabelText('Name'));
+    await user.type(within(group('Notes')).getByLabelText('Name'), 'Recovered notes');
     await user.click(within(group('Notes')).getByRole('button', { name: 'Save profile' }));
     expect(await screen.findByRole('group', { name: 'Authoritative notes' })).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Recovered notes' })).toBeNull();

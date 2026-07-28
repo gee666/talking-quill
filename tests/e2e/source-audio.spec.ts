@@ -171,13 +171,13 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
 
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Recording' }).click();
-    await main.getByRole('button', { name: 'Test microphone' }).click();
-    await expect(main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
+    await main.getByRole('button', { name: 'Test my microphone' }).click();
+    await expect(main.getByText('Listening — say something')).toBeVisible({ timeout: 15_000 });
     await expect
       .poll(
         async () =>
           Number(
-            await main.getByRole('progressbar', { name: 'Microphone level' }).getAttribute('value'),
+            await main.getByRole('progressbar', { name: 'How loud you are' }).getAttribute('value'),
           ),
         { timeout: 15_000 },
       )
@@ -197,25 +197,27 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
       throw new Error('Chromium fake microphone was not enumerated');
     }
     await picker.selectOption(fakeDeviceId);
-    await expect(main.getByText('Preferred microphone saved.')).toBeVisible();
-    await main.getByRole('button', { name: 'Test microphone' }).click();
-    await expect(main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByText('Microphone saved.')).toBeVisible();
+    await main.getByRole('button', { name: 'Test my microphone' }).click();
+    await expect(main.getByText('Listening — say something')).toBeVisible({ timeout: 15_000 });
     await expect
       .poll(
         async () =>
           Number(
-            await main.getByRole('progressbar', { name: 'Microphone level' }).getAttribute('value'),
+            await main.getByRole('progressbar', { name: 'How loud you are' }).getAttribute('value'),
           ),
         { timeout: 15_000 },
       )
       .toBeGreaterThan(0.01);
 
-    await main.getByRole('button', { name: 'Stop microphone test' }).click();
-    await expect(main.getByText('Test stopped')).toBeVisible();
+    await main.getByRole('button', { name: 'Stop test' }).click();
+    await expect(main.getByText('Not testing')).toBeVisible();
     await expectEveryReturnedTrackEnded(capture, 2);
 
-    await main.getByRole('combobox', { name: 'Silence detection' }).selectOption('relaxed');
-    await expect(main.getByText('Silence detection preset saved.')).toBeVisible();
+    await main
+      .getByRole('combobox', { name: 'How long a pause ends a dictation' })
+      .selectOption('relaxed');
+    await expect(main.getByText('Pause length saved.')).toBeVisible();
     const persisted = JSON.parse(await readFile(resolve(profile, 'settings.json'), 'utf8')) as {
       readonly schemaVersion: number;
       readonly recording: { readonly silencePreset: string };
@@ -225,9 +227,9 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
       recording: { silencePreset: 'relaxed' },
     });
 
-    await main.getByRole('button', { name: 'Test microphone' }).click();
-    await expect(main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
-    await main.getByRole('button', { name: 'Info' }).click();
+    await main.getByRole('button', { name: 'Test my microphone' }).click();
+    await expect(main.getByText('Listening — say something')).toBeVisible({ timeout: 15_000 });
+    await main.getByRole('button', { name: 'About' }).click();
     await expectEveryReturnedTrackEnded(capture, 3);
     const summary = await returnedStreamSummary(capture);
     expect(summary.tracks).toHaveLength(summary.streamCount);
@@ -251,10 +253,10 @@ test('Electron policy denial does not masquerade as Windows privacy denial', asy
     });
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Recording' }).click();
-    await main.getByRole('button', { name: 'Test microphone' }).click();
-    await expect(main.getByText('Microphone unavailable')).toBeVisible();
+    await main.getByRole('button', { name: 'Test my microphone' }).click();
+    await expect(main.getByText('Microphone not available')).toBeVisible();
     await expect(main.getByRole('alert')).toContainText(
-      'could not complete Electron’s microphone authorization',
+      'Talking Quill couldn’t ask for microphone access. Restart Talking Quill and test again.',
     );
     await expect(main.getByRole('button', { name: 'Open microphone settings' })).not.toBeVisible();
   } finally {

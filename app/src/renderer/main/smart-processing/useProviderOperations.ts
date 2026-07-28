@@ -165,10 +165,26 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
     [runModelDiscovery],
   );
 
-  const discoverPiImmediately = useCallback(
-    async (draft: ProviderSettingsDraft, expectedLease?: ProviderLease): Promise<void> => {
+  /**
+   * The quiet variant is the one automatic discovery uses: it reads provider caches instead of
+   * forcing a refresh, and it never verifies the destination — that would cancel the destination
+   * check a concurrent configuration or credential save started for itself.
+   */
+  const discoverModelsQuietly = useCallback(
+    async ({
+      providerId,
+      draft,
+      configurationDirty = false,
+      expectedLease,
+    }: {
+      readonly providerId: RunnableProviderId;
+      readonly draft: ProviderSettingsDraft;
+      readonly configurationDirty?: boolean;
+      readonly expectedLease?: ProviderLease;
+    }): Promise<void> => {
+      if (configurationDirty && providerId !== 'pi') return;
       await runModelDiscovery({
-        providerId: 'pi',
+        providerId,
         draft,
         refresh: false,
         verifyAfter: false,
@@ -176,6 +192,17 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
       });
     },
     [runModelDiscovery],
+  );
+
+  const discoverPiImmediately = useCallback(
+    async (draft: ProviderSettingsDraft, expectedLease?: ProviderLease): Promise<void> => {
+      await discoverModelsQuietly({
+        providerId: 'pi',
+        draft,
+        ...(expectedLease === undefined ? {} : { expectedLease }),
+      });
+    },
+    [discoverModelsQuietly],
   );
 
   const testConnection = useCallback(
@@ -257,6 +284,7 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
     reset,
     invalidate,
     discoverModels,
+    discoverModelsQuietly,
     discoverPiImmediately,
     testConnection,
     verifyDestination,

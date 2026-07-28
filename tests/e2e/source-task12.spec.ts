@@ -98,9 +98,9 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await expect(defaults.getByRole('listitem')).toHaveText([
       'General: Alt + X (final trigger X) — Smart processing',
       'Prompt: Alt + X + P (final trigger P) — Smart processing',
-      'Prompt to English: Alt + X + P + E (final trigger E) — Smart processing',
+      'Prompt to English: Alt + X + Q (final trigger Q) — Smart processing',
       'Markdown: Alt + X + M (final trigger M) — Smart processing',
-      'Translate to English: Alt + X + E (final trigger E) — Smart processing',
+      'Translate to English: Alt + X + T (final trigger T) — Smart processing',
     ]);
     await main.getByRole('button', { name: 'Start using Talking Quill' }).click();
     await expect(main.getByRole('heading', { name: 'Talking Quill is ready' })).toBeVisible();
@@ -128,7 +128,7 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
       .toBe('completed');
     await expect(main.getByText('deterministic transcript')).toBeVisible();
 
-    await main.getByRole('button', { name: 'Info' }).click();
+    await main.getByRole('button', { name: 'About' }).click();
     await main.screenshot({ path: 'tmp/review-screenshots/info-large.png', fullPage: false });
     await main.getByRole('button', { name: 'Reopen Welcome' }).click();
     await expect(main.getByRole('button', { name: 'Exit Welcome' })).toBeVisible();

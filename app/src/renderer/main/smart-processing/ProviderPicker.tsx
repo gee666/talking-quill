@@ -49,7 +49,7 @@ export function ProviderPicker({
 
   return (
     <div className="provider-picker">
-      <span className="provider-picker__label">Provider</span>
+      <span className="provider-picker__label">AI service</span>
       <button
         type="button"
         className="provider-picker__trigger"
@@ -70,6 +70,7 @@ export function ProviderPicker({
           <Input
             label="Search providers"
             type="search"
+            placeholder="Start typing a name…"
             value={search}
             onChange={(event) => {
               setSearch(event.currentTarget.value);
@@ -104,8 +105,8 @@ export function ProviderPicker({
             ))}
             {filtered.length === 0 ? (
               <EmptyState
-                title="No matching providers"
-                description="Try a provider name or clear the search."
+                title="Nothing matches"
+                description="Try a different name, or clear the search to see them all."
               />
             ) : null}
           </div>

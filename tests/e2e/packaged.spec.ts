@@ -386,12 +386,11 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
         }
       });
     });
-    // Remount the dictation history after diagnostics are attached so thumbnail loading and CSP
+    // Mount the dictation history after diagnostics are attached so thumbnail loading and CSP
     // enforcement are observed rather than relying on renderer events emitted before CDP connected.
-    await launched.main.getByRole('button', { name: 'Settings' }).click();
-    await launched.main.getByRole('button', { name: 'Dashboard' }).click();
+    await launched.main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(
-      launched.main.getByRole('heading', { name: 'Dictation needs local setup' }),
+      launched.main.getByRole('heading', { name: 'Dictation history', exact: true }),
     ).toBeVisible();
     // Categorized in-process instrumentation is intentionally blocked before socket I/O. This is
     // scenario-routing evidence, not OS packet-capture evidence.
@@ -420,11 +419,13 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
       }),
     ).toEqual([]);
     expect(rendererErrors).toEqual([]);
+    await launched.main.getByRole('button', { name: 'Dashboard' }).click();
+    await expect(launched.main.getByRole('heading', { name: 'Almost there' })).toBeVisible();
     const helperReadiness = launched.main
       .locator('.readiness-row')
-      .filter({ hasText: 'Native keyboard and insertion helper' });
+      .filter({ hasText: 'Typing helper' });
     await expect(helperReadiness).toContainText(
-      process.platform === 'win32' ? 'Available' : /Available|Permission needed/,
+      process.platform === 'win32' ? 'Available' : /Available|Needs permission/,
     );
     expect(await launched.main.evaluate(() => Reflect.has(window.talkingQuill, 'helper'))).toBe(
       false,
@@ -518,24 +519,32 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
 
     await launched.main.getByRole('button', { name: 'Settings' }).click();
     await launched.main.getByRole('button', { name: 'Recording' }).click();
-    await launched.main.getByRole('button', { name: 'Test microphone' }).click();
-    await expect(launched.main.getByText('Microphone active')).toBeVisible({ timeout: 15_000 });
+    await launched.main.getByRole('button', { name: 'Test my microphone' }).click();
+    await expect(launched.main.getByText('Listening — say something')).toBeVisible({
+      timeout: 15_000,
+    });
     await expect
       .poll(
         async () =>
           Number(
             await launched?.main
-              .getByRole('progressbar', { name: 'Microphone level' })
+              .getByRole('progressbar', { name: 'How loud you are' })
               .getAttribute('value'),
           ),
         { timeout: 15_000 },
       )
       .toBeGreaterThan(0.01);
-    await launched.main.getByRole('button', { name: 'Stop microphone test' }).click();
-    await expect(launched.main.getByText('Test stopped')).toBeVisible();
+    await launched.main.getByRole('button', { name: 'Stop test' }).click();
+    await expect(launched.main.getByText('Not testing')).toBeVisible();
     await launched.main.getByRole('button', { name: 'General' }).click();
-    await launched.main.getByRole('checkbox', { name: 'Close to tray' }).click();
-    await expect(launched.main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
+    await launched.main
+      .getByRole('checkbox', { name: 'Keep running in the tray when I close the window' })
+      .click();
+    await expect(
+      launched.main.getByRole('checkbox', {
+        name: 'Keep running in the tray when I close the window',
+      }),
+    ).not.toBeChecked();
     await launched.main.getByRole('button', { name: 'Smart processing' }).click();
     await launched.main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     const providerLogos = launched.main
@@ -552,23 +561,33 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
         ),
       )
       .toBe(true);
-    const providerForm = launched.main.locator('.provider-form');
-    await providerForm.getByLabel('Model').fill('proof-model');
-    await providerForm.getByRole('button', { name: 'Save configuration' }).click();
-    await expect(providerForm.getByText('Draft saved')).toBeVisible();
-    await launched.main.getByRole('button', { name: 'Test connection' }).click();
+    // Opening Smart processing now starts automatic model discovery, which is the first
+    // categorized provider choke point the proof observer records.
     await expect.poll(() => readEgressCategories(profile)).toEqual(['provider']);
+    const providerForm = launched.main.locator('form.stack');
+    await providerForm
+      .getByRole('combobox', { name: 'Model', exact: true })
+      .selectOption('\u0000custom-model');
+    await providerForm
+      .getByRole('textbox', { name: 'Model name', exact: true })
+      .fill('proof-model');
+    await providerForm.getByRole('button', { name: 'Save configuration' }).click();
+    await expect(providerForm.getByText('Saved', { exact: true })).toBeVisible();
+    await launched.main.getByRole('button', { name: 'Test connection' }).click();
+    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'provider']);
 
-    await launched.main.getByRole('button', { name: 'Info' }).click();
+    await launched.main.getByRole('button', { name: 'About' }).click();
     await expect(launched.main.getByRole('heading', { name: 'About Talking Quill' })).toBeVisible();
     await launched.main.getByRole('button', { name: 'Check for updates' }).click();
-    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'update']);
-    await launched.main.getByRole('button', { name: 'Settings' }).click();
-    await launched.main.getByRole('button', { name: 'Transcription model' }).click();
-    await launched.main.getByRole('button', { name: 'Download model' }).click();
     await expect
       .poll(() => readEgressCategories(profile))
-      .toEqual(['provider', 'update', 'model-download']);
+      .toEqual(['provider', 'provider', 'update']);
+    await launched.main.getByRole('button', { name: 'Settings' }).click();
+    await launched.main.getByRole('button', { name: 'Transcription model' }).click();
+    await launched.main.getByRole('button', { name: 'Download', exact: true }).click();
+    await expect
+      .poll(() => readEgressCategories(profile))
+      .toEqual(['provider', 'provider', 'update', 'model-download']);
     const firstExit = waitForExit(launched.child);
     await launched.main.getByRole('button', { name: 'Close window' }).click();
     await firstExit;
@@ -578,7 +597,11 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     launched = await launchPackaged(profile);
     await launched.main.getByRole('button', { name: 'Settings' }).click();
     await launched.main.getByRole('button', { name: 'General' }).click();
-    await expect(launched.main.getByRole('checkbox', { name: 'Close to tray' })).not.toBeChecked();
+    await expect(
+      launched.main.getByRole('checkbox', {
+        name: 'Keep running in the tray when I close the window',
+      }),
+    ).not.toBeChecked();
     const secondExit = waitForExit(launched.child);
     await launched.main.getByRole('button', { name: 'Close window' }).click();
     await secondExit;

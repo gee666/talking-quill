@@ -151,11 +151,11 @@ export function actionableError(error: unknown, providerId?: RunnableProviderId)
   );
 }
 
-export function destinationLabel(destination: Destination | null): string {
-  if (destination === 'local') return 'Local destination';
-  if (destination === 'lan') return 'LAN destination';
-  if (destination === 'cloud') return 'Cloud destination';
-  return 'Destination unknown';
+export function destinationLabel(destination: Destination | null, providerName?: string): string {
+  if (destination === 'local') return 'Runs on this computer';
+  if (destination === 'lan') return 'Runs on your network';
+  if (destination === 'cloud') return `Sends your text to ${providerName ?? 'a company online'}`;
+  return 'We do not know yet where your text goes';
 }
 
 export function destinationTone(destination: Destination | null): 'success' | 'info' | 'warning' {

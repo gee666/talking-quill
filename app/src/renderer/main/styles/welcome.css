@@ -5,11 +5,25 @@
   display: flex;
   min-height: 0;
   height: 100%;
-  max-width: 720px;
+  justify-content: center;
+  padding: var(--space-4) var(--space-5) 0;
+}
+/* One shared column: the brand row, header, progress strip, content and the
+   action bar all line up with these edges. */
+.welcome__column {
+  --welcome-column: 700px;
+
+  display: flex;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--welcome-column);
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-4) var(--space-5) 0;
-  margin: 0 auto;
+}
+.welcome__column > * {
+  width: 100%;
+  min-width: 0;
+  flex: none;
 }
 
 /* --------------------------------------------------------------- Brand row */
@@ -85,8 +99,9 @@
   list-style: none;
 }
 .welcome__progress > li {
-  position: relative;
-  display: block;
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
   flex: 1 1 0;
   min-width: 0;
 }
@@ -103,30 +118,20 @@
 .welcome__progress > li[data-state='current'] .welcome__progress-marker {
   background: var(--color-accent);
 }
-/* Every step name stays available to assistive technology; only the current
-   step is shown, so the strip keeps a single quiet caption. */
+/* Every step name is readable, not just the current one. */
 .welcome__progress-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-}
-.welcome__progress > li[data-state='current'] .welcome__progress-label {
-  top: calc(var(--welcome-strip-thickness) + var(--space-1));
-  left: 0;
-  width: auto;
-  height: auto;
-  overflow: visible;
-  clip: auto;
-  color: var(--color-secondary);
+  display: block;
+  color: var(--color-muted);
   font-size: var(--fs-xs);
   line-height: 1.2;
+  overflow-wrap: anywhere;
 }
-.welcome__progress > li:last-child[data-state='current'] .welcome__progress-label {
-  right: 0;
-  left: auto;
+.welcome__progress > li[data-state='complete'] .welcome__progress-label {
+  color: var(--color-secondary);
+}
+.welcome__progress > li[data-state='current'] .welcome__progress-label {
+  color: var(--color-text);
+  font-weight: 500;
 }
 
 /* ----------------------------------------------------------------- Content */
@@ -146,6 +151,7 @@
   min-width: 0;
 }
 .welcome__content p:not([class]) {
+  max-width: var(--measure);
   margin: 0;
   font-size: var(--fs-md);
 }
@@ -204,7 +210,6 @@
   gap: var(--space-3);
   min-height: var(--row-height);
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
 }
 .model-setup__identity {
   display: grid;
@@ -221,6 +226,9 @@
   color: var(--color-secondary);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
+}
+.model-setup__row--state-only {
+  justify-content: flex-end;
 }
 .model-setup__state {
   display: flex;
@@ -240,10 +248,9 @@
 }
 .model-setup__row--progress {
   display: block;
-  padding-block: var(--space-2);
 }
 .model-setup__detail {
-  padding: var(--space-2) var(--space-3);
+  max-width: var(--measure);
 }
 
 @media (max-width: 900px) {

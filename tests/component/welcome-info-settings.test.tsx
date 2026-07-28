@@ -156,7 +156,7 @@ describe('Welcome, Info, and settings completion', () => {
     expect(onComplete).toHaveBeenCalledWith({ completedAt: 10, lastStep: 5, reopened: false });
   });
 
-  it('shows and persists auto-detection or a source-language hint during local-model onboarding', async () => {
+  it('persists a source language without rendering the removed language hint', async () => {
     const user = userEvent.setup();
     const configured = settings();
     configured.welcome.lastStep = 3;
@@ -179,15 +179,17 @@ describe('Welcome, Info, and settings completion', () => {
       />,
     );
 
-    const language = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    const language = screen.getByRole('combobox', { name: 'Language you speak' });
     expect(language).toHaveValue('en');
-    expect(screen.getByText(/without translating it/i)).toBeVisible();
+    expect(screen.queryByText(/your words are not translated/i)).not.toBeInTheDocument();
     await user.selectOptions(language, 'fr');
-    await user.click(screen.getByRole('button', { name: 'Save source language' }));
+    const saveLanguage = screen.getByRole('button', { name: 'Save language' });
+    expect(saveLanguage).toHaveClass('language-save-button');
+    await user.click(saveLanguage);
 
     expect(update).toHaveBeenCalledWith({ transcription: { language: 'fr' } });
     expect(onSettingsSaved).toHaveBeenCalledWith(saved);
-    expect(await screen.findByText('Source language saved.')).toBeVisible();
+    expect(await screen.findByText('Language saved.')).toBeVisible();
   });
 
   it('uses authoritative step responses and follows persisted progress rollbacks', async () => {
@@ -311,11 +313,13 @@ describe('Welcome, Info, and settings completion', () => {
     ).toEqual([
       'General: Alt + X (final trigger X) — Smart processing',
       'Prompt: Alt + X + P (final trigger P) — Smart processing',
-      'Prompt to English: Alt + X + P + E (final trigger E) — Smart processing',
+      'Prompt to English: Alt + X + Q (final trigger Q) — Smart processing',
       'Markdown: Alt + X + M (final trigger M) — Smart processing',
-      'Translate to English: Alt + X + E (final trigger E) — Smart processing',
+      'Translate to English: Alt + X + T (final trigger T) — Smart processing',
     ]);
-    expect(screen.getByText(/existing or migrated profile settings may differ/i)).toBeVisible();
+    expect(
+      screen.getByText(/If you have already changed one, your version is kept/i),
+    ).toBeVisible();
     expect(within(profiles).queryByText('Meeting notes')).not.toBeInTheDocument();
     expect(screen.getByText(/Shortcuts can be changed anytime in Settings/i)).toBeVisible();
     expect(screen.queryByText(/Test activation shortcut/i)).not.toBeInTheDocument();
@@ -437,13 +441,13 @@ describe('Welcome, Info, and settings completion', () => {
     const update = vi.fn(() => Promise.reject(new Error('write failed')));
     (api.settings as { update: typeof update }).update = update;
     render(<TranscriptionLanguageSetting settings={configured} onSettingsSaved={vi.fn()} />);
-    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    const input = screen.getByRole('combobox', { name: 'Language you speak' });
     await user.selectOptions(input, 'ru');
-    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
     expect(update).toHaveBeenCalledWith({ transcription: { language: 'ru' } });
-    expect(await screen.findByText(/previous value was restored/i)).toBeVisible();
+    expect(await screen.findByText(/your previous choice is still in use/i)).toBeVisible();
     expect(input).toHaveValue('en');
-    expect(screen.getByRole('option', { name: /auto-detect/i })).toBeVisible();
+    expect(screen.getByRole('option', { name: /detect it automatically/i })).toBeVisible();
   });
 
   it('applies language saves after the StrictMode effect replay', async () => {
@@ -460,9 +464,9 @@ describe('Welcome, Info, and settings completion', () => {
       </StrictMode>,
     );
 
-    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    const input = screen.getByRole('combobox', { name: 'Language you speak' });
     fireEvent.change(input, { target: { value: 'fr' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
 
     await waitFor(() => expect(onSettingsSaved).toHaveBeenCalledWith(saved));
     expect(input).toHaveValue('fr');
@@ -487,11 +491,12 @@ describe('Welcome, Info, and settings completion', () => {
       );
     (api.settings as { update: typeof update }).update = update;
     render(<TranscriptionLanguageSetting settings={configured} onSettingsSaved={vi.fn()} />);
-    const input = screen.getByRole('combobox', { name: 'Spoken/source language' });
+    const input = screen.getByRole('combobox', { name: 'Language you speak' });
     fireEvent.change(input, { target: { value: 'fr' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save source language' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save language' }));
     fireEvent.change(input, { target: { value: 'de' } });
-    fireEvent.click(screen.getByRole('button', { name: /source language/i }));
+    // The first save is still in flight, so the button is now labelled 'Saving language'.
+    fireEvent.click(screen.getByRole('button', { name: 'Saving language' }));
     const newest = settings();
     newest.transcription.language = 'de';
     resolveSecond(newest);
@@ -499,7 +504,7 @@ describe('Welcome, Info, and settings completion', () => {
     rejectFirst(new Error('late failure'));
     await Promise.resolve();
     expect(input).toHaveValue('de');
-    expect(screen.queryByText(/could not be saved/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn’t be saved/i)).not.toBeInTheDocument();
   });
 
   it('keeps diagnostic logging opt-in and requires the exact reset confirmation', async () => {
@@ -515,18 +520,20 @@ describe('Welcome, Info, and settings completion', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: 'Privacy & data' }));
-    const logging = screen.getByRole('checkbox', { name: 'Diagnostic logging' });
+    const logging = screen.getByRole('checkbox', {
+      name: 'Write a technical log to help with problems',
+    });
     expect(logging).not.toBeChecked();
     await user.click(logging);
     expect((api.settings as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith({
       privacy: { diagnosticLoggingEnabled: true },
     });
 
-    await user.click(screen.getByRole('button', { name: 'Reset all application data' }));
+    await user.click(screen.getByRole('button', { name: 'Delete everything' }));
     const confirmation = screen.getByRole('textbox', {
       name: 'Type RESET TALKING QUILL to confirm',
     });
-    const reset = screen.getByRole('button', { name: 'Reset and restart' });
+    const reset = screen.getByRole('button', { name: 'Delete everything and restart' });
     expect(reset).toBeDisabled();
     await user.type(confirmation, 'RESET TALKING QUILL');
     expect(reset).toBeEnabled();
@@ -534,9 +541,7 @@ describe('Welcome, Info, and settings completion', () => {
     expect((api.data as { resetAll: ReturnType<typeof vi.fn> }).resetAll).toHaveBeenCalledWith(
       'RESET TALKING QUILL',
     );
-    expect(
-      await screen.findByText('Reset accepted. Talking Quill will now relaunch.'),
-    ).toBeVisible();
+    expect(await screen.findByText('Confirmed. Talking Quill will restart now.')).toBeVisible();
   });
 
   it('filters settings by keywords and reports an empty result accessibly', async () => {
@@ -568,6 +573,6 @@ describe('Welcome, Info, and settings completion', () => {
     expect(screen.queryByRole('region', { name: 'General' })).not.toBeInTheDocument();
     await user.clear(search);
     await user.type(search, 'definitely absent');
-    await waitFor(() => expect(screen.getByText('No matching settings')).toBeVisible());
+    await waitFor(() => expect(screen.getByText('Nothing matches your search')).toBeVisible());
   });
 });

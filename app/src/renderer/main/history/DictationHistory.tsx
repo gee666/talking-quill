@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HistoryCursor, HistoryListItem } from '../../../shared/schemas/history';
 import { Button, Card, Dialog, EmptyState, Icon, Toast } from '../../design';
 
-export function DictationHistory() {
+export function DictationHistory({
+  showHeading = true,
+  showDescription = true,
+}: {
+  readonly showHeading?: boolean;
+  readonly showDescription?: boolean;
+} = {}) {
   const [items, setItems] = useState<readonly HistoryListItem[]>([]);
   const [cursor, setCursor] = useState<HistoryCursor | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,7 +33,7 @@ export function DictationHistory() {
       setCursor(page.nextCursor);
     } catch {
       if (sequence === requestSequence.current)
-        setError('The dictation history could not be loaded.');
+        setError('Your dictation history could not be loaded.');
     } finally {
       if (sequence === requestSequence.current) {
         setLoading(false);
@@ -54,9 +60,9 @@ export function DictationHistory() {
     setNotice(null);
     try {
       await window.talkingQuill.history.copy(id);
-      setNotice({ message: 'Transcript copied to the clipboard.', tone: 'success' });
+      setNotice({ message: 'Copied to your clipboard.', tone: 'success' });
     } catch {
-      setError('The transcript could not be copied.');
+      setError('That transcript could not be copied.');
     }
   };
   const remove = async (id: string) => {
@@ -67,13 +73,12 @@ export function DictationHistory() {
       const result = await window.talkingQuill.history.delete(id);
       if (result.screenshotCleanup !== 'complete') {
         setNotice({
-          message:
-            'The entry was deleted, but screenshot cleanup is incomplete and will be retried.',
+          message: 'Deleted. The screenshot is taking a moment to clear and will go shortly.',
           tone: 'warning',
         });
       }
     } catch {
-      setError('The entry could not be deleted.');
+      setError('That entry could not be deleted.');
     } finally {
       setBusy(false);
     }
@@ -87,15 +92,15 @@ export function DictationHistory() {
       setConfirmDeleteAll(false);
       setNotice(
         result.screenshotCleanup === 'complete'
-          ? { message: 'All history entries were deleted.', tone: 'success' }
+          ? { message: 'Your dictation history is now empty.', tone: 'success' }
           : {
               message:
-                'All history entries were deleted, but screenshot cleanup is incomplete and will be retried.',
+                'Your dictation history is now empty. The screenshots are taking a moment to clear and will go shortly.',
               tone: 'warning',
             },
       );
     } catch {
-      setError('The dictation history could not be deleted.');
+      setError('Your dictation history could not be deleted.');
     } finally {
       setBusy(false);
     }
@@ -103,8 +108,10 @@ export function DictationHistory() {
 
   return (
     <Card
-      title="Dictation history"
-      description="Completed dictations stored locally on this device."
+      {...(showHeading ? { title: 'Dictation history' } : {})}
+      {...(showDescription
+        ? { description: 'Everything you have dictated, kept only on your computer.' }
+        : {})}
     >
       {items.length === 0 ? null : (
         <div className="history-heading-actions">
@@ -115,14 +122,14 @@ export function DictationHistory() {
       )}
       {loading && items.length === 0 ? (
         <p className="body-copy" aria-live="polite">
-          Loading history…
+          Loading your history…
         </p>
       ) : error !== null && items.length === 0 ? (
-        <EmptyState title="Unable to load history" description={error} />
+        <EmptyState title="History could not be loaded" description={error} />
       ) : items.length === 0 ? (
         <EmptyState
-          title="No dictations yet"
-          description="Completed dictations will appear here when history is enabled."
+          title="Nothing here yet"
+          description="Once you dictate something it shows up here, so you can copy it again or delete it."
         />
       ) : (
         <ol className="history-list" aria-label="Dictation history">
@@ -132,18 +139,21 @@ export function DictationHistory() {
                 <time dateTime={new Date(item.createdAt).toISOString()}>
                   {new Date(item.createdAt).toLocaleString()}
                 </time>
-                <span>
-                  {item.dictationMode === 'quick' ? 'Quick' : 'Extended'} ·{' '}
-                  {item.processingMode === 'raw' ? 'Raw' : 'Smart'}
+                <span className="history-entry__chips">
+                  <span>{item.dictationMode === 'quick' ? 'Quick' : 'Extended'}</span>{' '}
+                  <span aria-hidden="true">·</span>{' '}
+                  <span>{item.processingMode === 'raw' ? 'Raw' : 'Smart'}</span>
                 </span>
               </div>
-              <p>{historyDisplayText(item) ?? 'No usable transcript'}</p>
+              <p className="history-entry__text">
+                {historyDisplayText(item) ?? 'No words were captured'}
+              </p>
               {item.outcome === 'voice-command' && item.voiceTrigger !== null ? (
-                <p className="history-entry__detail">Command trigger: “{item.voiceTrigger}”</p>
+                <p className="history-entry__detail">You said “{item.voiceTrigger}”</p>
               ) : null}
               {item.processingMode === 'smart' &&
               (item.providerId !== null || item.modelId !== null) ? (
-                <p className="history-entry__detail" aria-label="Smart provider and model">
+                <p className="history-entry__detail hint" aria-label="Smart provider and model">
                   Provider: {item.providerId ?? 'Unknown'} · Model: {item.modelId ?? 'Unknown'}
                 </p>
               ) : null}
@@ -191,7 +201,7 @@ export function DictationHistory() {
       <Dialog
         open={confirmDeleteAll}
         title="Delete all history?"
-        description="This permanently removes all locally stored history entries."
+        description="Every entry below is removed for good. There is no undo."
         onClose={() => setConfirmDeleteAll(false)}
         actions={
           <>
@@ -204,7 +214,7 @@ export function DictationHistory() {
           </>
         }
       >
-        <p>This does not remove settings, credentials, transcription models, or logs.</p>
+        <p>Your settings, your API keys, the speech model and the logs are all left alone.</p>
       </Dialog>
     </Card>
   );
@@ -273,7 +283,7 @@ function HistoryThumbnail({ item }: { readonly item: HistoryListItem }) {
       {objectUrl === null ? (
         <>
           <Icon name="profiles" />
-          {item.hasScreenshot ? 'Screenshot unavailable' : 'No screenshot retained'}
+          {item.hasScreenshot ? 'Screenshot unavailable' : 'No screenshot kept'}
         </>
       ) : (
         <img src={objectUrl} alt="On-Screen Awareness context thumbnail" />
@@ -307,15 +317,15 @@ function scheduleDeferredTask(task: () => void): () => void {
 
 function fallbackDescription(category: string | null): string {
   if (category === 'pi-authentication-failed') {
-    return 'Fell back to Raw because Pi authentication failed.';
+    return 'The AI service could not sign in, so your words were inserted exactly as you said them.';
   }
   if (category === 'pi-model-not-found' || category === 'pi-no-models') {
-    return 'Fell back to Raw because the Pi model was unavailable.';
+    return 'The AI model was not available, so your words were inserted exactly as you said them.';
   }
   if (category?.startsWith('pi-') === true) {
-    return 'Fell back to Raw because Pi failed safely.';
+    return 'The AI clean-up did not work, so your words were inserted exactly as you said them.';
   }
-  return 'Fell back to Raw. Check the provider in Settings.';
+  return 'The AI clean-up did not run, so your words were inserted as you said them. Check Smart processing in Settings.';
 }
 
 function historyDisplayText(item: HistoryListItem): string | null {

@@ -618,6 +618,8 @@ export function useProviderConfiguration({
     providerSelectionPending,
     credentialConfigured,
     credentialBindingDirty,
+    credentialEpoch,
+    persistedCredentialBinding,
     credentialState,
     credentialMutationPending,
     secretRef,

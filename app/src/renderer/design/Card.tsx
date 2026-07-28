@@ -20,7 +20,7 @@ export function Card({
   return (
     <div
       {...props}
-      className={`me-card ${className}`.trim()}
+      className={`section ${className}`.trim()}
       data-interactive={interactive}
       role={interactive ? 'button' : undefined}
       aria-disabled={interactive ? disabled : undefined}
@@ -39,13 +39,13 @@ export function Card({
         }
       }}
     >
-      {title === undefined ? null : (
-        <header className="me-card__header">
-          <h2 className="me-card__heading">{title}</h2>
-          {description === undefined ? null : <p className="me-card__description">{description}</p>}
+      {title === undefined && description === undefined ? null : (
+        <header className="section__header">
+          {title === undefined ? null : <h2 className="section__title">{title}</h2>}
+          {description === undefined ? null : <p className="section__lead">{description}</p>}
         </header>
       )}
-      <div className="me-card__body">{children}</div>
+      <div className="section__body">{children}</div>
     </div>
   );
 }

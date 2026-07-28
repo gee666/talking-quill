@@ -6,16 +6,12 @@ import { Button, Progress, Select, Status, Toast } from '../../design';
 type WhisperModelId = Settings['transcription']['modelId'];
 
 const MODEL_ENTRIES = {
-  'Xenova/whisper-small': { name: 'Whisper Small', size: 'about 250 MB' },
+  'Xenova/whisper-small': { name: 'Faster — good for everyday dictation', size: 'about 250 MB' },
   'onnx-community/whisper-large-v3-turbo': {
-    name: 'Whisper Large v3 Turbo (High quality - longer transcription)',
+    name: 'More accurate — takes a little longer',
     size: 'about 1.09 GB',
   },
 } as const satisfies Record<WhisperModelId, { readonly name: string; readonly size: string }>;
-
-function modelOptionLabel(id: WhisperModelId): string {
-  return `${MODEL_ENTRIES[id].name} — ${MODEL_ENTRIES[id].size}`;
-}
 
 export function ModelSetup({
   settings,
@@ -43,7 +39,7 @@ export function ModelSetup({
       return next.modelId === modelId ? next : null;
     } catch {
       if (generation === refreshGeneration.current) {
-        setError('The local model status could not be read.');
+        setError('Talking Quill couldn’t check the speech model on this computer.');
       }
       return null;
     }
@@ -85,7 +81,7 @@ export function ModelSetup({
 
   const perform = async (
     action: () => Promise<ModelStatus>,
-    fallback = 'The model action could not be completed. Retry to resume from safe existing files.',
+    fallback = 'That didn’t work. Try again — whatever was already downloaded is kept.',
   ) => {
     setBusy(true);
     setError(null);
@@ -111,7 +107,7 @@ export function ModelSetup({
       if (mounted.current && generation === selectionGeneration.current) onSettingsSaved(saved);
     } catch {
       if (mounted.current && generation === selectionGeneration.current) {
-        setError('The selected model could not be saved.');
+        setError('That choice couldn’t be saved. Please try again.');
       }
     } finally {
       if (mounted.current && generation === selectionGeneration.current) setBusy(false);
@@ -132,42 +128,34 @@ export function ModelSetup({
           : state === 'ready'
             ? null
             : state === 'offline' || state === 'error' || state === 'corrupt'
-              ? { label: 'Retry download', run: () => window.talkingQuill.models.retry(modelId) }
+              ? { label: 'Try again', run: () => window.talkingQuill.models.retry(modelId) }
               : {
-                  label: 'Download model',
+                  label: 'Download',
                   run: () => window.talkingQuill.models.download(modelId),
                 };
 
   return (
     <div className="model-setup">
       <Select
-        label="Transcription model"
-        hint={
-          modelId === 'onnx-community/whisper-large-v3-turbo'
-            ? '(High quality - longer transcription)'
-            : '(Faster transcription)'
-        }
+        label="Which model to use"
+        hint={`${modelId} (${entry.size})`}
         value={modelId}
         disabled={
           busy || state === 'downloading' || state === 'verifying' || state === 'installing'
         }
         onChange={(event) => void saveModelSelection(event.currentTarget.value as WhisperModelId)}
       >
-        <option value="Xenova/whisper-small">{modelOptionLabel('Xenova/whisper-small')}</option>
+        <option value="Xenova/whisper-small">{MODEL_ENTRIES['Xenova/whisper-small'].name}</option>
         <option value="onnx-community/whisper-large-v3-turbo">
-          {modelOptionLabel('onnx-community/whisper-large-v3-turbo')}
+          {MODEL_ENTRIES['onnx-community/whisper-large-v3-turbo'].name}
         </option>
       </Select>
       <div className="group">
-        <div className="model-setup__row">
-          <span className="model-setup__identity">
-            <span className="model-setup__name">{entry.name}</span>
-            <span className="model-setup__size">{entry.size}</span>
-          </span>
+        <div className="model-setup__row model-setup__row--state-only">
           <div className="model-setup__state">
             {visibleStatus === null ? (
               <p role="status" className="model-setup__checking">
-                Checking model…
+                Checking…
               </p>
             ) : (
               <Status
@@ -205,7 +193,7 @@ export function ModelSetup({
                   disabled={busy}
                   onClick={() => void perform(() => window.talkingQuill.models.pause(modelId))}
                 >
-                  Pause model setup
+                  Pause
                 </Button>
               ) : null}
               {state === 'ready' ? (
@@ -216,11 +204,11 @@ export function ModelSetup({
                     void perform(
                       () =>
                         window.talkingQuill.models.delete(modelId).then((result) => result.status),
-                      'The model is currently in use or could not be deleted.',
+                      'The model couldn’t be deleted — it may be in use right now. Try again in a moment.',
                     )
                   }
                 >
-                  Delete model
+                  Delete
                 </Button>
               ) : null}
             </div>
@@ -229,7 +217,7 @@ export function ModelSetup({
         {visibleStatus === null ? null : (
           <div className="model-setup__row model-setup__row--progress">
             <Progress
-              label="Model files"
+              label="Download progress"
               value={visibleStatus.downloadedBytes}
               max={visibleStatus.totalBytes}
               disabled={state === 'missing'}
@@ -248,24 +236,24 @@ export function ModelSetup({
 function modelStateLabel(status: ModelStatus): string {
   switch (status.state) {
     case 'missing':
-      return 'Model download required';
+      return 'Not downloaded yet';
     case 'checking':
-      return 'Checking model integrity';
+      return 'Checking the download';
     case 'downloading':
-      return 'Downloading model';
+      return 'Downloading';
     case 'verifying':
-      return 'Verifying downloaded model';
+      return 'Checking everything arrived';
     case 'installing':
-      return 'Installing verified model';
+      return 'Almost ready';
     case 'paused':
       return 'Download paused';
     case 'ready':
-      return 'Model ready for offline transcription';
+      return 'Ready — works without internet';
     case 'corrupt':
-      return 'Model files are corrupt and need repair';
+      return 'The download is damaged — download it again';
     case 'offline':
-      return 'Offline — reconnect to finish the download';
+      return 'No internet — reconnect to finish the download';
     case 'error':
-      return 'Model setup failed';
+      return 'The download didn’t finish';
   }
 }

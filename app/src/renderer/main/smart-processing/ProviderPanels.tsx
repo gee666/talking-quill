@@ -14,23 +14,25 @@ import {
   type RequestState,
 } from './provider-utils';
 
+const CLOUD_COST_NOTE =
+  'Until this is checked, assume your text may leave this computer. A cloud provider may charge you for what it processes. Talking Quill never adds a fee of its own.';
+
 export function DestinationSummary({
   destination,
+  providerName,
   verified,
 }: {
   readonly destination: Destination | null;
+  readonly providerName: string;
   readonly verified: boolean;
 }) {
   return (
-    <div className="provider-summary">
+    <div className="provider-summary stack">
       <Status tone={destinationTone(destination)}>
-        {destinationLabel(destination)} — {verified ? 'verified' : 'not yet verified'}
+        {destinationLabel(destination, providerName)} — {verified ? 'checked' : 'not checked yet'}
       </Status>
       {destination === 'cloud' || !verified ? (
-        <p className="cloud-cost-note">
-          Until verified, assume transcript data may leave this device and the provider may charge
-          your account. Talking Quill does not add a fee.
-        </p>
+        <p className="cloud-cost-note body-copy">{CLOUD_COST_NOTE}</p>
       ) : null}
     </div>
   );
@@ -56,21 +58,21 @@ export function PiInstallationPanel({
   readonly onAction: (action: 'save' | 'browse' | 'automatic') => void;
 }) {
   return (
-    <section className="connection-panel" aria-labelledby="pi-installation-heading">
-      <div>
-        <h3 id="pi-installation-heading">Pi installation path</h3>
-        <p>
-          Auto-detect searches PATH, %APPDATA%\npm, %PNPM_HOME%, and %LOCALAPPDATA%\pnpm. Example
-          npm global shim: %APPDATA%\npm\pi.cmd.
-        </p>
-      </div>
+    <section className="stack" aria-labelledby="pi-installation-heading">
+      <h3 className="subhead" id="pi-installation-heading">
+        Where Pi is installed
+      </h3>
+      <p className="body-copy">
+        Talking Quill runs the Pi command that is already on your computer. If you know where it
+        lives, point us at it. Otherwise let us look for it.
+      </p>
       <Input
         label="Pi installation path"
         value={path}
         placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\pi.cmd"
         spellCheck={false}
         disabled={disabled || pathState === 'loading'}
-        hint="Paste an absolute .cmd, .bat, .exe, extensionless executable, symlink, or containing directory. Talking Quill checks CLI capabilities, not package ownership or version."
+        hint="A full path to the pi program, or the folder that holds it. Auto-detect also checks PATH, %APPDATA%\npm, %PNPM_HOME% and %LOCALAPPDATA%\pnpm."
         onChange={(event) => onPathChange(event.currentTarget.value)}
       />
       <div className="provider-actions">
@@ -99,36 +101,35 @@ export function PiInstallationPanel({
       </div>
       {installation === null ? (
         <Status tone="info" live>
-          Locating Pi…
+          Looking for Pi…
         </Status>
       ) : modelState === 'loading' ? (
         <Status tone="info" live>
-          Reading Pi models… {formatOperationElapsed(modelElapsedMs)}
+          Reading the models Pi offers… {formatOperationElapsed(modelElapsedMs)}
         </Status>
       ) : installation.state === 'ready' ? (
         <Status tone={modelState === 'error' ? 'error' : 'success'} live>
-          Pi {installation.version} — {modelState === 'error' ? 'model read failed' : 'ready'} —{' '}
+          Pi {installation.version} —{' '}
+          {modelState === 'error' ? 'could not read its model list' : 'ready to use'} —{' '}
           {formatOperationElapsed(modelElapsedMs)}
         </Status>
       ) : installation.state === 'invalid' ? (
         <Status tone="error" live>
-          The configured path is stale or invalid. Choose a valid Pi installation or select
-          Auto-detect; Talking Quill will not silently use another Pi.
+          Nothing usable is at that path any more. Pick a valid Pi program or use Auto-detect —
+          Talking Quill will not quietly run a different one.
         </Status>
       ) : installation.state === 'incompatible' ? (
         <Status tone="error" live>
-          This Pi command is missing required CLI capabilities. Update Pi or choose a different
-          compatible executable.
+          This copy of Pi is too old for Talking Quill. Update Pi, or point us at a newer one.
         </Status>
       ) : installation.errorCode === 'PI_LAUNCH_FAILED' ? (
         <Status tone="error" live>
-          Pi could not complete its bounded version and help checks. Retry or choose a different
-          executable.
+          Pi did not finish starting up. Try again, or pick a different Pi program.
         </Status>
       ) : (
         <Status tone="warning" live>
-          Pi was not found. Install it with npm install -g @earendil-works/pi-coding-agent, then
-          select Auto-detect.
+          We could not find Pi. Install it with npm install -g @earendil-works/pi-coding-agent, then
+          choose Auto-detect.
         </Status>
       )}
     </section>
@@ -162,20 +163,24 @@ export function CredentialPanel({
 }) {
   const bedrock = providerId === 'bedrock';
   return (
-    <section className="credential-panel" aria-labelledby="provider-credential-heading">
-      <div className="credential-panel__heading">
-        <div>
-          <h3 id="provider-credential-heading">{bedrock ? 'AWS credentials' : 'API key'}</h3>
-          <p>Write-only: stored credentials can be replaced or deleted, but never read back.</p>
-        </div>
+    <section className="stack" aria-labelledby="provider-credential-heading">
+      <div className="readiness-row">
+        <h3 className="subhead" id="provider-credential-heading">
+          {bedrock ? 'AWS credentials' : 'API key'}
+        </h3>
         <Status tone={configured && !bindingDirty ? 'success' : 'neutral'} live>
           {configured && !bindingDirty ? 'Configured' : 'Not configured'}
         </Status>
       </div>
+      <p className="body-copy">
+        {bedrock
+          ? 'Your AWS keys are stored securely on this computer. You can replace or remove them at any time, but we will never show them to you again.'
+          : 'Your API key is stored securely on this computer. You can replace or remove it at any time, but we will never show it to you again.'}
+      </p>
       {bindingDirty ? (
         <p className="operation-message operation-message--error" role="status">
-          Provider destination changed. Save it, then re-enter credentials; old credentials will
-          never be sent to the new destination.
+          You changed where this service lives. Save that first, then enter the key again — the old
+          key is never sent to a new address.
         </p>
       ) : null}
       {bedrock ? (
@@ -206,7 +211,7 @@ export function CredentialPanel({
             autoComplete="off"
             spellCheck={false}
             disabled={disabled || state === 'loading' || dirty}
-            hint="All fields are cleared immediately and stored together in the encrypted vault."
+            hint="All three boxes are emptied the moment you save."
           />
         </>
       ) : (
@@ -218,7 +223,7 @@ export function CredentialPanel({
           autoComplete="off"
           spellCheck={false}
           disabled={disabled || state === 'loading' || dirty}
-          hint="The input is cleared immediately when submitted."
+          hint="The box is emptied the moment you save."
         />
       )}
       <div className="provider-actions">
@@ -245,7 +250,9 @@ export function CredentialPanel({
             {bedrock ? 'Delete AWS credentials' : 'Delete API key'}
           </Button>
         ) : null}
-        {state === 'error' ? <Status tone="error">Credential action failed</Status> : null}
+        {state === 'error' ? (
+          <Status tone="error">That did not work. Check the key and try again.</Status>
+        ) : null}
       </div>
     </section>
   );
@@ -273,25 +280,25 @@ export function ConnectionTestPanel({
   readonly onCancel: () => void;
 }) {
   return (
-    <section className="connection-panel" aria-labelledby="connection-test-heading">
-      <div>
-        <h3 id="connection-test-heading">Connection test</h3>
-        <p>
-          {providerManagedModel
-            ? 'Verifies endpoint safety and availability using the model currently loaded by the provider.'
-            : 'Verifies authentication, endpoint safety, the selected model, and availability. For Pi, this sends a minimal fixed prompt to the selected model and may contact or charge its provider.'}
-        </p>
-      </div>
+    <section className="stack" aria-labelledby="connection-test-heading">
+      <h3 className="subhead" id="connection-test-heading">
+        Test connection
+      </h3>
+      <p className="body-copy">
+        {providerManagedModel
+          ? 'This sends one tiny message to the service using whichever model it has loaded, so you can see right away that everything works.'
+          : 'This sends one tiny message to the model you picked, so you can see right away that the address, the key and the model all work. On a paid service it may cost a fraction of a cent.'}
+      </p>
       <div className="provider-actions">
         <Button busy={state === 'loading'} disabled={disabled} onClick={onTest}>
           Test connection
         </Button>
         {!configurationDirty && missingModel ? (
-          <Status tone="warning">Select and save a model before testing</Status>
+          <Status tone="warning">Pick a model and save before testing</Status>
         ) : null}
         {state === 'loading' ? (
           <Status tone="info" live>
-            Testing selected model… {formatOperationElapsed(elapsedMs)}
+            Talking to the service… {formatOperationElapsed(elapsedMs)}
           </Status>
         ) : null}
         {state === 'loading' ? (
@@ -336,42 +343,47 @@ export function OnScreenAwarenessPanel({
   readonly onBeginVisionTest: () => void;
 }) {
   return (
-    <section className="connection-panel" aria-labelledby="osa-heading">
-      <div>
-        <h3 id="osa-heading">On-Screen Awareness</h3>
-        <p>
-          Opt in to send one screenshot of the focused display with each Smart cleanup. Capture
-          happens only after transcription and voice-command matching. The image is never reused.
-        </p>
-      </div>
+    <section className="stack" aria-labelledby="osa-heading">
+      <h3 className="subhead" id="osa-heading">
+        Let the AI see your screen
+      </h3>
+      <p className="body-copy">
+        Turn this on and one picture of the screen you are working on is sent along with each Smart
+        clean-up, so the AI understands what you were talking about. The picture is taken after you
+        stop speaking, used once, and never stored.
+      </p>
       {capability === 'supported' ? (
         <Toggle
           checked={enabled}
           disabled={!controlsEnabled || screenPermission === 'denied'}
           onChange={(event) => onUpdate(event.currentTarget.checked)}
-          label="Use the focused display for Smart context"
-          hint="The display is downscaled to 1568 px maximum edge and encoded as JPEG quality 80."
+          label="Let the AI see your screen"
+          hint="The picture is shrunk before it is sent."
         />
       ) : capability === 'unsupported' ? (
-        <Status tone="neutral">The selected model does not accept images.</Status>
+        <Status tone="neutral">The model you chose cannot look at pictures.</Status>
       ) : manualVisionAllowed ? (
-        <div>
-          <Status tone="warning">Vision support is unknown and remains off.</Status>
-          <p>
-            Generic endpoints vary. Only a successful live image-echo test can enable a manual
-            override, bound to this endpoint, credential revision, and model.
+        <div className="stack">
+          <Status tone="warning">
+            We cannot tell whether this model can see pictures, so this stays off.
+          </Status>
+          <p className="body-copy">
+            Run a quick test: we show a short code on screen and check that the model reads it back.
+            If it does, you can turn this on for this exact setup.
           </p>
           <Button variant="secondary" disabled={!controlsEnabled} onClick={onBeginVisionTest}>
-            Run disclosed image-echo test
+            Run a quick screen test
           </Button>
         </div>
       ) : (
-        <Status tone="neutral">Vision support is unknown; On-Screen Awareness stays off.</Status>
+        <Status tone="neutral">
+          We cannot tell whether this model can see pictures, so this stays off.
+        </Status>
       )}
       {screenPermission === 'denied' ? (
         <p className="operation-message operation-message--error" role="status">
-          Screen Recording is denied. On macOS, open System Settings → Privacy &amp; Security →
-          Screen Recording, allow Talking Quill, then restart it.
+          Your Mac is blocking screen capture. Open System Settings → Privacy &amp; Security →
+          Screen Recording, switch on Talking Quill, then restart the app.
         </p>
       ) : null}
     </section>
@@ -398,35 +410,35 @@ export function VisionVerificationDialog({
   return (
     <Dialog
       open={open}
-      title="Live image-echo verification"
-      description="This test captures the code below and sends that one screenshot to the configured provider. No image is retained. Success creates a narrowly bound manual vision override."
+      title="Check that the AI can see your screen"
+      description="We take one picture of your screen showing the code below and send that one picture to the AI service. Nothing is kept. If the code comes back correctly, you can switch this feature on for this exact setup."
       onClose={onClose}
       actions={
         <>
           <Button variant="secondary" disabled={commitPending} onClick={onClose}>
-            {commitPending ? 'Saving verification…' : state === 'success' ? 'Close' : 'Cancel'}
+            {commitPending ? 'Saving…' : state === 'success' ? 'Close' : 'Cancel'}
           </Button>
           <Button
             busy={state === 'loading'}
             disabled={!controlsEnabled || commitPending || state === 'success'}
             onClick={onVerify}
           >
-            Capture and verify
+            Capture and check
           </Button>
         </>
       }
     >
-      <p aria-label="Image echo verification code" className="vision-test-code">
+      <p aria-label="Screen test code" className="vision-test-code">
         {nonce}
       </p>
       {state === 'success' ? (
         <Status tone="success" live>
-          Verified. The override is bound to this exact configuration.
+          It worked. You can now let the AI see your screen with these settings.
         </Status>
       ) : null}
       {state === 'error' ? (
         <Status tone="error" live>
-          The model did not echo the visible code exactly. No override was saved.
+          The model did not read the code back correctly, so nothing changed.
         </Status>
       ) : null}
     </Dialog>

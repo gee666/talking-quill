@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PROVIDER_CATALOG } from '../../app/src/main/providers/registry';
 import { AppShell } from '../../app/src/renderer/main/AppShell';
 import { reconcileDiscoveredModels } from '../../app/src/renderer/main/pi-model-selection';
+import { resetAutoDiscoveryMemory } from '../../app/src/renderer/main/smart-processing/auto-discovery-memory';
+import { CUSTOM_MODEL_OPTION } from '../../app/src/renderer/main/smart-processing/ProviderFieldControl';
 import type { MainApi } from '../../app/src/shared/bridge/api';
 import type { ProviderCredentialState } from '../../app/src/shared/schemas/credentials';
 import type { ProviderConfig } from '../../app/src/shared/schemas/providers';
@@ -258,6 +260,9 @@ const api: MainApi = {
 };
 
 beforeEach(() => {
+  // Automatic discovery deliberately remembers attempts beyond a component instance; each test
+  // starts from a fresh application session.
+  resetAutoDiscoveryMemory();
   settings = structuredClone(DEFAULT_SETTINGS);
   settings.welcome = {
     completedAt: 1,
@@ -411,21 +416,27 @@ describe('Smart processing settings', () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    expect(await screen.findByText('Vision support is unknown and remains off.')).toBeVisible();
-    expect(screen.queryByRole('checkbox', { name: /focused display/i })).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Run disclosed image-echo test' }));
-    expect(screen.getByRole('dialog', { name: 'Live image-echo verification' })).toHaveTextContent(
-      'sends that one screenshot to the configured provider. No image is retained',
-    );
-    await user.click(screen.getByRole('button', { name: 'Capture and verify' }));
+    expect(
+      await screen.findByText(
+        'We cannot tell whether this model can see pictures, so this stays off.',
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole('checkbox', { name: /see your screen/i })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Run a quick screen test' }));
+    expect(
+      screen.getByRole('dialog', { name: 'Check that the AI can see your screen' }),
+    ).toHaveTextContent('send that one picture to the AI service. Nothing is kept.');
+    await user.click(screen.getByRole('button', { name: 'Capture and check' }));
     await user.click(screen.getByRole('button', { name: /^Cancel$/ }));
     expect(cancel).toHaveBeenCalledWith(expect.stringContaining('-vision-'));
     if (pendingVision.resolve === null) throw new Error('Vision verification was not pending');
     pendingVision.resolve({ verificationId: '11111111-1111-4111-8111-111111111113' });
     await waitFor(() => expect(verifyVision).toHaveBeenCalledOnce());
     expect(confirmVision).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog', { name: 'Live image-echo verification' })).toBeNull();
-    expect(screen.queryByRole('checkbox', { name: /focused display/i })).toBeNull();
+    expect(
+      screen.queryByRole('dialog', { name: 'Check that the AI can see your screen' }),
+    ).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /see your screen/i })).toBeNull();
   });
 
   it('renders a searchable keyboard picker with all 38 providers enabled', async () => {
@@ -476,14 +487,18 @@ describe('Smart processing settings', () => {
       const endpoint = await screen.findByRole('textbox', { name: 'Endpoint URL' });
       expect(endpoint).toHaveValue(baseUrl);
       expect(screen.getByText(/stored legacy endpoint is inactive/i)).toBeVisible();
-      expect(screen.getByText(/Destination unknown — not yet verified/i)).toBeVisible();
-      expect(screen.getByRole('button', { name: 'Discover models' })).toBeDisabled();
+      expect(
+        screen.getByText(/We do not know yet where your text goes — not checked yet/i),
+      ).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Refresh list' })).toBeDisabled();
       expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
       expect(screen.getByRole('button', { name: 'Save configuration' })).toBeDisabled();
       expect(saveConfig).not.toHaveBeenCalled();
-      expect(listModels).not.toHaveBeenCalled();
       expect(testConnection).not.toHaveBeenCalled();
-      expect(destination).not.toHaveBeenCalled();
+      // The initially selected Ollama provider legitimately runs one automatic discovery, but the
+      // provider awaiting endpoint repair must never be contacted.
+      expect(callsFor(listModels, 'generic-openai')).toEqual([]);
+      expect(callsFor(destination, 'generic-openai')).toEqual([]);
 
       await user.clear(endpoint);
       await user.type(endpoint, 'ftp://still-inert.example/models');
@@ -502,7 +517,7 @@ describe('Smart processing settings', () => {
           }),
         ),
       );
-      expect(await screen.findByText('Draft saved')).toBeVisible();
+      expect(await screen.findByText('Saved')).toBeVisible();
       expect(await screen.findByRole('button', { name: /^Generic OpenAI.*Connect/ })).toBeVisible();
     },
   );
@@ -576,7 +591,7 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     const osa = await screen.findByRole('checkbox', {
-      name: 'Use the focused display for Smart context',
+      name: 'Let the AI see your screen',
     });
     expect(osa).toBeEnabled();
 
@@ -590,7 +605,9 @@ describe('Smart processing settings', () => {
     expect(setOnScreenAwareness).not.toHaveBeenCalled();
 
     pending.reject(new Error('selection write failed'));
-    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(
+      await screen.findByText('That did not save. Check the settings and try again.'),
+    ).toBeVisible();
     expect(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i })).toBeEnabled();
   });
 
@@ -609,7 +626,9 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
 
     expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
-    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(
+      await screen.findByText('That did not save. Check the settings and try again.'),
+    ).toBeVisible();
   });
 
   it('reconciles an authoritative provider event received while mounted', async () => {
@@ -661,7 +680,9 @@ describe('Smart processing settings', () => {
       bindingToken: BINDING_TOKEN,
     });
 
-    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(
+      await screen.findByText('That did not save. Check the settings and try again.'),
+    ).toBeVisible();
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Store API key' })).toBeEnabled(),
     );
@@ -691,7 +712,9 @@ describe('Smart processing settings', () => {
     expect(saveConfig).toHaveBeenCalledTimes(1);
 
     pending.reject(new Error('selection write failed'));
-    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(
+      await screen.findByText('That did not save. Check the settings and try again.'),
+    ).toBeVisible();
     expect(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i })).toBeEnabled();
     expect(password).toBeEnabled();
     expect(storeCredential).toBeEnabled();
@@ -750,18 +773,21 @@ describe('Smart processing settings', () => {
     await waitFor(() => expect(listModels).toHaveBeenCalledWith('pi', expect.any(String), false));
     expect(await screen.findByRole('combobox', { name: 'Pi model' })).toHaveValue('');
     expect(screen.getByRole('combobox', { name: 'Thinking level' })).toHaveValue('off');
-    expect(screen.getByText(/minimal fixed prompt.*may contact.*charge/iu)).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Enter model ID manually' }));
-    const manual = screen.getByRole('textbox', { name: 'Pi model' });
+    expect(
+      screen.getByText(/one tiny message to the model you picked.*fraction of a cent/i),
+    ).toBeVisible();
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Pi model' }),
+      CUSTOM_MODEL_OPTION,
+    );
+    const manual = screen.getByRole('textbox', { name: 'Pi model name' });
     await user.type(manual, 'custom/exact-model');
     expect(manual).toHaveValue('custom/exact-model');
     expect(screen.queryByLabelText('API key', { selector: 'input' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Discover models' })).toBeEnabled(),
-    );
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh list' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
     await waitFor(() =>
       expect(listModels).toHaveBeenLastCalledWith('pi', expect.any(String), true),
     );
@@ -813,7 +839,7 @@ describe('Smart processing settings', () => {
     await user.clear(input);
     await user.type(input, 'C:\\stale\\pi.cmd');
     await user.click(screen.getByRole('button', { name: 'Save path' }));
-    expect(await screen.findByText(/configured path is stale or invalid/i)).toBeVisible();
+    expect(await screen.findByText(/Nothing usable is at that path any more/i)).toBeVisible();
     expect(screen.queryByText(/Pi 0\.81\.0/)).toBeNull();
   });
 
@@ -872,7 +898,15 @@ describe('Smart processing settings', () => {
   });
 
   it('renders Pi empty and malformed discovery states with specific guidance', async () => {
-    listModels.mockResolvedValueOnce([]);
+    // Automatic discovery already runs for the initially selected provider, so the empty result
+    // has to be bound to Pi rather than queued positionally.
+    listModels.mockImplementation((providerId) =>
+      Promise.resolve(
+        providerId === 'pi'
+          ? []
+          : [{ id: 'llama3.2', name: 'Llama 3.2', contextWindow: 8_192, vision: 'unsupported' }],
+      ),
+    );
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
@@ -882,10 +916,10 @@ describe('Smart processing settings', () => {
     expect(
       await screen.findByText(/Pi returned no models.*exact saved model is retained/i),
     ).toBeVisible();
-    expect(screen.getByText('No models found')).toBeVisible();
+    expect(screen.getByText('No models found — you can type a name instead.')).toBeVisible();
 
     listModels.mockRejectedValueOnce({ code: 'INVALID_RESPONSE' });
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
     expect(await screen.findByText(/model list was malformed or incompatible/i)).toBeVisible();
   });
 
@@ -932,17 +966,17 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     expect(await screen.findByText(/exact selected Pi model.*retained/i)).toBeVisible();
-    expect(screen.getByRole('textbox', { name: 'Pi model' })).toHaveValue('p/removed');
-    await user.click(screen.getByRole('button', { name: 'Choose a discovered model' }));
+    expect(screen.getByRole('textbox', { name: 'Pi model name' })).toHaveValue('p/removed');
     const selector = screen.getByRole('combobox', { name: 'Pi model' });
-    expect(selector).toHaveValue('');
+    expect(selector).toHaveValue(CUSTOM_MODEL_OPTION);
     await user.selectOptions(selector, 'p/current');
+    expect(screen.queryByRole('textbox', { name: 'Pi model name' })).toBeNull();
     expect(selector).toHaveValue('p/current');
 
     const pending = deferred<readonly []>();
     listModels.mockReturnValueOnce(pending.promise);
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
-    await user.click(screen.getByRole('button', { name: 'Cancel discovery' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
+    await user.click(screen.getByRole('button', { name: 'Stop searching' }));
     expect(cancel).toHaveBeenCalledWith(expect.stringContaining('pi-models-'));
     pending.resolve([]);
     expect(await screen.findByText('Model discovery cancelled.')).toBeVisible();
@@ -959,10 +993,11 @@ describe('Smart processing settings', () => {
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
 
     expect(await screen.findByText(/model already loaded.*no model ID is required/i)).toBeVisible();
-    expect(screen.queryByRole('textbox', { name: 'Model' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Discover models' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Select and save a model before testing')).not.toBeInTheDocument();
-    expect(screen.getByText(/using the model currently loaded by the provider/i)).toBeVisible();
+    expect(screen.queryByRole('textbox', { name: 'Model name' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refresh list' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick a model and save before testing')).not.toBeInTheDocument();
+    expect(screen.getByText(/whichever model it has loaded/i)).toBeVisible();
     const testButton = screen.getByRole('button', { name: 'Test connection' });
     expect(testButton).toBeEnabled();
     await user.click(testButton);
@@ -985,9 +1020,9 @@ describe('Smart processing settings', () => {
     expect(screen.getByRole('textbox', { name: 'Deployment name' })).toBeVisible();
     expect(screen.getByRole('combobox', { name: 'Model type' })).toHaveValue('default');
     expect(screen.getByLabelText('API key', { selector: 'input' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Discover models' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refresh list' })).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Deployment discovery requires Azure management-plane credentials/),
+      screen.getByText(/Azure keeps its deployment list behind a separate management login/),
     ).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: /^Azure OpenAI/ }));
@@ -995,7 +1030,7 @@ describe('Smart processing settings', () => {
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'Bedrock');
     await user.click(screen.getByRole('option', { name: /^AWS Bedrock/ }));
     expect(await screen.findByRole('textbox', { name: 'AWS region' })).toHaveValue('us-west-2');
-    expect(screen.getByRole('textbox', { name: 'Model' })).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Model' })).toBeVisible();
   });
 
   it('renders provider-managed Text Generation WebUI guidance without Azure deployment advice', async () => {
@@ -1007,13 +1042,14 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('option', { name: /^Oobabooga Web UI/ }));
 
     expect(
-      await screen.findByText(/uses its currently loaded model.*does not select one/i),
+      await screen.findByText(/uses the model it already has loaded.*no model to choose/i),
     ).toBeVisible();
     expect(
-      screen.queryByText(/Deployment discovery requires Azure management-plane credentials/i),
+      screen.queryByText(/Azure keeps its deployment list behind a separate management login/),
     ).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Discover models' })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Model' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Refresh list' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Model name' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Model' })).toBeNull();
   });
 
   it('stores structured Bedrock credentials write-only and clears every field immediately', async () => {
@@ -1064,7 +1100,7 @@ describe('Smart processing settings', () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    expect(await screen.findByText('Select and save a model before testing')).toBeVisible();
+    expect(await screen.findByText('Pick a model and save before testing')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
     expect(testConnection).not.toHaveBeenCalled();
   });
@@ -1082,7 +1118,7 @@ describe('Smart processing settings', () => {
     const password = await screen.findByLabelText('API key', { selector: 'input' });
     const connectionTest = screen.getByRole('button', { name: 'Test connection' });
     const osa = await screen.findByRole('checkbox', {
-      name: 'Use the focused display for Smart context',
+      name: 'Let the AI see your screen',
     });
     expect(connectionTest).toBeEnabled();
     expect(osa).toBeEnabled();
@@ -1118,9 +1154,9 @@ describe('Smart processing settings', () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    await screen.findByRole('button', { name: 'Discover models' });
+    await screen.findByRole('button', { name: 'Refresh list' });
 
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
     expect(await screen.findByText('1 model found')).toBeVisible();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'llama3.2');
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
@@ -1130,8 +1166,8 @@ describe('Smart processing settings', () => {
         expect.objectContaining({ providerId: 'ollama', modelId: 'llama3.2' }),
       ),
     );
-    expect(await screen.findByText('Draft saved')).toBeVisible();
-    expect(screen.getByText(/Local destination — verified/)).toBeVisible();
+    expect(await screen.findByText('Saved')).toBeVisible();
+    expect(screen.getByText(/Runs on this computer — checked/)).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     expect(await screen.findByText(/rejected the API key/i)).toBeVisible();
@@ -1154,11 +1190,12 @@ describe('Smart processing settings', () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    await user.click(await screen.findByRole('button', { name: 'Discover models' }));
+    await user.click(await screen.findByRole('button', { name: 'Refresh list' }));
 
     const model = await screen.findByRole('combobox', { name: 'Model' });
-    expect(within(model).getAllByRole('option')).toHaveLength(201);
-    const searchModels = screen.getByRole('searchbox', { name: 'Search discovered models' });
+    // Placeholder + 200 bounded models + the "type a model name myself" sentinel.
+    expect(within(model).getAllByRole('option')).toHaveLength(202);
+    const searchModels = screen.getByRole('searchbox', { name: 'Search models' });
     await user.type(searchModels, 'Model 349');
     expect(within(model).getByRole('option', { name: 'Model 349' })).toBeVisible();
     await user.selectOptions(model, 'model-349');
@@ -1182,12 +1219,15 @@ describe('Smart processing settings', () => {
     await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
     await user.click(screen.getByRole('option', { name: /^OpenAI.*standard option/ }));
-    expect(await screen.findByText(/Cloud destination — not yet verified/)).toBeVisible();
+    expect(await screen.findByText(/Sends your text to OpenAI — not checked yet/)).toBeVisible();
     expect(cancel).toHaveBeenCalledWith(oldOperationId);
+    // OpenAI needs an API key that is not stored, so nothing is sent there without a click.
+    expect(callsFor(listModels, 'openai')).toEqual([]);
+    expect(callsFor(destination, 'openai')).toEqual([]);
 
     pendingTest.resolve({ ok: true, destination: 'local', modelCount: 1 });
     await waitFor(() =>
-      expect(screen.getByText(/Cloud destination — not yet verified/)).toBeVisible(),
+      expect(screen.getByText(/Sends your text to OpenAI — not checked yet/)).toBeVisible(),
     );
     expect(screen.queryByText(/Connection verified/)).not.toBeInTheDocument();
   });
@@ -1216,9 +1256,11 @@ describe('Smart processing settings', () => {
     await user.clear(endpoint);
     await user.type(endpoint, 'http://127.0.0.1:22334');
 
-    expect(screen.getByText(/Provider destination changed.*re-enter credentials/i)).toBeVisible();
+    expect(
+      screen.getByText(/You changed where this service lives.*enter the key again/i),
+    ).toBeVisible();
     expect(screen.getByRole('button', { name: 'Store API key' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Discover models' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh list' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
     await waitFor(() =>
@@ -1242,7 +1284,10 @@ describe('Smart processing settings', () => {
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
     await waitFor(() => expect(secretStatus).toHaveBeenCalledOnce());
 
-    const model = screen.getByRole('textbox', { name: 'Model' });
+    const modelSelect = await screen.findByRole('combobox', { name: 'Model' });
+    await waitFor(() => expect(modelSelect).toHaveValue('llama3.2'));
+    await user.selectOptions(modelSelect, CUSTOM_MODEL_OPTION);
+    const model = screen.getByRole('textbox', { name: 'Model name' });
     await user.clear(model);
     await user.type(model, 'temporary-model');
     await user.clear(model);
@@ -1334,7 +1379,9 @@ describe('Smart processing settings', () => {
     await user.type(endpoint, 'http://127.0.0.1:32334');
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
 
-    expect(await screen.findByText('Configuration update failed; status refreshed')).toBeVisible();
+    expect(
+      await screen.findByText('That did not save. Check the settings and try again.'),
+    ).toBeVisible();
     expect(await screen.findByText('Not configured')).toBeVisible();
     expect(secretStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -1342,6 +1389,8 @@ describe('Smart processing settings', () => {
   it('cancels stale destination checks and ignores their late privacy result', async () => {
     const firstDestination = deferred<'local'>();
     const secondDestination = deferred<'cloud'>();
+    // Automatic discovery is quiet: it never checks the destination, so only the credential save
+    // and the configuration save contribute a check of their own.
     destination
       .mockReturnValueOnce(firstDestination.promise)
       .mockReturnValueOnce(secondDestination.promise);
@@ -1351,10 +1400,14 @@ describe('Smart processing settings', () => {
     const password = await screen.findByLabelText('API key', { selector: 'input' });
     await user.type(password, 'destination-secret');
     await user.click(screen.getByRole('button', { name: 'Store API key' }));
-    await waitFor(() => expect(destination).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(destination).toHaveBeenCalledOnce());
     const firstOperationId = destination.mock.calls[0]?.[1];
 
-    await user.type(screen.getByRole('textbox', { name: 'Model' }), 'manual-model');
+    await user.selectOptions(
+      await screen.findByRole('combobox', { name: 'Model' }),
+      CUSTOM_MODEL_OPTION,
+    );
+    await user.type(screen.getByRole('textbox', { name: 'Model name' }), 'manual-model');
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
     await waitFor(() => expect(destination).toHaveBeenCalledTimes(2));
     const secondOperationId = destination.mock.calls[1]?.[1];
@@ -1362,10 +1415,12 @@ describe('Smart processing settings', () => {
     expect(cancel).toHaveBeenCalledWith(firstOperationId);
     expect(firstOperationId).not.toBe(secondOperationId);
     secondDestination.resolve('cloud');
-    expect(await screen.findByText(/Cloud destination — verified/)).toBeVisible();
+    expect(await screen.findByText(/Sends your text to Ollama — checked/)).toBeVisible();
     firstDestination.resolve('local');
-    await waitFor(() => expect(screen.getByText(/Cloud destination — verified/)).toBeVisible());
-    expect(screen.getByText(/provider may charge your account/i)).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByText(/Sends your text to Ollama — checked/)).toBeVisible(),
+    );
+    expect(screen.getByText(/cloud provider may charge you for what it processes/i)).toBeVisible();
   });
 
   it('keeps a newer connection destination authoritative over a late destination-only result', async () => {
@@ -1374,13 +1429,19 @@ describe('Smart processing settings', () => {
       modelId: 'llama3.2',
     };
     const staleDestination = deferred<'local'>();
+    // Only the configuration save verifies the destination; the automatic discovery on mount is
+    // quiet and never claims destination authority.
     destination.mockReturnValueOnce(staleDestination.promise);
     testConnection.mockResolvedValueOnce({ ok: true, destination: 'cloud', modelCount: 1 });
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
 
-    const model = screen.getByRole('textbox', { name: 'Model' });
+    await user.selectOptions(
+      await screen.findByRole('combobox', { name: 'Model' }),
+      CUSTOM_MODEL_OPTION,
+    );
+    const model = screen.getByRole('textbox', { name: 'Model name' });
     await user.clear(model);
     await user.type(model, 'new-model');
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
@@ -1389,10 +1450,12 @@ describe('Smart processing settings', () => {
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     expect(cancel).toHaveBeenCalledWith(staleOperationId);
-    expect(await screen.findByText(/Cloud destination — verified/)).toBeVisible();
+    expect(await screen.findByText(/Sends your text to Ollama — checked/)).toBeVisible();
     staleDestination.resolve('local');
-    await waitFor(() => expect(screen.getByText(/Cloud destination — verified/)).toBeVisible());
-    expect(screen.queryByText(/Local destination — verified/)).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByText(/Sends your text to Ollama — checked/)).toBeVisible(),
+    );
+    expect(screen.queryByText(/Runs on this computer — checked/)).toBeNull();
   });
 
   it('settles a connection test when later model discovery claims destination authority', async () => {
@@ -1408,9 +1471,13 @@ describe('Smart processing settings', () => {
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    // The automatic discovery on mount is quiet, so it verifies no destination at all.
+    await screen.findByRole('button', { name: 'Refresh list' });
+    await waitFor(() => expect(listModels).toHaveBeenCalledOnce());
+    expect(destination).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
     await waitFor(() => expect(destination).toHaveBeenCalledOnce());
     pendingConnection.resolve({ ok: true, destination: 'cloud', modelCount: 1 });
 
@@ -1419,7 +1486,7 @@ describe('Smart processing settings', () => {
     ).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Cancel test' })).toBeNull();
     pendingDestination.resolve('local');
-    expect(await screen.findByText(/Local destination — verified/)).toBeVisible();
+    expect(await screen.findByText(/Runs on this computer — checked/)).toBeVisible();
   });
 
   it('keeps overlapping model and connection cancellation scoped to the right operation', async () => {
@@ -1429,52 +1496,151 @@ describe('Smart processing settings', () => {
     };
     const pendingModels = deferred<readonly []>();
     const pendingTest = deferred<Awaited<ReturnType<MainApi['providers']['testConnection']>>>();
-    listModels.mockReturnValueOnce(pendingModels.promise);
     testConnection.mockReturnValueOnce(pendingTest.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    await screen.findByRole('button', { name: 'Discover models' });
+    // Let the automatic discovery on mount finish before the explicitly refreshed one is armed.
+    await screen.findByRole('button', { name: 'Refresh list' });
+    await waitFor(() => expect(listModels).toHaveBeenCalledOnce());
+    listModels.mockReturnValueOnce(pendingModels.promise);
+    const cancelsBefore = cancel.mock.calls.length;
 
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
-    const modelOperationId = listModels.mock.calls[0]?.[1];
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
+    const modelOperationId = listModels.mock.calls[1]?.[1];
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
-    expect(screen.getByText(/Testing selected model… 0\.0s/u)).toBeVisible();
+    expect(screen.getByText(/Talking to the service… 0\.0s/u)).toBeVisible();
     const connectionOperationId = testConnection.mock.calls[0]?.[1];
-    await user.click(screen.getByRole('button', { name: 'Cancel discovery' }));
+    await user.click(screen.getByRole('button', { name: 'Stop searching' }));
     await user.click(screen.getByRole('button', { name: 'Cancel test' }));
 
     expect(modelOperationId).toBeTruthy();
     expect(connectionOperationId).toBeTruthy();
     expect(modelOperationId).not.toBe(connectionOperationId);
-    expect(cancel).toHaveBeenNthCalledWith(1, modelOperationId);
-    expect(cancel).toHaveBeenNthCalledWith(2, connectionOperationId);
+    expect(cancel.mock.calls.slice(cancelsBefore).map(([operationId]) => operationId)).toEqual([
+      modelOperationId,
+      connectionOperationId,
+    ]);
     pendingModels.resolve([]);
     pendingTest.resolve({ ok: true, destination: 'local', modelCount: 0 });
   });
 
   it('shows loading cancellation and cloud cost qualification', async () => {
     const pending = deferred<readonly []>();
-    listModels.mockReturnValueOnce(pending.promise);
     const user = renderSettings();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
-    await screen.findByRole('button', { name: 'Discover models' });
-    await user.click(screen.getByRole('button', { name: 'Discover models' }));
-    await user.click(screen.getByRole('button', { name: 'Cancel discovery' }));
-    expect(cancel).toHaveBeenCalledOnce();
+    // Let the automatic discovery on mount finish before the explicitly refreshed one is armed.
+    await screen.findByRole('button', { name: 'Refresh list' });
+    await waitFor(() => expect(listModels).toHaveBeenCalledOnce());
+    listModels.mockReturnValueOnce(pending.promise);
+    const cancelsBefore = cancel.mock.calls.length;
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
+    await user.click(screen.getByRole('button', { name: 'Stop searching' }));
+    expect(listModels).toHaveBeenCalledTimes(2);
+    const refreshOperationId = listModels.mock.calls[1]?.[1];
+    expect(refreshOperationId).toEqual(expect.any(String));
+    expect(cancel.mock.calls.slice(cancelsBefore)).toEqual([[refreshOperationId]]);
     pending.resolve([]);
     expect(await screen.findByText('Model discovery cancelled.')).toBeVisible();
-    expect(screen.queryByText('No models found')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('No models found — you can type a name instead.'),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /Ollama.*Run LLMs locally/i }));
     await user.type(screen.getByRole('searchbox', { name: 'Search providers' }), 'OpenAI');
     const openai = screen.getByRole('option', { name: /^OpenAI.*standard option/ });
     await user.click(openai);
-    expect(await screen.findByText(/provider may charge your account/i)).toBeVisible();
-    expect(screen.getByText(/Cloud destination — not yet verified/)).toBeVisible();
+    expect(
+      await screen.findByText(/cloud provider may charge you for what it processes/i),
+    ).toBeVisible();
+    expect(screen.getByText(/Sends your text to OpenAI — not checked yet/)).toBeVisible();
+    expect(callsFor(destination, 'openai')).toEqual([]);
+  });
+
+  it('never contacts a provider whose credentials are not configured', async () => {
+    settings = settingsWithConfig(settings, { providerId: 'openai', modelId: 'gpt-4.1-mini' });
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    expect(await screen.findByRole('button', { name: /^OpenAI.*standard option/ })).toBeVisible();
+    await waitFor(() => expect(secretStatus).toHaveBeenCalledWith('openai'));
+    expect(await screen.findByText('Not configured')).toBeVisible();
+
+    expect(listModels).not.toHaveBeenCalled();
+    expect(destination).not.toHaveBeenCalled();
+
+    // The key is what gates it: once stored, discovery arms itself without a discovery click.
+    setSecret.mockResolvedValueOnce({
+      providerId: 'openai',
+      configured: true,
+      updatedAt: 1,
+      bindingToken: BINDING_TOKEN,
+    });
+    await user.type(await screen.findByLabelText('API key', { selector: 'input' }), 'sk-test');
+    await user.click(screen.getByRole('button', { name: 'Store API key' }));
+    await waitFor(() =>
+      expect(listModels).toHaveBeenCalledWith('openai', expect.any(String), false),
+    );
+  });
+
+  it('never contacts a provider for a settings section surfaced only by a search', async () => {
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search settings' }), 'vision');
+
+    expect(await screen.findByRole('region', { name: 'Smart processing' })).toBeVisible();
+    await screen.findByRole('button', { name: /Ollama.*Run LLMs locally/i });
+    expect(listModels).not.toHaveBeenCalled();
+    expect(destination).not.toHaveBeenCalled();
+
+    // Choosing the section explicitly is what authorises the request.
+    await user.click(screen.getByRole('button', { name: 'Smart processing' }));
+    await waitFor(() =>
+      expect(listModels).toHaveBeenCalledWith('ollama', expect.any(String), false),
+    );
+  });
+
+  it('re-arms automatic discovery per configuration, not per mount or draft edit', async () => {
+    settings.smartProcessing.providers.ollama = {
+      ...settings.smartProcessing.providers.ollama,
+      modelId: 'llama3.2',
+    };
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await waitFor(() => expect(listModels).toHaveBeenCalledOnce());
+
+    // Navigating away unmounts the section; coming back must not contact the service again.
+    await user.click(screen.getByRole('button', { name: 'Recording' }));
+    await user.click(screen.getByRole('button', { name: 'Smart processing' }));
+    await screen.findByRole('button', { name: 'Refresh list' });
+    expect(listModels).toHaveBeenCalledOnce();
+
+    // An edit that is reverted leaves the persisted configuration untouched.
+    const endpoint = screen.getByRole('textbox', { name: 'Endpoint URL' });
+    await user.type(endpoint, '/');
+    await user.clear(endpoint);
+    await user.type(endpoint, 'http://127.0.0.1:11434');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Save configuration' })).toBeDisabled(),
+    );
+    expect(listModels).toHaveBeenCalledOnce();
+
+    // A genuine endpoint change, once saved, is a new configuration and arms discovery again.
+    await user.clear(endpoint);
+    await user.type(endpoint, 'http://127.0.0.1:21434');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(2));
   });
 });
+
+function callsFor(
+  mock: { readonly mock: { readonly calls: readonly (readonly unknown[])[] } },
+  providerId: string,
+): readonly (readonly unknown[])[] {
+  return mock.mock.calls.filter((call) => call[0] === providerId);
+}
 
 function settingsWithConfig(current: Settings, config: ProviderConfig): Settings {
   const { providerId, ...draft } = config;

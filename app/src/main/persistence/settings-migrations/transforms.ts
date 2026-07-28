@@ -26,6 +26,7 @@ import {
   ShortcutKeySchema,
   shortcutFromLegacyActivation,
   shortcutsConflict,
+  shortcutsEqual,
   type Shortcut,
 } from '../../../shared/schemas/shortcut';
 import { normalizeWhisperSourceLanguage } from '../../../shared/schemas/whisper-languages';
@@ -36,10 +37,8 @@ import {
   VocabularyListSchema,
   type VocabularyEntry,
 } from '../../../shared/schemas/vocabulary';
-import {
-  LegacySettingsV22Schema,
-  type LegacySettingsV22,
-} from './legacy-settings-v22';
+import { LegacySettingsV22Schema, type LegacySettingsV22 } from './legacy-settings-v22';
+import { LegacySettingsV23Schema, type LegacySettingsV23 } from './legacy-settings-v23';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
@@ -191,14 +190,48 @@ export function migrateSettingsV21(legacy: LegacySettingsV21): LegacySettingsV22
   });
 }
 
-export function migrateSettingsV22(legacy: LegacySettingsV22): Settings {
+export function migrateSettingsV22(legacy: LegacySettingsV22): LegacySettingsV23 {
   const profiles = legacy.dictationProfiles.map((profile) => structuredClone(profile));
   const promptIndex = profiles.findIndex(({ id }) => id === PROMPT_PROFILE_ID);
   profiles.splice(promptIndex + 1, 0, structuredClone(DEFAULT_PROMPT_TO_ENGLISH_PROFILE));
+  return LegacySettingsV23Schema.parse({
+    ...structuredClone(legacy),
+    schemaVersion: 23,
+    dictationProfiles: profiles,
+  });
+}
+
+export function migrateSettingsV23(legacy: LegacySettingsV23): Settings {
+  const legacyPromptToEnglish: Shortcut = {
+    modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+    keys: ['X', 'P', 'E'],
+  };
+  const legacyTranslateToEnglish: Shortcut = {
+    modifiers: { ctrl: false, alt: true, shift: false, meta: false },
+    keys: ['X', 'E'],
+  };
+  const dictationProfiles = legacy.dictationProfiles.map((profile) => {
+    if (
+      profile.id === DEFAULT_PROMPT_TO_ENGLISH_PROFILE.id &&
+      shortcutsEqual(profile.shortcut, legacyPromptToEnglish)
+    ) {
+      return { ...structuredClone(profile), shortcut: DEFAULT_PROMPT_TO_ENGLISH_PROFILE.shortcut };
+    }
+    if (
+      profile.id === DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.id &&
+      shortcutsEqual(profile.shortcut, legacyTranslateToEnglish)
+    ) {
+      return {
+        ...structuredClone(profile),
+        shortcut: DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut,
+      };
+    }
+    return structuredClone(profile);
+  });
   return SettingsSchema.parse({
     ...structuredClone(legacy),
     schemaVersion: SETTINGS_SCHEMA_VERSION,
-    dictationProfiles: profiles,
+    dictationProfiles,
   });
 }
 

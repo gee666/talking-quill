@@ -1,11 +1,10 @@
 /* Dashboard, Info and dictation-history screens. */
 
 /* ============================================================ Row groups */
-/* Rows that live inside an explicit `.group` need the row padding that
-   `components.css` only applies to direct children of `.me-card__body`. */
+/* `.group`, `.rows` and `.section__body` share the hairline row treatment
+   defined in `design/components.css`; only the row content is styled here. */
 .group > .readiness-row {
   min-height: var(--row-height);
-  padding: var(--space-2) var(--space-3);
   font-size: var(--fs-md);
 }
 .group > .readiness-row > span:first-child {
@@ -14,7 +13,8 @@
 
 /* ============================================================= Dashboard */
 .readiness-group > .readiness-note {
-  padding: 0 var(--space-3) var(--space-2);
+  max-width: var(--measure);
+  padding-block-start: 0;
   color: var(--color-secondary);
   font-size: var(--fs-sm);
 }
@@ -45,8 +45,25 @@
 
 .permission-list {
   display: grid;
-  gap: var(--space-2);
   min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  list-style: none;
+}
+.permission-list > * {
+  min-width: 0;
+  padding-block: var(--row-pad-y);
+}
+.permission-list > * + * {
+  border-top: 1px solid var(--color-border);
+}
+.permission-list > :first-child {
+  padding-block-start: 0;
+}
+.permission-list > :last-child {
+  padding-block-end: 0;
 }
 .permission-list .readiness-row > span:first-child {
   overflow: hidden;
@@ -102,12 +119,10 @@
 .history-list {
   display: grid;
   min-width: 0;
-  overflow: hidden;
   padding: 0;
   margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
+  border: 0;
+  background: none;
   list-style: none;
 }
 
@@ -117,7 +132,7 @@
   align-items: start;
   gap: var(--space-1) var(--space-2);
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) 0;
   transition: background-color var(--transition-fast);
 }
 .history-entry > * {
@@ -142,6 +157,11 @@
 }
 .history-entry__meta time {
   font-variant-numeric: tabular-nums;
+}
+.history-entry__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .history-entry > p {

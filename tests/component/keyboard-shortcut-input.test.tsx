@@ -43,17 +43,20 @@ function Harness({
 }
 
 describe('KeyboardShortcutInput capture lifecycle', () => {
-  it('explains simultaneous multi-letter holds and foreground pass-through behavior', () => {
+  it('invites capture with a single short hint instead of a paragraph of instructions', () => {
     installCaptureApi(
       vi.fn(() => Promise.resolve()),
       vi.fn(() => Promise.resolve()),
     );
     render(<Harness disabled={false} onChange={vi.fn()} onValidity={vi.fn()} />);
 
-    expect(screen.getByText(/all letters remain held simultaneously/i)).toBeVisible();
+    // The full explanation lives once in the section lead (see
+    // dictation-profiles-section.test.tsx), never repeated under every field.
+    expect(screen.getByText('Click here and press the shortcut you want.')).toBeVisible();
+    expect(screen.queryByText(/keep every letter held down/i)).toBeNull();
     expect(
-      screen.getByText(/modifiers and prefix letters pass through to the foreground app/i),
-    ).toBeVisible();
+      screen.queryByText(/keys before the last one still reach whatever app you are in/i),
+    ).toBeNull();
   });
 
   it('requires one nonempty exact modifier mask and fences mismatches until all letters release', async () => {
@@ -70,7 +73,7 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
     fireEvent.keyDown(input, { key: 'p', code: 'KeyP', altKey: true });
     expect(input).toHaveValue('Alt + Z');
     expect(onChange).not.toHaveBeenCalled();
-    expect(screen.getByRole('status')).toHaveTextContent(/Release all letter keys/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/Let go of the letters and start again/i);
 
     fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX' });
@@ -78,7 +81,7 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
     expect(input).toHaveValue('Alt + X');
     fireEvent.keyDown(input, { key: 'p', code: 'KeyP', altKey: true, ctrlKey: true });
     expect(input).toHaveValue('Alt + X');
-    expect(screen.getByRole('status')).toHaveTextContent(/exact same modifiers/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/same modifier keys the whole time/i);
 
     fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true, ctrlKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
@@ -109,7 +112,7 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
 
     expect(input).toHaveValue('Alt + X');
     expect(onChange).toHaveBeenCalledOnce();
-    expect(screen.getByRole('status')).toHaveTextContent(/exact same modifiers/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/same modifier keys the whole time/i);
 
     fireEvent.keyUp(input, { key: 'p', code: 'KeyP', altKey: true });
     fireEvent.keyUp(input, { key: 'x', code: 'KeyX', altKey: true });
@@ -140,7 +143,7 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
 
     expect(input).toHaveValue('Alt + X');
     expect(onChange).toHaveBeenCalledOnce();
-    expect(screen.getByRole('status')).toHaveTextContent(/exact same modifiers/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/same modifier keys the whole time/i);
   });
 
   it('releases and resets capture when the browser window loses focus', async () => {
@@ -214,11 +217,11 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
     fireEvent.focus(input);
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent(
-        'Shortcut capture is unavailable. Try again.',
+        'Talking Quill can’t read your keys right now. Try again.',
       ),
     );
     expect(
-      screen.getByText('Shortcut capture is unavailable. Try again.', {
+      screen.getByText('Talking Quill can’t read your keys right now. Try again.', {
         selector: '.me-field__error',
       }),
     ).toBeVisible();
@@ -235,12 +238,12 @@ describe('KeyboardShortcutInput capture lifecycle', () => {
     fireEvent.blur(input);
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent(
-        'Global shortcuts could not be restored',
+        'Your shortcuts couldn’t be switched back on.',
       ),
     );
     expect(
       screen.getByText(
-        'Global shortcuts could not be restored. Refocus this field, then Tab away to retry.',
+        'Your shortcuts couldn’t be switched back on. Click this field again, then press Tab to leave it.',
         { selector: '.me-field__error' },
       ),
     ).toBeVisible();

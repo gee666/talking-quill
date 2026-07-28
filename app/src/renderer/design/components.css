@@ -4,8 +4,11 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
+  /* A button never stretches, not even as a lone grid/flex child. */
+  width: fit-content;
+  flex: 0 0 auto;
   min-height: var(--control-height);
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-sm);
   background: var(--color-accent);
@@ -67,6 +70,12 @@
 .me-button--quiet:active:not(:disabled) {
   background: var(--color-hover);
 }
+/* A lone button inside a hairline list or a stack sits at the start. */
+.section__body > .me-button,
+.rows > .me-button,
+.stack > .me-button {
+  justify-self: start;
+}
 .me-button__busy {
   margin-inline-end: var(--space-1);
   color: var(--color-secondary);
@@ -106,9 +115,26 @@ textarea.me-field__control {
   line-height: 1.5;
   resize: vertical;
 }
+/* The native arrow is drawn with two gradients so no image URL is needed:
+   the production CSP allows `img-src 'self' blob:` only. */
 select.me-field__control {
-  padding-inline-end: var(--space-1);
+  appearance: none;
+  padding-inline-end: var(--space-5);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentcolor 50%),
+    linear-gradient(135deg, currentcolor 50%, transparent 50%);
+  background-position:
+    right 14px center,
+    right 10px center;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+  color: var(--color-text);
   cursor: pointer;
+}
+select.me-field__control:disabled {
+  background-image: none;
 }
 .me-field__control::placeholder {
   color: var(--color-secondary);
@@ -121,8 +147,9 @@ select.me-field__control {
   outline: none;
 }
 .me-field__control:disabled {
+  border-color: var(--color-border);
   color: var(--color-muted);
-  background: var(--color-hover);
+  background-color: var(--color-hover);
   cursor: not-allowed;
 }
 .me-field__control[aria-invalid='true'] {
@@ -136,6 +163,47 @@ select.me-field__control {
   color: var(--color-error);
   font-size: var(--fs-xs);
   font-weight: 500;
+}
+
+/* ---------------------------------------------------------- Field layout */
+/* Fields are STACKED by default (the base `.me-field` rule above): label on
+   its own line above a full-width control, hint below. That is the safe shape
+   everywhere — forms, panels, dialogs, narrow columns.
+
+   The two-column settings ROW is strictly OPT IN: a field only becomes a row
+   when it carries `me-field--row` AND is a direct child of a hairline settings
+   list (`.section__body` or `.rows`). There is deliberately no ancestor
+   allow-list; anything not on a settings list stays stacked. */
+.section__body > .me-field--row,
+.rows > .me-field--row {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+.section__body > .me-field--row > .me-field__label,
+.rows > .me-field--row > .me-field__label {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.section__body > .me-field--row > .me-field__control,
+.rows > .me-field--row > .me-field__control {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  min-width: var(--field-control-min);
+  max-width: var(--field-control-max);
+}
+/* Hints and errors span the whole row, under both columns, so they never
+   become a thin ragged column. */
+.section__body > .me-field--row > :is(.me-field__hint, .me-field__error),
+.rows > .me-field--row > :is(.me-field__hint, .me-field__error) {
+  grid-column: 1 / -1;
+  grid-row: auto;
+  max-width: var(--measure);
 }
 
 /* ---------------------------------------------------------------- Toggle */
@@ -161,14 +229,15 @@ select.me-field__control {
   font-size: var(--fs-md);
 }
 .me-toggle__hint {
+  max-width: var(--measure);
   color: var(--color-secondary);
   font-size: var(--fs-xs);
 }
 .me-toggle__control {
   position: relative;
   flex: 0 0 auto;
-  width: 30px;
-  height: 17px;
+  width: 32px;
+  height: 18px;
 }
 .me-toggle__input {
   position: absolute;
@@ -178,8 +247,8 @@ select.me-field__control {
 }
 .me-toggle__track {
   display: block;
-  width: 30px;
-  height: 17px;
+  width: 32px;
+  height: 18px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-pill);
   background: var(--color-hover);
@@ -190,8 +259,8 @@ select.me-field__control {
 .me-toggle__track::after {
   content: '';
   display: block;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   transform: translate(2px, 2px);
   background: var(--color-muted);
@@ -207,7 +276,7 @@ select.me-field__control {
   border-color: var(--color-accent);
 }
 .me-toggle__input:checked + .me-toggle__track::after {
-  transform: translate(15px, 2px);
+  transform: translate(16px, 2px);
   background: var(--color-on-accent);
 }
 .me-toggle__input:focus-visible + .me-toggle__track {
@@ -215,72 +284,179 @@ select.me-field__control {
 }
 
 /* -------------------------------------------------- Section (former Card) */
-.me-card {
+/* A section is a flat piece of the page: a heading, one short sentence and a
+   stack of rows. No border, no fill, no shadow. */
+.section {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
   padding: 0;
   border: 0;
   background: none;
 }
-.me-card__header {
+.section__header {
   display: grid;
-  gap: 1px;
+  gap: 2px;
 }
-.me-card__heading {
+.section__title {
   margin: 0;
   color: var(--color-text);
   font-size: var(--fs-lg);
   font-weight: 600;
 }
-.me-card__description {
+.section__lead {
+  max-width: var(--measure);
   margin: 0;
   color: var(--color-secondary);
   font-size: var(--fs-sm);
 }
-.me-card__body {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-.me-card[data-interactive='true'] {
+
+/* Interactive cards keep a light affordance so they read as clickable. */
+.section[data-interactive='true'] {
+  gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-raised);
   cursor: pointer;
   transition:
     border-color var(--transition-fast),
     background-color var(--transition-fast);
 }
-.me-card[data-interactive='true']:hover {
+.section[data-interactive='true']:hover {
   border-color: var(--color-border-strong);
   background: var(--color-hover);
 }
-.me-card[aria-disabled='true'] {
+.section[aria-disabled='true'] {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* ------------------------------------------------------------ Row groups */
-.group {
+/* ------------------------------------------------- Hairline row containers */
+/* `.section__body` and `.rows` behave the same: children sit directly on the
+   page, separated by one hairline, with comfortable vertical padding. */
+.section__body,
+.rows,
+.group,
+.details-list,
+.settings-list {
   display: grid;
   min-width: 0;
-  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  list-style: none;
+}
+.section__body > *,
+.rows > *,
+.group > *,
+.details-list > div,
+.settings-list > li {
+  min-width: 0;
+  padding-block: var(--row-pad-y);
+}
+.section__body > * + *,
+.rows > * + *,
+.group > * + *,
+.details-list > div + div,
+.settings-list > li + li {
+  border-top: 1px solid var(--color-border);
+}
+.section__body > :first-child,
+.rows > :first-child,
+.group > :first-child,
+.details-list > div:first-child,
+.settings-list > li:first-child {
+  padding-block-start: 0;
+}
+.section__body > :last-child,
+.rows > :last-child,
+.group > :last-child,
+.details-list > div:last-child,
+.settings-list > li:last-child {
+  padding-block-end: 0;
+}
+/* Blocks that carry their own surface are never hairline-separated: a border
+   inside a border is exactly the clutter this redesign removes. */
+.section__body > :is(.panel, .gesture-test, .info-alert, .permission-guidance, .me-empty),
+.rows > :is(.panel, .gesture-test, .info-alert, .permission-guidance, .me-empty),
+.section__body > .setting-divider,
+.rows > .setting-divider,
+.section__body
+  > :is(.panel, .gesture-test, .info-alert, .permission-guidance, .me-empty, .setting-divider)
+  + *,
+.rows
+  > :is(.panel, .gesture-test, .info-alert, .permission-guidance, .me-empty, .setting-divider)
+  + * {
+  border-top: 0;
+}
+.section__body > .setting-divider,
+.rows > .setting-divider {
+  padding-block: 0;
+}
+
+/* A plain vertical stack: spacing only, never a divider. */
+.stack {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  min-width: 0;
+  /* `.stack` is also used on <ul>/<ol>; drop the browser markers and indent. */
+  padding-inline-start: 0;
+  margin-block: 0;
+  list-style: none;
+}
+.stack > * {
+  min-width: 0;
+}
+
+/* One explicit hairline. */
+.setting-divider {
+  height: 1px;
+  background: var(--color-border);
+}
+
+/* A small bold sub-heading inside a section. */
+.subhead {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+/* Extra-small muted helper text. */
+.hint {
+  max-width: var(--measure);
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+}
+/* Secondary explanatory paragraph. */
+.body-copy {
+  max-width: var(--measure);
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+
+/* The only bordered container left: the dictation profile editor and the live
+   gesture test. `.gesture-test` shares this rule set for compatibility. */
+.panel,
+.gesture-test {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-raised);
 }
-.group > * + * {
-  border-top: 1px solid var(--color-border);
-}
+
 .row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   min-height: var(--row-height);
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
 }
 .row__label {
   flex: 1;
@@ -290,39 +466,6 @@ select.me-field__control {
 .row__value {
   flex: 0 0 auto;
   color: var(--color-secondary);
-}
-
-/* Automatic row treatment for common section children. */
-.me-card__body > .me-toggle,
-.me-card__body > .readiness-row,
-.me-card__body > .setting-action,
-.me-card__body > .me-field--row {
-  min-height: var(--row-height);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-raised);
-}
-.me-card__body > .me-field--row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 220px);
-  align-items: center;
-  gap: var(--space-1) var(--space-3);
-}
-.me-card__body > .me-field--row > .me-field__label {
-  grid-column: 1;
-  grid-row: 1;
-  color: var(--color-text);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  letter-spacing: 0;
-}
-.me-card__body > .me-field--row > .me-field__control {
-  grid-column: 2;
-  grid-row: 1;
-}
-.me-card__body > .me-field--row > .me-field__hint,
-.me-card__body > .me-field--row > .me-field__error {
-  grid-column: 1 / -1;
 }
 
 /* ---------------------------------------------------------------- Dialog */
@@ -401,27 +544,37 @@ select.me-field__control {
 }
 
 /* ---------------------------------------------------------------- Status */
+/* The app shows many of these, so the neutral chip is plain text with a dot;
+   only the tones that carry meaning get a tint. */
 .me-status {
   display: inline-flex;
   width: fit-content;
   align-items: center;
   gap: 6px;
-  min-height: 20px;
-  padding: 0 var(--space-2);
+  min-height: 18px;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-pill);
-  background: var(--color-hover);
+  background: none;
   color: var(--color-secondary);
   font-size: var(--fs-xs);
   font-weight: 500;
   white-space: nowrap;
 }
 .me-status__icon {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
+  flex: none;
   border-radius: 50%;
   background: currentcolor;
   font-size: 0;
+}
+.me-status--success,
+.me-status--warning,
+.me-status--error,
+.me-status--info {
+  padding: 0 var(--space-2);
+  min-height: 20px;
 }
 .me-status--success {
   color: var(--color-success);
@@ -474,8 +627,7 @@ select.me-field__control {
   justify-items: center;
   gap: var(--space-1);
   padding: var(--space-5) var(--space-4);
-  border: 1px dashed var(--color-border-strong);
-  border-radius: var(--radius-md);
+  border: 0;
   background: transparent;
   text-align: center;
 }

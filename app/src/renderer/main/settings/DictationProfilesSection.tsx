@@ -28,10 +28,12 @@ export function DictationProfilesSection({
   settings,
   platform,
   onSettingsSaved,
+  heading = 'Dictation profiles',
 }: {
   readonly settings: Settings;
   readonly platform: string;
   readonly onSettingsSaved: (settings: Settings) => void;
+  readonly heading?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,22 +57,14 @@ export function DictationProfilesSection({
         }));
       }
       setError(
-        'The profile could not be saved. Shortcut chords must be distinct, may not share a same-modifier prefix, and built-in defaults stay reserved.',
+        'That profile couldn’t be saved. Give it a shortcut no other profile uses — and one that isn’t the start of another profile’s shortcut. The shortcuts that come with Talking Quill are always kept free.',
       );
     } finally {
       setBusy(false);
     }
   };
   return (
-    <Card
-      title="Dictation profiles"
-      description="Each profile owns one customizable keyboard chord and one processing mode."
-    >
-      <p>
-        Hold the same nonempty modifier combination while pressing letter keys in order. The final
-        letter is the trigger; its key down/up timing chooses Quick or Extended Dictation. Built-in
-        profiles can be edited and reset, but not deleted.
-      </p>
+    <Card {...(heading === null ? {} : { title: heading })}>
       {settings.dictationProfiles.map((profile) => (
         <ProfileEditor
           key={[
@@ -129,12 +123,14 @@ export function DictationProfilesSection({
           onDelete={() => setCreating(false)}
         />
       ) : (
-        <Button
-          disabled={busy || settings.dictationProfiles.length >= MAX_DICTATION_PROFILES}
-          onClick={() => setCreating(true)}
-        >
-          Add custom profile
-        </Button>
+        <div className="provider-actions">
+          <Button
+            disabled={busy || settings.dictationProfiles.length >= MAX_DICTATION_PROFILES}
+            onClick={() => setCreating(true)}
+          >
+            Add custom profile
+          </Button>
+        </div>
       )}
       {error === null ? null : <Status tone="error">{error}</Status>}
     </Card>
@@ -185,16 +181,17 @@ function ProfileEditor({
   return (
     <fieldset className="gesture-test">
       <legend>{create ? 'New custom profile' : profile.name}</legend>
-      {builtInMetadata === null ? null : <p>{builtInMetadata.description}</p>}
+      {builtInMetadata === null ? null : <p className="body-copy">{builtInMetadata.description}</p>}
       <Input
-        label={`${profile.name} profile name`}
+        label="Name"
+        hint="Something you will recognise in this list."
         value={draft.name}
         maxLength={80}
         disabled={disabled}
         onChange={(event) => setDraft({ ...draft, name: event.currentTarget.value })}
       />
       <KeyboardShortcutInput
-        label={`${profile.name} keyboard shortcut`}
+        label="Shortcut"
         shortcut={draft.shortcut}
         platform={platform}
         disabled={disabled}
@@ -203,18 +200,19 @@ function ProfileEditor({
         onCaptureValidityChange={setShortcutValid}
       />
       <Select
-        label={`${profile.name} processing mode`}
+        label="What happens to your words"
+        hint="Raw types what you said. Smart sends it to your AI service to be cleaned up first."
         value={draft.processingMode}
         disabled={disabled}
         onChange={(event) =>
           setDraft({ ...draft, processingMode: event.currentTarget.value as 'raw' | 'smart' })
         }
       >
-        <option value="raw">Raw transcription</option>
-        <option value="smart">Smart transcription</option>
+        <option value="raw">Type it exactly as I said it</option>
+        <option value="smart">Clean it up with AI</option>
       </Select>
       <TextArea
-        label={`${profile.name} Smart prompt (optional)`}
+        label="Extra instructions for the AI (optional)"
         value={draft.smartPrompt ?? ''}
         maxLength={4_096}
         rows={4}
@@ -226,9 +224,9 @@ function ProfileEditor({
               event.currentTarget.value.trim().length === 0 ? null : event.currentTarget.value,
           })
         }
-        hint="Additional cleanup, formatting, or translation instruction. Core content-safety rules always apply."
+        hint="Tell the AI what to do with your words — for example “make it sound formal” or “translate it into Spanish”. Used only when you choose to clean it up with AI."
       />
-      <div>
+      <div className="provider-actions">
         <Button
           disabled={
             disabled ||
@@ -241,12 +239,12 @@ function ProfileEditor({
           onClick={() => onSave(draft)}
         >
           {create ? 'Create profile' : 'Save profile'}
-        </Button>{' '}
+        </Button>
         {onReset === undefined ? null : (
           <Button variant="quiet" disabled={disabled} onClick={onReset}>
             Reset
           </Button>
-        )}{' '}
+        )}
         {onDelete === undefined ? null : (
           <Button variant="quiet" disabled={disabled} onClick={onDelete}>
             {create ? 'Cancel' : 'Delete'}
@@ -265,9 +263,9 @@ function profileConflictMessage(
   const candidate = formatKeyboardShortcut(shortcut, platform);
   const existing = formatKeyboardShortcut(conflictingProfile.shortcut, platform);
   if (shortcutsEqual(shortcut, conflictingProfile.shortcut)) {
-    return `${candidate} is already used by ${conflictingProfile.name} (${existing}).`;
+    return `${candidate} is already used by ${conflictingProfile.name} (${existing}). Pick a different one.`;
   }
-  return `${candidate} conflicts with ${conflictingProfile.name} (${existing}) because one chord is a prefix of the other.`;
+  return `${candidate} gets in the way of ${conflictingProfile.name} (${existing}) — one shortcut starts with the other, so Talking Quill can’t tell them apart. Pick a different one.`;
 }
 
 function reservedConflictMessage(
@@ -278,14 +276,14 @@ function reservedConflictMessage(
   const candidate = formatKeyboardShortcut(shortcut, platform);
   const binding = RESERVED_DICTATION_BINDINGS.find(({ ownerId: owner }) => owner === ownerId);
   if (binding === undefined || ownerId === null) {
-    return `${candidate} conflicts with a reserved built-in shortcut chord.`;
+    return `${candidate} is kept free for one of the shortcuts that come with Talking Quill. Pick a different one.`;
   }
   const ownerName = builtInDictationProfileName(ownerId);
   const reservedShortcut = formatKeyboardShortcut(binding.shortcut, platform);
   if (shortcutsEqual(shortcut, binding.shortcut)) {
-    return `${candidate} matches the reserved ${ownerName} default ${reservedShortcut}.`;
+    return `${candidate} is the original shortcut for ${ownerName} (${reservedShortcut}), which stays reserved. Pick a different one.`;
   }
-  return `${candidate} conflicts with the reserved ${ownerName} default ${reservedShortcut} because one chord is a prefix of the other.`;
+  return `${candidate} gets in the way of the original ${ownerName} shortcut (${reservedShortcut}) — one starts with the other. Pick a different one.`;
 }
 
 function profilePatch(current: DictationProfile, next: DictationProfile): DictationProfilePatch {

@@ -18,6 +18,7 @@ export class ProfileActivationCoordinator {
   readonly #settings: SettingsStore;
   readonly #helper: EchoHelperPort;
   readonly #isModelReady: () => boolean;
+  readonly #onSyncFailure: (error: unknown) => void;
   #transactionTail: Promise<void> = Promise.resolve();
   #transactionActive = false;
   #syncRequested = false;
@@ -29,10 +30,12 @@ export class ProfileActivationCoordinator {
     readonly settings: SettingsStore;
     readonly helper: EchoHelperPort;
     readonly isModelReady: () => boolean;
+    readonly onSyncFailure?: (error: unknown) => void;
   }) {
     this.#settings = options.settings;
     this.#helper = options.helper;
     this.#isModelReady = options.isModelReady;
+    this.#onSyncFailure = options.onSyncFailure ?? (() => undefined);
   }
 
   dispose(): void {
@@ -173,11 +176,17 @@ export class ProfileActivationCoordinator {
   }
 
   async #syncActivation(): Promise<void> {
+    if (this.#helper.readiness.status !== 'ready') return;
     const settings = this.#settings.get();
-    await this.#helper.configureActivation(
-      this.#activationEnabled(settings.app.enabled),
-      profileBindings(settings.dictationProfiles),
-    );
+    try {
+      await this.#helper.configureActivation(
+        this.#activationEnabled(settings.app.enabled),
+        profileBindings(settings.dictationProfiles),
+      );
+    } catch (error: unknown) {
+      this.#onSyncFailure(error);
+      throw error;
+    }
   }
 
   async #drainSyncRequests(): Promise<void> {

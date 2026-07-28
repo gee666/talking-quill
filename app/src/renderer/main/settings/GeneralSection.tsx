@@ -22,38 +22,28 @@ function activationTestLabel(
     const requiredName =
       settings.dictationProfiles.find((profile) => profile.id === requiredProfileId)?.name ??
       requiredProfileId;
-    return `Use the ${requiredName} profile shortcut; a different shortcut was recognized`;
+    return `That was a different shortcut — try the one for ${requiredName}`;
   }
   if (state.unavailableReason === 'app-disabled') {
-    return 'Enable Talking Quill before testing the shortcut';
+    return 'Turn Talking Quill on first, then try your shortcut';
   }
   if (state.unavailableReason === 'session-active') {
-    return 'Finish or cancel the active dictation, then try again';
+    return 'Finish or cancel the dictation you have running, then try again';
   }
   if (state.unavailableReason === 'helper-unavailable') {
-    return 'The native keyboard helper must be ready before testing';
+    return 'Talking Quill is still getting ready to watch your keyboard';
   }
   switch (state.phase) {
     case 'waiting':
-      return 'Waiting for shortcut';
+      return 'Go ahead — press your shortcut';
     case 'pressed':
-      return 'Shortcut final trigger held';
+      return 'Holding the last key';
     case 'quick':
-      return recognizedActivationLabel(
-        'Quick Dictation gesture recognized',
-        state,
-        settings,
-        platform,
-      );
+      return recognizedActivationLabel('That was quick dictation', state, settings, platform);
     case 'extended':
-      return recognizedActivationLabel(
-        'Extended Dictation gesture recognized',
-        state,
-        settings,
-        platform,
-      );
+      return recognizedActivationLabel('That was extended dictation', state, settings, platform);
     case 'idle':
-      return 'Shortcut test inactive';
+      return 'Not testing right now';
   }
 }
 
@@ -76,12 +66,14 @@ export function GeneralSection({
   disabled,
   onSave,
   activationTestProfileId,
+  heading = 'General',
 }: {
   readonly settings: Settings;
   readonly platform: string;
   readonly disabled: boolean;
   readonly onSave: (patch: PublicSettingsPatch, success: string) => Promise<void>;
   readonly activationTestProfileId?: DictationProfileId;
+  readonly heading?: string | null;
 }) {
   const [gesture, setGesture] = useState(IDLE_ACTIVATION_TEST);
   useEffect(() => {
@@ -99,7 +91,10 @@ export function GeneralSection({
     );
   };
   return (
-    <Card title="General" description="Activation, processing, widget, and application behavior.">
+    <Card
+      {...(heading === null ? {} : { title: heading })}
+      description="How Talking Quill behaves day to day — whether it is listening for your shortcut, how big the widget is, and what it does when you close it."
+    >
       <Toggle
         checked={settings.app.enabled}
         disabled={disabled}
@@ -109,15 +104,14 @@ export function GeneralSection({
             'Enabled setting saved on this device.',
           )
         }
-        label="Enable Talking Quill"
-        hint="Makes the system-wide activation shortcut available."
+        label="Turn Talking Quill on"
+        hint="When this is on, your dictation shortcut works in any app. Turn it off to pause Talking Quill without quitting it."
       />
-      <div className="setting-divider" />
       <div className="gesture-test" aria-live="polite">
-        <strong>Live gesture test</strong>
+        <strong>Try your shortcut safely</strong>
         <span>
-          This safely tests the helper chord without opening the microphone or inserting text. The
-          final letter key down/up controls Quick versus Extended timing.
+          Press your shortcut and Talking Quill will tell you what it saw. Nothing is recorded and
+          no text is typed — how long you hold the last key decides quick or extended dictation.
         </span>
         <Status
           tone={
@@ -140,6 +134,7 @@ export function GeneralSection({
       </div>
       <Select
         label="Widget size"
+        hint="The small window that appears while you dictate. Make it bigger if it is hard to see."
         value={settings.app.widgetSize}
         disabled={disabled}
         onChange={(event) =>
@@ -163,8 +158,8 @@ export function GeneralSection({
             'Sound preference saved.',
           )
         }
-        label="Session sounds"
-        hint="Play short local cues when recording starts and finishes."
+        label="Play a sound when recording starts and stops"
+        hint="A short cue so you know Talking Quill is listening without looking at the screen."
       />
       <Toggle
         checked={settings.app.launchAtLogin}
@@ -175,8 +170,8 @@ export function GeneralSection({
             'Launch at login preference saved.',
           )
         }
-        label="Launch at login"
-        hint="Start Talking Quill after you sign in to this computer."
+        label="Start Talking Quill when I sign in"
+        hint="Turn this on if you dictate often, so your shortcut works right away."
       />
       <Toggle
         checked={settings.app.closeToTray}
@@ -187,8 +182,8 @@ export function GeneralSection({
             'Close behavior saved on this device.',
           )
         }
-        label="Close to tray"
-        hint="When off, closing the main window quits Talking Quill normally."
+        label="Keep running in the tray when I close the window"
+        hint="Your shortcut keeps working after you close the window. Turn it off if you would rather closing the window quit the app."
       />
     </Card>
   );

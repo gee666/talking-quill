@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
@@ -422,29 +422,64 @@ describe('main application shell', () => {
     expect(await screen.findByRole('heading', { name: 'Local model' })).toHaveFocus();
   });
 
-  it('offers only Dashboard, Settings, and Info with keyboard navigation and truthful content', async () => {
+  it('offers four primary screens in order with keyboard navigation and truthful content', async () => {
     const user = userEvent.setup();
     renderShell();
-    expect(screen.getAllByRole('button', { name: /Dashboard|Settings|Info/ })).toHaveLength(3);
+    const primaryNavigation = screen.getByRole('navigation', { name: 'Primary' });
+    expect(
+      within(primaryNavigation)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Dashboard', 'Dictation history', 'Settings', 'About']);
     const settingsButton = screen.getByRole('button', { name: 'Settings' });
     settingsButton.focus();
     await user.keyboard('{Enter}');
-    expect(await screen.findByRole('heading', { name: 'General settings' })).toHaveFocus();
-    expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked();
-    await user.click(screen.getByRole('button', { name: 'Show Welcome' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'General' })).toHaveFocus();
+    expect(
+      screen.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+    ).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Run setup again' }));
     await user.click(screen.getByRole('button', { name: 'Exit Welcome' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Show Welcome' })).toHaveFocus());
-    const infoButton = screen.getByRole('button', { name: 'Info' });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Run setup again' })).toHaveFocus(),
+    );
+    const infoButton = screen.getByRole('button', { name: 'About' });
     infoButton.focus();
     await user.keyboard('{Enter}');
     expect(await screen.findByRole('heading', { name: 'About Talking Quill' })).toHaveFocus();
-    expect(screen.getByText(/no account required/i)).toBeVisible();
+    expect(screen.getByText(/no account, no usage limits/i)).toBeVisible();
     const reopen = screen.getByRole('button', { name: 'Reopen Welcome' });
     await user.click(reopen);
     await user.click(screen.getByRole('button', { name: 'Exit Welcome' }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Reopen Welcome' })).toHaveFocus(),
     );
+  });
+
+  it('moves dictation history out of Dashboard and focuses it as a primary screen', async () => {
+    const user = userEvent.setup();
+    renderShell();
+
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { level: 1, name: 'Dictation history' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Dictation history' }));
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Dictation history' }),
+    ).toHaveFocus();
+    expect(screen.getAllByRole('heading', { name: 'Dictation history' })).toHaveLength(1);
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Dashboard' }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Almost there' })).toHaveFocus();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { level: 1, name: 'Dictation history' }),
+    ).not.toBeInTheDocument();
   });
 
   it('reports provider-managed Text Generation WebUI as ready without a model ID', () => {
@@ -458,7 +493,7 @@ describe('main application shell', () => {
     renderShell('ready', true, settings);
 
     expect(screen.getByText('textgenwebui uses its currently loaded model')).toBeVisible();
-    expect(screen.queryByText('Needs provider model setup')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick a model to finish setup')).not.toBeInTheDocument();
   });
 
   it('still reports missing required provider models as needing setup', () => {
@@ -471,7 +506,7 @@ describe('main application shell', () => {
 
     renderShell('ready', true, settings);
 
-    expect(screen.getByText('Needs provider model setup')).toBeVisible();
+    expect(screen.getByText('Pick a model to finish setup')).toBeVisible();
   });
 
   it('reports model readiness independently from the disabled aggregate status', () => {
@@ -484,7 +519,7 @@ describe('main application shell', () => {
     expect(screen.getByText('Model available')).toBeVisible();
   });
 
-  it('formats full Windows chords and explains final-trigger timing on the Dashboard', () => {
+  it('lists each profile shortcut as its own row and explains hold timing on the Dashboard', () => {
     const configured = structuredClone(DEFAULT_SETTINGS);
     const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
     if (general === undefined) throw new Error('Default General profile is missing');
@@ -494,13 +529,15 @@ describe('main application shell', () => {
     };
     renderShell('ready', true, configured);
 
-    expect(
-      screen.getByText(/General: Ctrl \+ Alt \+ Shift \+ Win \+ X \+ P \(final trigger P\)/i),
-    ).toBeVisible();
-    expect(screen.getByText(/final letter key down starts timing/i)).toBeVisible();
-    expect(
-      screen.getByText(/release that final key before 600 ms for Quick Dictation/i),
-    ).toBeVisible();
+    const shortcuts = screen.getByLabelText('Your shortcuts');
+    const generalTerm = within(shortcuts).getByText('General');
+    expect(generalTerm).toBeVisible();
+    expect(generalTerm.nextElementSibling).toHaveTextContent(
+      'Ctrl + Alt + Shift + Win + X + P · Smart',
+    );
+    expect(screen.getByText(/press your shortcut and let go straight away/i)).toBeVisible();
+    expect(screen.getByText(/hold the last key of the shortcut for more than/i)).toBeVisible();
+    expect(screen.getByText(/600 ms/)).toBeVisible();
   });
 
   it.each(Object.entries(APP_STATUS_PRESENTATIONS))(
@@ -545,7 +582,7 @@ describe('main application shell', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Test activation shortcut' }));
     expect(startActivationTest).toHaveBeenCalledOnce();
-    expect(screen.getByText('Waiting for shortcut')).toBeVisible();
+    expect(screen.getByText('Go ahead — press your shortcut')).toBeVisible();
 
     act(() =>
       activationTestListener?.({
@@ -557,7 +594,7 @@ describe('main application shell', () => {
         unavailableReason: null,
       }),
     );
-    expect(await screen.findByText('Quick Dictation gesture recognized')).toBeVisible();
+    expect(await screen.findByText('That was quick dictation')).toBeVisible();
     act(() =>
       activationTestListener?.({
         active: true,
@@ -569,9 +606,7 @@ describe('main application shell', () => {
       }),
     );
     expect(
-      await screen.findByText(
-        'Extended Dictation gesture recognized: Prompt, Alt + X + P (final trigger P)',
-      ),
+      await screen.findByText('That was extended dictation: Prompt, Alt + X + P (final trigger P)'),
     ).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Stop shortcut test' }));
     expect(stopActivationTest).toHaveBeenCalled();
@@ -586,7 +621,7 @@ describe('main application shell', () => {
       }),
     );
     expect(
-      await screen.findByText('The native keyboard helper must be ready before testing'),
+      await screen.findByText('Talking Quill is still getting ready to watch your keyboard'),
     ).toBeVisible();
   });
 
@@ -596,10 +631,12 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    const enabled = await screen.findByRole('checkbox', { name: 'Enable Talking Quill' });
+    const enabled = await screen.findByRole('checkbox', { name: 'Turn Talking Quill on' });
     await user.click(enabled);
     await waitFor(() => expect(enabled).toBeChecked());
-    expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That change didn’t save. Please try again.',
+    );
     expect(screen.queryByText(/secret persistence detail/i)).not.toBeInTheDocument();
   });
 
@@ -622,16 +659,26 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    await user.click(await screen.findByRole('checkbox', { name: 'Close to tray' }));
+    await user.click(
+      await screen.findByRole('checkbox', {
+        name: 'Keep running in the tray when I close the window',
+      }),
+    );
 
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Close to tray' })).toBeChecked(),
+      expect(
+        screen.getByRole('checkbox', { name: 'Keep running in the tray when I close the window' }),
+      ).toBeChecked(),
     );
-    expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That change didn’t save. Please try again.',
+    );
     await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
-    expect(screen.getByRole('textbox', { name: 'General keyboard shortcut' })).toHaveValue(
-      'Alt + Q',
-    );
+    expect(
+      within(screen.getByRole('group', { name: 'General' })).getByRole('textbox', {
+        name: 'Shortcut',
+      }),
+    ).toHaveValue('Alt + Q');
   });
 
   it('does not overwrite a newer settings event with an older failed-save reload', async () => {
@@ -641,7 +688,11 @@ describe('main application shell', () => {
     const user = userEvent.setup();
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(await screen.findByRole('checkbox', { name: 'Close to tray' }));
+    await user.click(
+      await screen.findByRole('checkbox', {
+        name: 'Keep running in the tray when I close the window',
+      }),
+    );
     await vi.waitFor(() => expect(getBootstrap).toHaveBeenCalledOnce());
 
     const newer = structuredClone(DEFAULT_SETTINGS);
@@ -660,9 +711,11 @@ describe('main application shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Dictation profiles' }));
     await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'General keyboard shortcut' })).toHaveValue(
-        'Alt + Y',
-      ),
+      expect(
+        within(screen.getByRole('group', { name: 'General' })).getByRole('textbox', {
+          name: 'Shortcut',
+        }),
+      ).toHaveValue('Alt + Y'),
     );
   });
 
@@ -672,10 +725,14 @@ describe('main application shell', () => {
     renderShell();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-    const closeToTray = await screen.findByRole('checkbox', { name: 'Close to tray' });
+    const closeToTray = await screen.findByRole('checkbox', {
+      name: 'Keep running in the tray when I close the window',
+    });
     await user.click(closeToTray);
     await waitFor(() => expect(closeToTray).toBeChecked());
-    expect(await screen.findByRole('alert')).toHaveTextContent('The setting could not be saved.');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That change didn’t save. Please try again.',
+    );
     expect(screen.queryByText(/secret persistence detail/i)).not.toBeInTheDocument();
   });
 });

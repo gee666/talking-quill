@@ -70,9 +70,9 @@ export class WindowManager {
   showWidget(
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'] = null,
-  ): void {
+  ): boolean {
     const widget = this.#windows.get('widget');
-    if (widget === undefined || widget.isDestroyed()) return;
+    if (widget === undefined || widget.isDestroyed()) return false;
     const displayBounds =
       targetBounds !== null && process.platform === 'win32'
         ? physicalBoundsToDip(targetBounds, (point) => screen.screenToDipPoint(point))
@@ -84,6 +84,7 @@ export class WindowManager {
     widget.setContentBounds(widgetContentBounds(size, display.workArea), false);
     widget.setIgnoreMouseEvents(true, { forward: true });
     widget.showInactive();
+    return true;
   }
 
   isWidgetVisible(): boolean {

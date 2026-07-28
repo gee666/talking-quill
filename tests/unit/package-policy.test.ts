@@ -29,6 +29,8 @@ const mergedMasterRendererAssets = [
 ] as const;
 
 const performanceLazyChunks = [
+  'out/renderer/assets/Dialog-valid.js',
+  'out/renderer/assets/HistoryScreen-valid.js',
   'out/renderer/assets/InfoScreen-valid.js',
   'out/renderer/assets/SettingsScreen-valid.js',
   'out/renderer/assets/SmartProcessingSection-valid.js',
@@ -128,7 +130,7 @@ const validResources = (target: 'win' | 'mac') => {
 
 describe('packaged runtime allowlist', () => {
   it('accepts only the expected runtime ASAR and native resource paths', () => {
-    expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(53);
+    expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(55);
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
     expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();

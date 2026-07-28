@@ -9,19 +9,52 @@ import type { ModelState } from '../../app/src/shared/schemas/transcription';
 
 afterEach(cleanup);
 const cases: readonly [ModelState, string][] = [
-  ['missing', 'Model download required'],
-  ['checking', 'Checking model integrity'],
-  ['downloading', 'Downloading model'],
-  ['verifying', 'Verifying downloaded model'],
-  ['installing', 'Installing verified model'],
+  ['missing', 'Not downloaded yet'],
+  ['checking', 'Checking the download'],
+  ['downloading', 'Downloading'],
+  ['verifying', 'Checking everything arrived'],
+  ['installing', 'Almost ready'],
   ['paused', 'Download paused'],
-  ['ready', 'Model ready for offline transcription'],
-  ['corrupt', 'Model files are corrupt and need repair'],
-  ['offline', 'Offline — reconnect to finish the download'],
-  ['error', 'Model setup failed'],
+  ['ready', 'Ready — works without internet'],
+  ['corrupt', 'The download is damaged — download it again'],
+  ['offline', 'No internet — reconnect to finish the download'],
+  ['error', 'The download didn’t finish'],
 ];
 
 describe('model setup state matrix', () => {
+  it('shows each selected model’s exact id and size beneath its readable label', () => {
+    Object.defineProperty(window, 'talkingQuill', {
+      configurable: true,
+      value: {
+        models: {
+          status: vi.fn(() => new Promise(() => undefined)),
+          onProgress: vi.fn(() => () => undefined),
+        },
+        settings: { update: vi.fn() },
+      },
+    });
+    const small = structuredClone(DEFAULT_SETTINGS);
+    const view = render(<ModelSetup settings={small} onSettingsSaved={vi.fn()} />);
+
+    expect(screen.getByRole('combobox', { name: 'Which model to use' })).toHaveValue(
+      'Xenova/whisper-small',
+    );
+    expect(screen.getByText('Xenova/whisper-small (about 250 MB)')).toBeVisible();
+    expect(
+      screen.queryByText('onnx-community/whisper-large-v3-turbo (about 1.09 GB)'),
+    ).not.toBeInTheDocument();
+
+    const large = structuredClone(DEFAULT_SETTINGS);
+    large.transcription.modelId = 'onnx-community/whisper-large-v3-turbo';
+    view.rerender(<ModelSetup settings={large} onSettingsSaved={vi.fn()} />);
+
+    expect(screen.getByRole('combobox', { name: 'Which model to use' })).toHaveValue(
+      'onnx-community/whisper-large-v3-turbo',
+    );
+    expect(screen.getByText('onnx-community/whisper-large-v3-turbo (about 1.09 GB)')).toBeVisible();
+    expect(screen.queryByText('Xenova/whisper-small (about 250 MB)')).not.toBeInTheDocument();
+  });
+
   it.each(cases)(
     'renders %s with explicit non-color text and an appropriate action',
     async (state, label) => {
@@ -49,14 +82,19 @@ describe('model setup state matrix', () => {
       });
       render(<ModelSetup settings={structuredClone(DEFAULT_SETTINGS)} onSettingsSaved={vi.fn()} />);
       expect(await screen.findByText(label)).toBeVisible();
-      if (state === 'ready')
-        expect(screen.getByRole('button', { name: 'Delete model' })).toBeVisible();
-      if (state === 'downloading')
+      if (state === 'ready') expect(screen.getByRole('button', { name: 'Delete' })).toBeVisible();
+      if (state === 'downloading') {
         expect(screen.getByRole('button', { name: 'Pause download' })).toBeVisible();
+        expect(screen.getByRole('button', { name: 'Cancel download' })).toBeVisible();
+      }
       if (state === 'verifying' || state === 'installing')
-        expect(screen.getByRole('button', { name: 'Pause model setup' })).toBeVisible();
+        expect(screen.getByRole('button', { name: 'Pause' })).toBeVisible();
+      if (state === 'paused')
+        expect(screen.getByRole('button', { name: 'Resume download' })).toBeVisible();
+      if (state === 'missing' || state === 'checking')
+        expect(screen.getByRole('button', { name: 'Download' })).toBeVisible();
       if (state === 'offline' || state === 'error' || state === 'corrupt')
-        expect(screen.getByRole('button', { name: 'Retry download' })).toBeVisible();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
     },
   );
 
@@ -135,9 +173,9 @@ describe('model setup state matrix', () => {
         <ModelSetup settings={structuredClone(DEFAULT_SETTINGS)} onSettingsSaved={vi.fn()} />
       </StrictMode>,
     );
-    fireEvent.click(await screen.findByRole('button', { name: 'Download model' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
 
-    expect(await screen.findByText('Model ready for offline transcription')).toBeVisible();
+    expect(await screen.findByText('Ready — works without internet')).toBeVisible();
     expect(download).toHaveBeenCalledOnce();
   });
 
@@ -177,7 +215,7 @@ describe('model setup state matrix', () => {
       },
     });
     render(<ModelSetup settings={structuredClone(DEFAULT_SETTINGS)} onSettingsSaved={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Download model' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
     expect(
       await screen.findAllByText(
         'Windows could not install the verified model because a file is temporarily locked. Retry to reuse the verified download.',

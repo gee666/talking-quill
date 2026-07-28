@@ -4,8 +4,7 @@ import { providerModelSelectionPolicy } from '../../../shared/provider-model-sel
 import type { AppState } from '../../../shared/schemas/app-state';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Card, Status, Toast, Toggle } from '../../design';
-import { DictationHistory } from '../history/DictationHistory';
-import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
+import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 import { presentAppStatus } from '../../status-presentation';
 
 const STATUS_COPY: Record<
@@ -13,35 +12,35 @@ const STATUS_COPY: Record<
   { readonly heading: string; readonly introduction: string; readonly readiness: string }
 > = {
   disabled: {
-    heading: 'Talking Quill is disabled',
-    introduction: 'Enable Talking Quill when you are ready to start dictating.',
-    readiness: 'Activation is disabled and no shortcut gestures will start dictation.',
+    heading: 'Talking Quill is off',
+    introduction: 'Turn it back on whenever you want to start dictating again.',
+    readiness: 'Your shortcuts stay quiet while Talking Quill is off.',
   },
   'needs-setup': {
-    heading: 'Dictation needs local setup',
+    heading: 'Almost there',
     introduction:
-      'Install the selected local transcription model and grant the requested permissions to begin dictating.',
-    readiness: 'Local transcription still needs setup before dictation can start.',
+      'Finish the last couple of steps below and you can start talking to any app on your computer.',
+    readiness: 'A few things still need your attention.',
   },
   ready: {
     heading: 'Talking Quill is ready',
-    introduction: 'Local dictation services are configured and ready on this device.',
-    readiness: 'The local dictation foundation is ready.',
+    introduction: 'Press your shortcut in any app, say what you want, and the words appear.',
+    readiness: 'Everything Talking Quill needs is working.',
   },
   recording: {
-    heading: 'Listening for speech',
-    introduction: 'Talking Quill is capturing speech for local transcription.',
-    readiness: 'The local capture service is active.',
+    heading: 'Listening',
+    introduction: 'Keep talking. Talking Quill is picking up what you say.',
+    readiness: 'Your microphone is live right now.',
   },
   transcribing: {
-    heading: 'Transcribing speech',
-    introduction: 'Talking Quill is converting captured speech into text on this device.',
-    readiness: 'Local transcription is in progress.',
+    heading: 'Writing down your words',
+    introduction: 'This happens on your own computer and only takes a moment.',
+    readiness: 'Turning what you said into text.',
   },
   processing: {
-    heading: 'Preparing your text',
-    introduction: 'Talking Quill is processing captured speech in the selected dictation mode.',
-    readiness: 'Text processing is in progress.',
+    heading: 'Tidying up your text',
+    introduction: 'Nearly done. Your words are being cleaned up before they go in.',
+    readiness: 'Cleaning up your text.',
   },
 };
 
@@ -68,7 +67,7 @@ export function DashboardScreen({
       ? `${smartProviderId} uses its currently loaded model`
       : smartProviderConfig?.modelId
         ? `${smartProviderId} model selected`
-        : 'Needs provider model setup';
+        : 'Pick a model to finish setup';
 
   const updateEnabled = async (enabled: boolean) => {
     setSavingEnabled(true);
@@ -95,58 +94,51 @@ export function DashboardScreen({
         <Status tone={status.tone}>{status.label}</Status>
       </header>
       <div className="screen__grid">
-        <Card title="Application" description="Store whether Talking Quill should be enabled.">
+        <Card
+          title="Dictation"
+          description="Switch Talking Quill on when you want to dictate. With Raw dictation your voice never leaves your computer: no account, nothing tracked, nothing uploaded."
+        >
           <Toggle
             checked={state.enabled}
             disabled={savingEnabled}
             onChange={(event) => void updateEnabled(event.currentTarget.checked)}
             label={state.enabled ? 'Talking Quill enabled' : 'Talking Quill disabled'}
-            hint="Use any configured profile shortcut chord from another application."
+            hint="While it is on, your shortcut works in any app on your computer."
           />
         </Card>
         {enabledError === null ? null : (
           <Toast tone="error" message={enabledError} onDismiss={() => setEnabledError(null)} />
         )}
-        <Card
-          title="Privacy by design"
-          description="Local transcription is the default foundation."
-        >
-          <p className="body-copy">
-            Raw transcription keeps audio on this device. Talking Quill includes no telemetry and
-            requires no account.
-          </p>
-        </Card>
-        <Card title="Current setup" description="Your active dictation configuration.">
-          <dl className="details-list">
-            <div>
-              <dt>Profiles</dt>
-              <dd>
-                {settings.dictationProfiles
-                  .map(
-                    (profile) =>
-                      `${profile.name}: ${formatKeyboardShortcutWithTrigger(profile.shortcut, platform)} (${profile.processingMode === 'raw' ? 'Raw' : 'Smart'})`,
-                  )
-                  .join(' · ')}
-              </dd>
-            </div>
+        <Card title="How you are set up" description="What Talking Quill will use when you speak.">
+          <h3 className="subhead">Your shortcuts</h3>
+          <dl className="details-list" aria-label="Your shortcuts">
+            {settings.dictationProfiles.map((profile) => (
+              <div key={profile.id}>
+                <dt>{profile.name}</dt>
+                <dd>
+                  {formatKeyboardShortcut(profile.shortcut, platform)} ·{' '}
+                  {profile.processingMode === 'raw' ? 'Raw' : 'Smart'}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <h3 className="subhead">Everything else</h3>
+          <dl className="details-list" aria-label="Everything else">
             <div>
               <dt>Microphone</dt>
               <dd>{settings.recording.preferredMicrophoneId ?? 'System default'}</dd>
             </div>
             <div>
-              <dt>Transcription model</dt>
+              <dt>Speech model</dt>
               <dd>{state.modelReady ? 'Model available' : 'Needs setup'}</dd>
             </div>
             <div>
-              <dt>Smart provider</dt>
+              <dt>AI clean-up</dt>
               <dd>{smartProviderReadiness}</dd>
             </div>
           </dl>
         </Card>
-        <Card
-          title="Try it here"
-          description="Focus this field, then use your activation shortcut."
-        >
+        <Card title="Try it here" description="Click in the box, then use your shortcut and talk.">
           <label className="try-dictation">
             <span>Dictation test area</span>
             <textarea
@@ -155,34 +147,42 @@ export function DashboardScreen({
               placeholder="Your inserted dictation will appear here…"
             />
           </label>
-          <p className="body-copy">
-            The shortcut&apos;s final letter key down starts timing. Release that final key before{' '}
-            {String(ECHO_HOLD_THRESHOLD_MS)} ms for Quick Dictation, or keep it down for Extended
-            Dictation. Press Enter, press the full shortcut chord again, or use the widget Stop
-            button to submit. Press Escape to cancel. Each profile shortcut uses its configured Raw
-            or Smart mode.
+          <ul className="stack">
+            <li>
+              <strong>Quick note:</strong> press your shortcut and let go straight away. Talking
+              Quill writes your words once you stop talking.
+            </li>
+            <li>
+              <strong>Longer note:</strong> hold the last key of the shortcut for more than{' '}
+              {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses.
+            </li>
+            <li>To finish a longer note, press Enter or use your shortcut again.</li>
+            <li>Press Escape at any time to throw the recording away.</li>
+          </ul>
+          <p className="hint">
+            Each shortcut uses its own setting: Raw writes exactly what you said, Smart lets an AI
+            service tidy it up first.
           </p>
         </Card>
-        <Card title="Current readiness" description={copy.readiness}>
+        <Card title="What is ready" description={copy.readiness}>
           <div className="group readiness-group">
             <div className="readiness-row">
-              <span>Desktop shell and local settings</span>
+              <span>Talking Quill itself</span>
               <Status tone="success">Available</Status>
             </div>
             <div className="readiness-row">
-              <span>Native keyboard and insertion helper</span>
+              <span>Typing helper</span>
               <Status tone={helper.tone}>{helper.label}</Status>
             </div>
             <p className="body-copy readiness-note">{helperReadinessDetail(state)}</p>
             <div className="readiness-row">
-              <span>Local transcription model</span>
+              <span>Speech model</span>
               <Status tone={state.modelReady ? 'success' : 'warning'}>
                 {state.modelReady ? 'Available' : 'Needs setup'}
               </Status>
             </div>
           </div>
         </Card>
-        <DictationHistory />
       </div>
     </div>
   );
@@ -198,11 +198,11 @@ function presentHelperReadiness(status: AppState['helper']['status']): {
     case 'ready':
       return { label: 'Available', tone: 'success' };
     case 'permission-required':
-      return { label: 'Permission needed', tone: 'warning' };
+      return { label: 'Needs permission', tone: 'warning' };
     case 'incompatible':
-      return { label: 'Update needed', tone: 'error' };
+      return { label: 'Needs an update', tone: 'error' };
     case 'unavailable':
-      return { label: 'Unavailable', tone: 'error' };
+      return { label: 'Not working', tone: 'error' };
     case 'stopped':
       return { label: 'Stopped', tone: 'neutral' };
   }
@@ -211,21 +211,21 @@ function presentHelperReadiness(status: AppState['helper']['status']): {
 function helperReadinessDetail(state: AppState): string {
   switch (state.helper.reason) {
     case 'input-monitoring-required':
-      return 'Allow Input Monitoring in macOS System Settings, then restart Talking Quill.';
+      return 'Open System Settings on your Mac, allow Input Monitoring for Talking Quill, then restart the app.';
     case 'accessibility-required':
     case 'event-post-required':
-      return 'Allow Accessibility in macOS System Settings so Talking Quill can insert text.';
+      return 'Open System Settings on your Mac and allow Accessibility, so Talking Quill can type for you.';
     case 'binary-missing':
-      return 'The native helper binary is missing. Reinstall Talking Quill to repair this component.';
+      return 'Part of Talking Quill is missing. Reinstalling the app will put it back.';
     case 'protocol-mismatch':
-      return 'The native helper does not match this application version. Reinstall Talking Quill.';
+      return 'This part of Talking Quill does not match the rest of the app. Reinstalling will fix it.';
     case 'crash-loop':
-      return 'The native helper stopped repeatedly. Restart Talking Quill or reinstall the application.';
+      return 'The typing helper keeps stopping. Restart Talking Quill, and reinstall it if that keeps happening.';
     case null:
       return state.helper.status === 'ready'
-        ? 'Global activation, session controls, front-app inspection, and paste dispatch are available.'
-        : 'Checking the bundled native helper.';
+        ? 'Your shortcut works everywhere, and Talking Quill can type into whichever app you are using.'
+        : 'Checking the typing helper.';
     default:
-      return 'The native helper could not start. Restart Talking Quill or reinstall the application.';
+      return 'The typing helper could not start. Restart Talking Quill, and reinstall it if that does not help.';
   }
 }

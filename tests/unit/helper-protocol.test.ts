@@ -16,6 +16,7 @@ import {
   DEFAULT_GENERAL_PROFILE,
   DEFAULT_MARKDOWN_PROFILE,
   DEFAULT_PROMPT_PROFILE,
+  DEFAULT_PROMPT_TO_ENGLISH_PROFILE,
   DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
 } from '../../app/src/shared/schemas/dictation-profiles';
 import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
@@ -143,6 +144,7 @@ describe('native helper JSON-RPC schemas', () => {
         bindings: [
           binding('general', DEFAULT_GENERAL_PROFILE.shortcut),
           binding('prompt', DEFAULT_PROMPT_PROFILE.shortcut),
+          binding('prompt-to-english', DEFAULT_PROMPT_TO_ENGLISH_PROFILE.shortcut),
           binding('markdown', DEFAULT_MARKDOWN_PROFILE.shortcut),
           binding('translate-to-english', DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE.shortcut),
         ],
@@ -250,7 +252,7 @@ describe('native helper JSON-RPC schemas', () => {
     expect(
       schema.safeParse({
         enabled: true,
-        bindings: Array.from({ length: 12 }, (_, index) =>
+        bindings: Array.from({ length: 13 }, (_, index) =>
           binding(customProfileId(index), {
             ...altA,
             keys: [String.fromCharCode(65 + index)],
@@ -355,7 +357,7 @@ describe('native helper JSON-RPC schemas', () => {
           heldMs: 100,
         },
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       HelperNotificationSchema.safeParse({
         jsonrpc: '2.0',

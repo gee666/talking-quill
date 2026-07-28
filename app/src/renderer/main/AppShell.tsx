@@ -10,6 +10,10 @@ import { presentAppStatus } from '../status-presentation';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
 
+const HistoryScreen = lazy(async () => {
+  const module = await import('./screens/HistoryScreen');
+  return { default: module.HistoryScreen };
+});
 const InfoScreen = lazy(async () => {
   const module = await import('./screens/InfoScreen');
   return { default: module.InfoScreen };
@@ -19,13 +23,21 @@ const SettingsScreen = lazy(async () => {
   return { default: module.SettingsScreen };
 });
 
-const screens = ['dashboard', 'settings', 'info'] as const;
+const screens = ['dashboard', 'history', 'settings', 'info'] as const;
 type Screen = (typeof screens)[number];
 
 const SCREEN_ICONS: Record<Screen, IconName> = {
   dashboard: 'dashboard',
+  history: 'history',
   settings: 'settings',
   info: 'info',
+};
+
+const SCREEN_LABELS: Record<Screen, string> = {
+  dashboard: 'Dashboard',
+  history: 'Dictation history',
+  settings: 'Settings',
+  info: 'About',
 };
 
 export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
@@ -80,6 +92,8 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
         settings={settings}
         platform={bootstrap.platform}
       />
+    ) : screen === 'history' ? (
+      <HistoryScreen headingRef={headingRef} />
     ) : screen === 'settings' ? (
       <SettingsScreen
         headingRef={headingRef}
@@ -158,10 +172,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
                 onClick={() => setScreen(item)}
               >
                 <Icon name={SCREEN_ICONS[item]} />
-                <span>
-                  {item[0]?.toUpperCase()}
-                  {item.slice(1)}
-                </span>
+                <span>{SCREEN_LABELS[item]}</span>
               </button>
             ))}
           </nav>

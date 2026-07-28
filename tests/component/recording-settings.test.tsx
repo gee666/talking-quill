@@ -87,12 +87,15 @@ describe('Recording settings', () => {
     expect(screen.getByRole('option', { name: 'Studio microphone' })).toBeVisible();
     await user.selectOptions(microphone, 'studio');
     expect(update).toHaveBeenCalledWith({ recording: { preferredMicrophoneId: 'studio' } });
-    const preset = screen.getByRole('combobox', { name: 'Silence detection' });
+    const preset = screen.getByRole('combobox', { name: 'How long a pause ends a dictation' });
     await user.selectOptions(preset, 'aggressive');
     await user.selectOptions(preset, 'relaxed');
     expect(update).toHaveBeenCalledWith({ recording: { silencePreset: 'aggressive' } });
     expect(update).toHaveBeenCalledWith({ recording: { silencePreset: 'relaxed' } });
-    expect(screen.getByText(/at least 300 ms/i)).toBeVisible();
+    expect(screen.getByRole('option', { name: /^Short pause — /u })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /^Normal pause — /u })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /^Long pause — /u })).toBeInTheDocument();
+    expect(screen.getByText(/at least 0\.3 seconds/i)).toBeVisible();
   });
 
   it('requests access only on user action, displays live level, and stops cleanly', async () => {
@@ -100,15 +103,15 @@ describe('Recording settings', () => {
     const view = render(<RecordingSection settings={settings} platform="win32" />);
     await screen.findByRole('combobox', { name: 'Microphone' });
     expect(startTest).not.toHaveBeenCalled();
-    await user.click(screen.getByRole('button', { name: 'Test microphone' }));
+    await user.click(screen.getByRole('button', { name: 'Test my microphone' }));
     expect(startTest).toHaveBeenCalledOnce();
-    expect(await screen.findByText('Microphone active')).toBeVisible();
+    expect(await screen.findByText('Listening — say something')).toBeVisible();
     levelListener?.({
       captureId: 'd9428888-122b-11e1-b85c-61cd3cbb3210',
       rms: 0.42,
     });
     await waitFor(() =>
-      expect(screen.getByRole('progressbar', { name: 'Microphone level' })).toHaveAttribute(
+      expect(screen.getByRole('progressbar', { name: 'How loud you are' })).toHaveAttribute(
         'value',
         '0.42',
       ),
@@ -117,11 +120,11 @@ describe('Recording settings', () => {
       captureId: '11111111-1111-4111-8111-111111111111',
       rms: 0.99,
     });
-    expect(screen.getByRole('progressbar', { name: 'Microphone level' })).toHaveAttribute(
+    expect(screen.getByRole('progressbar', { name: 'How loud you are' })).toHaveAttribute(
       'value',
       '0.42',
     );
-    await user.click(screen.getByRole('button', { name: 'Stop microphone test' }));
+    await user.click(screen.getByRole('button', { name: 'Stop test' }));
     expect(stopTest).toHaveBeenCalled();
     view.unmount();
     expect(stopTest).toHaveBeenCalledTimes(2);
@@ -134,8 +137,8 @@ describe('Recording settings', () => {
     render(<RecordingSection settings={settings} platform="win32" />);
     await screen.findByRole('combobox', { name: 'Microphone' });
 
-    await user.click(screen.getByRole('button', { name: 'Test microphone' }));
-    const cancel = screen.getByRole('button', { name: 'Cancel microphone test' });
+    await user.click(screen.getByRole('button', { name: 'Test my microphone' }));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
     expect(cancel).toBeEnabled();
     await user.click(cancel);
     expect(stopTest).toHaveBeenCalledOnce();
@@ -165,10 +168,10 @@ describe('Recording settings', () => {
       reason: 'permission-unavailable',
     });
     render(<RecordingSection settings={settings} platform="win32" />);
-    await user.click(await screen.findByRole('button', { name: 'Test microphone' }));
+    await user.click(await screen.findByRole('button', { name: 'Test my microphone' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'could not complete Electron’s microphone authorization',
+      'Talking Quill couldn’t ask for microphone access. Restart Talking Quill and test again.',
     );
     expect(screen.queryByRole('button', { name: 'Open microphone settings' })).toBeNull();
   });
@@ -179,8 +182,8 @@ describe('Recording settings', () => {
     update.mockReturnValueOnce(pending.promise);
     const view = render(<RecordingSection settings={settings} platform="win32" />);
     await screen.findByRole('combobox', { name: 'Microphone' });
-    await user.click(screen.getByRole('button', { name: 'Test microphone' }));
-    await screen.findByText('Microphone active');
+    await user.click(screen.getByRole('button', { name: 'Test my microphone' }));
+    await screen.findByText('Listening — say something');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Microphone' }), 'studio');
     await vi.waitFor(() => expect(stopTest).toHaveBeenCalledOnce());
     view.unmount();
@@ -202,11 +205,11 @@ describe('Recording settings', () => {
       />,
     );
     expect(
-      await screen.findByRole('option', { name: 'Preferred microphone (disconnected)' }),
+      await screen.findByRole('option', { name: 'Your chosen microphone (not connected)' }),
     ).toBeVisible();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Microphone' }), 'studio');
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The preferred microphone could not be saved.',
+      'That microphone couldn’t be saved. Please try again.',
     );
     expect(screen.queryByText('private disk detail')).not.toBeInTheDocument();
   });

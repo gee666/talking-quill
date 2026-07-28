@@ -7,12 +7,15 @@
   --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
 
   --fs-2xs: 10px;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-md: 13px;
-  --fs-lg: 15px;
-  --fs-xl: 19px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 21px;
   --fs-brand: 22px;
+
+  /* Longest comfortable measure for explanatory prose. */
+  --measure: 64ch;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -26,14 +29,21 @@
   --radius-lg: 10px;
   --radius-pill: 999px;
 
-  --control-height: 28px;
-  --control-height-sm: 24px;
-  --row-height: 34px;
+  --control-height: 32px;
+  --control-height-sm: 26px;
+  --row-height: 38px;
+
+  /* Vertical breathing room of a hairline-separated row. */
+  --row-pad-y: 10px;
+  /* The control column of a row-layout field sizes to its content between
+     these two bounds, so realistic option labels are never clipped. */
+  --field-control-min: 200px;
+  --field-control-max: 300px;
 
   --transition-fast: 120ms cubic-bezier(0.2, 0.6, 0.2, 1);
   --focus-ring:
     0 0 0 2px var(--color-background),
-    0 0 0 3px color-mix(in srgb, var(--color-accent) 85%, transparent);
+    0 0 0 4px color-mix(in srgb, var(--color-accent) 80%, transparent);
 }
 
 :root,

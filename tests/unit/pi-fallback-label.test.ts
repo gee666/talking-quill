@@ -89,6 +89,30 @@ describe('Pi widget fallback labels', () => {
     ).toEqual({ heading: 'Cancelled', badge: 'Smart', secondary: 'Talking Quill' });
   });
 
+  it('surfaces errors with an Error badge and the specific message when there is one', () => {
+    expect(
+      widgetPresentation({
+        ...SMART_SESSION,
+        phase: 'error',
+        abortReason: 'provider-error',
+        fallbackCategory: 'pi-timeout',
+        message: 'Microphone was disconnected',
+      }),
+    ).toEqual({
+      heading: 'Could not complete',
+      badge: 'Error',
+      secondary: 'Microphone was disconnected',
+    });
+  });
+
+  it('falls back to a default sentence when an error carries no message', () => {
+    expect(widgetPresentation({ ...SMART_SESSION, phase: 'error', message: null })).toEqual({
+      heading: 'Could not complete',
+      badge: 'Error',
+      secondary: 'Talking Quill encountered an error.',
+    });
+  });
+
   it('keeps pointer Cancel available while transcription and Pi processing can be aborted', () => {
     expect(isWidgetPointerCancelable('transcribing')).toBe(true);
     expect(isWidgetPointerCancelable('processingSmart')).toBe(true);

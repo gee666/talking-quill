@@ -18,13 +18,27 @@ import { useProviderConfiguration } from './smart-processing/useProviderConfigur
 import { useProviderOperations } from './smart-processing/useProviderOperations';
 import { useProviderUiCoordinator } from './smart-processing/useProviderUiCoordinator';
 import { ENDPOINT_REPAIR_MESSAGE, type RequestState } from './smart-processing/provider-utils';
+import { autoDiscoveryKey, claimAutoDiscovery } from './smart-processing/auto-discovery-memory';
 
 interface SmartProcessingSectionProps {
   readonly settings: Settings;
   readonly onSettingsSaved: (settings: Settings) => void;
+  /** Pass `null` when the surrounding screen already shows this heading. */
+  readonly heading?: string | null;
+  /**
+   * Whether the user deliberately opened this section. Call sites that surface the section without
+   * an explicit request (for example a settings search that happens to match it) must pass `false`,
+   * so no AI service is contacted for a configuration the user never asked to see.
+   */
+  readonly autoDiscover?: boolean;
 }
 
-export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProcessingSectionProps) {
+export function SmartProcessingSection({
+  settings,
+  onSettingsSaved,
+  heading = 'Smart processing',
+  autoDiscover = true,
+}: SmartProcessingSectionProps) {
   const [catalog, setCatalog] = useState<readonly ProviderCatalogEntry[]>([]);
   const [catalogState, setCatalogState] = useState<RequestState>('loading');
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -107,6 +121,54 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
     configuration.dirty ||
     missingRequiredModel;
 
+  const configurationDirty =
+    configuration.dirty ||
+    configuration.endpointRepairRequired ||
+    !configuration.providerSelectionPersisted;
+  const credentialRequired =
+    selected?.fields.some((field) => field.secret && field.required) ?? false;
+
+  // Auto-discovery replaces the old "Discover models" click. It runs at most once per persisted
+  // configuration, only from a fresh idle state, so an error or a cancellation is never retried in
+  // a loop, and only for a provider that can actually be reached without a user click.
+  const autoDiscoveryAllowed =
+    autoDiscover &&
+    selected !== null &&
+    selected.modelDiscovery === 'remote' &&
+    catalogState === 'success' &&
+    (!credentialRequired || configuration.credentialConfigured) &&
+    configuration.providerSelectionPersisted &&
+    !configuration.providerSelectionPending &&
+    !configuration.endpointRepairRequired &&
+    !configuration.dirty &&
+    !providerMutationPending &&
+    operations.modelState === 'idle';
+
+  useEffect(() => {
+    if (!autoDiscoveryAllowed) return;
+    const attempt = autoDiscoveryKey(
+      configuration.selectedId,
+      configuration.persistedCredentialBinding,
+      configuration.credentialEpoch,
+    );
+    if (!claimAutoDiscovery(attempt)) return;
+    void operations.discoverModelsQuietly({
+      providerId: configuration.selectedId,
+      draft: configuration.draft,
+      configurationDirty,
+      expectedLease: coordinator.current(),
+    });
+  }, [
+    autoDiscoveryAllowed,
+    configuration.credentialEpoch,
+    configuration.draft,
+    configuration.persistedCredentialBinding,
+    configuration.selectedId,
+    configurationDirty,
+    coordinator,
+    operations,
+  ]);
+
   const saveConfiguration = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => {
     event.preventDefault();
     pi.clearMessage();
@@ -115,18 +177,18 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
 
   return (
     <Card
-      title="Smart processing"
-      description="Choose where transcript cleanup runs. Provider secrets stay in encrypted main-process storage."
+      {...(heading === null ? {} : { title: heading })}
+      description="Smart dictation hands what you said to an AI service that tidies it up — punctuation, capitals, stray filler words. Raw dictation needs none of this and never leaves your computer. A service running on your own machine, like Ollama, keeps everything here; a cloud service sends your text to a company that may charge you for it."
     >
       {catalogState === 'loading' ? (
         <p role="status" aria-live="polite">
-          Loading providers…
+          Loading AI services…
         </p>
       ) : null}
       {catalogState === 'error' ? (
         <EmptyState
-          title="Provider catalog unavailable"
-          description={catalogError ?? 'Retry after restarting Talking Quill.'}
+          title="We could not load the list of AI services"
+          description={catalogError ?? 'Restart Talking Quill and try again.'}
           action={
             <Button variant="secondary" onClick={() => window.location.reload()}>
               Retry
@@ -135,7 +197,10 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
         />
       ) : null}
       {catalogState === 'empty' ? (
-        <EmptyState title="No providers" description="No provider definitions are available." />
+        <EmptyState
+          title="No AI services available"
+          description="Restart Talking Quill and try again."
+        />
       ) : null}
       {catalogState === 'success' && selected !== null ? (
         <>
@@ -154,6 +219,7 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
 
           <DestinationSummary
             destination={displayedDestination}
+            providerName={selected.displayName}
             verified={operations.destinationVerified}
           />
 
@@ -181,16 +247,17 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
             />
           ) : null}
 
-          <form className="provider-form" onSubmit={saveConfiguration}>
+          <form className="stack" onSubmit={saveConfiguration}>
             {selected.fields
               .filter((field) => !field.secret)
               .map((field) => (
                 <ProviderFieldControl
-                  key={field.key}
+                  key={`${configuration.selectedId}-${field.key}`}
                   field={field}
                   value={configuration.draft[field.key as keyof ProviderSettingsDraft]}
                   models={operations.models}
                   modelState={operations.modelState}
+                  modelElapsedMs={operations.modelElapsedMs}
                   modelDiscovery={selected.modelDiscovery}
                   error={
                     field.key === 'baseUrl' && configuration.endpointRepairRequired
@@ -228,7 +295,7 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
               ))}
             {selected.modelDiscovery === 'provider-managed' ? (
               <Status tone="info">
-                This provider uses its currently loaded model; Talking Quill does not select one.
+                This service uses the model it already has loaded, so there is no model to choose.
               </Status>
             ) : null}
             <div className="provider-actions">
@@ -245,13 +312,11 @@ export function SmartProcessingSection({ settings, onSettingsSaved }: SmartProce
                 Save configuration
               </Button>
               {configuration.dirty ? (
-                <Status tone="warning">Save changes before discovery or testing</Status>
+                <Status tone="warning">Save your changes before testing</Status>
               ) : null}
-              {configuration.saveState === 'success' ? (
-                <Status tone="success">Draft saved</Status>
-              ) : null}
+              {configuration.saveState === 'success' ? <Status tone="success">Saved</Status> : null}
               {configuration.saveState === 'error' ? (
-                <Status tone="error">Configuration update failed; status refreshed</Status>
+                <Status tone="error">That did not save. Check the settings and try again.</Status>
               ) : null}
             </div>
           </form>
