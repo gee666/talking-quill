@@ -1,0 +1,100 @@
+name: Build macOS test packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-13
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      TALKING_QUILL_PACKAGE_TARGET: mac
+      TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
+      TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: none
+      TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build application
+        run: pnpm --filter @talking-quill/app build
+
+      - name: Build native helper
+        run: node scripts/build-helper.mjs --platform darwin --arch ${{ matrix.arch }}
+
+      - name: Package unsigned application
+        working-directory: app
+        run: >-
+          pnpm exec electron-builder
+          --config ../build/electron-builder.yml
+          --mac dir
+          --${{ matrix.arch }}
+          -c.mac.sign=false
+
+      - name: Ad-hoc sign and verify
+        shell: bash
+        run: |
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            app_path="release/mac-arm64/Talking Quill.app"
+          else
+            app_path="release/mac/Talking Quill.app"
+          fi
+          codesign --force --deep --sign - --options runtime "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
+      - name: Inspect packaged application
+        shell: bash
+        run: |
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            package_root="release/mac-arm64"
+          else
+            package_root="release/mac"
+          fi
+          node scripts/inspect-package.mjs "$package_root"
+
+      - name: Create test ZIP and checksum
+        shell: bash
+        run: |
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            app_path="release/mac-arm64/Talking Quill.app"
+          else
+            app_path="release/mac/Talking Quill.app"
+          fi
+          zip_path="release/Talking-Quill-0.0.1-mac-${{ matrix.arch }}-test.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
+          shasum -a 256 "$zip_path" > "$zip_path.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Talking-Quill-mac-${{ matrix.arch }}-test
+          path: |
+            release/Talking-Quill-0.0.1-mac-${{ matrix.arch }}-test.zip
+            release/Talking-Quill-0.0.1-mac-${{ matrix.arch }}-test.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
