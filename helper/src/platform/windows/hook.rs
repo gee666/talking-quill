@@ -286,6 +286,13 @@ impl ModifierTracker {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InjectionKind {
+    Physical,
+    External,
+    Helper,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnterSource {
     Main,
     Numpad,
@@ -858,7 +865,13 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             WM_KEYUP | WM_SYSKEYUP => KeyPhase::Up,
             _ => return None,
         };
-        let injected = native.flags & LLKHF_INJECTED != 0 || native.dwExtraInfo == INJECTED_MARKER;
+        let injection = if native.dwExtraInfo == INJECTED_MARKER {
+            InjectionKind::Helper
+        } else if native.flags & LLKHF_INJECTED != 0 {
+            InjectionKind::External
+        } else {
+            InjectionKind::Physical
+        };
         let extended = native.flags & LLKHF_EXTENDED != 0;
         Some(process_hook_record_at(
             context,
@@ -866,7 +879,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             native.scanCode,
             extended,
             phase,
-            injected,
+            injection,
             u64::from(native.time),
         ))
     });
@@ -910,7 +923,11 @@ fn process_hook_record(
         scan_code,
         extended,
         phase,
-        injected,
+        if injected {
+            InjectionKind::External
+        } else {
+            InjectionKind::Physical
+        },
         0,
     )
 }
@@ -921,12 +938,14 @@ fn process_hook_record_at(
     scan_code: u32,
     extended: bool,
     phase: KeyPhase,
-    injected: bool,
+    injection: InjectionKind,
     observed_at_ms: u64,
 ) -> bool {
-    // Helper-synthesized and other injected records pass through without
-    // changing modifier, physical, reducer, or capture state.
-    if injected {
+    // Never feed our own SendInput records back into keyboard state. Windows
+    // does, however, report AltGr's synthetic left-Ctrl companion as injected;
+    // tracking that modifier is required to avoid mistaking AltGr+letter typing
+    // for a plain Alt shortcut.
+    if injection == InjectionKind::Helper {
         return false;
     }
 
@@ -949,6 +968,12 @@ fn process_hook_record_at(
         let modifiers = keyboard.modifiers.mask();
         keyboard.reducer.observe_modifiers(modifiers);
         // Modifier prefixes intentionally leak through to the foreground app.
+        return false;
+    }
+    // Injected non-modifier input must never activate or alter a captured
+    // sequence. Its modifier companions were handled above solely so AltGr is
+    // represented by the exact Ctrl+Alt mask Windows generates.
+    if injection == InjectionKind::External {
         return false;
     }
 
@@ -1447,6 +1472,35 @@ mod tests {
     }
 
     #[test]
+    fn injected_altgr_ctrl_companion_prevents_plain_alt_activation() {
+        let (context, outbound, _terminal) = test_context(4);
+
+        // Windows synthesizes the left-Ctrl half of AltGr and marks that hook
+        // record as injected. It is keyboard state, not an activation input.
+        assert!(!process_hook_record(
+            &context,
+            VK_CONTROL,
+            0x1D,
+            false,
+            KeyPhase::Down,
+            true,
+        ));
+        assert!(!modifier(&context, VK_RMENU, KeyPhase::Down));
+        assert_eq!(
+            context.keyboard.lock().unwrap().modifiers.mask(),
+            ModifierMask::new(true, true, false, false),
+        );
+
+        assert!(!record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(outbound.try_recv().is_err());
+    }
+
+    #[test]
     fn every_nonempty_exact_modifier_mask_can_activate_in_the_native_path() {
         for bits in 1_u8..16 {
             let modifiers = ShortcutModifiers {
@@ -1816,7 +1870,8 @@ mod tests {
         ));
         assert!(outbound.try_recv().is_err());
 
-        // Injected ups do not clear physical modifier or letter state.
+        // Externally injected modifiers contribute to native state (Windows
+        // uses one for AltGr), but injected letters cannot alter sequences.
         assert!(!process_hook_record(
             &context,
             VK_LMENU,
@@ -1835,13 +1890,29 @@ mod tests {
         ));
         assert_eq!(
             context.keyboard.lock().unwrap().modifiers.mask(),
-            ModifierMask::new(false, true, false, false)
+            ModifierMask::default()
         );
         assert!(context.keyboard.lock().unwrap().physical.observe(
             PhysicalKey::Letter(ActivationKey::P),
             None,
             KeyPhase::Down
         ));
+
+        // Talking Quill's own marked SendInput records remain entirely inert.
+        modifier(&context, VK_LMENU, KeyPhase::Down);
+        assert!(!process_hook_record_at(
+            &context,
+            VK_LMENU,
+            0,
+            false,
+            KeyPhase::Up,
+            InjectionKind::Helper,
+            0,
+        ));
+        assert_eq!(
+            context.keyboard.lock().unwrap().modifiers.mask(),
+            ModifierMask::new(false, true, false, false)
+        );
     }
 
     #[test]
