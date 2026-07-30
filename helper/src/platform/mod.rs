@@ -13,7 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    keyboard::{ActivationBindings, EventPhase, HelperEvent},
+    keyboard::{ActivationBindings, HelperEvent},
     protocol::Outbound,
 };
 
@@ -326,31 +326,6 @@ pub(crate) fn deliver_callback_event(
     }
 }
 
-/// Activation acceptance and session-key capture are one native transaction: capture becomes
-/// visible before the activation notification is queued, and failed queueing rolls it back.
-pub(crate) fn deliver_callback_event_with_session_arm(
-    outbound: &Sender<Outbound>,
-    terminal: &TerminalSignal,
-    session_capture: &AtomicBool,
-    event: HelperEvent,
-) -> bool {
-    let arms_session = matches!(
-        event,
-        HelperEvent::Activation {
-            phase: EventPhase::Down,
-            ..
-        } | HelperEvent::ActivationComplete { .. }
-    );
-    if arms_session {
-        session_capture.store(true, Ordering::Release);
-    }
-    let delivered = deliver_callback_event(outbound, terminal, event);
-    if arms_session && !delivered {
-        session_capture.store(false, Ordering::Release);
-    }
-    delivered
-}
-
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TapRecoveryPolicy {
@@ -488,51 +463,6 @@ mod tests {
         ] {
             assert_eq!(callback_delivery_outcome(encoded, queued), expected);
         }
-    }
-
-    #[test]
-    fn accepted_activation_arms_session_capture_and_failed_delivery_rolls_back() {
-        let gate = Arc::new(CallbackGate::new());
-        gate.open();
-        let (terminal_sender, _terminal_receiver) = crossbeam_channel::bounded(1);
-        let terminal = TerminalSignal::new(gate, terminal_sender);
-        let capture = AtomicBool::new(false);
-        let activation = HelperEvent::Activation {
-            binding: ActivationBinding::new(ProfileId::GENERAL, test_shortcut()),
-            phase: EventPhase::Down,
-        };
-        let (sender, receiver) = crossbeam_channel::bounded(1);
-
-        assert!(deliver_callback_event_with_session_arm(
-            &sender, &terminal, &capture, activation,
-        ));
-        assert!(capture.load(Ordering::Acquire));
-        assert!(matches!(receiver.recv().unwrap(), Outbound::Event(_)));
-
-        capture.store(false, Ordering::Release);
-        let complete = HelperEvent::ActivationComplete {
-            binding: ActivationBinding::new(ProfileId::GENERAL, test_shortcut()),
-            held_ms: 599,
-        };
-        assert!(deliver_callback_event_with_session_arm(
-            &sender, &terminal, &capture, complete,
-        ));
-        assert!(capture.load(Ordering::Acquire));
-        assert!(matches!(receiver.recv().unwrap(), Outbound::Event(_)));
-
-        capture.store(false, Ordering::Release);
-        sender.try_send(Outbound::Event(activation)).unwrap();
-        let failure_gate = Arc::new(CallbackGate::new());
-        failure_gate.open();
-        let (failure_sender, _failure_receiver) = crossbeam_channel::bounded(1);
-        let failure_terminal = TerminalSignal::new(failure_gate, failure_sender);
-        assert!(!deliver_callback_event_with_session_arm(
-            &sender,
-            &failure_terminal,
-            &capture,
-            activation,
-        ));
-        assert!(!capture.load(Ordering::Acquire));
     }
 
     #[test]

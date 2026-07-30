@@ -6,6 +6,7 @@
   "releaseTagSignerFingerprints": [],
   "approvedTopLevel": [
     ".gitattributes",
+    ".github",
     ".gitignore",
     ".gitleaks.toml",
     ".node-version",
@@ -36,6 +37,7 @@
   "textAuditExceptions": {
     "legacy-brand": [
       "app/assets/THIRD_PARTY_NOTICES.txt",
+      "docs/attribution/anythingllm-mit.txt",
       "LICENSE",
       "scripts/generate-notices.mjs",
       "scripts/package-policy.mjs",
@@ -55,6 +57,7 @@
       "app/src/renderer/main/welcome/WelcomeWizard.tsx",
       "scripts/package-policy.mjs",
       "scripts/release-audit.mjs",
+      "tests/component/app-shell.test.tsx",
       "tests/component/commands-vocabulary-settings.test.tsx",
       "tests/integration/provider-contract.test.ts",
       "tests/unit/commands-vocabulary-store.test.ts",

@@ -208,7 +208,10 @@ export class EchoCapturePipeline {
     if (!isCapturePhase(this.#getState().phase)) return;
     // The widget renderer is preloaded. Show its truthful arming state before any device, model,
     // or helper round trip so the global shortcut always receives immediate visual feedback.
-    this.#windows.showWidget(this.#getWidgetSize(), null);
+    if (!this.#windows.showWidget(this.#getWidgetSize(), null)) {
+      this.#windows.showMain();
+      throw new Error('Dictation could not start because its status widget is unavailable.');
+    }
     // A shortcut acknowledgement must not wait for model loading, helper IPC, or microphone
     // startup. Beep first so the user can speak immediately and so the cue is not recorded once
     // capture begins opening below.

@@ -23,7 +23,7 @@ use crate::{
     platform::{
         CallbackGate, HookStatus, PermissionState, PlatformError, TapRecoveryDecision,
         TapRecoveryEvent, TapRecoveryPolicy, TerminalReason, TerminalSignal,
-        deliver_callback_event, deliver_callback_event_with_session_arm, hook_status_to_u8,
+        deliver_callback_event, hook_status_to_u8,
     },
     protocol::Outbound,
 };
@@ -904,18 +904,11 @@ fn process_key_event_with_modifiers(
     let planned_event = plan.event();
     let delivered = planned_event.is_none()
         || (accepting
-            && match planned_event.expect("event presence checked above") {
-                event @ (HelperEvent::Activation { .. }
-                | HelperEvent::ActivationComplete { .. }) => {
-                    deliver_callback_event_with_session_arm(
-                        &context.outbound,
-                        &context.terminal,
-                        &context.state.session_capture,
-                        event,
-                    )
-                }
-                event => deliver_callback_event(&context.outbound, &context.terminal, event),
-            });
+            && deliver_callback_event(
+                &context.outbound,
+                &context.terminal,
+                planned_event.expect("event presence checked above"),
+            ));
     if !delivered {
         context.state.hook_status.store(
             hook_status_to_u8(HookStatus::Unavailable),
@@ -923,18 +916,6 @@ fn process_key_event_with_modifiers(
         );
     }
     let swallowed = keyboard.reducer.apply(plan, delivered);
-    if matches!(
-        planned_event,
-        Some(
-            HelperEvent::Activation {
-                phase: crate::keyboard::EventPhase::Down,
-                ..
-            } | HelperEvent::ActivationComplete { .. }
-        )
-    ) && delivered
-    {
-        keyboard.capture_enabled_at = event_timestamp;
-    }
     if let Some(HelperEvent::SessionKey {
         key: crate::keyboard::SessionKey::Enter,
         phase: crate::keyboard::EventPhase::Down,

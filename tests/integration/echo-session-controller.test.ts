@@ -389,6 +389,20 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
   });
 
+  it('fails closed before sound, key capture, or microphone use when the widget is unavailable', async () => {
+    const test = fixture();
+    await settle();
+    test.spies.showWidget.mockReturnValue(false);
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
+
+    expect(test.spies.showMain).toHaveBeenCalledOnce();
+    expect(test.spies.sound).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.spies.setSessionCapture).not.toHaveBeenCalledWith(true);
+  });
+
   it('shows an actionable widget error when native shortcut registration fails', async () => {
     vi.useFakeTimers();
     const test = fixture({
