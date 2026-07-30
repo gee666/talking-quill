@@ -69,6 +69,13 @@ export const WhisperWorkerRequestSchema = z.discriminatedUnion('type', [
       modelId: TranscriptionOptionsSchema.shape.modelId,
     })
     .strict(),
+  z
+    .object({
+      ...envelope,
+      type: z.literal('model-warmup'),
+      modelId: TranscriptionOptionsSchema.shape.modelId,
+    })
+    .strict(),
   z.object({ ...envelope, type: z.literal('memory-pressure') }).strict(),
   z.object({ ...envelope, type: z.literal('shutdown') }).strict(),
 ]);

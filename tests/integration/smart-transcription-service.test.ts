@@ -22,6 +22,7 @@ function createHarness(
     screenshotsDirectory?: string;
     manualVision?: boolean;
     providerManagedModel?: boolean;
+    voiceCommands?: Settings['voiceCommands'];
     preflightCapability?: 'supported' | 'unsupported' | 'unknown';
     settingsUpdateGate?: Promise<void>;
     retainScreenshot?: () => {
@@ -75,6 +76,7 @@ function createHarness(
       ...structuredClone(DEFAULT_SETTINGS.privacy),
       retainSmartScreenshots: options.retain ?? false,
     },
+    voiceCommands: options.voiceCommands ?? [],
   };
   let revision = 0;
   const revisionListeners = new Set<(revision: number) => void>();
@@ -219,6 +221,58 @@ describe('SmartTranscriptionService', () => {
       maxOutputTokens: 9_999,
     });
     expect(capturedRequests[0]?.input).toContain('Untrusted transcript JSON:\n"raw words"');
+  });
+
+  it('lets Smart processing canonicalize an entire translated command and returns the command', async () => {
+    const command = {
+      id: '33333333-3333-4333-8333-333333333333',
+      trigger: 'send report',
+      snippet: 'report body',
+      createdAt: 1,
+      updatedAt: 1,
+    } as const;
+    const { service, capturedRequests } = createHarness({
+      output: 'send report',
+      voiceCommands: [command],
+    });
+
+    const result = await service
+      .beginSession()
+      .process('отправить отчет', new AbortController().signal);
+
+    expect(result.voiceCommand).toEqual(command);
+    expect(capturedRequests[0]?.input).toContain(JSON.stringify(['send report']));
+    expect(capturedRequests[0]?.input).not.toContain('report body');
+  });
+
+  it('executes a command that Smart identifies inside a natural request', async () => {
+    const command = {
+      id: '33333333-3333-4333-8333-333333333333',
+      trigger: 'send report',
+      snippet: 'report body',
+      createdAt: 1,
+      updatedAt: 1,
+    } as const;
+    const { service } = createHarness({ output: 'send report', voiceCommands: [command] });
+    const result = await service
+      .beginSession()
+      .process('and now show me the send report template', new AbortController().signal);
+    expect(result.voiceCommand).toEqual(command);
+  });
+
+  it('does not execute a merely fuzzy Smart output', async () => {
+    const command = {
+      id: '33333333-3333-4333-8333-333333333333',
+      trigger: 'send report',
+      snippet: 'report body',
+      createdAt: 1,
+      updatedAt: 1,
+    } as const;
+    const { service } = createHarness({ output: 'send reports', voiceCommands: [command] });
+    const result = await service
+      .beginSession()
+      .process('send reports', new AbortController().signal);
+    expect(result.voiceCommand).toBeUndefined();
   });
 
   it('processes provider-managed model sessions without inventing a model ID', async () => {

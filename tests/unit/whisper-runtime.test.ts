@@ -28,6 +28,24 @@ describe('Whisper runtime', () => {
     await runtime.shutdown();
   });
 
+  it('warms a cold pipeline without inference and reuses it for transcription', async () => {
+    const pipeline = vi.fn(() => Promise.resolve({ text: 'ready' })) as unknown as WhisperPipeline;
+    const verify = vi.fn(() => Promise.resolve());
+    const factory = vi.fn(() => Promise.resolve(pipeline));
+    const runtime = new WhisperRuntime({ cacheDirectory: 'models', revisions, factory, verify });
+
+    await runtime.warmup('Xenova/whisper-small');
+    expect(factory).toHaveBeenCalledOnce();
+    expect(verify).toHaveBeenCalledOnce();
+    expect(pipeline).not.toHaveBeenCalled();
+
+    const result = await runtime.transcribe(new Float32Array([0.1]), options);
+    expect(factory).toHaveBeenCalledOnce();
+    expect(verify).toHaveBeenCalledOnce();
+    expect(result.pipeline.reused).toBe(true);
+    await runtime.shutdown();
+  });
+
   it('verifies once on cold load, re-verifies warm checks, and skips warm inference hashing', async () => {
     const pipeline = vi.fn(() => Promise.resolve({ text: 'ok' })) as unknown as WhisperPipeline;
     const verify = vi.fn(() => Promise.resolve());

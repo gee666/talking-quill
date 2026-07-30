@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import type { VoiceCommand } from '../../shared/schemas/commands';
+import { matchVoiceCommand } from '../commands/matcher';
 import type { HelperClient } from '../helper';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { ProviderConfigService } from '../providers/provider-config-service';
@@ -28,6 +30,7 @@ import {
 export interface SmartProcessingResult {
   readonly text: string;
   readonly screenshotFilename: string | null;
+  readonly voiceCommand?: VoiceCommand | null;
 }
 
 export interface FrozenSmartTranscriptSession {
@@ -294,6 +297,9 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     const vocabulary = Object.freeze(
       settings.customVocabulary.map((entry) => Object.freeze(entry)),
     );
+    const voiceCommands = Object.freeze(
+      settings.voiceCommands.map((command) => Object.freeze(command)),
+    );
     const binding = this.#visionBinding(config, settings, providerId);
     const osaRequested = settings.smartProcessing.onScreenAwarenessEnabled;
     let retainAllowed = settings.privacy.historyEnabled && settings.privacy.retainSmartScreenshots;
@@ -407,7 +413,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
           const output = await this.#providers.cleanTranscript(
             config,
             {
-              input: buildSmartCleanupPrompt(text, vocabulary, profilePrompt),
+              input: buildSmartCleanupPrompt(text, vocabulary, profilePrompt, voiceCommands),
               ...(modelId === null ? {} : { modelId }),
               temperature: SMART_TEMPERATURE,
               maxOutputTokens: config.maxOutputTokens ?? SMART_DEFAULT_OUTPUT_TOKENS,
@@ -418,6 +424,10 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
           operation.assertActive();
           const normalized = normalizeSmartOutput(output);
           operation.assertActive();
+          // Smart processing may repair a translated or slightly misheard command, but execution
+          // remains host-authoritative: the complete model output must equal a saved trigger.
+          const smartMatch = matchVoiceCommand(normalized, voiceCommands);
+          const voiceCommand = smartMatch?.kind === 'exact' ? smartMatch.command : null;
           const currentPrivacy = this.#settings.get().privacy;
           if (
             screenshot !== null &&
@@ -435,6 +445,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
           return Object.freeze({
             text: normalized,
             screenshotFilename: retained?.filename ?? null,
+            ...(voiceCommand === null ? {} : { voiceCommand }),
           });
         } catch (error: unknown) {
           throw operation.normalize(error);

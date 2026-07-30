@@ -938,7 +938,7 @@ describe('EchoSessionController integration', () => {
     expect(process).not.toHaveBeenCalled();
   });
 
-  it('cancels submit-time Smart preparation and discards its session context', async () => {
+  it('cancels parallel submit-time Smart preparation and transcription, then discards context', async () => {
     const cleanup = vi.fn();
     const prepare = vi.fn(
       (signal: AbortSignal) =>
@@ -971,9 +971,55 @@ describe('EchoSessionController integration', () => {
     test.controller.cancel();
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('cancelled'));
     await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
-    expect(test.spies.transcribe).not.toHaveBeenCalled();
+    expect(test.spies.transcribe).toHaveBeenCalledOnce();
+    expect(test.spies.transcribe.mock.calls[0]?.[2].aborted).toBe(true);
     expect(test.spies.insert).not.toHaveBeenCalled();
     expect(test.spies.historyRecord).not.toHaveBeenCalled();
+  });
+
+  it('executes and records a command verified by Smart processing', async () => {
+    const command = {
+      id: '11111111-1111-4111-8111-111111111111',
+      trigger: 'send report',
+      snippet: 'inserted report',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const cleanup = vi.fn();
+    const test = fixture({
+      commands: { match: () => ({ command, kind: 'fuzzy', score: 0.9 }) },
+      smartProcessor: {
+        beginSession: () => ({
+          providerId: 'openai',
+          modelId: 'gpt-4.1',
+          prepare: () => Promise.resolve(),
+          process: () =>
+            Promise.resolve({
+              text: command.trigger,
+              screenshotFilename: null,
+              voiceCommand: command,
+            }),
+          commitScreenshot: vi.fn(),
+          cleanup,
+        }),
+      },
+    });
+    await test.controller.updateProfile('general', { processingMode: 'smart' });
+    test.notify(activation('down'));
+    await settle();
+    test.frame();
+    test.notify(key('enter'));
+
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.spies.insert).toHaveBeenCalledWith(
+      command.snippet,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(test.spies.historyRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'voice-command', voiceTrigger: command.trigger }),
+    );
   });
 
   it('records no command history when cancellation wins before insertion commit', async () => {

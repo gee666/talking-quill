@@ -177,7 +177,8 @@ export function reduceEchoSession(
     );
   }
   if (event.type === 'voice-command-matched') {
-    if (state.phase !== 'transcribing') return transition(state);
+    if (state.phase !== 'transcribing' && state.phase !== 'processingSmart')
+      return transition(state);
     const transcript = event.transcript.trim();
     if (transcript.length === 0) return terminalError(state, 'No speech was detected.');
     return transition(

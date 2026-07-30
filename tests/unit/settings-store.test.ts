@@ -321,9 +321,20 @@ describe('SettingsStore', () => {
         },
       ],
     });
+    await store.update({
+      voiceCommands: [
+        {
+          id: '22222222-2222-4222-8222-222222222222',
+          trigger: 'send report',
+          snippet: 'report body',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    });
 
-    expect(revisions).toEqual([1, 2, 3, 4, 5]);
-    expect(configs.smartRevision()).toBe(5);
+    expect(revisions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(configs.smartRevision()).toBe(6);
   });
 
   it('creates strict defaults and persists updates across restart', async () => {

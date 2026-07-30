@@ -574,12 +574,22 @@ export class EchoSessionController {
       await this.#capture.stopCapture();
       const signal = this.#operationSignal();
       const smartSession = this.#outcomes.smartSession;
-      if (this.#state.processingMode === 'smart' && smartSession !== null) {
-        await raceWithAbort(smartSession.prepare(signal), signal);
-      }
-      const text = await raceWithAbort(this.#capture.transcribe(), signal);
+      const smartPreparation =
+        this.#state.processingMode === 'smart' && smartSession !== null
+          ? raceWithAbort(smartSession.prepare(signal), signal)
+          : Promise.resolve();
+      // Screenshot/provider preparation and local inference are independent. Run them together so
+      // Smart mode pays only the slower latency rather than adding both waits after recording.
+      const [, text] = await Promise.all([
+        smartPreparation,
+        raceWithAbort(this.#capture.transcribe(), signal),
+      ]);
       const match: VoiceCommandMatch | null = this.#commands?.match(text) ?? null;
-      if (match !== null) {
+      // In Smart mode, only an exact local match bypasses the monitor. Fuzzy and cross-language
+      // candidates must be reviewed by Smart processing before they can execute.
+      const executeImmediately =
+        match !== null && (this.#state.processingMode !== 'smart' || match.kind === 'exact');
+      if (executeImmediately && match !== null) {
         this.#outcomes.discardSmartSession();
         this.#outcomes.setVoiceCommand(match.command);
         this.#dispatch({ type: 'voice-command-matched', transcript: text, command: match.command });
@@ -601,8 +611,18 @@ export class EchoSessionController {
       const signal = this.#operationSignal();
       try {
         const result = await raceWithAbort(smartSession.process(effect.text, signal), signal);
-        this.#outcomes.setScreenshotFilename(result.screenshotFilename);
-        this.#dispatch({ type: 'smart-completed', text: result.text });
+        if (result.voiceCommand !== undefined && result.voiceCommand !== null) {
+          this.#outcomes.discardSmartSession();
+          this.#outcomes.setVoiceCommand(result.voiceCommand);
+          this.#dispatch({
+            type: 'voice-command-matched',
+            transcript: effect.text,
+            command: result.voiceCommand,
+          });
+        } else {
+          this.#outcomes.setScreenshotFilename(result.screenshotFilename);
+          this.#dispatch({ type: 'smart-completed', text: result.text });
+        }
       } catch (error: unknown) {
         const providerId = smartSession.providerId;
         this.#outcomes.discardSmartSession();

@@ -75,6 +75,7 @@ export class EchoCapturePipeline {
   #streamFailure: unknown = null;
   #modelUse: EchoModelUseGrant | null = null;
   #modelUseOpening: Promise<void> = Promise.resolve();
+  #warmupOpening: Promise<void> = Promise.resolve();
   #holdTimer: ReturnType<typeof setTimeout> | null = null;
   #capTimer: ReturnType<typeof setTimeout> | null = null;
   #audioStartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -135,6 +136,7 @@ export class EchoCapturePipeline {
     this.#streamTail = Promise.resolve();
     this.#streamFailure = null;
     this.#modelUse = null;
+    this.#warmupOpening = Promise.resolve();
     return this.#generation;
   }
 
@@ -162,6 +164,10 @@ export class EchoCapturePipeline {
     // The start-capture effect observes this promise. Attaching a rejection handler now keeps
     // synchronous model-loss races from becoming process-level unhandled rejections.
     void this.#modelUseOpening.catch(() => undefined);
+    // Warm the inference pipeline independently of capture readiness. This begins at shortcut-down
+    // and overlaps the user's speech without delaying the widget, cue, helper, or microphone.
+    this.#warmupOpening = this.#whisper.warmup?.(modelId, owner.signal) ?? Promise.resolve();
+    void this.#warmupOpening.catch(() => undefined);
     this.#pendingSilenceSubmit = false;
     this.#silence = new SilencePolicy({
       mode: 'quick',
@@ -340,6 +346,7 @@ export class EchoCapturePipeline {
     const ownedStream = this.#stream;
     const streamTail = this.#streamTail;
     const modelUseOpening = this.#modelUseOpening;
+    const warmupOpening = this.#warmupOpening;
     const modelUse = this.#modelUse;
     if (owner !== null) owner.active = false;
     this.#clearRecordingTimers();
@@ -371,11 +378,18 @@ export class EchoCapturePipeline {
         ),
         withSoftTimeout(streamCancellation, STREAM_CANCEL_TIMEOUT_MS, undefined),
       ]);
-      await withSoftTimeout(
-        modelUseOpening.catch(() => undefined),
-        MODEL_USE_SETTLE_TIMEOUT_MS,
-        undefined,
-      );
+      await Promise.all([
+        withSoftTimeout(
+          modelUseOpening.catch(() => undefined),
+          MODEL_USE_SETTLE_TIMEOUT_MS,
+          undefined,
+        ),
+        withSoftTimeout(
+          warmupOpening.catch(() => undefined),
+          MODEL_USE_SETTLE_TIMEOUT_MS,
+          undefined,
+        ),
+      ]);
       modelUse?.release();
       if (this.#ownsSession(owner)) {
         this.#sessionOwner = null;
@@ -386,6 +400,7 @@ export class EchoCapturePipeline {
         this.#streamOpening = null;
         this.#modelUse = null;
         this.#modelUseOpening = Promise.resolve();
+        this.#warmupOpening = Promise.resolve();
         this.#pcmChunks = [];
         this.#totalSamples = 0;
         this.#streamedSamples = 0;

@@ -52,6 +52,24 @@ describe('Smart transcription prompt and output', () => {
     );
   });
 
+  it('supplies command triggers without snippets and allows clearly embedded requests', () => {
+    const prompt = buildSmartCleanupPrompt('отправить отчет', [], null, [
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        trigger: 'send report',
+        snippet: 'private report contents',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    expect(prompt).toContain('Saved voice-command triggers');
+    expect(prompt).toContain(JSON.stringify(['send report']));
+    expect(prompt).toContain('naturally embedded in surrounding request language');
+    expect(prompt).toContain('merely discussing, quoting, defining');
+    expect(prompt).toContain('transcribed phonetically or translated into another language');
+    expect(prompt).not.toContain('private report contents');
+  });
+
   it('adds source-language preservation only as the null or blank profile fallback', () => {
     expect(SMART_CLEANUP_PROMPT).not.toContain(SMART_DEFAULT_PROFILE_INSTRUCTION);
     expect(buildSmartCleanupPrompt('Bonjour', [], null)).toContain(

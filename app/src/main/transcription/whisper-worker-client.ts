@@ -111,6 +111,39 @@ export class WhisperWorkerClient {
     }
   }
 
+  async warmup(modelId: WhisperModelId, signal?: AbortSignal): Promise<void> {
+    const expectedGeneration = this.#supervisor.captureActiveGeneration();
+    const use = await this.#acquireReadyModel(modelId, signal);
+    let requestGeneration = 0;
+    try {
+      const result = await this.#supervisor.request(
+        (requestId) => ({
+          version: WHISPER_PROTOCOL_VERSION,
+          requestId,
+          type: 'model-warmup',
+          modelId,
+        }),
+        {
+          signal,
+          timeoutMs: inferenceTimeoutMs(0),
+          expectedGeneration,
+          accepts: isModelReadyResult,
+          captureGeneration: (generation) => {
+            requestGeneration = generation;
+          },
+        },
+      );
+      if (result.type !== 'model-ready') {
+        throw new WhisperClientError(
+          'PROTOCOL_ERROR',
+          'Worker warmup returned the wrong response.',
+        );
+      }
+    } finally {
+      this.#supervisor.releaseUseWhenSafe(requestGeneration, () => use.release());
+    }
+  }
+
   async startSession(
     options: TranscriptionOptions,
     signal?: AbortSignal,

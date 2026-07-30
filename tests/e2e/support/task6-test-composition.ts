@@ -95,6 +95,10 @@ class DeterministicRecording implements EchoRecordingPort {
 class DeterministicWhisper implements EchoWhisperPort {
   text = 'deterministic transcript';
 
+  warmup() {
+    return Promise.resolve();
+  }
+
   transcribe(_pcm: Float32Array, options: Parameters<EchoWhisperPort['transcribe']>[1]) {
     return Promise.resolve(this.result(options.modelId));
   }

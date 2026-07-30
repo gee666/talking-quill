@@ -26,7 +26,8 @@ export type EchoHelperPort = Pick<
 };
 
 export type EchoRecordingPort = Pick<RecordingService, 'startDictation' | 'stopDictation'>;
-export type EchoWhisperPort = Pick<WhisperWorkerClient, 'transcribe' | 'startSession'>;
+export type EchoWhisperPort = Pick<WhisperWorkerClient, 'transcribe' | 'startSession'> &
+  Partial<Pick<WhisperWorkerClient, 'warmup'>>;
 export type EchoInsertionPort = Pick<InsertionService, 'insert'>;
 
 export interface EchoHistoryPort {

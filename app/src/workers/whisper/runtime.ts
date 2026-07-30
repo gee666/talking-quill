@@ -101,6 +101,12 @@ export class WhisperRuntime {
     );
   }
 
+  async warmup(modelId: WhisperModelId): Promise<void> {
+    // Loading is the expensive part of a cold transcription. Keep this operation inference-free
+    // so it can safely overlap microphone capture and leave the pipeline resident for submission.
+    await this.#withPipeline(modelId, () => Promise.resolve());
+  }
+
   async transcribe(pcm: Float32Array, options: TranscriptionOptions): Promise<TranscriptionResult> {
     validatePcm(pcm, WHISPER_MAX_SAMPLES);
     const startedAt = performance.now();

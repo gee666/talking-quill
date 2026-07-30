@@ -187,6 +187,9 @@ async function execute(
       await runtime.checkModel(request.modelId);
       return { ...base, result: { type: 'model-ready' } };
     }
+    case 'model-warmup':
+      await runtime.warmup(request.modelId);
+      return { ...base, result: { type: 'model-ready' } };
     case 'memory-pressure':
       await runtime.memoryPressure();
       return { ...base, result: { type: 'acknowledged', operation: 'memory-pressure' } };

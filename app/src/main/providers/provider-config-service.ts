@@ -102,5 +102,6 @@ function smartFingerprint(settings: Settings): string {
   return JSON.stringify({
     smartProcessing: settings.smartProcessing,
     customVocabulary: settings.customVocabulary,
+    voiceCommands: settings.voiceCommands,
   });
 }

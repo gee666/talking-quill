@@ -61,6 +61,26 @@ describe('Whisper worker protocol', () => {
     ).toBe(false);
   });
 
+  it('accepts a bounded model warmup request without audio', () => {
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        version: 2,
+        requestId: 'warmup-1',
+        type: 'model-warmup',
+        modelId: 'Xenova/whisper-small',
+      }).success,
+    ).toBe(true);
+    expect(
+      WhisperWorkerRequestSchema.safeParse({
+        version: 2,
+        requestId: 'warmup-2',
+        type: 'model-warmup',
+        modelId: 'Xenova/whisper-small',
+        pcm: new ArrayBuffer(4),
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects the removed parent-supplied model authorization path', () => {
     expect(
       WhisperWorkerRequestSchema.safeParse({

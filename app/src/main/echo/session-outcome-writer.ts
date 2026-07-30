@@ -200,6 +200,7 @@ function legacySmartSession(
     process: async (text, signal) => ({
       text: await processor.process(text, signal),
       screenshotFilename: null,
+      voiceCommand: null,
     }),
     commitScreenshot: () => undefined,
     cleanup: () => undefined,
