@@ -292,6 +292,12 @@ enum InjectionKind {
     Helper,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HookObservation {
+    observed_at_ms: u64,
+    native_modifiers: Option<ModifierTracker>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnterSource {
     Main,
@@ -353,8 +359,8 @@ struct CallbackKeyboard {
     activation_fenced_letters: u32,
     activation: ActivationConfig,
     captured_enter_source: Option<EnterSource>,
-    injected_altgr_ctrl_pending: bool,
     altgr_active: bool,
+    modifiers_fenced: bool,
 }
 
 struct CallbackContext {
@@ -702,6 +708,8 @@ fn process_owner_commands(context: &CallbackContext, receiver: &Receiver<OwnerCo
                     // revision until all letters held at the revision release.
                     keyboard.reducer.fence_activation_revision();
                     keyboard.activation_fenced_letters = keyboard.physical.held_letter_bits();
+                    keyboard.modifiers_fenced =
+                        keyboard.modifiers.mask() != ModifierMask::default();
                     keyboard.activation = command.mutation.activation;
                     true
                 }
@@ -756,6 +764,11 @@ fn hook_thread(
         return;
     }
 
+    let mut message = MSG::default();
+    // SAFETY: this no-remove peek creates the owner queue before hook
+    // installation, so low-level callbacks always have a live message loop.
+    unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
+
     // SAFETY: the callback has the system ABI, and the boxed context remains
     // alive and registered until this owner thread unhooks.
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), null_mut(), 0) };
@@ -782,10 +795,7 @@ fn hook_thread(
     };
     keyboard.physical = physical;
     keyboard.modifiers = modifiers;
-
-    let mut message = MSG::default();
-    // SAFETY: this no-remove peek creates the owner queue before readiness.
-    unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
+    keyboard.modifiers_fenced = keyboard.modifiers.mask() != ModifierMask::default();
 
     if !claim_startup(&startup_state) {
         // SAFETY: `hook` is valid and owned by this thread.
@@ -882,7 +892,11 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             extended,
             phase,
             injection,
-            u64::from(native.time),
+            HookObservation {
+                observed_at_ms: u64::from(native.time),
+                native_modifiers: (injection == InjectionKind::Physical)
+                    .then(|| ModifierTracker::from_state(key_is_down)),
+            },
         ))
     });
 
@@ -930,7 +944,7 @@ fn process_hook_record(
         } else {
             InjectionKind::Physical
         },
-        0,
+        HookObservation::default(),
     )
 }
 
@@ -941,17 +955,12 @@ fn process_hook_record_at(
     extended: bool,
     phase: KeyPhase,
     injection: InjectionKind,
-    observed_at_ms: u64,
+    observation: HookObservation,
 ) -> bool {
     // Injected input must never become physical hotkey state. In particular,
     // an unmatched injected modifier must not remain latched and combine with
     // ordinary typing to activate dictation.
     if injection == InjectionKind::Helper {
-        // A helper-generated record also breaks the required immediate AltGr
-        // pairing, but otherwise remains entirely inert.
-        if let Ok(mut keyboard) = context.keyboard.try_lock() {
-            keyboard.injected_altgr_ctrl_pending = false;
-        }
         return false;
     }
 
@@ -968,24 +977,17 @@ fn process_hook_record_at(
     };
 
     if injection == InjectionKind::External {
-        // Windows emits an injected left-Ctrl down immediately before the
-        // physical right-Alt down that represents AltGr. Remember only that
-        // exact candidate; never add it to the physical modifier tracker.
-        keyboard.injected_altgr_ctrl_pending = (virtual_key == VK_CONTROL
-            || virtual_key == VK_LCONTROL)
-            && scan_code == 0x1D
-            && !extended
-            && phase == KeyPhase::Down;
         return false;
     }
 
     let right_alt =
         virtual_key == VK_RMENU || (virtual_key == VK_MENU && scan_code == 0x38 && extended);
-    let altgr_candidate = std::mem::take(&mut keyboard.injected_altgr_ctrl_pending);
-    if altgr_candidate && right_alt && phase == KeyPhase::Down {
+    if right_alt && phase == KeyPhase::Down {
+        // Right Alt is AltGr on many layouts, and Windows does not guarantee a
+        // stable injected-Ctrl event shape. Never allow it to activate a
+        // global shortcut; left Alt remains available for configured bindings.
         keyboard.altgr_active = true;
     }
-    let suppress_activation = keyboard.altgr_active;
     if right_alt && phase == KeyPhase::Up {
         keyboard.altgr_active = false;
     }
@@ -995,6 +997,9 @@ fn process_hook_record_at(
         .observe(virtual_key, scan_code, extended, phase)
     {
         let modifiers = keyboard.modifiers.mask();
+        if keyboard.modifiers_fenced && modifiers == ModifierMask::default() {
+            keyboard.modifiers_fenced = false;
+        }
         keyboard.reducer.observe_modifiers(modifiers);
         // Modifier prefixes intentionally leak through to the foreground app.
         return false;
@@ -1003,13 +1008,34 @@ fn process_hook_record_at(
     if key == PhysicalKey::Other {
         return false;
     }
+    if let Some(native_modifiers) = observation.native_modifiers {
+        // Snapshot recovery also repairs a missed Right-Alt release. Conversely,
+        // a physically held Right Alt remains suppressed even when Windows did
+        // not expose AltGr's synthetic Ctrl as injected.
+        keyboard.altgr_active = native_modifiers.alt.right;
+        if native_modifiers.mask() != keyboard.modifiers.mask() {
+            // A modifier release can be lost across secure-desktop transitions
+            // or helper startup. Resynchronize before considering ordinary
+            // typing. When no modifier is physically down, fence this letter
+            // through its up so stale state can never turn it into activation.
+            keyboard.modifiers = native_modifiers;
+            let modifiers = keyboard.modifiers.mask();
+            // This event-time native snapshot is authoritative. Startup and
+            // configuration fences remain intact when masks agree, while a
+            // repaired mismatch can use a genuinely held left-side modifier.
+            keyboard.modifiers_fenced = false;
+            keyboard.reducer.observe_modifiers(modifiers);
+            keyboard.reducer.fence_activation_revision();
+            if modifiers == ModifierMask::default()
+                && let PhysicalKey::Letter(letter) = key
+            {
+                keyboard.activation_fenced_letters |= 1_u32 << u32::from(letter.index());
+            }
+        }
+    }
+    let suppress_activation = keyboard.altgr_active;
     let enter_source = enter_source(scan_code, extended);
     let repeat = keyboard.physical.observe(key, enter_source, phase);
-    if let PhysicalKey::Letter(letter) = key
-        && phase == KeyPhase::Up
-    {
-        keyboard.activation_fenced_letters &= !(1_u32 << u32::from(letter.index()));
-    }
     let input = KeyInput {
         key,
         phase,
@@ -1043,9 +1069,10 @@ fn process_hook_record_at(
         accepting
             && activation.enabled
             && keyboard.activation_fenced_letters == 0
+            && !keyboard.modifiers_fenced
             && !suppress_activation,
         accepting && capture,
-        observed_at_ms,
+        observation.observed_at_ms,
     );
     let planned_event = plan.event();
     let delivered = planned_event.is_none()
@@ -1062,6 +1089,11 @@ fn process_hook_record_at(
         );
     }
     let swallowed = keyboard.reducer.apply(plan, delivered);
+    if let PhysicalKey::Letter(letter) = key
+        && phase == KeyPhase::Up
+    {
+        keyboard.activation_fenced_letters &= !(1_u32 << u32::from(letter.index()));
+    }
     if let Some(HelperEvent::SessionKey {
         key: crate::keyboard::SessionKey::Enter,
         phase: crate::keyboard::EventPhase::Down,
@@ -1569,28 +1601,35 @@ mod tests {
     }
 
     #[test]
-    fn altgr_candidate_expires_on_every_intervening_record() {
-        let (context, _outbound, _terminal) = test_context(2);
+    fn physical_looking_altgr_and_missed_release_never_activate_plain_typing() {
+        let binding = ActivationBinding::new(
+            ProfileId::GENERAL,
+            shortcut(
+                ShortcutModifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: false,
+                    meta: false,
+                },
+                &[ActivationKey::X],
+            ),
+        );
+        let (context, outbound, _terminal) = test_context(4);
+        context.keyboard.lock().unwrap().activation = ActivationConfig {
+            enabled: true,
+            bindings: ActivationBindings::new(&[binding]).unwrap(),
+        };
+
+        // Some layouts expose AltGr's synthetic Ctrl as a physical-looking
+        // record. Right Alt suppression must still prevent Ctrl+Alt activation.
         assert!(!process_hook_record(
             &context,
-            VK_CONTROL,
+            VK_LCONTROL,
             0x1D,
             false,
             KeyPhase::Down,
-            true,
-        ));
-        assert!(context.keyboard.lock().unwrap().injected_altgr_ctrl_pending);
-
-        assert!(!process_hook_record_at(
-            &context,
-            0,
-            0,
             false,
-            KeyPhase::Down,
-            InjectionKind::Helper,
-            0,
         ));
-        assert!(!context.keyboard.lock().unwrap().injected_altgr_ctrl_pending);
         assert!(!process_hook_record(
             &context,
             VK_RMENU,
@@ -1599,7 +1638,47 @@ mod tests {
             KeyPhase::Down,
             false,
         ));
+        let mut held_altgr = ModifierTracker::default();
+        held_altgr.observe(VK_LCONTROL, 0x1D, false, KeyPhase::Down);
+        held_altgr.observe(VK_RMENU, 0x38, true, KeyPhase::Down);
+        assert!(!process_hook_record_at(
+            &context,
+            0x58,
+            LETTER_SCAN_CODES[usize::from(ActivationKey::X.index())],
+            false,
+            KeyPhase::Down,
+            InjectionKind::Physical,
+            HookObservation {
+                observed_at_ms: 0,
+                native_modifiers: Some(held_altgr),
+            },
+        ));
+        assert!(outbound.try_recv().is_err());
+        record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Up,
+        );
+
+        // If the desktop transition loses every AltGr release event, the next
+        // native snapshot repairs both modifiers and suppression without using
+        // the ordinary X as a shortcut.
+        let no_modifiers = ModifierTracker::default();
+        assert!(!process_hook_record_at(
+            &context,
+            0x58,
+            LETTER_SCAN_CODES[usize::from(ActivationKey::X.index())],
+            false,
+            KeyPhase::Down,
+            InjectionKind::Physical,
+            HookObservation {
+                observed_at_ms: 0,
+                native_modifiers: Some(no_modifiers),
+            },
+        ));
         assert!(!context.keyboard.lock().unwrap().altgr_active);
+        assert!(outbound.try_recv().is_err());
     }
 
     #[test]
@@ -1661,6 +1740,79 @@ mod tests {
             context.keyboard.lock().unwrap().modifiers.mask(),
             ModifierMask::new(false, true, false, false),
         );
+        assert!(record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::Activation {
+                binding,
+                phase: EventPhase::Down,
+            },
+        );
+    }
+
+    #[test]
+    fn stale_tracked_alt_is_resynchronized_without_activating_plain_typing() {
+        let binding = ActivationBinding::new(
+            ProfileId::GENERAL,
+            shortcut(
+                ShortcutModifiers {
+                    ctrl: false,
+                    alt: true,
+                    shift: false,
+                    meta: false,
+                },
+                &[ActivationKey::X],
+            ),
+        );
+        let (context, outbound, _terminal) = test_context(4);
+        {
+            let mut keyboard = context.keyboard.lock().unwrap();
+            keyboard.activation = ActivationConfig {
+                enabled: true,
+                bindings: ActivationBindings::new(&[binding]).unwrap(),
+            };
+            keyboard
+                .modifiers
+                .observe(VK_LMENU, 0x38, false, KeyPhase::Down);
+        }
+
+        let no_modifiers = ModifierTracker::default();
+        assert!(!process_hook_record_at(
+            &context,
+            0x58,
+            LETTER_SCAN_CODES[usize::from(ActivationKey::X.index())],
+            false,
+            KeyPhase::Down,
+            InjectionKind::Physical,
+            HookObservation {
+                observed_at_ms: 0,
+                native_modifiers: Some(no_modifiers),
+            },
+        ));
+        assert!(!process_hook_record_at(
+            &context,
+            0x58,
+            LETTER_SCAN_CODES[usize::from(ActivationKey::X.index())],
+            false,
+            KeyPhase::Up,
+            InjectionKind::Physical,
+            HookObservation {
+                observed_at_ms: 0,
+                native_modifiers: Some(no_modifiers),
+            },
+        ));
+        assert_eq!(
+            context.keyboard.lock().unwrap().modifiers.mask(),
+            ModifierMask::default(),
+        );
+        assert!(outbound.try_recv().is_err());
+
+        modifier(&context, VK_LMENU, KeyPhase::Down);
         assert!(record(
             &context,
             0x58,
@@ -2101,7 +2253,7 @@ mod tests {
             false,
             KeyPhase::Up,
             InjectionKind::Helper,
-            0,
+            HookObservation::default(),
         ));
         assert_eq!(
             context.keyboard.lock().unwrap().modifiers.mask(),

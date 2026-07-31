@@ -3,7 +3,7 @@ import type { Settings } from '../../shared/schemas/settings';
 
 interface WidgetWindowTarget {
   isWidgetVisible(): boolean;
-  hideWidget(): void;
+  hideWidget(preserveInteraction?: boolean): void;
   showWidget(
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'],
@@ -32,7 +32,7 @@ export class WidgetCaptureExclusion {
     if (excluded) {
       if (this.#exclusions === 0) {
         this.#restoreAfterCapture = this.#windows.isWidgetVisible();
-        this.#windows.hideWidget();
+        this.#windows.hideWidget(true);
       }
       this.#exclusions += 1;
       return;

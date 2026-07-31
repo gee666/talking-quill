@@ -271,8 +271,8 @@ export class EchoSessionController {
     try {
       this.#onHelperNotification(notification);
     } catch {
-      // Native backends arm Enter/Escape capture before notifying us. A consumer failure must
-      // always disarm it and become visible instead of leaving the app apparently unresponsive.
+      // Treat malformed or out-of-contract native notifications as potentially capture-armed.
+      // This preserves fail-open cleanup across mixed helper/app versions.
       this.#captureReconciler.markNativeCaptureArmed();
       this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
       this.#reportOperationalFailure('Dictation could not start. Please try again.');
@@ -370,8 +370,8 @@ export class EchoSessionController {
     if (notification.method === 'activation.event') {
       const startsActivation = notification.params.phase !== 'up';
       if (startsActivation) {
-        // Native backends arm session-key capture before publishing an activation start. Mark the
-        // applied state unknown so every rejection/test path explicitly confirms it disabled.
+        // Older helper versions arm session-key capture before publishing activation. Keep this
+        // compatibility repair until every supported installed helper follows the new contract.
         this.#captureReconciler.markNativeCaptureArmed();
       }
       if (this.#profiles.shortcutCaptureActive) {
@@ -444,8 +444,7 @@ export class EchoSessionController {
             );
           }
         } else {
-          // Every activation start arms native Esc/Enter capture. Active phases which do not own
-          // this new shortcut must explicitly disarm it instead of waiting for terminal reset.
+          // Active phases which do not own this shortcut explicitly restore their capture state.
           this.#captureReconciler.requestBestEffort(
             isCapturePhase(this.#state.phase),
             this.#capture.generation,

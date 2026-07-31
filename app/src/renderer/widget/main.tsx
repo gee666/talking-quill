@@ -54,12 +54,22 @@ export function WidgetShell() {
     };
   }, [setInteractive]);
 
+  const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const extended = session.dictationMode === 'extended';
   const recording = session.phase === 'arming' || session.phase.startsWith('recording');
   const level = usePerceptualMicrophoneLevel(session.rms, recording);
   const presentation = widgetPresentation(session);
   const cancelable = isWidgetPointerCancelable(session.phase);
-  useEffect(() => setInteractive(false), [cancelable, recording, setInteractive]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const point = lastPointer.current;
+      const target =
+        cancelable && point !== null ? document.elementFromPoint(point.x, point.y) : null;
+      const button = target instanceof Element ? target.closest('button') : null;
+      setInteractive(button !== null && !button.hasAttribute('disabled'));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [cancelable, recording, session.phase, setInteractive]);
   const scale = Math.max(
     0.01,
     Math.min(
@@ -72,7 +82,8 @@ export function WidgetShell() {
     '--widget-layout-width': `${String(viewport.width / scale)}px`,
     '--widget-layout-height': `${String(viewport.height / scale)}px`,
   } as CSSProperties;
-  const updatePointerMode = (target: EventTarget | null) => {
+  const updatePointerMode = (target: EventTarget | null, x: number, y: number) => {
+    lastPointer.current = { x, y };
     const button = target instanceof Element ? target.closest('button') : null;
     setInteractive(button !== null && !button.hasAttribute('disabled'));
   };
@@ -81,8 +92,11 @@ export function WidgetShell() {
       className="widget-shell"
       style={layoutStyle}
       aria-label="Talking Quill dictation status"
-      onPointerMove={(event) => updatePointerMode(event.target)}
-      onPointerLeave={() => setInteractive(false)}
+      onMouseMove={(event) => updatePointerMode(event.target, event.clientX, event.clientY)}
+      onMouseLeave={() => {
+        lastPointer.current = null;
+        setInteractive(false);
+      }}
     >
       <p className="widget-live" role="status" aria-live="polite" aria-atomic="true">
         {presentation.heading}. {presentation.secondary}
@@ -133,7 +147,6 @@ export function WidgetShell() {
                 aria-label="Stop Extended Dictation"
                 aria-describedby="widget-keyboard-equivalents"
                 onClick={() => {
-                  setInteractive(false);
                   void window.talkingQuillWidget.stop();
                 }}
               >
@@ -145,7 +158,6 @@ export function WidgetShell() {
               aria-label="Cancel dictation"
               aria-describedby="widget-keyboard-equivalents"
               onClick={() => {
-                setInteractive(false);
                 void window.talkingQuillWidget.cancel();
               }}
             >

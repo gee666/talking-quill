@@ -82,7 +82,8 @@ export class WindowManager {
         ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
         : screen.getDisplayMatching(displayBounds);
     widget.setContentBounds(widgetContentBounds(size, display.workArea), false);
-    widget.setIgnoreMouseEvents(true, { forward: true });
+    // Preserve renderer-selected hit testing across screenshot-only hide/show
+    // cycles so a stationary pointer can still click Stop or Cancel.
     widget.showInactive();
     return true;
   }
@@ -92,11 +93,13 @@ export class WindowManager {
     return widget !== undefined && !widget.isDestroyed() && widget.isVisible();
   }
 
-  hideWidget(): void {
+  hideWidget(preserveInteraction = false): void {
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
       widget.setFocusable(false);
-      widget.setIgnoreMouseEvents(true, { forward: true });
+      if (!preserveInteraction) {
+        widget.setIgnoreMouseEvents(true, { forward: true });
+      }
       widget.hide();
     }
   }
