@@ -96,6 +96,50 @@ describe('Recording settings', () => {
     expect(screen.getByRole('option', { name: /^Normal pause — /u })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /^Long pause — /u })).toBeInTheDocument();
     expect(screen.getByText(/at least 0\.3 seconds/i)).toBeVisible();
+
+    await user.click(screen.getByRole('checkbox', { name: 'Automatically finish after a pause' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Include system audio' }));
+    expect(update).toHaveBeenCalledWith({ recording: { autoSubmitOnSilence: false } });
+    expect(update).toHaveBeenCalledWith({ recording: { includeSystemAudio: true } });
+  });
+
+  it('shows manual finishing and disables unsupported system audio', async () => {
+    render(
+      <RecordingSection
+        settings={{
+          ...settings,
+          recording: { ...settings.recording, autoSubmitOnSilence: false },
+        }}
+        platform="darwin"
+      />,
+    );
+
+    expect(
+      await screen.findByRole('checkbox', { name: 'Automatically finish after a pause' }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('combobox', { name: 'How long a pause ends a dictation' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Include system audio' })).toBeDisabled();
+    expect(screen.getByText(/available on Windows only/i)).toBeVisible();
+  });
+
+  it('lets an unsupported platform turn off a restored system-audio setting', async () => {
+    const user = userEvent.setup();
+    render(
+      <RecordingSection
+        settings={{
+          ...settings,
+          recording: { ...settings.recording, includeSystemAudio: true },
+        }}
+        platform="darwin"
+      />,
+    );
+    const systemAudio = await screen.findByRole('checkbox', { name: 'Include system audio' });
+    expect(systemAudio).toBeChecked();
+    expect(systemAudio).toBeEnabled();
+    await user.click(systemAudio);
+    expect(update).toHaveBeenCalledWith({ recording: { includeSystemAudio: false } });
   });
 
   it('requests access only on user action, displays live level, and stops cleanly', async () => {
@@ -199,7 +243,11 @@ describe('Recording settings', () => {
       <RecordingSection
         settings={{
           ...settings,
-          recording: { preferredMicrophoneId: 'missing', silencePreset: 'average' },
+          recording: {
+            ...settings.recording,
+            preferredMicrophoneId: 'missing',
+            silencePreset: 'average',
+          },
         }}
         platform="win32"
       />,

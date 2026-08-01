@@ -3,6 +3,7 @@ import { APP_PROTOCOL } from '../../shared/constants/app';
 import { developmentCsp } from './csp';
 import type { WindowRoleRegistry } from '../app/window-role-registry';
 import type { MicrophonePermissionController } from './microphone-permission';
+import type { SystemAudioCaptureController } from './system-audio-capture';
 
 const ACTIVE_SESSION_POLICY = new WeakMap<Session, () => void>();
 
@@ -19,6 +20,12 @@ export interface SecureSessionOptions {
       webContents: WebContents | null,
     ) => TrustedCaptureDocument | null;
   };
+  readonly systemAudio?: {
+    readonly controller: SystemAudioCaptureController;
+    readonly getTrustedCaptureDocument: (
+      webContents: WebContents | null,
+    ) => TrustedCaptureDocument | null;
+  };
 }
 
 export function secureSession(
@@ -28,6 +35,24 @@ export function secureSession(
 ): () => void {
   ACTIVE_SESSION_POLICY.get(target)?.();
   target.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const systemAudio = options.systemAudio;
+    if (systemAudio !== undefined) {
+      const document = systemAudio.getTrustedCaptureDocument(webContents);
+      const allowed = systemAudio.controller.allowsPermissionRequest({
+        webContents,
+        permission,
+        mediaTypes: readPermissionRequestMediaTypes(details),
+        isMainFrame: readDetailBoolean(details, 'isMainFrame'),
+        requestingUrl: readDetailString(details, 'requestingUrl'),
+        securityOrigin: readDetailString(details, 'securityOrigin'),
+        expectedUrl: document?.url ?? null,
+        expectedOrigin: document?.origin ?? null,
+      });
+      if (allowed || permission === 'display-capture') {
+        callback(allowed);
+        return;
+      }
+    }
     const microphone = options.microphone;
     if (microphone === undefined) {
       callback(false);
@@ -52,6 +77,27 @@ export function secureSession(
     callback(allowed);
   });
   target.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    const systemAudio = options.systemAudio;
+    if (systemAudio !== undefined && webContents !== null) {
+      const document = systemAudio.getTrustedCaptureDocument(webContents);
+      const checkedMediaTypes = readPermissionCheckMediaTypes(details);
+      const mediaTypes =
+        checkedMediaTypes.length > 0 ? checkedMediaTypes : readPermissionRequestMediaTypes(details);
+      if (
+        systemAudio.controller.allowsPermissionRequest({
+          webContents,
+          permission,
+          mediaTypes,
+          isMainFrame: readDetailBoolean(details, 'isMainFrame'),
+          requestingUrl: readDetailString(details, 'requestingUrl'),
+          securityOrigin: readDetailString(details, 'securityOrigin') ?? requestingOrigin,
+          expectedUrl: document?.url ?? null,
+          expectedOrigin: document?.origin ?? null,
+        })
+      ) {
+        return true;
+      }
+    }
     const microphone = options.microphone;
     if (microphone === undefined) return false;
     const document = microphone.getTrustedCaptureDocument(webContents);

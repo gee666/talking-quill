@@ -9,6 +9,7 @@ import {
   ECHO_LEVEL_EVENT_INTERVAL_MS,
 } from '../../shared/constants/echo-session';
 import { WHISPER_MAX_PUSH_SAMPLES } from '../../shared/constants/whisper';
+import type { HelperSessionCaptureMode } from '../../shared/helper/protocol';
 import { TranscriptionResultSchema } from '../../shared/schemas/transcription';
 import type { Settings } from '../../shared/schemas/settings';
 import { SilencePolicy } from '../audio/silence-policy';
@@ -29,7 +30,7 @@ import type {
 import type { HelperCaptureReconciler } from './helper-capture-reconciler';
 import { concatChunks, discardChunkPrefix, sliceChunks } from './pcm-buffer';
 import type { EchoSessionEvent, EchoSessionState } from './session-reducer';
-import { isCapturePhase, isTerminalPhase } from './session-phase';
+import { helperCaptureModeForPhase, isCapturePhase, isTerminalPhase } from './session-phase';
 
 const MAX_EXTENDED_BUFFERED_SAMPLES = WHISPER_MAX_PUSH_SAMPLES * 2;
 const MODEL_USE_SETTLE_TIMEOUT_MS = 1_000;
@@ -40,6 +41,7 @@ interface CaptureSessionOwner {
   readonly generation: number;
   readonly signal: AbortSignal;
   readonly transcription: Readonly<Settings['transcription']>;
+  readonly includeSystemAudio: boolean;
   active: boolean;
   captureOpening: boolean;
 }
@@ -145,6 +147,7 @@ export class EchoCapturePipeline {
       generation: this.#generation,
       signal: this.#getSignal(),
       transcription: settings.transcription,
+      includeSystemAudio: settings.recording.includeSystemAudio,
       active: true,
       captureOpening: false,
     };
@@ -169,10 +172,12 @@ export class EchoCapturePipeline {
     this.#warmupOpening = this.#whisper.warmup?.(modelId, owner.signal) ?? Promise.resolve();
     void this.#warmupOpening.catch(() => undefined);
     this.#pendingSilenceSubmit = false;
-    this.#silence = new SilencePolicy({
-      mode: 'quick',
-      preset: settings.recording.silencePreset,
-    });
+    this.#silence = settings.recording.autoSubmitOnSilence
+      ? new SilencePolicy({
+          mode: 'quick',
+          preset: settings.recording.silencePreset,
+        })
+      : null;
     this.#holdTimer = setTimeout(() => {
       if (this.#isActive(owner)) this.#dispatch({ type: 'hold-elapsed', now: Date.now() });
     }, ECHO_HOLD_THRESHOLD_MS);
@@ -219,18 +224,29 @@ export class EchoCapturePipeline {
 
     // Model readiness, native key capture, and microphone startup are independent. Open all three
     // concurrently so none of their latencies are added together and opening speech is retained.
-    const helperCaptureOpening = this.#captureReconciler.request(true, owner.generation);
+    const helperCaptureOpening = this.#captureReconciler.request('recording', owner.generation);
     owner.captureOpening = true;
     let capturePromise: ReturnType<EchoRecordingPort['startDictation']>;
     try {
-      capturePromise = this.#recording.startDictation({
-        onFrame: (samples, rms) => this.#onFrame(owner, samples, rms),
-        onUnexpectedStop: () => {
-          if (this.#isActive(owner)) {
-            this.#dispatch({ type: 'fail', message: 'The microphone stopped unexpectedly.' });
-          }
+      capturePromise = this.#recording.startDictation(
+        {
+          onFrame: (samples, rms) => this.#onFrame(owner, samples, rms),
+          onUnexpectedStop: (reason) => {
+            if (this.#isActive(owner)) {
+              this.#dispatch({
+                type: 'fail',
+                message:
+                  reason === 'device-unavailable'
+                    ? 'The microphone stopped unexpectedly.'
+                    : reason === 'system-audio-unavailable'
+                      ? 'System audio stopped unexpectedly.'
+                      : 'Audio capture stopped unexpectedly.',
+              });
+            }
+          },
         },
-      });
+        { includeSystemAudio: owner.includeSystemAudio },
+      );
     } catch (error: unknown) {
       owner.captureOpening = false;
       throw error;
@@ -264,7 +280,10 @@ export class EchoCapturePipeline {
     if (this.#isActive(owner)) this.#queueExtendedAudio(owner, false);
   }
 
-  async stopCapture(owner = this.#sessionOwner): Promise<void> {
+  async stopCapture(
+    owner = this.#sessionOwner,
+    helperMode: HelperSessionCaptureMode = helperCaptureModeForPhase(this.#getState().phase),
+  ): Promise<void> {
     const ownsSession = owner !== null && this.#ownsSession(owner);
     const generation = owner?.generation ?? this.#generation;
     const captureId = ownsSession ? this.#captureId : null;
@@ -282,15 +301,15 @@ export class EchoCapturePipeline {
           new Error('Microphone stop timed out'),
         )
       : Promise.resolve(null);
-    // Disarm native key capture immediately rather than waiting for microphone teardown. Both
+    // Change native key capture immediately rather than waiting for microphone teardown. Both
     // boundaries are independently bounded because custom ports need not honor production limits.
     const helperStop = withSoftTimeout(
       operationError(
-        () => this.#captureReconciler.request(false, generation),
-        'Helper capture stop failed',
+        () => this.#captureReconciler.request(helperMode, generation),
+        'Helper capture mode change failed',
       ),
       CAPTURE_CANCEL_TIMEOUT_MS,
-      new Error('Helper capture stop timed out'),
+      new Error('Helper capture mode change timed out'),
     );
     let errors: readonly Error[];
     try {

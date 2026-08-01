@@ -6,18 +6,18 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{PROTOCOL_VERSION, messages::*};
 use crate::{
     CriticalDelivery,
-    keyboard::ActivationBindings,
+    keyboard::{ActivationBindings, SessionCaptureMode},
     platform::{CallbackGate, Platform, PlatformError, TerminalReason, TerminalSignal},
 };
 
-/// `initialize` params schema: `{ "protocolVersion": 5 }`.
+/// `initialize` params schema: `{ "protocolVersion": 6 }`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct InitializeParams {
     protocol_version: u16,
 }
 
-/// Protocol-v5 `activation.configure` params schema.
+/// Protocol-v6 `activation.configure` params schema.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigureActivationParams {
@@ -25,11 +25,11 @@ struct ConfigureActivationParams {
     bindings: ActivationBindings,
 }
 
-/// `session.set_capture` params schema: `{ "active": boolean }`.
+/// `session.set_capture` params schema: `{ "mode": "off" | "recording" | "cancel-only" }`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetCaptureParams {
-    active: bool,
+    mode: SessionCaptureMode,
 }
 
 /// Params schema for parameterless methods. Params are still required and must
@@ -51,7 +51,7 @@ struct InitializeResult {
 
 #[derive(Debug, Serialize)]
 struct SetCaptureResult {
-    active: bool,
+    mode: SessionCaptureMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,13 +176,8 @@ impl<P: Platform> Server<P> {
                     Ok(params) => params,
                     Err(keep_running) => return HandleOutcome::from_keep_running(keep_running),
                 };
-                match self.platform.set_session_capture(params.active) {
-                    Ok(()) => self.send_success(
-                        request.id,
-                        SetCaptureResult {
-                            active: params.active,
-                        },
-                    ),
+                match self.platform.set_session_capture(params.mode) {
+                    Ok(()) => self.send_success(request.id, SetCaptureResult { mode: params.mode }),
                     Err(error) => self.send_platform_error(request.id, error),
                 }
             }
@@ -200,7 +195,7 @@ impl<P: Platform> Server<P> {
                 if result.submitted {
                     // Stop session-key capture before the success response can reach Electron so
                     // restoration-phase Esc/Enter pass through.
-                    let _ = self.platform.set_session_capture(false);
+                    let _ = self.platform.set_session_capture(SessionCaptureMode::Off);
                 }
                 let mut batch = Vec::with_capacity(2);
                 if result.submitted {
@@ -253,7 +248,7 @@ impl<P: Platform> Server<P> {
 
     pub(crate) fn complete_shutdown(&mut self, id: RequestId) -> bool {
         self.gate.close();
-        let _ = self.platform.set_session_capture(false);
+        let _ = self.platform.set_session_capture(SessionCaptureMode::Off);
         self.stop_platform();
         if self.terminal.is_triggered() {
             return false;

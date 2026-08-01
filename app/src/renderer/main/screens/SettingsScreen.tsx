@@ -104,7 +104,7 @@ export function SettingsScreen({
     {
       title: 'Recording',
       keywords:
-        'Recording microphone preferred device audio live level test my microphone permission pause silence detection how long a pause aggressive average relaxed short medium long system default disconnected',
+        'Recording microphone preferred device audio system sounds loopback calls meetings music live level test my microphone permission automatic manual finish Enter pause silence detection how long a pause aggressive average relaxed short medium long system default disconnected',
       node: <RecordingSection settings={settings} platform={platform} heading={null} />,
     },
     {

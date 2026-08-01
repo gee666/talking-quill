@@ -131,6 +131,10 @@ const api: MainApi = {
           preferredMicrophoneId:
             patch.recording?.preferredMicrophoneId ?? settings.recording.preferredMicrophoneId,
           silencePreset: patch.recording?.silencePreset ?? settings.recording.silencePreset,
+          autoSubmitOnSilence:
+            patch.recording?.autoSubmitOnSilence ?? settings.recording.autoSubmitOnSilence,
+          includeSystemAudio:
+            patch.recording?.includeSystemAudio ?? settings.recording.includeSystemAudio,
         },
         transcription: {
           modelId: patch.transcription?.modelId ?? settings.transcription.modelId,

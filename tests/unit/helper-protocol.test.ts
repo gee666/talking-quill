@@ -66,11 +66,11 @@ describe('native helper framing', () => {
 });
 
 describe('native helper JSON-RPC schemas', () => {
-  it('requires protocol v5 and has no lossy default activation key handshake field', () => {
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 5 }).success).toBe(true);
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 4 }).success).toBe(false);
+  it('requires protocol v6 and has no lossy default activation key handshake field', () => {
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 6 }).success).toBe(true);
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 5 }).success).toBe(false);
     const initialized = {
-      protocolVersion: 5,
+      protocolVersion: 6,
       helperVersion: '1.0.0',
       platform: 'windows',
       architecture: 'x86_64',
@@ -133,6 +133,18 @@ describe('native helper JSON-RPC schemas', () => {
     expect(
       helperParamsSchemas['paste.inject'].safeParse({ key: 'A', shell: 'whoami' }).success,
     ).toBe(false);
+    const capture = helperParamsSchemas['session.set_capture'];
+    for (const mode of ['off', 'recording', 'cancel-only']) {
+      expect(capture.safeParse({ mode }).success).toBe(true);
+    }
+    for (const value of [
+      { active: true },
+      { mode: 'cancel_only' },
+      { mode: true },
+      { mode: 'off', extra: true },
+    ]) {
+      expect(capture.safeParse(value).success).toBe(false);
+    }
   });
 
   it('allows only the canonical built-in prefix family and rejects unrelated conflicts', () => {

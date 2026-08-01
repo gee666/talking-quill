@@ -36,18 +36,37 @@ function migrateV21ToCurrent(input: Readonly<Record<string, unknown>>) {
   if (typeof v22 !== 'object' || v22 === null) throw new Error('V21 migration did not emit v22');
   const v23 = SETTINGS_MIGRATIONS[22]?.(v22 as Readonly<Record<string, unknown>>);
   if (typeof v23 !== 'object' || v23 === null) throw new Error('V22 migration did not emit v23');
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>));
+  const v24 = SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>);
+  if (typeof v24 !== 'object' || v24 === null) throw new Error('V23 migration did not emit v24');
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>));
 }
 
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 23 }, (_, index) => index + 1),
+      Array.from({ length: 24 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
       Array.from({ length: 21 }, (_, index) => index + 1),
     );
+  });
+
+  it('adds privacy-safe recording defaults to the released v24 contract', () => {
+    const source = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    source.schemaVersion = 24;
+    const recording = source.recording;
+    if (typeof recording !== 'object' || recording === null || Array.isArray(recording)) {
+      throw new Error('Missing recording settings');
+    }
+    delete (recording as Record<string, unknown>).autoSubmitOnSilence;
+    delete (recording as Record<string, unknown>).includeSystemAudio;
+
+    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(source));
+    expect(migrated.recording).toMatchObject({
+      autoSubmitOnSilence: true,
+      includeSystemAudio: false,
+    });
   });
 
   it('makes v19 emit literal v20 and v20 emit frozen v21 before current migration', () => {
@@ -70,7 +89,7 @@ describe('frozen settings migrations', () => {
     });
 
     const current = migrateV21ToCurrent(v21);
-    expect(current.schemaVersion).toBe(24);
+    expect(current.schemaVersion).toBe(25);
     expect(current.transcription.language).toBe('fr');
     expect(current.dictationProfiles.map(({ id }) => id)).toEqual([
       'general',
@@ -106,7 +125,11 @@ describe('frozen settings migrations', () => {
       keys: ['X', 'E'],
     };
 
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[23]?.(source));
+    const v24 = SETTINGS_MIGRATIONS[23]?.(source);
+    if (typeof v24 !== 'object' || v24 === null) throw new Error('V23 migration did not emit v24');
+    const migrated = SettingsSchema.parse(
+      SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>),
+    );
     expect(
       migrated.dictationProfiles.find(({ id }) => id === 'prompt-to-english')?.shortcut.keys,
     ).toEqual(['X', 'Q']);

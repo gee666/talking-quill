@@ -13,7 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    keyboard::{ActivationBindings, HelperEvent},
+    keyboard::{ActivationBindings, HelperEvent, SessionCaptureMode},
     protocol::Outbound,
 };
 
@@ -410,7 +410,7 @@ pub trait Platform: Sized {
         enabled: bool,
         bindings: ActivationBindings,
     ) -> Result<(), PlatformError>;
-    fn set_session_capture(&self, active: bool) -> Result<(), PlatformError>;
+    fn set_session_capture(&self, mode: SessionCaptureMode) -> Result<(), PlatformError>;
     fn inject_paste(&self) -> PasteResult;
     fn front_app(&self) -> Result<FrontApp, PlatformError>;
     fn permissions(&self) -> Permissions;
@@ -505,7 +505,7 @@ mod tests {
             },
             ActivationKey::A,
             true,
-            false,
+            SessionCaptureMode::Off,
         );
         assert!(reducer.apply(down, true));
 
@@ -519,7 +519,7 @@ mod tests {
             },
             ActivationKey::A,
             true,
-            false,
+            SessionCaptureMode::Off,
         );
         let event = up.event().unwrap();
 

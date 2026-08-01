@@ -50,9 +50,9 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 5 });
+const initialized = await request('initialize', { protocolVersion: 6 });
 await request('activation.configure', { enabled: false, bindings: [] });
-await request('session.set_capture', { active: false });
+await request('session.set_capture', { mode: 'off' });
 const permissions = await request('permissions.get', {});
 const activationRegistration = await configureActivationCoverage(initialized, permissions);
 await request('activation.configure', { enabled: false, bindings: [] });
@@ -66,7 +66,7 @@ const safeReport = {
 console.log(JSON.stringify(safeReport, null, 2));
 
 if (interactive) await runInteractive();
-await request('session.set_capture', { active: false }).catch(() => undefined);
+await request('session.set_capture', { mode: 'off' }).catch(() => undefined);
 await request('activation.configure', { enabled: false, bindings: [] }).catch(() => undefined);
 await request('shutdown', {});
 await childExit;
@@ -162,18 +162,39 @@ async function runInteractive() {
     }
 
     notifications.length = 0;
-    await request('session.set_capture', { active: true });
+    await request('session.set_capture', { mode: 'recording' });
     console.log(
       'For 15 seconds, focus the editor and press Esc and Enter. Both should be absent there.',
     );
     await delay(15_000);
-    await request('session.set_capture', { active: false });
-    const sessionKeys = printObserved('session.key');
-    assertPairedEvents(sessionKeys, 'session.key');
+    const recordingKeys = printObserved('session.key');
+    assertPairedEvents(recordingKeys, 'recording session.key');
     for (const key of ['escape', 'enter']) {
-      if (!sessionKeys.some((event) => event.params.key === key && event.params.phase === 'down')) {
-        throw new Error(`No ${key} session-control event was observed`);
+      if (
+        !recordingKeys.some((event) => event.params.key === key && event.params.phase === 'down')
+      ) {
+        throw new Error(`No ${key} recording session-control event was observed`);
       }
+    }
+
+    notifications.length = 0;
+    await request('session.set_capture', { mode: 'cancel-only' });
+    console.log(
+      'For 15 seconds, focus the editor and press Esc and Enter. Esc should be absent; Enter should type normally.',
+    );
+    await delay(15_000);
+    await request('session.set_capture', { mode: 'off' });
+    const cancelOnlyKeys = printObserved('session.key');
+    assertPairedEvents(cancelOnlyKeys, 'cancel-only session.key');
+    if (
+      !cancelOnlyKeys.some(
+        (event) => event.params.key === 'escape' && event.params.phase === 'down',
+      )
+    ) {
+      throw new Error('No Escape cancel-only session-control event was observed');
+    }
+    if (cancelOnlyKeys.some((event) => event.params.key === 'enter')) {
+      throw new Error('Enter was captured in cancel-only mode');
     }
 
     await terminal.question(

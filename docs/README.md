@@ -37,9 +37,9 @@ Global detection does not suppress a chord’s prefix: its modifier and prefix k
 
 ## Quick and Extended dictation
 
-- **Quick:** the final trigger key goes down after the chord prefix and is released before 600 ms. Quick stays open until speech followed by the selected trailing silence (1.0, 1.8, or 3.0 seconds), `Enter`, the full activation chord again, or the two-minute cap. Its widget offers **Cancel**, not Stop.
+- **Quick:** the final trigger key goes down after the chord prefix and is released before 600 ms. By default, Quick finishes after speech followed by the selected trailing silence (1.0, 1.8, or 3.0 seconds). Automatic finishing can be disabled so an explicit `Enter`, the full activation chord again, or the two-minute safety cap is required. Its widget offers **Cancel**, not Stop.
 - **Extended:** keep the final trigger key down for at least 600 ms. Extended streams transcription locally and does not submit on silence. Submit with `Enter`, the full activation chord again, or the widget’s **Stop** button. The cap is 30 minutes.
-- Press `Escape` or use **Cancel** to cancel either mode.
+- Press `Escape` or use **Cancel** through recording, transcription, Smart processing, and pre-commit insertion. Once native paste commits, Talking Quill finishes clipboard restoration rather than attempting an unsafe undo.
 
 Because General's `Alt/Option+X` is also the family prefix, the helper resolves General when X is released and classifies Quick or Extended from the physical hold duration. Start speaking after the widget appears. The longer P/M/E chords resolve on their suffix key down as usual.
 
@@ -63,7 +63,7 @@ A manually started vision/image-echo test also captures and sends a screenshot; 
 
 - **Dashboard:** enable/disable dictation, inspect readiness, use a test field, and browse History with details, optional thumbnails, Copy, Delete, Delete all, and Load more.
 - **General and profiles:** test shortcuts without recording or insertion; manage profiles, widget size, sounds, launch at login, and close to tray. The tray offers Open, Enable/Disable, and Quit; the window has themes and controls.
-- **Recording and model:** select and live-test a microphone, choose silence detection, manage Whisper, and choose the spoken/source language.
+- **Recording and model:** select and live-test a microphone, require manual finishing or choose silence detection, and opt into Windows system-audio capture for calls and other apps. System audio is off by default and currently unavailable on macOS. Manage Whisper and choose the spoken/source language here too.
 - **Smart processing:** configure/test providers, discover models where supported, and optionally enable vision. Pi adds installation-path and thinking-level settings.
 - **Voice Commands and vocabulary:** manage and preview trigger/snippet pairs, Smart-only vocabulary, and text import/export.
 - **Privacy and Info:** control future history, 7/30/90-day or no expiry, screenshots, diagnostics, and reset. Info includes manual updates, permissions, data/log folders, notices, and Welcome; updates are not automatic.
@@ -80,6 +80,6 @@ Network use includes requested, verified Hugging Face model downloads; provider 
 
 ## Development
 
-Talking Quill uses Electron, React, TypeScript, and a Rust keyboard/paste helper. Helper protocol v5 configures up to twelve profile bindings as `{ profileId, shortcut: { modifiers, keys } }` and reports exact activation down/up snapshots or an atomic General-prefix completion with its physical hold duration. Prefix-conflict validation, canonical family ownership, and the narrow built-in-family exception are enforced across settings and helper configuration. Local Whisper worker protocol v2 requires an explicit validated source language; the worker fixes the inference task to `transcribe`.
+Talking Quill uses Electron, React, TypeScript, and a Rust keyboard/paste helper. Helper protocol v6 configures up to thirteen profile bindings as `{ profileId, shortcut: { modifiers, keys } }`, uses `off | recording | cancel-only` session-key capture modes, and reports exact activation down/up snapshots or an atomic General-prefix completion with its physical hold duration. Prefix-conflict validation, canonical family ownership, and the narrow built-in-family exception are enforced across settings and helper configuration. Local Whisper worker protocol v2 requires an explicit validated source language; the worker fixes the inference task to `transcribe`.
 
 Run `pnpm install`, then `pnpm dev`, `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm test`, or `pnpm validate`. Packaging scripts build Windows and macOS x64/ARM64 artifacts.

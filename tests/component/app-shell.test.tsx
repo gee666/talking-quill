@@ -270,6 +270,10 @@ beforeEach(() => {
       recording: {
         preferredMicrophoneId: patch.recording?.preferredMicrophoneId ?? null,
         silencePreset: patch.recording?.silencePreset ?? 'average',
+        autoSubmitOnSilence:
+          patch.recording?.autoSubmitOnSilence ?? DEFAULT_SETTINGS.recording.autoSubmitOnSilence,
+        includeSystemAudio:
+          patch.recording?.includeSystemAudio ?? DEFAULT_SETTINGS.recording.includeSystemAudio,
       },
       transcription: {
         modelId: patch.transcription?.modelId ?? DEFAULT_SETTINGS.transcription.modelId,

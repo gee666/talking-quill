@@ -1,7 +1,9 @@
+import type { HelperSessionCaptureMode } from '../../shared/helper/protocol';
+
 const CAPACITY_RETRY_MS = 10;
 
 export interface HelperCaptureReconcilerPort {
-  setSessionCapture(active: boolean): Promise<unknown>;
+  setSessionCapture(mode: HelperSessionCaptureMode): Promise<unknown>;
   resetSessionCapture(signal?: AbortSignal): Promise<unknown>;
 }
 
@@ -9,8 +11,8 @@ export class HelperCaptureReconciler {
   readonly #helper: HelperCaptureReconcilerPort;
   readonly #onCaptureOff: () => void;
   #generation = 0;
-  #desired = false;
-  #applied: boolean | null = false;
+  #desired: HelperSessionCaptureMode = 'off';
+  #applied: HelperSessionCaptureMode | null = 'off';
   #revision = 0;
   #running = false;
   #tail: Promise<void> = Promise.resolve();
@@ -47,35 +49,38 @@ export class HelperCaptureReconciler {
   beginShutdown(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.#desired = false;
+    this.#desired = 'off';
     this.#revision += 1;
     this.#shutdown.abort(new DOMException('Capture reconciliation stopped', 'AbortError'));
   }
 
-  requestBestEffort(active: boolean, generation: number): void {
-    void this.request(active, generation).catch(() => undefined);
+  requestBestEffort(mode: HelperSessionCaptureMode, generation: number): void {
+    void this.request(mode, generation).catch(() => undefined);
   }
 
-  request(active: boolean, generation: number): Promise<void> {
-    if (generation !== this.#generation || (this.#disposed && active)) {
+  request(mode: HelperSessionCaptureMode, generation: number): Promise<void> {
+    if (generation !== this.#generation || (this.#disposed && mode !== 'off')) {
       return Promise.resolve();
     }
 
-    if (this.#desired !== active) {
-      this.#desired = active;
+    if (this.#desired !== mode) {
+      this.#desired = mode;
       this.#revision += 1;
     }
-    if (active) this.#captureOffGuaranteed = false;
+    if (mode !== 'off') this.#captureOffGuaranteed = false;
     if (this.#running) return this.#tail;
     if (this.#applied === this.#desired) return Promise.resolve();
     this.#running = true;
     const reconcile = async () => {
       try {
-        while ((!this.#disposed || !this.#desired) && this.#applied !== this.#desired) {
+        while ((!this.#disposed || this.#desired === 'off') && this.#applied !== this.#desired) {
           const desired = this.#desired;
           const revision = this.#revision;
           try {
-            await this.#helper.setSessionCapture(desired);
+            const result = await this.#helper.setSessionCapture(desired);
+            if (!captureResultMatches(result, desired)) {
+              throw new Error('Native helper acknowledged the wrong capture mode');
+            }
             if (revision !== this.#revision) {
               // Native activation may have re-armed capture while this acknowledgement was in
               // flight. Reconcile the newer revision instead of trusting the stale response.
@@ -83,11 +88,13 @@ export class HelperCaptureReconciler {
               continue;
             }
             this.#applied = desired;
-            if (!desired) this.#confirmCaptureOff();
+            if (desired === 'off') this.#confirmCaptureOff();
           } catch (error: unknown) {
             this.#applied = null;
             if (revision !== this.#revision) continue;
-            if (desired) throw normalizeCaptureError(error, 'Helper capture could not start');
+            if (desired !== 'off') {
+              throw normalizeCaptureError(error, 'Helper capture mode could not be set');
+            }
             if (this.#disposed || helperSupervisionOwnsRecovery(error)) {
               this.#captureOffGuaranteed = false;
               throw normalizeCaptureError(error, 'Helper capture could not be disabled');
@@ -102,7 +109,7 @@ export class HelperCaptureReconciler {
                 this.#applied = null;
                 continue;
               }
-              this.#applied = false;
+              this.#applied = 'off';
               this.#confirmCaptureOff();
             } catch (resetError: unknown) {
               if (revision !== this.#revision) {
@@ -126,6 +133,10 @@ export class HelperCaptureReconciler {
     this.#captureOffGuaranteed = true;
     this.#onCaptureOff();
   }
+}
+
+function captureResultMatches(result: unknown, expected: HelperSessionCaptureMode): boolean {
+  return typeof result === 'object' && result !== null && Reflect.get(result, 'mode') === expected;
 }
 
 function helperSupervisionOwnsRecovery(error: unknown): boolean {

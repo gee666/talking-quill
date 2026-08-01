@@ -1,4 +1,4 @@
-//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 5).
+//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 6).
 //!
 //! # Transport and framing
 //!
@@ -49,8 +49,8 @@
 //! and are Invalid Request.
 //!
 //! - `initialize`
-//!   - Params: `{"protocolVersion":5}`.
-//!   - Result: `{"protocolVersion":5,"helperVersion":string,
+//!   - Params: `{"protocolVersion":6}`.
+//!   - Result: `{"protocolVersion":6,"helperVersion":string,
 //!     "platform":string,"architecture":string,"hookStatus":HOOK_STATUS,
 //!     "permissions":PERMISSIONS}`.
 //! - `activation.configure`
@@ -66,8 +66,9 @@
 //!     requires at least one binding. Windows and macOS both consume this complete bounded
 //!     representation without reducing modifier or key-order information.
 //! - `session.set_capture`
-//!   - Params: `{"active":boolean}`.
-//!   - Result: `{"active":boolean}`.
+//!   - Params/result: `{"mode":CAPTURE_MODE}`, where `CAPTURE_MODE` is
+//!     `"off"`, `"recording"`, or `"cancel-only"`. Recording captures
+//!     Escape and Enter, cancel-only captures only Escape, and off captures neither.
 //! - `paste.inject`
 //!   - Params: `{}`.
 //!   - Result: `{"submitted":boolean}` on success, or
@@ -103,7 +104,7 @@
 //! `"permission_denied"`, `"conflicting_modifiers"`, `"secure_input"`,
 //! `"os_rejected"`, or `"unavailable"`.
 //!
-//! `initialize` with `protocolVersion` exactly 5 must be the first successful
+//! `initialize` with `protocolVersion` exactly 6 must be the first successful
 //! command. Before it succeeds, other allowlisted commands return Invalid
 //! helper state. A failed or incompatible initialization leaves the helper
 //! uninitialized. After success, every later `initialize` returns Invalid
@@ -122,8 +123,9 @@
 //! foreground application). An ambiguous canonical built-in prefix passes both
 //! down and up and resolves as one complete event; otherwise only an accepted
 //! final trigger down, its repeats, and its matching up are swallowed. Session
-//! Escape/Enter capture is independent
-//! of activation configuration/modifiers.
+//! key capture is independent of activation configuration/modifiers. A mode
+//! change affects only fresh downs; repeats and matching ups retain ownership
+//! so every swallowed down remains balanced.
 //!
 //! - `activation.event` params are either
 //!   `{"phase":"down"|"up","profileId":PROFILE_ID,"shortcut":SHORTCUT}` or
@@ -180,4 +182,4 @@ pub use messages::{
 pub(crate) use server::HandleOutcome;
 pub use server::Server;
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;

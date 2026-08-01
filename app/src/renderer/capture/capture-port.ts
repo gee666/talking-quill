@@ -10,7 +10,7 @@ import {
 } from '../../shared/ipc/capture-port';
 import type { MicrophoneDevice } from '../../shared/schemas/audio';
 import { CaptureEngineError } from './capture-engine';
-import type { CaptureEngine } from './capture-engine';
+import type { CaptureEngine, CaptureStopReason } from './capture-engine';
 
 interface PendingStart {
   readonly requestId: string;
@@ -72,7 +72,7 @@ export class CapturePortController {
     this.#post({ type: 'stream:frame', captureId, sequence, samples: frameSamples, rms });
   }
 
-  notifyUnexpectedStop(reason: 'device-lost' | 'error'): void {
+  notifyUnexpectedStop(reason: CaptureStopReason): void {
     const captureId = this.#captureId;
     if (captureId === null) return;
     this.#captureId = null;
@@ -98,7 +98,12 @@ export class CapturePortController {
       return;
     }
     if (command.type === 'stream:start') {
-      void this.#start(command.requestId, command.captureId, command.preferredMicrophoneId);
+      void this.#start(
+        command.requestId,
+        command.captureId,
+        command.preferredMicrophoneId,
+        command.includeSystemAudio,
+      );
       return;
     }
     if (command.type === 'stream:activate') {
@@ -115,6 +120,7 @@ export class CapturePortController {
     requestId: string,
     captureId: string,
     preferredMicrophoneId: string | null,
+    includeSystemAudio: boolean,
   ): Promise<void> {
     if (this.#phase !== 'idle') {
       this.#sendError(requestId, captureId, 'capture-failed');
@@ -126,7 +132,7 @@ export class CapturePortController {
     this.#pendingStart = pending;
     this.#sequence = 0;
     try {
-      const result = await this.#engine.start(preferredMicrophoneId);
+      const result = await this.#engine.start(preferredMicrophoneId, includeSystemAudio);
       if (this.#pendingStart !== pending || !this.#isCaptureInPhase(captureId, 'starting')) return;
       this.#pendingStart = null;
       this.#phase = 'prepared';

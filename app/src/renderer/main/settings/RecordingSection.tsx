@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { SILENCE_PRESET_MS, SPEECH_ARMING_MS } from '../../../shared/constants/audio';
 import type { MicrophoneDeviceList, MicrophoneTestState } from '../../../shared/schemas/audio';
 import type { Settings } from '../../../shared/schemas/settings';
-import { Button, Card, Progress, Select, Status, Toast } from '../../design';
+import { Button, Card, Progress, Select, Status, Toast, Toggle } from '../../design';
 
 interface Notice {
   readonly tone: 'success' | 'error';
@@ -184,6 +184,40 @@ export function RecordingSection({
     }
   };
 
+  const saveAutomaticSubmission = async (enabled: boolean) => {
+    setSaving(true);
+    setNotice(null);
+    try {
+      await window.talkingQuill.settings.update({
+        recording: { autoSubmitOnSilence: enabled },
+      });
+      setNotice({
+        tone: 'success',
+        message: enabled ? 'Automatic finishing enabled.' : 'Manual finishing enabled.',
+      });
+    } catch {
+      setNotice({ tone: 'error', message: 'That finishing option couldn’t be saved.' });
+    } finally {
+      if (mounted.current) setSaving(false);
+    }
+  };
+
+  const saveSystemAudio = async (enabled: boolean) => {
+    setSaving(true);
+    setNotice(null);
+    try {
+      await window.talkingQuill.settings.update({ recording: { includeSystemAudio: enabled } });
+      setNotice({
+        tone: 'success',
+        message: enabled ? 'System audio will be captured.' : 'Microphone-only capture enabled.',
+      });
+    } catch {
+      setNotice({ tone: 'error', message: 'That audio-source option couldn’t be saved.' });
+    } finally {
+      if (mounted.current) setSaving(false);
+    }
+  };
+
   const preferred = settings.recording.preferredMicrophoneId;
   const preferredMissing =
     preferred !== null &&
@@ -207,7 +241,7 @@ export function RecordingSection({
   return (
     <Card
       {...(heading === null ? {} : { title: heading })}
-      description="Choose which microphone to listen with and how long a pause should end a dictation. Your audio never leaves this computer."
+      description="Choose which audio to capture and whether a pause should finish a dictation. Your audio never leaves this computer."
     >
       <Select
         label="Microphone"
@@ -269,11 +303,18 @@ export function RecordingSection({
         </div>
       )}
       <div className="setting-divider" />
+      <Toggle
+        label="Automatically finish after a pause"
+        hint="Turn this off when background noise makes Talking Quill finish too early. You will need to press Enter or repeat your shortcut when you are done."
+        checked={settings.recording.autoSubmitOnSilence}
+        disabled={saving}
+        onChange={(event) => void saveAutomaticSubmission(event.currentTarget.checked)}
+      />
       <Select
         label="How long a pause ends a dictation"
         hint={`When you stop talking for this long, Talking Quill decides you are done. Quick dictation waits until it has heard at least ${formatSeconds(SPEECH_ARMING_MS)} of speech first.`}
         value={settings.recording.silencePreset}
-        disabled={saving}
+        disabled={saving || !settings.recording.autoSubmitOnSilence}
         onChange={(event) =>
           void savePreset(event.currentTarget.value as Settings['recording']['silencePreset'])
         }
@@ -284,6 +325,18 @@ export function RecordingSection({
         <option value="average">Normal pause — {formatSeconds(SILENCE_PRESET_MS.average)}</option>
         <option value="relaxed">Long pause — {formatSeconds(SILENCE_PRESET_MS.relaxed)}</option>
       </Select>
+      <div className="setting-divider" />
+      <Toggle
+        label="Include system audio"
+        hint={
+          platform === 'win32'
+            ? 'Capture sounds from calls, videos, and other apps together with your microphone. Leave this off for microphone-only dictation, such as while listening to music.'
+            : 'System-audio capture is currently available on Windows only. Microphone capture is unchanged.'
+        }
+        checked={settings.recording.includeSystemAudio}
+        disabled={saving || (platform !== 'win32' && !settings.recording.includeSystemAudio)}
+        onChange={(event) => void saveSystemAudio(event.currentTarget.checked)}
+      />
       {notice === null ? null : (
         <Toast tone={notice.tone} message={notice.message} onDismiss={() => setNotice(null)} />
       )}

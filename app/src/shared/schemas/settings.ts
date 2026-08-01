@@ -18,7 +18,7 @@ import {
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 24 as const;
+export const SETTINGS_SCHEMA_VERSION = 25 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 
@@ -50,6 +50,8 @@ export const RecordingSettingsSchema = z
   .object({
     preferredMicrophoneId: MicrophoneIdSchema.nullable(),
     silencePreset: SilencePresetSchema,
+    autoSubmitOnSilence: z.boolean(),
+    includeSystemAudio: z.boolean(),
   })
   .strict();
 
@@ -209,6 +211,8 @@ export const DEFAULT_SETTINGS: Settings = deepFreeze({
   recording: {
     preferredMicrophoneId: null,
     silencePreset: 'average',
+    autoSubmitOnSilence: true,
+    includeSystemAudio: false,
   },
   transcription: {
     modelId: 'Xenova/whisper-small',

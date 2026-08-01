@@ -98,7 +98,7 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
               jsonrpc: '2.0',
               id: request.id,
               result: {
-                protocolVersion: 5,
+                protocolVersion: 6,
                 helperVersion: '1.0.0',
                 platform: process.platform === 'win32' ? 'windows' : 'macos',
                 architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',
@@ -231,7 +231,7 @@ describe('supervised native HelperClient', () => {
         shortcutFromLegacyActivation('Z', true, 'prompt'),
       ],
     });
-    await expect(client.setSessionCapture(true)).resolves.toEqual({ active: true });
+    await expect(client.setSessionCapture('recording')).resolves.toEqual({ mode: 'recording' });
     await expect(
       Promise.all([client.getFrontApp(), client.injectPaste(), client.ping()]),
     ).resolves.toEqual([
@@ -877,7 +877,7 @@ describe('supervised native HelperClient', () => {
       shortcutFromLegacyActivation('Q', false),
       shortcutFromLegacyActivation('Q', true, 'prompt'),
     ]);
-    await client.setSessionCapture(true);
+    await client.setSessionCapture('recording');
 
     await client.restart();
     await waitFor(() => launches >= 2 && client.readiness.status === 'ready');
@@ -1003,7 +1003,7 @@ describe('supervised native HelperClient', () => {
     });
     clients.push(client);
     await client.start();
-    await client.setSessionCapture(true);
+    await client.setSessionCapture('cancel-only');
 
     await expect(client.resetSessionCapture()).resolves.toBeUndefined();
     expect(launches).toBe(2);
@@ -1023,8 +1023,8 @@ describe('supervised native HelperClient', () => {
             method === 'session.set_capture' &&
             typeof params === 'object' &&
             params !== null &&
-            'active' in params &&
-            params.active === false,
+            'mode' in params &&
+            params.mode === 'off',
         ),
       ).toBe(true),
     );

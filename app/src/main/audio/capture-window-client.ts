@@ -17,6 +17,7 @@ export interface CaptureStarted {
   readonly captureId: string;
   readonly activeMicrophoneId: string | null;
   readonly preferredUnavailable: boolean;
+  readonly systemAudioIncluded: boolean;
   readonly sampleRate: 16_000;
   readonly channelCount: 1;
 }
@@ -28,7 +29,8 @@ export interface CaptureFrame {
   readonly rms: number;
 }
 
-export type UnexpectedCaptureStopReason = 'device-unavailable' | 'capture-unavailable';
+export type UnexpectedCaptureStopReason =
+  'device-unavailable' | 'system-audio-unavailable' | 'capture-unavailable';
 
 export class CaptureClientError extends Error {
   readonly code:
@@ -37,6 +39,7 @@ export class CaptureClientError extends Error {
     | 'device-unavailable'
     | 'unsupported-audio-format'
     | 'worklet-unavailable'
+    | 'system-audio-unavailable'
     | 'capture-failed'
     | 'capture-unavailable';
 
@@ -107,6 +110,7 @@ export class CaptureWindowClient {
   async start(
     preferredMicrophoneId: string | null,
     captureId: string = randomUUID(),
+    includeSystemAudio = false,
   ): Promise<CaptureStarted> {
     if (this.#activeCaptureId !== null) await this.stop(this.#activeCaptureId);
     this.#activeCaptureId = captureId;
@@ -116,6 +120,7 @@ export class CaptureWindowClient {
       requestId: randomUUID(),
       captureId,
       preferredMicrophoneId,
+      includeSystemAudio,
     }).catch((error: unknown) => {
       if (this.#activeCaptureId === captureId) this.#activeCaptureId = null;
       throw error;
@@ -127,10 +132,17 @@ export class CaptureWindowClient {
     if (this.#activeCaptureId !== captureId) {
       throw new CaptureClientError('capture-unavailable');
     }
+    if (response.systemAudioIncluded !== includeSystemAudio) {
+      await this.stop(captureId).catch(() => this.#closePort());
+      throw new CaptureClientError(
+        includeSystemAudio ? 'system-audio-unavailable' : 'capture-failed',
+      );
+    }
     return {
       captureId,
       activeMicrophoneId: response.activeMicrophoneId,
       preferredUnavailable: response.preferredUnavailable,
+      systemAudioIncluded: response.systemAudioIncluded,
       sampleRate: response.sampleRate,
       channelCount: response.channelCount,
     };
@@ -255,7 +267,11 @@ export class CaptureWindowClient {
       if (this.#activeCaptureId === message.captureId) this.#activeCaptureId = null;
       this.#notifyUnexpectedStop(
         message.captureId,
-        message.reason === 'device-lost' ? 'device-unavailable' : 'capture-unavailable',
+        message.reason === 'device-lost'
+          ? 'device-unavailable'
+          : message.reason === 'system-audio-lost'
+            ? 'system-audio-unavailable'
+            : 'capture-unavailable',
       );
       return;
     }

@@ -281,6 +281,9 @@ async function updateSettings(
     patch.transcription?.modelId !== undefined &&
     patch.transcription.modelId !== before.transcription.modelId;
   const requestedLaunchAtLogin = patch.app?.launchAtLogin;
+  if (patch.recording?.includeSystemAudio === true && dependencies.platform !== 'win32') {
+    throw new Error('System audio capture is unavailable on this platform');
+  }
 
   // Evidence is derived from the values being replaced. Clear it before committing so a failed
   // invalidation can be retried with the same patch instead of becoming invisible after commit.

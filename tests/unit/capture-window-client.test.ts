@@ -47,7 +47,7 @@ describe('CaptureWindowClient', () => {
     expect(test.port1.start).toHaveBeenCalledOnce();
     expect(test.webContents.postMessage).toHaveBeenCalledWith(
       'capture:port',
-      { protocolVersion: 1 },
+      { protocolVersion: 2 },
       [test.port2],
     );
 
@@ -78,6 +78,34 @@ describe('CaptureWindowClient', () => {
       captureId,
     });
     await expect(activating).resolves.toBeUndefined();
+  });
+
+  it('requires a truthful positive acknowledgement for requested system audio', async () => {
+    const test = harness();
+    const captureId = randomUUID();
+    const starting = test.client.start(null, captureId, true);
+    const startCommand = lastCommand(test.port1);
+    expect(startCommand).toMatchObject({ includeSystemAudio: true });
+    test.port1.receive({
+      type: 'stream:started',
+      requestId: startCommand.requestId,
+      captureId,
+      sampleRate: 16_000,
+      channelCount: 1,
+      activeMicrophoneId: null,
+      preferredUnavailable: false,
+      systemAudioIncluded: false,
+    });
+    await vi.waitFor(() => expect(lastCommand(test.port1).type).toBe('stream:stop'));
+    const stopCommand = lastCommand(test.port1);
+    test.port1.receive({
+      type: 'stream:stopped',
+      requestId: stopCommand.requestId,
+      captureId,
+      reason: 'requested',
+    });
+
+    await expect(starting).rejects.toMatchObject({ code: 'system-audio-unavailable' });
   });
 
   it('fails closed on an active frame gap instead of permanently stalling', async () => {

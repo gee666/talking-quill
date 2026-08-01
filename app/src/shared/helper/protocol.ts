@@ -8,7 +8,7 @@ import {
 } from '../schemas/dictation-profiles';
 import { ShortcutSchema, shortcutIdentity } from '../schemas/shortcut';
 
-export const HELPER_PROTOCOL_VERSION = 5 as const;
+export const HELPER_PROTOCOL_VERSION = 6 as const;
 export const HELPER_MAX_FRAME_BYTES = 16 * 1024;
 const HelperNumericRequestIdSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const HelperStringRequestIdSchema = z
@@ -149,7 +149,8 @@ const configureActivationParamsSchema = z
     path: ['bindings'],
   });
 const configureActivationResultSchema = configureActivationParamsSchema;
-const setCaptureSchema = z.object({ active: z.boolean() }).strict();
+export const HelperSessionCaptureModeSchema = z.enum(['off', 'recording', 'cancel-only']);
+const setCaptureSchema = z.object({ mode: HelperSessionCaptureModeSchema }).strict();
 const pingResultSchema = z
   .object({ ok: z.literal(true), hookStatus: HelperHookStatusSchema })
   .strict();
@@ -185,6 +186,7 @@ export type HelperResult<Method extends HelperMethod> = z.infer<
 >;
 export type ActivationBinding = z.infer<typeof ActivationBindingSchema>;
 export type HelperHookStatus = z.infer<typeof HelperHookStatusSchema>;
+export type HelperSessionCaptureMode = z.infer<typeof HelperSessionCaptureModeSchema>;
 export type HelperPermissions = z.infer<typeof HelperPermissionsSchema>;
 export type HelperInitializeResult = z.infer<typeof HelperInitializeResultSchema>;
 export type HelperPasteResult = z.infer<typeof HelperPasteResultSchema>;

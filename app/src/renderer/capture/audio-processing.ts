@@ -161,6 +161,24 @@ export class StreamingResampler {
   }
 }
 
+export function mixAudioSources(sources: readonly (readonly Float32Array[])[]): Float32Array {
+  const downmixed = sources.map((channels) =>
+    channels.length === 1 ? channels[0] : downmixChannels(channels),
+  );
+  const microphone = downmixed[0];
+  if (microphone === undefined || microphone.length === 0) return new Float32Array();
+  const sampleCount = Math.max(...downmixed.map((samples) => samples?.length ?? 0));
+  const mixed = new Float32Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    let value = sanitizeSample(microphone[index] ?? 0);
+    for (const source of downmixed.slice(1)) {
+      value += sanitizeSample(source?.[index] ?? 0) * 0.5;
+    }
+    mixed[index] = sanitizeSample(value);
+  }
+  return mixed;
+}
+
 export function downmixChannels(channels: readonly Float32Array[]): Float32Array {
   const sampleCount = channels[0]?.length ?? 0;
   const mixed = new Float32Array(sampleCount);

@@ -16,7 +16,10 @@ use super::{
     TerminalReason, TerminalSignal, hook_status_from_u8, hook_status_to_u8,
     permissions_allow_native_input,
 };
-use crate::{keyboard::ActivationBindings, protocol::Outbound};
+use crate::{
+    keyboard::{ActivationBindings, SessionCaptureMode},
+    protocol::Outbound,
+};
 
 mod accessibility;
 mod cf;
@@ -157,7 +160,7 @@ pub(super) enum OwnerMutationKind {
 pub(super) struct OwnerMutation {
     pub(super) kind: OwnerMutationKind,
     pub(super) activation: ActivationConfig,
-    pub(super) session_capture: bool,
+    pub(super) session_capture_mode: SessionCaptureMode,
 }
 
 impl OwnerMutation {
@@ -165,15 +168,15 @@ impl OwnerMutation {
         Self {
             kind: OwnerMutationKind::Configure,
             activation,
-            session_capture: false,
+            session_capture_mode: SessionCaptureMode::Off,
         }
     }
 
-    fn set_session_capture(active: bool) -> Self {
+    fn set_session_capture(mode: SessionCaptureMode) -> Self {
         Self {
             kind: OwnerMutationKind::SetSessionCapture,
             activation: ActivationConfig::default(),
-            session_capture: active,
+            session_capture_mode: mode,
         }
     }
 
@@ -181,7 +184,7 @@ impl OwnerMutation {
         Self {
             kind: OwnerMutationKind::SuspendNativeInput,
             activation: ActivationConfig::default(),
-            session_capture: false,
+            session_capture_mode: SessionCaptureMode::Off,
         }
     }
 }
@@ -239,7 +242,7 @@ fn signal_owner_bounded(state: Arc<SharedState>, timeout: Duration) -> Option<Ow
 
 struct SharedState {
     owner_endpoint: Mutex<OwnerEndpoint>,
-    session_capture: AtomicBool,
+    session_capture_mode: AtomicU8,
     hook_status: AtomicU8,
     event_tap: AtomicPtr<c_void>,
     tap_recovery: AtomicU8,
@@ -251,7 +254,7 @@ impl SharedState {
     fn new() -> Self {
         Self {
             owner_endpoint: Mutex::new(OwnerEndpoint::default()),
-            session_capture: AtomicBool::new(false),
+            session_capture_mode: AtomicU8::new(SessionCaptureMode::Off.as_u8()),
             hook_status: AtomicU8::new(hook_status_to_u8(HookStatus::Unavailable)),
             event_tap: AtomicPtr::new(null_mut()),
             tap_recovery: AtomicU8::new(0),
@@ -414,23 +417,31 @@ impl Platform for NativePlatform {
         )
     }
 
-    fn set_session_capture(&self, active: bool) -> Result<(), PlatformError> {
-        if !active && !self.gate.is_open() {
+    fn set_session_capture(&self, mode: SessionCaptureMode) -> Result<(), PlatformError> {
+        if mode == SessionCaptureMode::Off {
+            // Fail open at the caller's commit boundary. The owner command acknowledges the
+            // mutation without clearing reducer ownership needed to balance an already-held key.
+            self.state
+                .session_capture_mode
+                .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
+        }
+        if mode == SessionCaptureMode::Off && !self.gate.is_open() {
             self.state.quiescing.store(true, Ordering::Release);
         }
         if self.hook_status() != HookStatus::Ready {
-            if !active {
-                self.state.session_capture.store(false, Ordering::Release);
+            if mode == SessionCaptureMode::Off {
                 return Ok(());
             }
             return Err(PlatformError::HookUnavailable);
         }
-        if active && !permissions_allow_native_input(accessibility::permission_snapshot()) {
+        if mode != SessionCaptureMode::Off
+            && !permissions_allow_native_input(accessibility::permission_snapshot())
+        {
             let _ = self.suspend_native_input();
             return Err(PlatformError::PermissionDenied);
         }
         self.submit_owner_mutation(
-            OwnerMutation::set_session_capture(active),
+            OwnerMutation::set_session_capture(mode),
             TerminalReason::OwnerThreadUnresponsive,
         )
     }
@@ -530,7 +541,10 @@ mod tests {
         assert!(returned_rx.recv_timeout(Duration::from_secs(1)).is_ok());
         assert!(state.quiescing.load(Ordering::Acquire));
         assert!(state.stopping.load(Ordering::Acquire));
-        assert!(!state.session_capture.load(Ordering::Acquire));
+        assert_eq!(
+            SessionCaptureMode::from_u8(state.session_capture_mode.load(Ordering::Acquire)),
+            SessionCaptureMode::Off,
+        );
 
         drop(endpoint);
         caller.join().unwrap();

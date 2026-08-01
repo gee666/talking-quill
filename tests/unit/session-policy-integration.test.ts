@@ -71,9 +71,20 @@ function harness() {
   };
   const controller = new MicrophonePermissionController(platform, () => 1_000);
   const registry = roles();
+  const allowsSystemAudioPermission = vi.fn(
+    (request: { readonly permission: string; readonly mediaTypes: readonly string[] }) =>
+      request.permission === 'display-capture' ||
+      (request.permission === 'media' && request.mediaTypes.length === 0),
+  );
   const dispose = secureSession(target, null, {
     microphone: {
       controller,
+      getTrustedCaptureDocument: (contents) => getTrustedCaptureDocument(contents, registry),
+    },
+    systemAudio: {
+      controller: {
+        allowsPermissionRequest: allowsSystemAudioPermission,
+      } as never,
       getTrustedCaptureDocument: (contents) => getTrustedCaptureDocument(contents, registry),
     },
   });
@@ -82,7 +93,15 @@ function harness() {
   if (requestHandler === undefined || checkHandler === undefined) {
     throw new Error('Handlers not installed');
   }
-  return { checkHandler, controller, dispose, mocks, requestHandler, target };
+  return {
+    allowsSystemAudioPermission,
+    checkHandler,
+    controller,
+    dispose,
+    mocks,
+    requestHandler,
+    target,
+  };
 }
 
 const captureUrl = 'talking-quill://app/capture/index.html';
@@ -164,6 +183,50 @@ describe('integrated Electron microphone session policy', () => {
         embeddingOrigin: captureOrigin,
       }),
     ).toBe(false);
+  });
+
+  it('allows only lease-bound display capture through the system-audio policy', () => {
+    const test = harness();
+    const contents = webContents();
+    let granted = false;
+    expect(
+      test.checkHandler(contents, 'media', electronCaptureOrigin, {
+        ...checkDetails,
+        mediaType: undefined,
+      }),
+    ).toBe(true);
+    test.requestHandler(
+      contents,
+      'media',
+      (value) => {
+        granted = value;
+      },
+      { ...requestDetails, mediaTypes: [] },
+    );
+
+    expect(granted).toBe(true);
+    expect(test.allowsSystemAudioPermission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webContents: contents,
+        permission: 'media',
+        mediaTypes: [],
+        requestingUrl: captureUrl,
+        securityOrigin: electronCaptureOrigin,
+        expectedUrl: captureUrl,
+        expectedOrigin: captureOrigin,
+      }),
+    );
+
+    test.allowsSystemAudioPermission.mockReturnValue(false);
+    test.requestHandler(
+      contents,
+      'media',
+      (value) => {
+        granted = value;
+      },
+      { ...requestDetails, mediaTypes: [] },
+    );
+    expect(granted).toBe(false);
   });
 
   it('denies the wrong role, URL, destroyed sender, missing lease, and non-media permission', () => {

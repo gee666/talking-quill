@@ -4,6 +4,7 @@ import {
   type DictationProfile,
 } from '../../../shared/schemas/dictation-profiles';
 import { SettingsObjectSchema } from '../../../shared/schemas/settings';
+import { LegacyRecordingSettingsSchema } from './legacy-settings-contracts';
 
 const LegacyBuiltInProfileIdV22Schema = z.enum([
   'general',
@@ -39,10 +40,12 @@ const LegacyDictationProfileListV22Schema = z
 
 export const LegacySettingsV22Schema = SettingsObjectSchema.omit({
   schemaVersion: true,
+  recording: true,
   dictationProfiles: true,
 })
   .extend({
     schemaVersion: z.literal(22),
+    recording: LegacyRecordingSettingsSchema,
     dictationProfiles: LegacyDictationProfileListV22Schema,
   })
   .superRefine((settings, context) => {

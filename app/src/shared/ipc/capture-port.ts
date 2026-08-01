@@ -23,6 +23,7 @@ export const CapturePortCommandSchema = z.discriminatedUnion('type', [
       requestId: RequestIdSchema,
       captureId: CaptureIdSchema,
       preferredMicrophoneId: MicrophoneIdSchema.nullable(),
+      includeSystemAudio: z.boolean().default(false),
     })
     .strict(),
   z
@@ -82,6 +83,7 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
       channelCount: z.literal(PCM_CHANNEL_COUNT),
       activeMicrophoneId: MicrophoneIdSchema.nullable(),
       preferredUnavailable: z.boolean(),
+      systemAudioIncluded: z.boolean().default(false),
     })
     .strict(),
   z
@@ -105,7 +107,7 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
       type: z.literal('stream:stopped'),
       requestId: RequestIdSchema.nullable(),
       captureId: CaptureIdSchema,
-      reason: z.enum(['requested', 'device-lost', 'error']),
+      reason: z.enum(['requested', 'device-lost', 'system-audio-lost', 'error']),
     })
     .strict(),
   z
@@ -119,6 +121,7 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
         'device-unavailable',
         'unsupported-audio-format',
         'worklet-unavailable',
+        'system-audio-unavailable',
         'capture-failed',
       ]),
     })

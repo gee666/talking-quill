@@ -19,6 +19,7 @@ use super::{
 use crate::{
     keyboard::{
         ActivationKey, HelperEvent, KeyInput, KeyPhase, KeyboardReducer, ModifierMask, PhysicalKey,
+        SessionCaptureMode, SessionKey,
     },
     platform::{
         CallbackGate, HookStatus, PermissionState, PlatformError, TapRecoveryDecision,
@@ -199,7 +200,8 @@ struct CallbackKeyboard {
     preheld_letters: PreheldLetters,
     activation: ActivationConfig,
     activation_revision_at: u64,
-    capture_enabled_at: u64,
+    escape_capture_enabled_at: u64,
+    enter_capture_enabled_at: u64,
     captured_enter_key_code: Option<u16>,
 }
 
@@ -322,7 +324,9 @@ pub(super) fn start_hook(
 pub(super) fn request_stop(state: &Arc<SharedState>) {
     state.quiescing.store(true, Ordering::Release);
     state.stopping.store(true, Ordering::Release);
-    state.session_capture.store(false, Ordering::Release);
+    state
+        .session_capture_mode
+        .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
 
     // Core Foundation wake-up must not make the coordinator's bounded shutdown
     // path block. The endpoint lock keeps owner cleanup from releasing either
@@ -481,8 +485,8 @@ fn hook_thread(
     context.gate.close();
     context
         .state
-        .session_capture
-        .store(false, Ordering::Release);
+        .session_capture_mode
+        .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
     {
         let mut endpoint = context
             .state
@@ -589,21 +593,35 @@ fn process_owner_commands(context: &CallbackContext) {
                         keyboard.activation = command.mutation.activation;
                     }
                     OwnerMutationKind::SetSessionCapture => {
-                        if command.mutation.session_capture {
+                        let previous = SessionCaptureMode::from_u8(
+                            context.state.session_capture_mode.load(Ordering::Acquire),
+                        );
+                        let next = command.mutation.session_capture_mode;
+                        let enables_escape =
+                            !previous.allows(SessionKey::Escape) && next.allows(SessionKey::Escape);
+                        let enables_enter =
+                            !previous.allows(SessionKey::Enter) && next.allows(SessionKey::Enter);
+                        if enables_escape || enables_enter {
                             keyboard.merge_current_state_as_preheld(native_key_is_down);
-                            keyboard.capture_enabled_at = event_timestamp_now();
+                            let enabled_at = event_timestamp_now();
+                            if enables_escape {
+                                keyboard.escape_capture_enabled_at = enabled_at;
+                            }
+                            if enables_enter {
+                                keyboard.enter_capture_enabled_at = enabled_at;
+                            }
                         }
                         context
                             .state
-                            .session_capture
-                            .store(command.mutation.session_capture, Ordering::Release);
+                            .session_capture_mode
+                            .store(next.as_u8(), Ordering::Release);
                     }
                     OwnerMutationKind::SuspendNativeInput => {
                         keyboard.activation.enabled = false;
                         context
                             .state
-                            .session_capture
-                            .store(false, Ordering::Release);
+                            .session_capture_mode
+                            .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
                         deliver_balancing_events(context, &mut keyboard.reducer);
                         keyboard.captured_enter_key_code = None;
                         keyboard.fence_current_letters();
@@ -827,14 +845,16 @@ fn process_key_event_with_modifiers(
     };
     let tracked_modifiers = keyboard.modifiers.mask();
     let observed_modifiers = event_modifiers.unwrap_or(tracked_modifiers);
-    let capture = context.state.session_capture.load(Ordering::Acquire);
+    let capture_mode =
+        SessionCaptureMode::from_u8(context.state.session_capture_mode.load(Ordering::Acquire));
     let relevant_to_capture = keyboard.reducer.has_captured_sequence()
         || !keyboard.preheld_letters.is_empty()
         || match key {
             PhysicalKey::Letter(_) => {
                 keyboard.activation.enabled && observed_modifiers != ModifierMask::default()
             }
-            PhysicalKey::Escape | PhysicalKey::Enter => capture,
+            PhysicalKey::Escape => capture_mode.allows(SessionKey::Escape),
+            PhysicalKey::Enter => capture_mode.allows(SessionKey::Enter),
             PhysicalKey::Other => false,
         };
     let tracked_state_mismatch = reconcile_held_state
@@ -858,7 +878,12 @@ fn process_key_event_with_modifiers(
     let repeat = tracked_repeat || native_repeat;
     let policy_cutoff = match key {
         PhysicalKey::Letter(_) if keyboard.activation.enabled => keyboard.activation_revision_at,
-        PhysicalKey::Escape | PhysicalKey::Enter if capture => keyboard.capture_enabled_at,
+        PhysicalKey::Escape if capture_mode.allows(SessionKey::Escape) => {
+            keyboard.escape_capture_enabled_at
+        }
+        PhysicalKey::Enter if capture_mode.allows(SessionKey::Enter) => {
+            keyboard.enter_capture_enabled_at
+        }
         _ => 0,
     };
     let predates_policy = policy_cutoff != 0 && event_timestamp <= policy_cutoff;
@@ -898,7 +923,11 @@ fn process_key_event_with_modifiers(
         input,
         activation.bindings,
         accepting && activation.enabled && keyboard.preheld_letters.is_empty(),
-        accepting && capture,
+        if accepting {
+            capture_mode
+        } else {
+            SessionCaptureMode::Off
+        },
         event_timestamp / 1_000_000,
     );
     let planned_event = plan.event();
@@ -1102,7 +1131,7 @@ mod tests {
                 mutation: OwnerMutation {
                     kind: OwnerMutationKind::Configure,
                     activation,
-                    session_capture: false,
+                    session_capture_mode: SessionCaptureMode::Off,
                 },
                 state: Arc::clone(&state),
                 acknowledgement,
@@ -1258,9 +1287,13 @@ mod tests {
         let (capture_context, capture_outbound, _commands) = test_context();
         capture_context
             .state
-            .session_capture
-            .store(true, Ordering::Release);
-        capture_context.keyboard.lock().unwrap().capture_enabled_at = 100;
+            .session_capture_mode
+            .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
+        {
+            let mut keyboard = capture_context.keyboard.lock().unwrap();
+            keyboard.escape_capture_enabled_at = 100;
+            keyboard.enter_capture_enabled_at = 100;
+        }
         assert!(!process_key_event_with_modifiers(
             &capture_context,
             ESCAPE_KEY_CODE,
@@ -1346,7 +1379,10 @@ mod tests {
     #[test]
     fn simultaneous_main_and_keypad_enter_keep_the_captured_source_balanced() {
         let (context, outbound, _commands) = test_context();
-        context.state.session_capture.store(true, Ordering::Release);
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
         assert!(process_key_event(
             &context,
             RETURN_KEY_CODE,
@@ -1388,6 +1424,95 @@ mod tests {
                 key: crate::keyboard::SessionKey::Enter,
                 phase: EventPhase::Up,
             }
+        );
+    }
+
+    #[test]
+    fn capture_mode_changes_preserve_balancing_and_cancel_only_passes_fresh_enter() {
+        let (context, outbound, _commands) = test_context();
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
+        assert!(process_key_event(
+            &context,
+            RETURN_KEY_CODE,
+            KeyPhase::Down,
+            false,
+            false,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Down,
+            },
+        );
+
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::CancelOnly.as_u8(), Ordering::Release);
+        assert!(process_key_event(
+            &context,
+            RETURN_KEY_CODE,
+            KeyPhase::Up,
+            false,
+            false,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Up,
+            },
+        );
+        assert!(!process_key_event(
+            &context,
+            RETURN_KEY_CODE,
+            KeyPhase::Down,
+            false,
+            false,
+        ));
+        assert!(!process_key_event(
+            &context,
+            RETURN_KEY_CODE,
+            KeyPhase::Up,
+            false,
+            false,
+        ));
+
+        assert!(process_key_event(
+            &context,
+            ESCAPE_KEY_CODE,
+            KeyPhase::Down,
+            false,
+            false,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Down,
+            },
+        );
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
+        assert!(process_key_event(
+            &context,
+            ESCAPE_KEY_CODE,
+            KeyPhase::Up,
+            false,
+            false,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Up,
+            },
         );
     }
 
@@ -1461,7 +1586,7 @@ mod tests {
                 mutation: OwnerMutation {
                     kind: OwnerMutationKind::Configure,
                     activation: ActivationConfig::default(),
-                    session_capture: false,
+                    session_capture_mode: SessionCaptureMode::Off,
                 },
                 state: Arc::clone(&state),
                 acknowledgement,
@@ -1500,12 +1625,12 @@ mod tests {
             OwnerMutation {
                 kind: OwnerMutationKind::Configure,
                 activation: updated,
-                session_capture: false,
+                session_capture_mode: SessionCaptureMode::Off,
             },
             OwnerMutation {
                 kind: OwnerMutationKind::SetSessionCapture,
                 activation: ActivationConfig::default(),
-                session_capture: true,
+                session_capture_mode: SessionCaptureMode::Recording,
             },
         ] {
             let state = Arc::new(std::sync::atomic::AtomicU8::new(
@@ -1526,7 +1651,10 @@ mod tests {
         process_owner_commands(&context);
 
         assert_eq!(context.keyboard.lock().unwrap().activation, updated);
-        assert!(context.state.session_capture.load(Ordering::Acquire));
+        assert_eq!(
+            SessionCaptureMode::from_u8(context.state.session_capture_mode.load(Ordering::Acquire)),
+            SessionCaptureMode::Recording,
+        );
         for state in states {
             assert_eq!(owner_command_state(&state), OwnerCommandState::Applied);
         }

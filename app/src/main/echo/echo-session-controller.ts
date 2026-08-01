@@ -46,7 +46,7 @@ import {
   type EchoSessionState,
 } from './session-reducer';
 import { SessionOutcomeWriter } from './session-outcome-writer';
-import { isCapturePhase, isTerminalPhase } from './session-phase';
+import { helperCaptureModeForPhase, isTerminalPhase } from './session-phase';
 
 export { discardChunkPrefix } from './pcm-buffer';
 export type {
@@ -145,7 +145,7 @@ export class EchoSessionController {
     this.#activationTest = new ActivationTestController({
       publish: (state) => this.#publishActivationTest(state),
       requestCaptureOff: () =>
-        this.#captureReconciler.requestBestEffort(false, this.#capture.generation),
+        this.#captureReconciler.requestBestEffort('off', this.#capture.generation),
     });
     this.#capture = new EchoCapturePipeline({
       recording: options.recording,
@@ -167,12 +167,12 @@ export class EchoSessionController {
       if (readiness.status === 'ready') {
         this.#profiles.requestSync();
         this.#captureReconciler.requestBestEffort(
-          isCapturePhase(this.#state.phase),
+          helperCaptureModeForPhase(this.#state.phase),
           this.#capture.generation,
         );
       } else {
         this.#captureReconciler.markAppliedUnknown();
-        this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+        this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
         if (this.#activationTest.state.active) this.#activationTest.stop();
         const message = helperReadinessError(readiness);
         if (message !== null) this.#reportOperationalFailure(message);
@@ -274,7 +274,7 @@ export class EchoSessionController {
       // Treat malformed or out-of-contract native notifications as potentially capture-armed.
       // This preserves fail-open cleanup across mixed helper/app versions.
       this.#captureReconciler.markNativeCaptureArmed();
-      this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+      this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
       this.#reportOperationalFailure('Dictation could not start. Please try again.');
     }
   }
@@ -376,14 +376,14 @@ export class EchoSessionController {
       }
       if (this.#profiles.shortcutCaptureActive) {
         if (startsActivation) {
-          this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+          this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
         }
         return;
       }
       if (this.#activationTest.state.active) {
         this.#activationTest.accept(notification, this.#settings.get().dictationProfiles);
         if (startsActivation) {
-          this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+          this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
         }
         return;
       }
@@ -395,7 +395,7 @@ export class EchoSessionController {
             !this.#isModelReady() ||
             this.#helper.readiness.status !== 'ready'
           ) {
-            this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+            this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
             return;
           }
           const profile = settings.dictationProfiles.find(
@@ -404,7 +404,7 @@ export class EchoSessionController {
               shortcutsEqual(candidate.shortcut, notification.params.shortcut),
           );
           if (profile === undefined) {
-            this.#captureReconciler.requestBestEffort(false, this.#capture.generation);
+            this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
             return;
           }
           this.#sessionSettings = settings;
@@ -439,14 +439,14 @@ export class EchoSessionController {
             this.#dispatch({ type: 'submit', source: 'shortcut' });
           } else {
             this.#captureReconciler.requestBestEffort(
-              isCapturePhase(this.#state.phase),
+              helperCaptureModeForPhase(this.#state.phase),
               this.#capture.generation,
             );
           }
         } else {
           // Active phases which do not own this shortcut explicitly restore their capture state.
           this.#captureReconciler.requestBestEffort(
-            isCapturePhase(this.#state.phase),
+            helperCaptureModeForPhase(this.#state.phase),
             this.#capture.generation,
           );
         }
@@ -518,6 +518,14 @@ export class EchoSessionController {
       );
       this.#capture.arm(sessionSettings);
     }
+    const previousHelperMode = helperCaptureModeForPhase(previous.phase);
+    const nextHelperMode = helperCaptureModeForPhase(next.phase);
+    if (
+      previousHelperMode !== nextHelperMode &&
+      !(previous.phase === 'idle' && next.phase === 'arming')
+    ) {
+      this.#captureReconciler.requestBestEffort(nextHelperMode, this.#capture.generation);
+    }
     this.#capture.observeTransition(previous, next);
   }
 
@@ -588,7 +596,7 @@ export class EchoSessionController {
       // candidates must be reviewed by Smart processing before they can execute.
       const executeImmediately =
         match !== null && (this.#state.processingMode !== 'smart' || match.kind === 'exact');
-      if (executeImmediately && match !== null) {
+      if (executeImmediately) {
         this.#outcomes.discardSmartSession();
         this.#outcomes.setVoiceCommand(match.command);
         this.#dispatch({ type: 'voice-command-matched', transcript: text, command: match.command });

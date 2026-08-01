@@ -121,6 +121,22 @@ describe('settings IPC handler', () => {
     expect(set.mock.calls).toEqual([[true], [false], [false]]);
   });
 
+  it('rejects enabling system audio outside Windows before changing settings', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    const updateSettings = vi.fn();
+    const handlers = createHandlers({
+      platform: 'darwin',
+      state: { getSettings: () => settings, updateSettings },
+      welcome: {},
+      launchAtLogin: { set: vi.fn() },
+    } as unknown as HandlerDependencies);
+
+    await expect(
+      handlers['settings:update']({ recording: { includeSystemAudio: true } }, context),
+    ).rejects.toThrow('System audio capture is unavailable');
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
   it('retries evidence invalidation when the same setting patch is retried', async () => {
     let settings: Settings = structuredClone(DEFAULT_SETTINGS);
     const invalidateMicrophoneBinding = vi

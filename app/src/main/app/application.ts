@@ -39,6 +39,7 @@ import {
 import { ProviderOperationCoordinator, PinnedJsonTransport } from '../providers';
 import type { ProviderMutationService, ProviderService } from '../providers';
 import { MicrophonePermissionController } from '../security/microphone-permission';
+import { SystemAudioCaptureController } from '../security/system-audio-capture';
 import { WelcomeService } from '../welcome/welcome-service';
 import { UpdateService } from '../info/update-service';
 import { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
@@ -153,6 +154,9 @@ export class TalkingQuillApplication {
       this.#settings = settings;
       cleanup.add('settings', () => settings.flush());
       await settings.initialize();
+      if (process.platform !== 'win32' && settings.get().recording.includeSystemAudio) {
+        await settings.update({ recording: { includeSystemAudio: false } });
+      }
       const diagnostics = new DiagnosticLogger(settings, paths.logs);
       this.#diagnostics = diagnostics;
       cleanup.add('diagnostic-logger', () => diagnostics.dispose());
@@ -234,6 +238,8 @@ export class TalkingQuillApplication {
         );
       }
       const microphonePermission = new MicrophonePermissionController();
+      const systemAudioCapture = new SystemAudioCaptureController(captureSession);
+      this.#ownRuntimeDisposer(cleanup, 'system-audio-capture', () => systemAudioCapture.dispose());
       this.#ownRuntimeDisposer(
         cleanup,
         'ui-session-policy',
@@ -246,6 +252,11 @@ export class TalkingQuillApplication {
           allowWorkers: true,
           microphone: {
             controller: microphonePermission,
+            getTrustedCaptureDocument: (webContents) =>
+              getTrustedCaptureDocument(webContents, this.#roles),
+          },
+          systemAudio: {
+            controller: systemAudioCapture,
             getTrustedCaptureDocument: (webContents) =>
               getTrustedCaptureDocument(webContents, this.#roles),
           },
@@ -294,6 +305,7 @@ export class TalkingQuillApplication {
         settings,
         events,
         microphonePermission,
+        systemAudioCapture,
       );
       const updates = new UpdateService(
         new PinnedJsonTransport(undefined, { category: 'update', observeEgress }),

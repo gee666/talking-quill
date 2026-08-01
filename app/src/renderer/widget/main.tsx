@@ -5,7 +5,11 @@ import type { EchoSessionSnapshot } from '../../shared/schemas/echo-session';
 import '../design/global.css';
 import { applyTheme, Button, resolveInitialTheme, Status } from '../design';
 import './widget.css';
-import { isWidgetPointerCancelable, widgetPresentation } from './fallback-label';
+import {
+  isWidgetPointerCancelable,
+  widgetKeyboardGuidance,
+  widgetPresentation,
+} from './fallback-label';
 import { subscribeToWidgetSession } from './session-subscription';
 
 const EMPTY: EchoSessionSnapshot = {
@@ -102,8 +106,7 @@ export function WidgetShell() {
         {presentation.heading}. {presentation.secondary}
       </p>
       <p id="widget-keyboard-equivalents" className="widget-live">
-        This window never takes keyboard focus away from you. Press Enter to finish, Escape to
-        cancel, or your dictation shortcut again to stop. You can also click Stop or Cancel here.
+        This window never takes keyboard focus away from you. {widgetKeyboardGuidance(session)}
       </p>
       <div className="widget-pill">
         <div

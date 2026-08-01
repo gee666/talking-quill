@@ -7,6 +7,7 @@ import { LegacySettingsV20Schema } from './settings-migrations/legacy-settings-v
 import { LegacySettingsV21Schema } from './settings-migrations/legacy-settings-v21';
 import { LegacySettingsV22Schema } from './settings-migrations/legacy-settings-v22';
 import { LegacySettingsV23Schema } from './settings-migrations/legacy-settings-v23';
+import { LegacySettingsV24Schema } from './settings-migrations/legacy-settings-v24';
 import {
   migrateFiveStepWelcome,
   migrateLegacy,
@@ -14,11 +15,13 @@ import {
   migrateSettingsV21,
   migrateSettingsV22,
   migrateSettingsV23,
+  migrateSettingsV24,
   migrateRemovedLargeModel,
   migrateUnverifiedWelcome,
   stripDiagnosticLoggingField,
   stripDictationProfiles,
   stripPiInstallationPath,
+  stripRecordingOptions,
   stripTask12Fields,
 } from './settings-migrations/transforms';
 
@@ -139,12 +142,13 @@ export const SETTINGS_MIGRATIONS: SettingsMigrations = Object.freeze({
   19: (input) =>
     LegacySettingsV20Schema.parse(
       migrateFiveStepWelcome({
-        ...LegacySettingsV19Schema.parse(input),
+        ...LegacySettingsV19Schema.parse(stripRecordingOptions(input)),
         schemaVersion: 20,
       }),
     ),
-  20: (input) => migrateShortcutChords(LegacySettingsV20Schema.parse(input)),
-  21: (input) => migrateSettingsV21(LegacySettingsV21Schema.parse(input)),
-  22: (input) => migrateSettingsV22(LegacySettingsV22Schema.parse(input)),
-  23: (input) => migrateSettingsV23(LegacySettingsV23Schema.parse(input)),
+  20: (input) => migrateShortcutChords(LegacySettingsV20Schema.parse(stripRecordingOptions(input))),
+  21: (input) => migrateSettingsV21(LegacySettingsV21Schema.parse(stripRecordingOptions(input))),
+  22: (input) => migrateSettingsV22(LegacySettingsV22Schema.parse(stripRecordingOptions(input))),
+  23: (input) => migrateSettingsV23(LegacySettingsV23Schema.parse(stripRecordingOptions(input))),
+  24: (input) => migrateSettingsV24(LegacySettingsV24Schema.parse(stripRecordingOptions(input))),
 });

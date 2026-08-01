@@ -6,7 +6,10 @@ use super::{
     CallbackGate, FrontApp, HookStatus, PasteFailure, PasteResult, PermissionState, Permissions,
     Platform, PlatformError, TerminalReason, TerminalSignal,
 };
-use crate::{keyboard::ActivationBindings, protocol::Outbound};
+use crate::{
+    keyboard::{ActivationBindings, SessionCaptureMode},
+    protocol::Outbound,
+};
 
 /// Build-only backend so protocol and reducer tests remain portable. Release
 /// artifacts are produced only for Windows and macOS.
@@ -35,7 +38,7 @@ impl Platform for NativePlatform {
         Ok(())
     }
 
-    fn set_session_capture(&self, _active: bool) -> Result<(), PlatformError> {
+    fn set_session_capture(&self, _mode: SessionCaptureMode) -> Result<(), PlatformError> {
         Ok(())
     }
 

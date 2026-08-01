@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isWidgetPointerCancelable,
   piFallbackLabel,
+  widgetKeyboardGuidance,
   widgetPresentation,
 } from '../../app/src/renderer/widget/fallback-label';
 import {
@@ -113,9 +114,30 @@ describe('Pi widget fallback labels', () => {
     });
   });
 
-  it('keeps pointer Cancel available while transcription and Pi processing can be aborted', () => {
+  it('describes only controls that are active in the current phase', () => {
+    expect(widgetKeyboardGuidance({ ...SMART_SESSION, phase: 'recordingQuick' })).not.toContain(
+      'click Stop',
+    );
+    expect(
+      widgetKeyboardGuidance({
+        ...SMART_SESSION,
+        phase: 'recordingExtended',
+        dictationMode: 'extended',
+      }),
+    ).toContain('click Stop or Cancel');
+    expect(widgetKeyboardGuidance(SMART_SESSION)).toBe(
+      'Press Escape or click Cancel here to stop before text is inserted.',
+    );
+    expect(widgetKeyboardGuidance({ ...SMART_SESSION, phase: 'restoringClipboard' })).not.toContain(
+      'Press Escape',
+    );
+  });
+
+  it('keeps pointer Cancel available through pre-commit insertion only', () => {
     expect(isWidgetPointerCancelable('transcribing')).toBe(true);
     expect(isWidgetPointerCancelable('processingSmart')).toBe(true);
+    expect(isWidgetPointerCancelable('inserting')).toBe(true);
+    expect(isWidgetPointerCancelable('restoringClipboard')).toBe(false);
     expect(isWidgetPointerCancelable('completed')).toBe(false);
     expect(isWidgetPointerCancelable('idle')).toBe(false);
   });

@@ -17,19 +17,23 @@ export type CaptureFailureCode =
   | 'device-unavailable'
   | 'unsupported-audio-format'
   | 'worklet-unavailable'
+  | 'system-audio-unavailable'
   | 'capture-failed';
 
 export interface CaptureStartResult {
   readonly activeMicrophoneId: string | null;
   readonly preferredUnavailable: boolean;
+  readonly systemAudioIncluded: boolean;
   readonly sampleRate: typeof PCM_SAMPLE_RATE;
   readonly channelCount: typeof PCM_CHANNEL_COUNT;
 }
 
+export type CaptureStopReason = 'device-lost' | 'system-audio-lost' | 'error';
+
 export interface CaptureEngineCallbacks {
   readonly onDevicesChanged: (devices: readonly MicrophoneDevice[]) => void;
   readonly onFrame: (samples: Float32Array, rms: number) => void;
-  readonly onUnexpectedStop: (reason: 'device-lost' | 'error') => void;
+  readonly onUnexpectedStop: (reason: CaptureStopReason) => void;
 }
 
 export interface CaptureEnvironment {
@@ -44,14 +48,17 @@ export interface CaptureEnvironment {
 interface ActiveCapture {
   readonly generation: number;
   readonly stream: MediaStream;
+  readonly systemStream: MediaStream | null;
   readonly context: AudioContext;
   readonly source: MediaStreamAudioSourceNode;
+  readonly systemSource: MediaStreamAudioSourceNode | null;
   readonly worklet: AudioWorkletNode;
   readonly onWorkletMessage: (event: MessageEvent<unknown>) => void;
-  readonly onTrackEnded: () => void;
+  readonly onMicrophoneTrackEnded: () => void;
+  readonly onSystemTrackEnded: () => void;
   readonly onProcessorError: () => void;
   phase: 'prepared' | 'activating' | 'active';
-  startupFailure: 'device-lost' | 'error' | null;
+  startupFailure: CaptureStopReason | null;
   connected: boolean;
   flushResolver: (() => void) | null;
   teardownPromise: Promise<void> | null;
@@ -72,6 +79,7 @@ export class CaptureEngine {
   readonly #environment: CaptureEnvironment;
   readonly #callbacks: CaptureEngineCallbacks;
   #active: ActiveCapture | null = null;
+  #startupSettled: Promise<void> | null = null;
   #generation = 0;
   #deviceTimer: number | null = null;
   #disposed = false;
@@ -107,7 +115,26 @@ export class CaptureEngine {
       .slice(0, MAX_MICROPHONE_DEVICES);
   }
 
-  async start(preferredMicrophoneId: string | null): Promise<CaptureStartResult> {
+  start(
+    preferredMicrophoneId: string | null,
+    includeSystemAudio = false,
+  ): Promise<CaptureStartResult> {
+    const startup = this.#start(preferredMicrophoneId, includeSystemAudio);
+    const settled = startup.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#startupSettled = settled;
+    void settled.then(() => {
+      if (this.#startupSettled === settled) this.#startupSettled = null;
+    });
+    return startup;
+  }
+
+  async #start(
+    preferredMicrophoneId: string | null,
+    includeSystemAudio: boolean,
+  ): Promise<CaptureStartResult> {
     if (this.#disposed) throw new CaptureEngineError('capture-failed');
     const generation = ++this.#generation;
     await this.#teardownActive(false);
@@ -139,8 +166,24 @@ export class CaptureEngine {
       throw new CaptureEngineError('capture-failed');
     }
 
+    let systemStream: MediaStream | null = null;
+    if (includeSystemAudio) {
+      try {
+        systemStream = await this.#acquireSystemStream();
+      } catch {
+        stopStream(stream);
+        throw new CaptureEngineError('system-audio-unavailable');
+      }
+      if (generation !== this.#generation) {
+        stopStream(stream);
+        stopStream(systemStream);
+        throw new CaptureEngineError('capture-failed');
+      }
+    }
+
     let context: AudioContext | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
+    let systemSource: MediaStreamAudioSourceNode | null = null;
     let worklet: AudioWorkletNode | null = null;
     let activeInstalled = false;
     try {
@@ -151,15 +194,19 @@ export class CaptureEngine {
       await context.audioWorklet.addModule(this.#environment.workletModuleUrl);
       if (generation !== this.#generation) throw new Error('stale capture');
       source = context.createMediaStreamSource(stream);
+      systemSource = systemStream === null ? null : context.createMediaStreamSource(systemStream);
       worklet = this.#environment.createWorkletNode(context);
       const active: ActiveCapture = {
         generation,
         stream,
+        systemStream,
         context,
         source,
+        systemSource,
         worklet,
         onWorkletMessage: (event) => this.#handleWorkletMessage(event),
-        onTrackEnded: () => this.#handleCaptureFailure(generation, 'device-lost'),
+        onMicrophoneTrackEnded: () => this.#handleCaptureFailure(generation, 'device-lost'),
+        onSystemTrackEnded: () => this.#handleCaptureFailure(generation, 'system-audio-lost'),
         onProcessorError: () => this.#handleCaptureFailure(generation, 'error'),
         phase: 'prepared',
         startupFailure: null,
@@ -173,17 +220,24 @@ export class CaptureEngine {
       worklet.port.addEventListener('message', active.onWorkletMessage);
       worklet.addEventListener('processorerror', active.onProcessorError);
       worklet.port.start();
-      for (const track of stream.getTracks()) track.addEventListener('ended', active.onTrackEnded);
-      if (stream.getTracks().some((track) => track.readyState === 'ended')) {
+      for (const track of active.stream.getTracks()) {
+        track.addEventListener('ended', active.onMicrophoneTrackEnded);
+      }
+      for (const track of active.systemStream?.getTracks() ?? []) {
+        track.addEventListener('ended', active.onSystemTrackEnded);
+      }
+      if (active.stream.getTracks().some((track) => track.readyState === 'ended')) {
         active.startupFailure = 'device-lost';
+      } else if (
+        active.systemStream?.getTracks().some((track) => track.readyState === 'ended') === true
+      ) {
+        active.startupFailure = 'system-audio-lost';
       }
       if (active.startupFailure !== null || generation !== this.#generation) {
         const reason = active.startupFailure;
         ++this.#generation;
         await this.#teardownActive(false);
-        throw new CaptureEngineError(
-          reason === 'device-lost' ? 'device-unavailable' : 'worklet-unavailable',
-        );
+        throw new CaptureEngineError(captureFailureCode(reason));
       }
     } catch (error: unknown) {
       if (this.#active?.generation === generation) {
@@ -191,9 +245,11 @@ export class CaptureEngine {
         await this.#teardownActive(false);
       } else if (!activeInstalled) {
         source?.disconnect();
+        systemSource?.disconnect();
         worklet?.disconnect();
         worklet?.port.close();
         stopStream(stream);
+        if (systemStream !== null) stopStream(systemStream);
         if (context !== null) await context.close().catch(() => undefined);
       }
       if (error instanceof CaptureEngineError) throw error;
@@ -206,6 +262,7 @@ export class CaptureEngine {
     return {
       activeMicrophoneId: reportedDeviceId ?? acquisitionDeviceId,
       preferredUnavailable,
+      systemAudioIncluded: systemStream !== null,
       sampleRate: PCM_SAMPLE_RATE,
       channelCount: PCM_CHANNEL_COUNT,
     };
@@ -225,6 +282,23 @@ export class CaptureEngine {
     });
   }
 
+  async #acquireSystemStream(): Promise<MediaStream> {
+    const stream = await this.#environment.mediaDevices.getDisplayMedia({
+      audio: true,
+      video: true,
+    });
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0 || audioTracks.every((track) => track.readyState === 'ended')) {
+      stopStream(stream);
+      throw new CaptureEngineError('system-audio-unavailable');
+    }
+    for (const track of stream.getVideoTracks()) {
+      stream.removeTrack(track);
+      track.stop();
+    }
+    return stream;
+  }
+
   async activate(): Promise<void> {
     const active = this.#active;
     if (active?.phase !== 'prepared') {
@@ -232,7 +306,8 @@ export class CaptureEngine {
     }
     active.phase = 'activating';
     try {
-      active.source.connect(active.worklet);
+      active.source.connect(active.worklet, 0, 0);
+      active.systemSource?.connect(active.worklet, 0, 1);
       active.worklet.connect(active.context.destination);
       active.connected = true;
       await active.context.resume();
@@ -244,9 +319,7 @@ export class CaptureEngine {
         active.generation !== this.#generation ||
         active.startupFailure !== null
       ) {
-        throw new CaptureEngineError(
-          active.startupFailure === 'device-lost' ? 'device-unavailable' : 'worklet-unavailable',
-        );
+        throw new CaptureEngineError(captureFailureCode(active.startupFailure));
       }
       active.phase = 'active';
     } catch (error: unknown) {
@@ -260,8 +333,10 @@ export class CaptureEngine {
   }
 
   async stop(): Promise<void> {
+    const startupSettled = this.#startupSettled;
     ++this.#generation;
     await this.#teardownActive(true);
+    await startupSettled;
   }
 
   disposeImmediately(): void {
@@ -293,9 +368,11 @@ export class CaptureEngine {
     active.releasePromise ??= (() => {
       this.#removeActiveListeners(active);
       active.source.disconnect();
+      active.systemSource?.disconnect();
       active.worklet.disconnect();
       active.worklet.port.close();
       stopStream(active.stream);
+      if (active.systemStream !== null) stopStream(active.systemStream);
       return active.context.close().catch(() => undefined);
     })();
     return active.releasePromise;
@@ -305,7 +382,10 @@ export class CaptureEngine {
     active.worklet.port.removeEventListener('message', active.onWorkletMessage);
     active.worklet.removeEventListener('processorerror', active.onProcessorError);
     for (const track of active.stream.getTracks()) {
-      track.removeEventListener('ended', active.onTrackEnded);
+      track.removeEventListener('ended', active.onMicrophoneTrackEnded);
+    }
+    for (const track of active.systemStream?.getTracks() ?? []) {
+      track.removeEventListener('ended', active.onSystemTrackEnded);
     }
   }
 
@@ -366,7 +446,7 @@ export class CaptureEngine {
     this.#callbacks.onFrame(samples, rms);
   }
 
-  #handleCaptureFailure(generation: number, reason: 'device-lost' | 'error'): void {
+  #handleCaptureFailure(generation: number, reason: CaptureStopReason): void {
     const active = this.#active;
     if (
       active?.generation !== generation ||
@@ -402,7 +482,7 @@ export function createBrowserCaptureEnvironment(workletModuleUrl: string): Captu
     createAudioContext: () => new AudioContext({ latencyHint: 'interactive' }),
     createWorkletNode: (context) =>
       new AudioWorkletNode(context, CAPTURE_WORKLET_PROCESSOR_NAME, {
-        numberOfInputs: 1,
+        numberOfInputs: 2,
         numberOfOutputs: 1,
         outputChannelCount: [1],
         channelCountMode: 'max',
@@ -411,6 +491,12 @@ export function createBrowserCaptureEnvironment(workletModuleUrl: string): Captu
     setTimeout: (callback, delay) => window.setTimeout(callback, delay),
     clearTimeout: (timer) => window.clearTimeout(timer),
   };
+}
+
+function captureFailureCode(reason: CaptureStopReason | null): CaptureFailureCode {
+  if (reason === 'device-lost') return 'device-unavailable';
+  if (reason === 'system-audio-lost') return 'system-audio-unavailable';
+  return 'worklet-unavailable';
 }
 
 function stopStream(stream: MediaStream): void {

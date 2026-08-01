@@ -16,6 +16,7 @@ import {
   type HelperPasteResult,
   type HelperPermissions,
   type HelperResult,
+  type HelperSessionCaptureMode,
 } from '../../shared/helper/protocol';
 import {
   DEFAULT_HELPER_PERMISSIONS,
@@ -171,8 +172,8 @@ export class HelperClient {
     return this.#activation.configure(enabled, bindings);
   }
 
-  setSessionCapture(active: boolean) {
-    return this.request('session.set_capture', { active });
+  setSessionCapture(mode: HelperSessionCaptureMode) {
+    return this.request('session.set_capture', { mode });
   }
 
   async resetSessionCapture(signal?: AbortSignal): Promise<void> {
@@ -196,7 +197,7 @@ export class HelperClient {
       if (this.#readiness.status !== 'ready') {
         throw new HelperClientError('not-running', 'Native helper capture reset is unavailable');
       }
-      await this.setSessionCapture(false);
+      await this.setSessionCapture('off');
       this.#assertResetAllowed(revision, signal);
     } catch (error: unknown) {
       if (signal?.aborted === true || !this.#desiredRunning) {
@@ -374,7 +375,7 @@ export class HelperClient {
       try {
         await this.request(
           'session.set_capture',
-          { active: false },
+          { mode: 'off' },
           250,
           undefined,
           undefined,

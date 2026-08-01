@@ -149,15 +149,17 @@ export function DashboardScreen({
           </label>
           <ul className="stack">
             <li>
-              <strong>Quick note:</strong> press your shortcut and let go straight away. Talking
-              Quill writes your words once you stop talking.
+              <strong>Quick note:</strong> press your shortcut and let go straight away.{' '}
+              {settings.recording.autoSubmitOnSilence
+                ? 'Press Enter when you are done, or let Talking Quill finish after your chosen pause.'
+                : 'Press Enter or repeat your shortcut when you are done.'}
             </li>
             <li>
               <strong>Longer note:</strong> hold the last key of the shortcut for more than{' '}
               {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses.
             </li>
             <li>To finish a longer note, press Enter or use your shortcut again.</li>
-            <li>Press Escape at any time to throw the recording away.</li>
+            <li>Press Escape before insertion to cancel at any recording or processing stage.</li>
           </ul>
           <p className="hint">
             Each shortcut uses its own setting: Raw writes exactly what you said, Smart lets an AI

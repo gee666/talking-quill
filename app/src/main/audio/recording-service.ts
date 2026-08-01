@@ -4,6 +4,7 @@ import { CAPTURE_CANCEL_TIMEOUT_MS } from '../../shared/constants/audio';
 import type { IpcEventEmitter } from '../ipc/event-emitter';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { MicrophonePermissionController } from '../security/microphone-permission';
+import type { SystemAudioCaptureController } from '../security/system-audio-capture';
 import type {
   MicrophoneDevice,
   MicrophoneDeviceList,
@@ -16,12 +17,18 @@ const LEVEL_EVENT_INTERVAL_MS = 50;
 
 export interface DictationCaptureCallbacks {
   readonly onFrame: (samples: Float32Array, rms: number) => void;
-  readonly onUnexpectedStop: (reason: 'device-unavailable' | 'capture-unavailable') => void;
+  readonly onUnexpectedStop: (
+    reason: 'device-unavailable' | 'system-audio-unavailable' | 'capture-unavailable',
+  ) => void;
 }
 
 export interface DictationCapture {
   readonly captureId: string;
   readonly activeMicrophoneId: string | null;
+}
+
+export interface DictationCaptureOptions {
+  readonly includeSystemAudio?: boolean;
 }
 
 interface ActiveDictation extends DictationCapture {
@@ -37,6 +44,7 @@ export class RecordingService {
   readonly #settings: SettingsStore;
   readonly #events: IpcEventEmitter;
   readonly #permission: MicrophonePermissionController;
+  readonly #systemAudio: SystemAudioCaptureController | null;
   readonly #removeFrameListener: () => void;
   readonly #removeDeviceListener: () => void;
   readonly #removeStopListener: () => void;
@@ -66,11 +74,13 @@ export class RecordingService {
     settings: SettingsStore,
     events: IpcEventEmitter,
     permission: MicrophonePermissionController,
+    systemAudio: SystemAudioCaptureController | null = null,
   ) {
     this.#capture = capture;
     this.#settings = settings;
     this.#events = events;
     this.#permission = permission;
+    this.#systemAudio = systemAudio;
     const permissionState = permission.getStatus();
     this.#state =
       permissionState === 'denied' || permissionState === 'restricted'
@@ -123,6 +133,7 @@ export class RecordingService {
       this.#dictation = null;
       this.#clearOwner();
       this.#permission.release(captureId);
+      this.#systemAudio?.release(captureId);
       if (reason === 'device-unavailable') this.#notifyMicrophoneUnavailable();
       if (dictation !== null) {
         try {
@@ -135,7 +146,7 @@ export class RecordingService {
       this.#setState({
         status: 'unavailable',
         permission: this.#permission.getStatus(),
-        reason,
+        reason: reason === 'system-audio-unavailable' ? 'capture-unavailable' : reason,
       });
     });
   }
@@ -261,7 +272,11 @@ export class RecordingService {
     return this.getState();
   }
 
-  async startDictation(callbacks: DictationCaptureCallbacks): Promise<DictationCapture> {
+  async startDictation(
+    callbacks: DictationCaptureCallbacks,
+    options: DictationCaptureOptions = {},
+  ): Promise<DictationCapture> {
+    const includeSystemAudio = options.includeSystemAudio === true;
     const operationGeneration = ++this.#operationGeneration;
     this.#pendingDictationGeneration = operationGeneration;
     const previousStop = this.#stopActive();
@@ -291,7 +306,17 @@ export class RecordingService {
           preferredMicrophoneId === null ? 1 : 2,
         );
         try {
-          const started = await this.#capture.start(preferredMicrophoneId, captureId);
+          if (includeSystemAudio) {
+            if (this.#systemAudio?.supported !== true) {
+              throw new CaptureClientError('system-audio-unavailable');
+            }
+            this.#systemAudio.authorize(captureWebContents, captureId);
+          }
+          const started = await this.#capture.start(
+            preferredMicrophoneId,
+            captureId,
+            includeSystemAudio,
+          );
           if (operationGeneration !== this.#operationGeneration) {
             await this.#stopActive();
             return;
@@ -409,6 +434,7 @@ export class RecordingService {
     this.#removeDeviceListener();
     this.#removeStopListener();
     this.#permission.releaseAll();
+    this.#systemAudio?.releaseAll();
     this.#onMicrophoneUnavailable = null;
     this.#capture.dispose();
   }
@@ -476,6 +502,7 @@ export class RecordingService {
     this.#activeCaptureId = null;
     if (dictation?.captureId === captureId) this.#drainingDictation = dictation;
     this.#permission.release(captureId);
+    this.#systemAudio?.release(captureId);
 
     const promise = this.#stopCapture(captureId);
     const stop = { promise };
@@ -529,6 +556,7 @@ export class RecordingService {
     this.#drainingDictation = null;
     this.#clearOwner();
     this.#permission.release(captureId);
+    this.#systemAudio?.release(captureId);
     this.#setState({
       status: 'unavailable',
       permission: this.#permission.getStatus(),

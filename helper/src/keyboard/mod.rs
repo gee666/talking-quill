@@ -673,6 +673,40 @@ impl From<KeyPhase> for EventPhase {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[repr(u8)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionCaptureMode {
+    #[default]
+    Off,
+    Recording,
+    CancelOnly,
+}
+
+impl SessionCaptureMode {
+    #[must_use]
+    pub const fn allows(self, key: SessionKey) -> bool {
+        match key {
+            SessionKey::Escape => !matches!(self, Self::Off),
+            SessionKey::Enter => matches!(self, Self::Recording),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub(crate) const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Recording,
+            2 => Self::CancelOnly,
+            _ => Self::Off,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionKey {

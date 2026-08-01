@@ -58,6 +58,7 @@ describe('capture MessagePort contracts', () => {
         requestId,
         captureId,
         preferredMicrophoneId: null,
+        includeSystemAudio: false,
       },
       'stream:activate': { type: 'stream:activate', requestId, captureId },
       'stream:stop': { type: 'stream:stop', requestId, captureId },
@@ -65,7 +66,7 @@ describe('capture MessagePort contracts', () => {
     const messagesByType: {
       [Type in CapturePortMessage['type']]: Extract<CapturePortMessage, { type: Type }>;
     } = {
-      'port:ready': { type: 'port:ready', protocolVersion: 1 },
+      'port:ready': { type: 'port:ready', protocolVersion: 2 },
       'devices:list-result': {
         type: 'devices:list-result',
         requestId,
@@ -83,6 +84,7 @@ describe('capture MessagePort contracts', () => {
         channelCount: 1,
         activeMicrophoneId: null,
         preferredUnavailable: false,
+        systemAudioIncluded: false,
       },
       'stream:activated': { type: 'stream:activated', requestId, captureId },
       'stream:frame': {
@@ -156,10 +158,10 @@ describe('capture MessagePort contracts', () => {
   });
 
   it('accepts only the versioned descriptor and strict commands', () => {
-    expect(CapturePortDescriptorSchema.parse({ protocolVersion: 1 })).toEqual({
-      protocolVersion: 1,
+    expect(CapturePortDescriptorSchema.parse({ protocolVersion: 2 })).toEqual({
+      protocolVersion: 2,
     });
-    expect(CapturePortDescriptorSchema.safeParse({ protocolVersion: 2 }).success).toBe(false);
+    expect(CapturePortDescriptorSchema.safeParse({ protocolVersion: 1 }).success).toBe(false);
     expect(
       CapturePortCommandSchema.safeParse({
         type: 'stream:start',

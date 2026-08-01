@@ -122,7 +122,11 @@ function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
   if (typeof v23 !== 'object' || v23 === null) {
     throw new Error('V22 migration did not emit settings');
   }
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>));
+  const v24 = SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>);
+  if (typeof v24 !== 'object' || v24 === null) {
+    throw new Error('V23 migration did not emit settings');
+  }
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>));
 }
 
 function validSettings(
@@ -135,7 +139,11 @@ function validSettings(
       enabled: overrides.enabled ?? true,
       closeToTray: overrides.closeToTray ?? true,
     },
-    recording: { preferredMicrophoneId: null, silencePreset: 'average' },
+    recording: {
+      ...structuredClone(DEFAULT_SETTINGS.recording),
+      preferredMicrophoneId: null,
+      silencePreset: 'average',
+    },
   });
 }
 
@@ -356,6 +364,7 @@ describe('SettingsStore', () => {
     await restarted.initialize();
     expect(restarted.get().app).toMatchObject({ enabled: false, closeToTray: false });
     expect(restarted.get().recording).toEqual({
+      ...DEFAULT_SETTINGS.recording,
       preferredMicrophoneId: 'studio-mic',
       silencePreset: 'relaxed',
     });
@@ -1086,6 +1095,7 @@ describe('SettingsStore', () => {
       ...legacy,
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       app: { ...structuredClone(DEFAULT_SETTINGS.app), ...legacy.app },
+      recording: { ...structuredClone(DEFAULT_SETTINGS.recording), ...legacy.recording },
       transcription: structuredClone(DEFAULT_SETTINGS.transcription),
       dictationProfiles: structuredClone(DEFAULT_SETTINGS.dictationProfiles),
       privacy: structuredClone(DEFAULT_SETTINGS.privacy),
@@ -1212,7 +1222,10 @@ describe('SettingsStore', () => {
     void _activationKey;
     expect(migrated.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
     expect(migrated.app).toEqual({ ...structuredClone(DEFAULT_SETTINGS.app), ...legacyApp });
-    expect(migrated.recording).toEqual(legacy.recording);
+    expect(migrated.recording).toEqual({
+      ...DEFAULT_SETTINGS.recording,
+      ...legacy.recording,
+    });
     expect(migrated.transcription).toEqual(
       'transcription' in legacy
         ? {
@@ -1758,7 +1771,12 @@ describe('SettingsStore', () => {
     await store.initialize();
 
     await store.update({
-      recording: { preferredMicrophoneId: 'studio-mic', silencePreset: 'relaxed' },
+      recording: {
+        preferredMicrophoneId: 'studio-mic',
+        silencePreset: 'relaxed',
+        autoSubmitOnSilence: false,
+        includeSystemAudio: true,
+      },
     });
     await store.update({
       smartProcessing: {
@@ -1771,9 +1789,16 @@ describe('SettingsStore', () => {
     expect(store.get().recording).toEqual({
       preferredMicrophoneId: 'studio-mic',
       silencePreset: 'relaxed',
+      autoSubmitOnSilence: false,
+      includeSystemAudio: true,
     });
 
     await store.update({ recording: { silencePreset: 'aggressive' } });
+    expect(store.get().recording).toMatchObject({
+      silencePreset: 'aggressive',
+      autoSubmitOnSilence: false,
+      includeSystemAudio: true,
+    });
     expect(store.get().smartProcessing).toMatchObject({
       selectedProviderId: 'generic-openai',
       providers: {

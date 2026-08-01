@@ -16,7 +16,8 @@ null
 {"jsonrpc":"2.0","id":1,"method":"unknown","params":{}}
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}
 {"jsonrpc":"2.0","id":1,"method":"activation.configure","params":{"enabled":true,"key":"F1"}}
-{"jsonrpc":"2.0","id":1,"method":"session.set_capture","params":{"active":"yes"}}
+{"jsonrpc":"2.0","id":1,"method":"session.set_capture","params":{"active":true}}
+{"jsonrpc":"2.0","id":1,"method":"session.set_capture","params":{"mode":"cancel_only"}}
 {"jsonrpc":"2.0","id":1,"method":"paste.inject","params":{"shell":"whoami"}}
 {"jsonrpc":"2.0","id":1,"id":2,"method":"ping","params":{}}
 {"jsonrpc":"2.0","id":1,"method":"ping","method":"shutdown","params":{}}

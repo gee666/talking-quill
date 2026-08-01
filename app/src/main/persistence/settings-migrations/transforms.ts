@@ -39,6 +39,7 @@ import {
 } from '../../../shared/schemas/vocabulary';
 import { LegacySettingsV22Schema, type LegacySettingsV22 } from './legacy-settings-v22';
 import { LegacySettingsV23Schema, type LegacySettingsV23 } from './legacy-settings-v23';
+import { LegacySettingsV24Schema, type LegacySettingsV24 } from './legacy-settings-v24';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
@@ -69,6 +70,13 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
       processingMode: ProcessingModeSchema.parse(legacyApp.defaultProcessingMode),
     };
     migrated.dictationProfiles = profiles;
+  }
+  const recording = migrated.recording;
+  if (typeof recording === 'object' && recording !== null && !Array.isArray(recording)) {
+    migrated.recording = {
+      ...structuredClone(DEFAULT_SETTINGS.recording),
+      ...(recording as Record<string, unknown>),
+    };
   }
   const transcription = migrated.transcription;
   if (
@@ -201,7 +209,7 @@ export function migrateSettingsV22(legacy: LegacySettingsV22): LegacySettingsV23
   });
 }
 
-export function migrateSettingsV23(legacy: LegacySettingsV23): Settings {
+export function migrateSettingsV23(legacy: LegacySettingsV23): LegacySettingsV24 {
   const legacyPromptToEnglish: Shortcut = {
     modifiers: { ctrl: false, alt: true, shift: false, meta: false },
     keys: ['X', 'P', 'E'],
@@ -228,16 +236,45 @@ export function migrateSettingsV23(legacy: LegacySettingsV23): Settings {
     }
     return structuredClone(profile);
   });
-  return SettingsSchema.parse({
+  return LegacySettingsV24Schema.parse({
     ...structuredClone(legacy),
-    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    schemaVersion: 24,
     dictationProfiles,
   });
 }
 
-export function stripDictationProfiles(input: unknown): unknown {
+export function migrateSettingsV24(legacy: LegacySettingsV24): Settings {
+  return SettingsSchema.parse({
+    ...structuredClone(legacy),
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    recording: {
+      ...structuredClone(DEFAULT_SETTINGS.recording),
+      ...structuredClone(legacy.recording),
+    },
+  });
+}
+
+export function stripRecordingOptions(input: unknown): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
   const clone = structuredClone(input) as Record<string, unknown>;
+  const recording = clone.recording;
+  if (typeof recording === 'object' && recording !== null && !Array.isArray(recording)) {
+    delete (recording as Record<string, unknown>).autoSubmitOnSilence;
+    delete (recording as Record<string, unknown>).includeSystemAudio;
+  }
+  return clone;
+}
+
+export function stripDictationProfiles(input: unknown): unknown {
+  const withoutRecordingOptions = stripRecordingOptions(input);
+  if (
+    typeof withoutRecordingOptions !== 'object' ||
+    withoutRecordingOptions === null ||
+    Array.isArray(withoutRecordingOptions)
+  ) {
+    return withoutRecordingOptions;
+  }
+  const clone = structuredClone(withoutRecordingOptions) as Record<string, unknown>;
   delete clone.dictationProfiles;
   return clone;
 }
@@ -340,7 +377,10 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
           ? legacy.app.launchAtLogin
           : DEFAULT_SETTINGS.app.launchAtLogin,
     },
-    recording: legacy.recording ?? structuredClone(DEFAULT_SETTINGS.recording),
+    recording: {
+      ...structuredClone(DEFAULT_SETTINGS.recording),
+      ...(legacy.recording ?? {}),
+    },
     transcription: migrateLegacyTranscription(legacy.transcription),
     dictationProfiles: profiles,
     privacy: {

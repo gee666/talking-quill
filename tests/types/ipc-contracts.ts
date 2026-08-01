@@ -3,12 +3,12 @@ import type { InvokeRequest, PortTransferDescriptor } from '../../app/src/shared
 
 export const validEnabledRequest: InvokeRequest<'app:set-enabled'> = { enabled: true };
 export const validCapturePort: PortTransferDescriptor<'capture:port'> = {
-  protocolVersion: 1,
+  protocolVersion: 2,
 };
 
 export const invalidCapturePort: PortTransferDescriptor<'capture:port'> = {
   // @ts-expect-error port descriptors are channel-specific and versioned
-  protocolVersion: 2,
+  protocolVersion: 1,
 };
 export const validProviderRequest: InvokeRequest<'provider:list-models'> = {
   providerId: 'ollama',

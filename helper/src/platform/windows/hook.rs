@@ -33,7 +33,7 @@ use super::{front_app::front_app, paste::inject_paste};
 use crate::{
     keyboard::{
         ActivationBindings, ActivationKey, HelperEvent, KeyInput, KeyPhase, KeyboardReducer,
-        ModifierMask, PhysicalKey, PhysicalKeyTracker,
+        ModifierMask, PhysicalKey, PhysicalKeyTracker, SessionCaptureMode,
     },
     platform::{
         CallbackGate, FrontApp, HookStatus, PasteResult, PermissionState, Permissions, Platform,
@@ -165,7 +165,7 @@ struct ActivationConfig {
 }
 
 struct SharedState {
-    session_capture: AtomicBool,
+    session_capture_mode: AtomicU8,
     hook_status: AtomicU8,
     stopping: AtomicBool,
 }
@@ -173,7 +173,7 @@ struct SharedState {
 impl SharedState {
     fn new() -> Self {
         Self {
-            session_capture: AtomicBool::new(false),
+            session_capture_mode: AtomicU8::new(SessionCaptureMode::Off.as_u8()),
             hook_status: AtomicU8::new(hook_status_to_u8(HookStatus::Unavailable)),
             stopping: AtomicBool::new(false),
         }
@@ -381,7 +381,7 @@ enum OwnerMutationKind {
 struct OwnerMutation {
     kind: OwnerMutationKind,
     activation: ActivationConfig,
-    session_capture: bool,
+    session_capture_mode: SessionCaptureMode,
 }
 
 impl OwnerMutation {
@@ -389,15 +389,15 @@ impl OwnerMutation {
         Self {
             kind: OwnerMutationKind::Configure,
             activation,
-            session_capture: false,
+            session_capture_mode: SessionCaptureMode::Off,
         }
     }
 
-    fn set_session_capture(active: bool) -> Self {
+    fn set_session_capture(mode: SessionCaptureMode) -> Self {
         Self {
             kind: OwnerMutationKind::SetSessionCapture,
             activation: ActivationConfig::default(),
-            session_capture: active,
+            session_capture_mode: mode,
         }
     }
 }
@@ -623,9 +623,16 @@ impl Platform for NativePlatform {
         )
     }
 
-    fn set_session_capture(&self, active: bool) -> Result<(), PlatformError> {
+    fn set_session_capture(&self, mode: SessionCaptureMode) -> Result<(), PlatformError> {
+        if mode == SessionCaptureMode::Off {
+            // Fail open at the caller's commit boundary. The owner command acknowledges the
+            // mutation without clearing reducer ownership needed to balance an already-held key.
+            self.state
+                .session_capture_mode
+                .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
+        }
         self.submit_owner_mutation(
-            OwnerMutation::set_session_capture(active),
+            OwnerMutation::set_session_capture(mode),
             TerminalReason::OwnerThreadUnresponsive,
         )
     }
@@ -716,10 +723,10 @@ fn process_owner_commands(context: &CallbackContext, receiver: &Receiver<OwnerCo
                 Err(_) => false,
             },
             OwnerMutationKind::SetSessionCapture => {
-                context
-                    .state
-                    .session_capture
-                    .store(command.mutation.session_capture, Ordering::Release);
+                context.state.session_capture_mode.store(
+                    command.mutation.session_capture_mode.as_u8(),
+                    Ordering::Release,
+                );
                 true
             }
         };
@@ -837,8 +844,8 @@ fn hook_thread(
     context.gate.close();
     context
         .state
-        .session_capture
-        .store(false, Ordering::Release);
+        .session_capture_mode
+        .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
     while let Ok(command) = owner_commands.try_recv() {
         let _ = cancel_owner_command(&command.state);
         let _ = command
@@ -1062,7 +1069,8 @@ fn process_hook_record_at(
         return false;
     }
     let activation = keyboard.activation;
-    let capture = context.state.session_capture.load(Ordering::Acquire);
+    let capture_mode =
+        SessionCaptureMode::from_u8(context.state.session_capture_mode.load(Ordering::Acquire));
     let plan = keyboard.reducer.plan_bindings_at(
         input,
         activation.bindings,
@@ -1071,7 +1079,11 @@ fn process_hook_record_at(
             && keyboard.activation_fenced_letters == 0
             && !keyboard.modifiers_fenced
             && !suppress_activation,
-        accepting && capture,
+        if accepting {
+            capture_mode
+        } else {
+            SessionCaptureMode::Off
+        },
         observation.observed_at_ms,
     );
     let planned_event = plan.event();
@@ -1386,7 +1398,7 @@ mod tests {
         let mut responses = Vec::new();
         for mutation in [
             OwnerMutation::configure(updated),
-            OwnerMutation::set_session_capture(true),
+            OwnerMutation::set_session_capture(SessionCaptureMode::Recording),
         ] {
             let state = Arc::new(AtomicU8::new(OwnerCommandState::Pending as u8));
             let (ack, response) = bounded(1);
@@ -1404,7 +1416,10 @@ mod tests {
         process_owner_commands(&context, &command_rx);
 
         assert_eq!(context.keyboard.lock().unwrap().activation, updated);
-        assert!(context.state.session_capture.load(Ordering::Acquire));
+        assert_eq!(
+            SessionCaptureMode::from_u8(context.state.session_capture_mode.load(Ordering::Acquire)),
+            SessionCaptureMode::Recording,
+        );
         for state in states {
             assert_eq!(owner_command_state(&state), OwnerCommandState::Applied);
         }
@@ -2072,7 +2087,10 @@ mod tests {
         // Activation delivery alone must not globally capture Enter/Escape.
         // Electron explicitly enables that capture only after accepting and
         // visibly starting the session.
-        assert!(!context.state.session_capture.load(Ordering::Acquire));
+        assert_eq!(
+            SessionCaptureMode::from_u8(context.state.session_capture_mode.load(Ordering::Acquire)),
+            SessionCaptureMode::Off,
+        );
         assert!(!record(
             &context,
             VK_ESCAPE,
@@ -2304,7 +2322,10 @@ mod tests {
         ] {
             for release_accepted_first in [false, true] {
                 let (context, outbound, _terminal) = test_context(4);
-                context.state.session_capture.store(true, Ordering::Release);
+                context
+                    .state
+                    .session_capture_mode
+                    .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
 
                 assert!(enter(&context, first, KeyPhase::Down));
                 assert_eq!(
@@ -2349,7 +2370,10 @@ mod tests {
         let (context, outbound, _terminal) = test_context(4);
 
         assert!(!enter(&context, EnterSource::Main, KeyPhase::Down));
-        context.state.session_capture.store(true, Ordering::Release);
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
         assert!(!enter(&context, EnterSource::Main, KeyPhase::Down));
         assert!(enter(&context, EnterSource::Numpad, KeyPhase::Down));
         assert_eq!(
@@ -2363,8 +2387,8 @@ mod tests {
 
         context
             .state
-            .session_capture
-            .store(false, Ordering::Release);
+            .session_capture_mode
+            .store(SessionCaptureMode::CancelOnly.as_u8(), Ordering::Release);
         apply_config(&context, ActivationConfig::default());
         assert!(!enter(&context, EnterSource::Main, KeyPhase::Up));
         assert!(enter(&context, EnterSource::Numpad, KeyPhase::Up));
@@ -2379,9 +2403,55 @@ mod tests {
     }
 
     #[test]
+    fn cancel_only_captures_escape_but_passes_enter_and_balances_after_off() {
+        let (context, outbound, _terminal) = test_context(4);
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::CancelOnly.as_u8(), Ordering::Release);
+
+        assert!(!enter(&context, EnterSource::Main, KeyPhase::Down));
+        assert!(!enter(&context, EnterSource::Main, KeyPhase::Up));
+        assert!(record(
+            &context,
+            VK_ESCAPE,
+            PhysicalKey::Escape,
+            KeyPhase::Down,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Down,
+            },
+        );
+
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Off.as_u8(), Ordering::Release);
+        assert!(record(
+            &context,
+            VK_ESCAPE,
+            PhysicalKey::Escape,
+            KeyPhase::Up,
+        ));
+        assert_eq!(
+            receive_event(&outbound),
+            HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Up,
+            },
+        );
+    }
+
+    #[test]
     fn escape_and_enter_capture_remains_paired_and_modifier_independent() {
         let (context, outbound, _terminal) = test_context(8);
-        context.state.session_capture.store(true, Ordering::Release);
+        context
+            .state
+            .session_capture_mode
+            .store(SessionCaptureMode::Recording.as_u8(), Ordering::Release);
         modifier(&context, VK_LWIN, KeyPhase::Down);
         for (key, session_key) in [
             (PhysicalKey::Escape, SessionKey::Escape),

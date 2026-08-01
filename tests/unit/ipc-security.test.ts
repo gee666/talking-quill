@@ -186,7 +186,7 @@ describe('typed IPC registry', () => {
     ]);
     expect(portTransferRegistry['capture:port'].roles).toEqual(['capture']);
     expect(
-      portTransferRegistry['capture:port'].descriptor.safeParse({ protocolVersion: 2 }).success,
+      portTransferRegistry['capture:port'].descriptor.safeParse({ protocolVersion: 1 }).success,
     ).toBe(false);
   });
 

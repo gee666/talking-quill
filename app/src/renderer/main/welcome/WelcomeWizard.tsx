@@ -294,14 +294,17 @@ export function WelcomeWizard({
           <ul>
             <li>
               <strong>Quick note:</strong> press your shortcut and let go of the last key straight
-              away. Talking Quill types your words once you stop talking.
+              away.{' '}
+              {settings.recording.autoSubmitOnSilence
+                ? 'Press Enter when you are done, or use automatic finishing after a pause.'
+                : 'Press Enter or repeat your shortcut when you are done.'}
             </li>
             <li>
               <strong>Longer note:</strong> hold that last key for more than{' '}
               {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses until
               you press Enter, use the shortcut again, or click Stop.
             </li>
-            <li>Press Escape at any point to throw the recording away.</li>
+            <li>Press Escape before insertion to cancel recording or processing.</li>
           </ul>
           <p>Shortcuts can be changed anytime in Settings under Dictation profiles.</p>
           <Status

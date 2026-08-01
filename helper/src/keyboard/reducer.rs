@@ -1,6 +1,6 @@
 use super::{
     ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, KeyInput,
-    KeyPhase, ModifierMask, PhysicalKey, ProfileId, SessionKey, Shortcut,
+    KeyPhase, ModifierMask, PhysicalKey, ProfileId, SessionCaptureMode, SessionKey, Shortcut,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -118,7 +118,7 @@ impl KeyboardReducer {
         input: KeyInput,
         activation_key: ActivationKey,
         activation_enabled: bool,
-        session_capture: bool,
+        session_capture: SessionCaptureMode,
     ) -> DecisionPlan {
         let shortcut = Shortcut::legacy_alt_letter(activation_key, input.modifiers.shift());
         let bindings =
@@ -133,7 +133,7 @@ impl KeyboardReducer {
         input: KeyInput,
         bindings: ActivationBindings,
         activation_enabled: bool,
-        session_capture: bool,
+        session_capture: SessionCaptureMode,
     ) -> DecisionPlan {
         self.plan_bindings_at(input, bindings, activation_enabled, session_capture, 0)
     }
@@ -144,7 +144,7 @@ impl KeyboardReducer {
         input: KeyInput,
         bindings: ActivationBindings,
         activation_enabled: bool,
-        session_capture: bool,
+        session_capture: SessionCaptureMode,
         observed_at_ms: u64,
     ) -> DecisionPlan {
         self.plan_input(
@@ -161,7 +161,7 @@ impl KeyboardReducer {
         input: KeyInput,
         bindings: ActivationBindings,
         activation_enabled: bool,
-        session_capture: bool,
+        session_capture: SessionCaptureMode,
         observed_at_ms: u64,
     ) -> DecisionPlan {
         if input.injected {
@@ -429,7 +429,7 @@ impl KeyboardReducer {
         &self,
         input: KeyInput,
         key: SessionKey,
-        session_capture: bool,
+        session_capture: SessionCaptureMode,
     ) -> DecisionPlan {
         let state = match key {
             SessionKey::Escape => self.escape,
@@ -463,7 +463,7 @@ impl KeyboardReducer {
                 }
             }
             SequenceState::Idle => {
-                if input.repeat || !session_capture || input.phase != KeyPhase::Down {
+                if input.repeat || !session_capture.allows(key) || input.phase != KeyPhase::Down {
                     return DecisionPlan::unchanged(self, false);
                 }
 

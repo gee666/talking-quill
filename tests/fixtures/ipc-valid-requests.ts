@@ -17,6 +17,8 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
   'info:status': {},
   'info:check-update': { operationId: OPERATION },
   'info:cancel-update': { operationId: OPERATION },
+  'info:update-state': {},
+  'info:apply-update': {},
   'info:open-permission': { permission: 'microphone' },
   'info:open-location': { location: 'data' },
   'info:open-release': { url: 'https://github.com/example/project/releases/tag/v1.0.0' },

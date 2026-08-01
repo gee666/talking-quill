@@ -16,21 +16,28 @@ import {
   MicrophonePermissionController,
   type MicrophonePermissionPlatform,
 } from '../../app/src/main/security/microphone-permission';
+import type { SystemAudioCaptureController } from '../../app/src/main/security/system-audio-capture';
 
 class FakeCaptureClient {
   readonly attach = vi.fn();
   readonly listDevices = vi.fn(() =>
     Promise.resolve([{ deviceId: 'default', label: 'Default', isDefault: true }]),
   );
-  readonly start = vi.fn<(preferred: string | null, captureId: string) => Promise<CaptureStarted>>(
-    (_preferred, captureId) =>
-      Promise.resolve({
-        captureId,
-        activeMicrophoneId: 'default',
-        preferredUnavailable: false,
-        sampleRate: 16_000,
-        channelCount: 1,
-      }),
+  readonly start = vi.fn<
+    (
+      preferred: string | null,
+      captureId: string,
+      includeSystemAudio?: boolean,
+    ) => Promise<CaptureStarted>
+  >((_preferred, captureId, includeSystemAudio) =>
+    Promise.resolve({
+      captureId,
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+      systemAudioIncluded: includeSystemAudio === true,
+      sampleRate: 16_000,
+      channelCount: 1,
+    }),
   );
   readonly activate = vi.fn<(captureId: string) => Promise<void>>(() => Promise.resolve());
   readonly stop = vi.fn(() => Promise.resolve());
@@ -98,6 +105,7 @@ function harness(
   options: {
     readonly permission?: 'not-determined' | 'granted' | 'denied' | 'restricted';
     readonly preferredMicrophoneId?: string | null;
+    readonly systemAudioSupported?: boolean;
   } = {},
 ) {
   const capture = new FakeCaptureClient();
@@ -105,6 +113,7 @@ function harness(
     get: () => ({
       ...structuredClone(DEFAULT_SETTINGS),
       recording: {
+        ...structuredClone(DEFAULT_SETTINGS.recording),
         preferredMicrophoneId: options.preferredMicrophoneId ?? null,
         silencePreset: 'average' as const,
       },
@@ -117,11 +126,18 @@ function harness(
     openExternal: () => Promise.resolve(),
   };
   const permission = new MicrophonePermissionController(permissionPlatform);
+  const systemAudio = {
+    supported: options.systemAudioSupported ?? true,
+    authorize: vi.fn(),
+    release: vi.fn(),
+    releaseAll: vi.fn(),
+  };
   const service = new RecordingService(
     capture as unknown as CaptureWindowClient,
     settings as unknown as SettingsStore,
     events as unknown as IpcEventEmitter,
     permission,
+    systemAudio as unknown as SystemAudioCaptureController,
   );
   const captureWebContents = {
     id: 7,
@@ -129,10 +145,39 @@ function harness(
     reload: vi.fn(),
   };
   service.attachCapture(captureWebContents as unknown as Electron.WebContents);
-  return { capture, captureWebContents, events, permission, service };
+  return { capture, captureWebContents, events, permission, service, systemAudio };
 }
 
 describe('RecordingService ownership', () => {
+  it('authorizes and forwards opt-in system audio only for dictation', async () => {
+    const test = harness();
+    const dictation = await test.service.startDictation(
+      { onFrame: vi.fn(), onUnexpectedStop: vi.fn() },
+      { includeSystemAudio: true },
+    );
+
+    expect(test.systemAudio.authorize).toHaveBeenCalledWith(
+      test.captureWebContents,
+      dictation.captureId,
+    );
+    expect(test.capture.start).toHaveBeenCalledWith(null, dictation.captureId, true);
+    await test.service.stopDictation(dictation.captureId);
+    expect(test.systemAudio.release).toHaveBeenCalledWith(dictation.captureId);
+    await test.service.shutdown();
+  });
+
+  it('fails instead of silently dropping requested system audio when unsupported', async () => {
+    const test = harness({ systemAudioSupported: false });
+    await expect(
+      test.service.startDictation(
+        { onFrame: vi.fn(), onUnexpectedStop: vi.fn() },
+        { includeSystemAudio: true },
+      ),
+    ).rejects.toMatchObject({ code: 'system-audio-unavailable' });
+    expect(test.capture.start).not.toHaveBeenCalled();
+    await test.service.shutdown();
+  });
+
   it('publishes active state and levels only after activation is acknowledged', async () => {
     const test = harness();
     const owner = new FakeOwner();
@@ -272,6 +317,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,
     });
@@ -696,6 +742,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,
     });
@@ -721,6 +768,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,
     });
@@ -738,6 +786,22 @@ describe('RecordingService ownership', () => {
     });
     test.capture.stopListener?.(dictation.captureId, 'device-unavailable');
     expect(onUnexpectedStop).toHaveBeenCalledWith('device-unavailable');
+    await test.service.shutdown();
+  });
+
+  it('does not invalidate microphone evidence when only system audio is lost', async () => {
+    const test = harness();
+    const invalidateMicrophone = vi.fn();
+    const onUnexpectedStop = vi.fn();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    const dictation = await test.service.startDictation(
+      { onFrame: vi.fn(), onUnexpectedStop },
+      { includeSystemAudio: true },
+    );
+
+    test.capture.stopListener?.(dictation.captureId, 'system-audio-unavailable');
+    expect(onUnexpectedStop).toHaveBeenCalledWith('system-audio-unavailable');
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
     await test.service.shutdown();
   });
 

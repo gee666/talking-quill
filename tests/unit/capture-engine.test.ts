@@ -62,6 +62,26 @@ function stream(track: FakeTrack): MediaStream {
   return {
     getTracks: () => [track as unknown as MediaStreamTrack],
     getAudioTracks: () => [track as unknown as MediaStreamTrack],
+    getVideoTracks: () => [],
+    removeTrack: vi.fn(),
+  } as unknown as MediaStream;
+}
+
+function displayStream(audioTrack: FakeTrack, videoTrack: FakeTrack): MediaStream {
+  const tracks = [
+    audioTrack as unknown as MediaStreamTrack,
+    videoTrack as unknown as MediaStreamTrack,
+  ];
+  return {
+    getTracks: () => [...tracks],
+    getAudioTracks: () =>
+      tracks.filter((track) => track === (audioTrack as unknown as MediaStreamTrack)),
+    getVideoTracks: () =>
+      tracks.filter((track) => track === (videoTrack as unknown as MediaStreamTrack)),
+    removeTrack: (track: MediaStreamTrack) => {
+      const index = tracks.indexOf(track);
+      if (index >= 0) tracks.splice(index, 1);
+    },
   } as unknown as MediaStream;
 }
 
@@ -82,6 +102,7 @@ function harness(
     readonly devices?: readonly MediaDeviceInfo[];
     readonly enumerateDevices?: () => Promise<MediaDeviceInfo[]>;
     readonly getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+    readonly getDisplayMedia?: (constraints: DisplayMediaStreamOptions) => Promise<MediaStream>;
     readonly sampleRate?: number;
     readonly immediateProcessorError?: boolean;
     readonly closeAudioContext?: () => Promise<void>;
@@ -90,6 +111,7 @@ function harness(
   const mediaDevices = new EventTarget() as EventTarget & {
     enumerateDevices: () => Promise<MediaDeviceInfo[]>;
     getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+    getDisplayMedia: (constraints: DisplayMediaStreamOptions) => Promise<MediaStream>;
   };
   mediaDevices.enumerateDevices = vi.fn(
     options.enumerateDevices ??
@@ -99,6 +121,10 @@ function harness(
     options.getUserMedia ?? (() => Promise.resolve(stream(new FakeTrack('default')))),
   );
   mediaDevices.getUserMedia = getUserMedia;
+  const getDisplayMedia = vi.fn(
+    options.getDisplayMedia ?? (() => Promise.resolve(stream(new FakeTrack('system-audio')))),
+  );
+  mediaDevices.getDisplayMedia = getDisplayMedia;
 
   const port = new FakePort();
   const sourceConnect = vi.fn();
@@ -152,8 +178,10 @@ function harness(
     engine,
     mediaDevices,
     getUserMedia,
+    getDisplayMedia,
     port,
     worklet,
+    sourceConnect,
     sourceDisconnect,
     workletDisconnect,
     contextResume,
@@ -203,6 +231,72 @@ describe('CaptureEngine', () => {
     );
     await test.engine.stop();
     expect(selectedTrack.stop).toHaveBeenCalledOnce();
+  });
+
+  it('mixes an explicitly requested system stream and tears down every track', async () => {
+    const microphoneTrack = new FakeTrack('microphone');
+    const systemTrack = new FakeTrack('system-audio');
+    const videoTrack = new FakeTrack('display-video');
+    const test = harness({
+      getUserMedia: () => Promise.resolve(stream(microphoneTrack)),
+      getDisplayMedia: () => Promise.resolve(displayStream(systemTrack, videoTrack)),
+    });
+
+    await expect(test.engine.start(null, true)).resolves.toMatchObject({
+      systemAudioIncluded: true,
+    });
+    expect(test.getDisplayMedia).toHaveBeenCalledWith({ audio: true, video: true });
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    await test.engine.activate();
+    expect(test.sourceConnect).toHaveBeenNthCalledWith(1, test.worklet, 0, 0);
+    expect(test.sourceConnect).toHaveBeenNthCalledWith(2, test.worklet, 0, 1);
+    await test.engine.stop();
+    expect(microphoneTrack.stop).toHaveBeenCalledOnce();
+    expect(systemTrack.stop).toHaveBeenCalledOnce();
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+  });
+
+  it('fails requested system audio when the display stream has no live audio track', async () => {
+    const microphoneTrack = new FakeTrack('microphone');
+    const videoTrack = new FakeTrack('display-video');
+    const displayStream = {
+      getTracks: () => [videoTrack as unknown as MediaStreamTrack],
+      getAudioTracks: () => [],
+    } as unknown as MediaStream;
+    const test = harness({
+      getUserMedia: () => Promise.resolve(stream(microphoneTrack)),
+      getDisplayMedia: () => Promise.resolve(displayStream),
+    });
+
+    await expect(test.engine.start(null, true)).rejects.toMatchObject({
+      code: 'system-audio-unavailable',
+    });
+    expect(microphoneTrack.stop).toHaveBeenCalledOnce();
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+  });
+
+  it('stops microphone and system streams acquired after cancellation', async () => {
+    const microphoneTrack = new FakeTrack('microphone');
+    const systemTrack = new FakeTrack('late-system-audio');
+    const pendingSystem = deferred<MediaStream>();
+    const test = harness({
+      getUserMedia: () => Promise.resolve(stream(microphoneTrack)),
+      getDisplayMedia: () => pendingSystem.promise,
+    });
+    const starting = test.engine.start(null, true);
+    await vi.waitFor(() => expect(test.getDisplayMedia).toHaveBeenCalledOnce());
+    let stopSettled = false;
+    const stopping = test.engine.stop().then(() => {
+      stopSettled = true;
+    });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    pendingSystem.resolve(stream(systemTrack));
+
+    await stopping;
+    await expect(starting).rejects.toMatchObject({ code: 'capture-failed' });
+    expect(microphoneTrack.stop).toHaveBeenCalledOnce();
+    expect(systemTrack.stop).toHaveBeenCalledOnce();
   });
 
   it('retries system default when an enumerated preferred device disappears during acquisition', async () => {
@@ -370,8 +464,9 @@ describe('CaptureEngine', () => {
     const test = harness({ getUserMedia: () => pending.promise });
     const starting = test.engine.start(null);
     await vi.waitFor(() => expect(test.getUserMedia).toHaveBeenCalledOnce());
-    await test.engine.stop();
+    const stopping = test.engine.stop();
     pending.resolve(stream(track));
+    await stopping;
     await expect(starting).rejects.toBeInstanceOf(CaptureEngineError);
     expect(track.stop).toHaveBeenCalledOnce();
     expect(test.contextResume).not.toHaveBeenCalled();
@@ -417,6 +512,22 @@ describe('CaptureEngine', () => {
     test.worklet.dispatchEvent(new Event('processorerror'));
     await vi.waitFor(() => expect(test.unexpectedStop).toHaveBeenCalledWith('error'));
     expect(track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('reports system-audio loss separately from microphone loss', async () => {
+    const microphoneTrack = new FakeTrack('microphone');
+    const systemTrack = new FakeTrack('system-audio');
+    const test = harness({
+      getUserMedia: () => Promise.resolve(stream(microphoneTrack)),
+      getDisplayMedia: () => Promise.resolve(stream(systemTrack)),
+    });
+    await test.engine.start(null, true);
+    await test.engine.activate();
+    systemTrack.dispatchEvent(new Event('ended'));
+
+    await vi.waitFor(() => expect(test.unexpectedStop).toHaveBeenCalledWith('system-audio-lost'));
+    expect(microphoneTrack.stop).toHaveBeenCalledOnce();
+    expect(systemTrack.stop).toHaveBeenCalledOnce();
   });
 
   it('does not let a delayed failure teardown stop a newer capture', async () => {

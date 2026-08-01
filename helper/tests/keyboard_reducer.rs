@@ -1,7 +1,7 @@
 use talking_quill_helper::keyboard::{
     ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, KeyInput,
     KeyPhase, KeyboardReducer, ModifierMask, PhysicalKey, PhysicalKeyTracker, ProfileId,
-    SessionKey, Shortcut, ShortcutModifiers,
+    SessionCaptureMode, SessionKey, Shortcut, ShortcutModifiers,
 };
 
 fn modifiers(ctrl: bool, alt: bool, shift: bool, meta: bool) -> ModifierMask {
@@ -90,7 +90,32 @@ fn step_at(
     delivered: bool,
     observed_at_ms: u64,
 ) -> (Option<HelperEvent>, bool) {
-    let plan = reducer.plan_bindings_at(input, configured, enabled, capture, observed_at_ms);
+    let mode = if capture {
+        SessionCaptureMode::Recording
+    } else {
+        SessionCaptureMode::Off
+    };
+    step_mode_at(
+        reducer,
+        configured,
+        input,
+        enabled,
+        mode,
+        delivered,
+        observed_at_ms,
+    )
+}
+
+fn step_mode_at(
+    reducer: &mut KeyboardReducer,
+    configured: ActivationBindings,
+    input: KeyInput,
+    enabled: bool,
+    mode: SessionCaptureMode,
+    delivered: bool,
+    observed_at_ms: u64,
+) -> (Option<HelperEvent>, bool) {
+    let plan = reducer.plan_bindings_at(input, configured, enabled, mode, observed_at_ms);
     let event = plan.event();
     let swallowed = reducer.apply(plan, delivered);
     (event, swallowed)
@@ -1172,6 +1197,99 @@ fn session_capture_gate_behavior_is_preserved_and_modifier_independent() {
             )
         );
     }
+}
+
+#[test]
+fn capture_modes_filter_fresh_keys_without_losing_balancing_ownership() {
+    let configured = ActivationBindings::default();
+
+    let mut enter = KeyboardReducer::default();
+    assert_eq!(
+        step_mode_at(
+            &mut enter,
+            configured,
+            control(PhysicalKey::Enter, KeyPhase::Down),
+            false,
+            SessionCaptureMode::Recording,
+            true,
+            0,
+        ),
+        (
+            Some(HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Down,
+            }),
+            true,
+        ),
+    );
+    assert_eq!(
+        step_mode_at(
+            &mut enter,
+            configured,
+            control(PhysicalKey::Enter, KeyPhase::Up),
+            false,
+            SessionCaptureMode::CancelOnly,
+            true,
+            0,
+        ),
+        (
+            Some(HelperEvent::SessionKey {
+                key: SessionKey::Enter,
+                phase: EventPhase::Up,
+            }),
+            true,
+        ),
+    );
+    assert_eq!(
+        step_mode_at(
+            &mut enter,
+            configured,
+            control(PhysicalKey::Enter, KeyPhase::Down),
+            false,
+            SessionCaptureMode::CancelOnly,
+            true,
+            0,
+        ),
+        (None, false),
+    );
+
+    let mut escape = KeyboardReducer::default();
+    assert_eq!(
+        step_mode_at(
+            &mut escape,
+            configured,
+            control(PhysicalKey::Escape, KeyPhase::Down),
+            false,
+            SessionCaptureMode::CancelOnly,
+            true,
+            0,
+        ),
+        (
+            Some(HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Down,
+            }),
+            true,
+        ),
+    );
+    assert_eq!(
+        step_mode_at(
+            &mut escape,
+            configured,
+            control(PhysicalKey::Escape, KeyPhase::Up),
+            false,
+            SessionCaptureMode::Off,
+            true,
+            0,
+        ),
+        (
+            Some(HelperEvent::SessionKey {
+                key: SessionKey::Escape,
+                phase: EventPhase::Up,
+            }),
+            true,
+        ),
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ import {
   StreamingResampler,
   calculateRms,
   downmixChannels,
+  mixAudioSources,
 } from '../../app/src/renderer/capture/audio-processing';
 import { PCM_FRAME_SAMPLES, PCM_SAMPLE_RATE } from '../../app/src/shared/constants/audio';
 import { WHISPER_SAMPLE_RATE } from '../../app/src/shared/constants/whisper';
@@ -106,6 +107,22 @@ describe('capture audio processing', () => {
     expect([...mixed]).toEqual([0, 0.5, 0.5, 0]);
     expect(calculateRms(Float32Array.from([1, -1, 1, -1]))).toBe(1);
     expect(calculateRms(new Float32Array())).toBe(0);
+  });
+
+  it('downmixes sources, preserves microphone gain, and limits the mixed signal', () => {
+    const mixed = mixAudioSources([
+      [Float32Array.from([1, 0]), Float32Array.from([-1, 1])],
+      [Float32Array.from([0.5, -0.5])],
+    ]);
+    expect([...mixed]).toEqual([0.25, 0.25]);
+    expect(mixAudioSources([[Float32Array.from([0.75])]])).toEqual(Float32Array.from([0.75]));
+    expect(mixAudioSources([[Float32Array.from([0.02])], [Float32Array.from([0])]])).toEqual(
+      Float32Array.from([0.02]),
+    );
+    expect(mixAudioSources([[Float32Array.from([0.9])], [Float32Array.from([0.9])]])).toEqual(
+      Float32Array.from([1]),
+    );
+    expect(mixAudioSources([[], []])).toHaveLength(0);
   });
 
   it('emits fixed 320-sample frames plus one final flushed partial frame with RMS', () => {

@@ -19,7 +19,7 @@ use talking_quill_helper::{
     framing::{MAX_FRAME_BYTES, read_frame, write_frame},
     keyboard::{
         ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, ProfileId,
-        SessionKey, Shortcut, ShortcutModifiers,
+        SessionCaptureMode, SessionKey, Shortcut, ShortcutModifiers,
     },
     platform::{
         CallbackGate, FrontApp, HookStatus, PasteFailure, PasteResult, PermissionState,
@@ -33,7 +33,7 @@ struct FakeState {
     activation: Mutex<ActivationKey>,
     activation_bindings: Mutex<ActivationBindings>,
     activation_enabled: Mutex<bool>,
-    capture: Mutex<bool>,
+    capture_mode: Mutex<SessionCaptureMode>,
     calls: Mutex<Vec<&'static str>>,
     emit_shutdown_event: AtomicBool,
     gate_was_closed_on_shutdown: AtomicBool,
@@ -48,7 +48,7 @@ impl Default for FakeState {
             activation: Mutex::new(ActivationKey::DEFAULT),
             activation_bindings: Mutex::new(ActivationBindings::default()),
             activation_enabled: Mutex::new(false),
-            capture: Mutex::new(false),
+            capture_mode: Mutex::new(SessionCaptureMode::Off),
             calls: Mutex::new(Vec::new()),
             emit_shutdown_event: AtomicBool::new(false),
             gate_was_closed_on_shutdown: AtomicBool::new(false),
@@ -125,9 +125,9 @@ impl Platform for FakePlatform {
         Ok(())
     }
 
-    fn set_session_capture(&self, active: bool) -> Result<(), PlatformError> {
+    fn set_session_capture(&self, mode: SessionCaptureMode) -> Result<(), PlatformError> {
         self.state.record("set_session_capture");
-        *self.state.capture.lock().unwrap() = active;
+        *self.state.capture_mode.lock().unwrap() = mode;
         Ok(())
     }
 
@@ -334,9 +334,9 @@ fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
 }
 
 fn initialize(server: &mut Server<FakePlatform>, receiver: &Receiver<Outbound>) {
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
     let response = receive(receiver);
-    assert_eq!(response["result"]["protocolVersion"], 5);
+    assert_eq!(response["result"]["protocolVersion"], 6);
     assert!(response["result"].get("defaultActivationKey").is_none());
 }
 
@@ -373,7 +373,7 @@ fn inbound_allowlist_is_exact() {
 }
 
 #[test]
-fn initialization_must_be_first_exactly_once_and_exactly_version_five() {
+fn initialization_must_be_first_exactly_once_and_exactly_version_six() {
     let (mut server, receiver, state, gate) = setup_observable();
     assert!(!gate.is_open());
 
@@ -404,16 +404,23 @@ fn initialization_must_be_first_exactly_once_and_exactly_version_five() {
     assert_error(&receiver, -32_002, json!(4));
     assert!(gate.is_open());
 
-    assert!(server.handle_payload(&request(5, "session.set_capture", json!({"active": true}))));
-    assert_eq!(receive(&receiver)["result"], json!({"active": true}));
-    assert!(*state.capture.lock().unwrap());
+    assert!(server.handle_payload(&request(
+        5,
+        "session.set_capture",
+        json!({"mode": "recording"}),
+    )));
+    assert_eq!(receive(&receiver)["result"], json!({"mode": "recording"}));
+    assert_eq!(
+        *state.capture_mode.lock().unwrap(),
+        SessionCaptureMode::Recording,
+    );
 
     assert!(!server.handle_payload(&request(6, "shutdown", json!({}))));
     assert_eq!(
         receive(&receiver),
         json!({"jsonrpc": "2.0", "id": 6, "result": {}})
     );
-    assert!(!*state.capture.lock().unwrap());
+    assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off,);
     assert!(!gate.is_open());
 }
 
@@ -421,9 +428,16 @@ fn initialization_must_be_first_exactly_once_and_exactly_version_five() {
 fn successful_paste_commit_disables_session_capture_before_responding() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
-    assert!(server.handle_payload(&request(2, "session.set_capture", json!({"active": true}),)));
+    assert!(server.handle_payload(&request(
+        2,
+        "session.set_capture",
+        json!({"mode": "cancel-only"}),
+    )));
     let _ = receive(&receiver);
-    assert!(*state.capture.lock().unwrap());
+    assert_eq!(
+        *state.capture_mode.lock().unwrap(),
+        SessionCaptureMode::CancelOnly,
+    );
 
     assert!(server.handle_payload(&request(3, "paste.inject", json!({}))));
     let committed = receive(&receiver);
@@ -431,7 +445,7 @@ fn successful_paste_commit_disables_session_capture_before_responding() {
     assert_eq!(committed["params"]["requestId"], 3);
     let response = receive(&receiver);
     assert_eq!(response["result"]["submitted"], true);
-    assert!(!*state.capture.lock().unwrap());
+    assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off,);
 }
 
 #[test]
@@ -440,7 +454,7 @@ fn string_request_ids_are_echoed_by_responses_and_paste_commit_notifications() {
     assert!(server.handle_payload(&request_with_id(
         json!("initialize-id"),
         "initialize",
-        json!({"protocolVersion": 5}),
+        json!({"protocolVersion": 6}),
     )));
     assert_eq!(receive(&receiver)["id"], "initialize-id");
 
@@ -586,7 +600,7 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 5})),
+        request(1, "initialize", json!({"protocolVersion": 6})),
         request(2, "ping", json!({})),
         request(3, "shutdown", json!({})),
     ] {
@@ -613,7 +627,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
     let mut eof_input = Vec::new();
     write_frame(
         &mut eof_input,
-        &request(1, "initialize", json!({"protocolVersion": 5})),
+        &request(1, "initialize", json!({"protocolVersion": 6})),
     )
     .unwrap();
     let mut eof_output = Vec::new();
@@ -631,7 +645,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
 fn framed_runner_does_not_wait_for_eof_after_shutdown() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 5})),
+        request(1, "initialize", json!({"protocolVersion": 6})),
         request(2, "shutdown", json!({})),
     ] {
         write_frame(&mut input, &payload).unwrap();
@@ -741,13 +755,13 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
 #[test]
 fn full_framed_coordinator_dispatches_every_registered_method_in_sequence() {
     let calls = [
-        (1, "initialize", json!({"protocolVersion": 5})),
+        (1, "initialize", json!({"protocolVersion": 6})),
         (
             2,
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
-        (3, "session.set_capture", json!({"active": true})),
+        (3, "session.set_capture", json!({"mode": "recording"})),
         (4, "paste.inject", json!({})),
         (5, "front_app.get", json!({})),
         (6, "permissions.get", json!({})),
@@ -796,7 +810,7 @@ fn every_allowed_method_dispatches_after_initialization() {
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
-        (3, "session.set_capture", json!({"active": true})),
+        (3, "session.set_capture", json!({"mode": "cancel-only"})),
         (4, "paste.inject", json!({})),
         (5, "front_app.get", json!({})),
         (6, "permissions.get", json!({})),
@@ -1009,9 +1023,14 @@ fn typed_params_reject_missing_wrong_and_duplicate_fields() {
             r#"{"enabled":true,"key":"A","key":"B"}"#,
         ),
         ("session.set_capture", "{}"),
-        ("session.set_capture", r#"{"active":1}"#),
-        ("session.set_capture", r#"{"active":null}"#),
-        ("session.set_capture", r#"{"active":true,"active":false}"#),
+        ("session.set_capture", r#"{"active":true}"#),
+        ("session.set_capture", r#"{"mode":1}"#),
+        ("session.set_capture", r#"{"mode":null}"#),
+        ("session.set_capture", r#"{"mode":"cancel_only"}"#),
+        (
+            "session.set_capture",
+            r#"{"mode":"recording","mode":"off"}"#,
+        ),
     ];
 
     for (method, params) in cases {
@@ -1096,7 +1115,7 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
 #[test]
 fn valid_notifications_are_never_executed_or_answered() {
     let (mut server, receiver, state, gate) = setup_observable();
-    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 5}),)));
+    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 6}),)));
     assert!(receiver.try_recv().is_err());
     assert!(!gate.is_open());
 
@@ -1104,12 +1123,12 @@ fn valid_notifications_are_never_executed_or_answered() {
     state.calls.lock().unwrap().clear();
 
     for (method, params) in [
-        ("initialize", json!({"protocolVersion": 5})),
+        ("initialize", json!({"protocolVersion": 6})),
         (
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
-        ("session.set_capture", json!({"active": true})),
+        ("session.set_capture", json!({"mode": "recording"})),
         ("paste.inject", json!({})),
         ("front_app.get", json!({})),
         ("permissions.get", json!({})),
@@ -1124,7 +1143,7 @@ fn valid_notifications_are_never_executed_or_answered() {
     assert!(state.calls.lock().unwrap().is_empty());
     assert_eq!(*state.activation.lock().unwrap(), ActivationKey::DEFAULT);
     assert!(!*state.activation_enabled.lock().unwrap());
-    assert!(!*state.capture.lock().unwrap());
+    assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off,);
     assert!(gate.is_open());
 
     assert!(server.handle_payload(&request(2, "ping", json!({}))));
@@ -1151,7 +1170,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
         Arc::clone(&terminal),
     );
 
-    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
+    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
     assert!(!gate.is_open());
     assert_eq!(
         terminal.reason(),
@@ -1181,7 +1200,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
     let _ = outbound_rx.recv().unwrap();
     assert!(gate.is_open());
     drop(outbound_rx);
@@ -1216,7 +1235,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
         Arc::clone(&gate),
         terminal,
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 5}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
     assert!(gate.is_open());
 
     assert!(!server.handle_payload(&request(2, "ping", json!({}))));
@@ -1249,7 +1268,7 @@ fn committed_malformed_protocol_corpus_is_rejected_with_bounded_responses() {
         );
         cases += 1;
     }
-    assert_eq!(cases, 23);
+    assert_eq!(cases, 24);
 }
 
 proptest! {
@@ -1291,7 +1310,7 @@ proptest! {
 }
 
 #[test]
-fn protocol_v5_configures_ordered_chords_and_preserves_every_wire_field() {
+fn protocol_v6_configures_ordered_chords_and_preserves_every_wire_field() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
     let values = json!({
@@ -1324,7 +1343,7 @@ fn protocol_v5_configures_ordered_chords_and_preserves_every_wire_field() {
 }
 
 #[test]
-fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
+fn protocol_v6_enforces_binding_count_enablement_key_and_conflict_rules() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
 
@@ -1392,7 +1411,7 @@ fn protocol_v5_enforces_binding_count_enablement_key_and_conflict_rules() {
 }
 
 #[test]
-fn protocol_v5_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
+fn protocol_v6_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
     let values = json!({

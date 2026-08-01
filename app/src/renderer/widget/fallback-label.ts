@@ -10,8 +10,25 @@ export function isWidgetPointerCancelable(phase: EchoSessionPhase): boolean {
     phase === 'recordingQuick' ||
     phase === 'recordingExtended' ||
     phase === 'transcribing' ||
-    phase === 'processingSmart'
+    phase === 'processingSmart' ||
+    phase === 'inserting'
   );
+}
+
+export function widgetKeyboardGuidance(session: EchoSessionSnapshot): string {
+  if (
+    session.phase === 'arming' ||
+    session.phase === 'recordingQuick' ||
+    session.phase === 'recordingExtended'
+  ) {
+    return session.dictationMode === 'extended'
+      ? 'Press Enter or your dictation shortcut again to finish, Escape to cancel, or click Stop or Cancel here.'
+      : 'Press Enter or your dictation shortcut again to finish, Escape to cancel, or click Cancel here.';
+  }
+  if (isWidgetPointerCancelable(session.phase)) {
+    return 'Press Escape or click Cancel here to stop before text is inserted.';
+  }
+  return 'Text has already been inserted or this dictation is finished.';
 }
 
 export function piFallbackLabel(category: PiFallbackCategory | null): string | null {
@@ -112,7 +129,7 @@ function normalSecondary(session: EchoSessionSnapshot): string {
     return 'Let go for a quick note, or keep holding for a longer one';
   }
   if (session.phase === 'recordingQuick') {
-    return 'Stop talking or press Enter when you are done; Escape cancels';
+    return 'Press Enter or your shortcut again when you are done; Escape cancels';
   }
   if (session.phase === 'recordingExtended') {
     return 'Press Enter or your shortcut again to finish; Escape cancels';

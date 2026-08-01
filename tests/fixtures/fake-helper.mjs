@@ -27,10 +27,10 @@ function handle(request) {
   }
   const { id, method, params } = request;
   if (method === 'initialize') {
-    if (params.protocolVersion !== 5) process.exit(28);
+    if (params.protocolVersion !== 6) process.exit(28);
     const initialize = () => {
       respond(id, {
-        protocolVersion: 5,
+        protocolVersion: 6,
         helperVersion: scenario === 'mismatch' ? '9.9.9' : '1.0.0',
         platform,
         architecture,
