@@ -414,7 +414,7 @@ mod platform {
         let name = c_name(name)?;
         let root_fd = open_at(parent_fd.0, &name)?;
         let root = stat_fd(root_fd.0)?;
-        if root.st_dev as u64 != expected_device || root.st_ino as u64 != expected_inode {
+        if root.st_dev as u64 != expected_device || root.st_ino != expected_inode {
             return Err(OwnedTreeError::IdentityMismatch);
         }
         remove_contents(root_fd.0, root.st_dev)?;

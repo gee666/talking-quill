@@ -1,4 +1,8 @@
 import '@testing-library/jest-dom/vitest';
+import { configure } from '@testing-library/dom';
+
+// Lazy renderer chunks can take longer than Testing Library's one-second default on shared CI.
+configure({ asyncUtilTimeout: 5_000 });
 
 if (typeof HTMLDialogElement !== 'undefined') {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {

@@ -42,6 +42,7 @@ jobs:
         with:
           toolchain: 1.97.1
           target: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
