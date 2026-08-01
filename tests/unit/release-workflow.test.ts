@@ -40,6 +40,14 @@ describe('unsigned release workflow', () => {
     },
   );
 
+  it('installs the pinned RustSec scanner before the Windows security gate', () => {
+    const install = sections.validate.indexOf(
+      'run: cargo install cargo-audit --version 0.22.2 --locked',
+    );
+    expect(install).toBeGreaterThan(-1);
+    expect(install).toBeLessThan(sections.validate.indexOf('run: pnpm security:gate'));
+  });
+
   it('pins JavaScript actions to reviewed Node.js 24 revisions', () => {
     for (const source of workflowSources) {
       const actions = [...source.matchAll(/\buses:\s*([^\s#]+)/gu)].flatMap((match) =>

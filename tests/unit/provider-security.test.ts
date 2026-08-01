@@ -24,6 +24,8 @@ afterEach(async () => {
 });
 
 const liveSignal = (): AbortSignal => new AbortController().signal;
+// This is only a deadlock guard; timing behavior is covered by explicit timeout tests below.
+const requestSignal = (): AbortSignal => AbortSignal.timeout(10_000);
 
 describe('provider endpoint policy', () => {
   it.each([
@@ -159,7 +161,7 @@ describe('socket-pinned JSON transport', () => {
         url: `http://pin.invalid:${port}/json`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ body: { ok: true }, destination: 'local' });
     expect(resolver).toHaveBeenCalledTimes(1);
@@ -175,7 +177,7 @@ describe('socket-pinned JSON transport', () => {
       .mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }])
       .mockResolvedValueOnce([{ address: '169.254.169.254', family: 4 }]);
     const transport = new PinnedJsonTransport(resolver);
-    const signal = AbortSignal.timeout(2_000);
+    const signal = requestSignal();
     const port = new URL(server.origin).port;
     const endpoint = `http://alternating.invalid:${port}`;
 
@@ -214,13 +216,13 @@ describe('socket-pinned JSON transport', () => {
         url: `http://retry.invalid:${port}`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ destination: 'local' });
     expect(retryResolver).toHaveBeenCalledTimes(1);
 
     const transport = new PinnedJsonTransport();
-    const signal = AbortSignal.timeout(2_000);
+    const signal = requestSignal();
     await transport.request({
       url: server.origin,
       method: 'GET',
@@ -294,7 +296,7 @@ describe('socket-pinned JSON transport', () => {
         url: `http://rebind.invalid:${port}/same`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ body: { redirected: true } });
     expect(resolver).toHaveBeenCalledTimes(1);
@@ -305,7 +307,7 @@ describe('socket-pinned JSON transport', () => {
         url: `${origin}/cross`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ body: { redirected: true }, destination: 'local' });
     await expect(
@@ -314,7 +316,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'GET',
         headers: { authorization: 'Bearer secret' },
         credentialed: true,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
     await expect(
@@ -323,7 +325,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'POST',
         body: { transcript: 'must-not-be-replayed' },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
     await expect(
@@ -331,7 +333,7 @@ describe('socket-pinned JSON transport', () => {
         url: `${origin}/metadata`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
   });
@@ -348,7 +350,7 @@ describe('socket-pinned JSON transport', () => {
         url: `${server.origin}/r0`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'REMOTE_FAILURE' });
     expect(server.requests).toHaveLength(4);
@@ -377,7 +379,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'POST',
         body: { transcript: 'private' },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ body: { method: 'GET', body: null } });
     await expect(
@@ -386,7 +388,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'POST',
         body: { value: 'safe' },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).resolves.toMatchObject({ body: { method: 'POST', body: { value: 'safe' } } });
     await expect(
@@ -395,7 +397,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'POST',
         body: { value: 'blocked' },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'SECURITY_BLOCKED' });
   });
@@ -451,7 +453,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'GET',
         body: { unexpected: true },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     await expect(
@@ -460,7 +462,7 @@ describe('socket-pinned JSON transport', () => {
         method: 'POST',
         body: { value: 'x'.repeat(600 * 1_024) },
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'REQUEST_TOO_LARGE' });
     expect(server.requests).toHaveLength(0);
@@ -470,7 +472,7 @@ describe('socket-pinned JSON transport', () => {
           url: `${server.origin}${path}`,
           method: 'GET',
           credentialed: false,
-          signal: AbortSignal.timeout(2_000),
+          signal: requestSignal(),
           maxResponseBytes: 100,
         }),
       ).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' });
@@ -480,7 +482,7 @@ describe('socket-pinned JSON transport', () => {
         url: `${server.origin}/malformed`,
         method: 'GET',
         credentialed: false,
-        signal: AbortSignal.timeout(2_000),
+        signal: requestSignal(),
       }),
     ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
   });

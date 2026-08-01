@@ -92,6 +92,9 @@ jobs:
         run: pnpm rust:fetch-targets
       - run: pnpm validate:unsigned-release
       - if: matrix.os == 'windows-latest'
+        name: Install the pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - if: matrix.os == 'windows-latest'
         run: pnpm security:gate
 
   package:
