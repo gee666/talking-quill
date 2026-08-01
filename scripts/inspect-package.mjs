@@ -440,7 +440,10 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
   validateResourceEntries(extractedResourceEntries, mac ? 'mac' : 'win');
   const extractedAsar = resolve(extractedResources, 'app.asar');
   const entries = listPackage(extractedAsar).map(normalizePackagePath);
-  validateAsarEntries(entries);
+  validateAsarEntries(entries, {
+    platform: mac ? 'mac' : 'win',
+    architecture: expectedArch,
+  });
   for (const entry of entries) {
     const metadata = statFile(extractedAsar, entry.replaceAll('/', sep));
     if (entry.length > 0 && 'link' in metadata) {

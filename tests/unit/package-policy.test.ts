@@ -508,6 +508,9 @@ describe('packaged runtime allowlist', () => {
     expect(inspector).toMatch(
       /inspectNativeTree\(root, \{\s*platform: mac \? 'mac' : 'win',\s*architecture: expectedArch,/u,
     );
+    expect(inspector).toMatch(
+      /validateAsarEntries\(entries, \{\s*platform: mac \? 'mac' : 'win',\s*architecture: expectedArch,/u,
+    );
     expect(inspector).toContain('writeArtifactProvenanceManifest');
   });
 
