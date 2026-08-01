@@ -301,7 +301,7 @@ const COMMON_RESOURCE_PATHS = [
 ];
 const PLATFORM_RESOURCE_PATHS = Object.freeze({
   win: Object.freeze(['elevate.exe', 'helper/talking-quill-helper.exe']),
-  mac: Object.freeze(['electron.icns', 'helper/talking-quill-helper']),
+  mac: Object.freeze(['electron.icns', 'icon.icns', 'helper/talking-quill-helper']),
 });
 
 export function validateAsarEntries(entries, target) {
@@ -390,6 +390,7 @@ const WINDOWS_PHYSICAL_EXACT = new Set([
   'vulkan-1.dll',
 ]);
 const WINDOWS_LOCALE_PATTERN = /^locales\/[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,3})?\.pak$/u;
+const MAC_LOCALIZATION_DIRECTORY_PATTERN = /^[a-z]{2,3}(?:_[A-Z]{2}|_419)?\.lproj$/u;
 const MAC_FRAMEWORK_PATTERN =
   /^Talking Quill\.app\/Contents\/Frameworks\/(?:Electron Framework\.framework|Mantle\.framework|ReactiveObjC\.framework|Squirrel\.framework|Sparkle\.framework|Talking Quill Helper(?: \(GPU\)| \(Plugin\)| \(Renderer\))?\.app)(?:\/.*)?$/u;
 const MAC_PHYSICAL_EXACT = new Set([
@@ -524,7 +525,12 @@ export function validateResourceEntries(entries, target) {
     ...ONNX_RESOURCE_PATHS[target],
   ]);
   assertSafePaths(normalized);
-  const unexpected = normalized.filter((entry) => entry.length > 0 && !allowed.has(entry));
+  const unexpected = normalized.filter(
+    (entry) =>
+      entry.length > 0 &&
+      !allowed.has(entry) &&
+      !(target === 'mac' && MAC_LOCALIZATION_DIRECTORY_PATTERN.test(entry)),
+  );
   if (unexpected.length > 0) {
     throw new Error(`Unexpected packaged resources: ${unexpected.join(', ')}`);
   }

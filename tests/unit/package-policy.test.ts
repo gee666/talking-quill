@@ -148,7 +148,15 @@ describe('packaged runtime allowlist', () => {
     expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(56);
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
-    expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();
+    expect(() =>
+      validateResourceEntries(
+        [...validResources('mac'), 'icon.icns', 'en_GB.lproj', 'es_419.lproj'],
+        'mac',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateResourceEntries([...validResources('mac'), 'unexpected.lproj'], 'mac'),
+    ).toThrow('Unexpected packaged resources');
   });
 
   it.each([
