@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const releaseWorkflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
+const sevenZipPreparation = readFileSync('scripts/prepare-seven-zip.mjs', 'utf8');
+const packageInspector = readFileSync('scripts/inspect-package.mjs', 'utf8');
 const workflowSources = [
   releaseWorkflow,
   readFileSync('.github/workflows/build-mac-test.yml', 'utf8'),
@@ -48,6 +50,18 @@ describe('unsigned release workflow', () => {
     expect(sections.validate).toContain('tool: cargo-audit@0.22.2');
     expect(sections.validate).toContain('fallback: none');
     expect(install).toBeLessThan(sections.validate.indexOf('run: pnpm security:gate'));
+  });
+
+  it('prepares a checksum-pinned 7-Zip before packaging Windows ARM64', () => {
+    const preparation = sections.package.indexOf('run: node scripts/prepare-seven-zip.mjs arm64');
+    expect(preparation).toBeGreaterThan(-1);
+    expect(sections.package).toContain("matrix.platform == 'win' && matrix.arch == 'arm64'");
+    expect(preparation).toBeLessThan(sections.package.indexOf('run: pnpm ${{ matrix.command }}'));
+    expect(sevenZipPreparation).toContain("const VERSION = '25.01'");
+    expect(sevenZipPreparation).toMatch(/const ARCHIVE_SHA256 = '[a-f0-9]{64}'/u);
+    expect(sevenZipPreparation).toContain('TALKING_QUILL_7ZIP_PATH=');
+    expect(packageInspector).toContain("expectedArtifact.arch === 'arm64'");
+    expect(packageInspector).toContain('configuredSevenZip ?? hostSevenZip');
   });
 
   it('uses only inputs supported by the version-pinned Rust action', () => {

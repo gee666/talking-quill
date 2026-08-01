@@ -325,7 +325,13 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
     };
   }
   validatePhysicalEntries(artifactNames);
-  const sevenZip = bundledSevenZip() ?? findCommand(['7z', '7za']);
+  const configuredSevenZip = mac ? null : configuredSevenZipPath();
+  const hostSevenZip = mac ? null : findCommand(['7z', '7za']);
+  const sevenZip = mac
+    ? null
+    : expectedArtifact.arch === 'arm64'
+      ? (configuredSevenZip ?? hostSevenZip)
+      : (bundledSevenZip() ?? configuredSevenZip ?? hostSevenZip);
   const ditto = mac ? findCommand(['ditto']) : null;
   const hdiutil = mac ? findCommand(['hdiutil']) : null;
   let inspected = 0;
@@ -337,14 +343,7 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
     let inspectionRoot = extractionRoot;
     let detach = null;
     let extracted = null;
-    if (sevenZip !== null) {
-      extracted = await extractArchiveWithRetry(
-        sevenZip,
-        ['x', '-y', `-o${extractionRoot}`, artifact],
-        extractionRoot,
-      );
-      methods.add(sevenZip);
-    } else if (/\.zip$/iu.test(artifact) && ditto !== null) {
+    if (/\.zip$/iu.test(artifact) && ditto !== null) {
       extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], { stdio: 'pipe' });
       methods.add('ditto');
     } else if (/\.dmg$/iu.test(artifact) && hdiutil !== null) {
@@ -357,10 +356,22 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
       );
       detach = () => spawnSync(hdiutil, ['detach', inspectionRoot], { stdio: 'pipe' });
       methods.add('hdiutil');
+    } else if (sevenZip !== null) {
+      extracted = await extractArchiveWithRetry(
+        sevenZip,
+        ['x', '-y', `-o${extractionRoot}`, artifact],
+        extractionRoot,
+      );
+      methods.add(sevenZip);
     }
     try {
-      if (extracted?.status !== 0) continue;
       if (extracted === null) continue;
+      if (extracted.status !== 0) {
+        const detail =
+          extracted.error?.message ?? extracted.stderr?.toString().trim() ?? 'unknown error';
+        console.warn(`Final-artifact extraction failed: ${detail}`);
+        continue;
+      }
       const entries = await inspectPhysicalTree(inspectionRoot, mac);
       validatePhysicalPackageEntries(entries, mac ? 'mac' : 'win');
       await inspectExtractedRuntime(inspectionRoot, mac, expectedArtifact.arch);
@@ -476,16 +487,20 @@ async function extractArchiveWithRetry(command, arguments_, extractionRoot) {
 function bundledSevenZip() {
   try {
     const module = require('7zip-bin');
-    // The ARM64 build cannot decode the NSIS compression methods used by electron-builder.
-    // Windows ARM64 provides x64 emulation, so use the bundled x64 extractor there.
-    const executable =
-      process.platform === 'win32' && process.arch === 'arm64'
-        ? resolve(dirname(require.resolve('7zip-bin/package.json')), 'win', 'x64', '7za.exe')
-        : module.path7za;
-    return typeof executable === 'string' && existsSync(executable) ? executable : null;
+    return typeof module.path7za === 'string' && existsSync(module.path7za) ? module.path7za : null;
   } catch {
     return null;
   }
+}
+
+function configuredSevenZipPath() {
+  const configured = process.env.TALKING_QUILL_7ZIP_PATH;
+  if (configured === undefined) return null;
+  const executable = resolve(configured);
+  if (!existsSync(executable)) {
+    throw new Error(`Configured 7-Zip extractor does not exist: ${executable}`);
+  }
+  return executable;
 }
 
 function findCommand(commands) {

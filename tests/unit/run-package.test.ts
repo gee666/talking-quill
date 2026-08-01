@@ -44,7 +44,8 @@ describe('package orchestration', () => {
       expect(appManifest.scripts[command]).toContain('scripts/prepackage-check.mjs');
       expect(appManifest.scripts[command]).toContain('scripts/inspect-package.mjs');
     }
-    expect(appManifest.scripts['package:win:arm64:unsigned']).toContain('-c.compression=store');
-    expect(appManifest.scripts['package:win:unsigned']).not.toContain('-c.compression=store');
+    for (const script of Object.values(appManifest.scripts)) {
+      expect(script).not.toContain('-c.compression=store');
+    }
   });
 });

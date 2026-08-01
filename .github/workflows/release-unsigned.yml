@@ -146,6 +146,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Fetch every locked Rust target graph used by package validation
         run: pnpm rust:fetch-targets
+      - if: matrix.platform == 'win' && matrix.arch == 'arm64'
+        name: Prepare the pinned Windows ARM64 release extractor
+        run: node scripts/prepare-seven-zip.mjs arm64
       - run: pnpm ${{ matrix.command }}
       - run: node scripts/stage-unsigned-release.mjs ${{ matrix.platform }} ${{ matrix.arch }}
       - name: Require source immutability after packaging
