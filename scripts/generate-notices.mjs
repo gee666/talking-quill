@@ -100,6 +100,8 @@ for (const target of rustTargets) {
       cargo,
       [
         'tree',
+        '--color',
+        'never',
         '--manifest-path',
         manifestPath,
         '--locked',
