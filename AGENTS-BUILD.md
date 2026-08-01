@@ -20,7 +20,7 @@ The pinned versions in the repository are authoritative:
 
 - Git
 - Node.js **24.15.0** (`.node-version` and `package.json`)
-- pnpm **11.13.0** (`package.json`)
+- pnpm **11.17.0** (`package.json`)
 - Rust **1.97.1** with Cargo, rustfmt, and Clippy (`rust-toolchain.toml`)
 
 After installation, open a fresh shell if PATH changed and verify:
@@ -37,10 +37,10 @@ Use a Node version manager when one is already available. Otherwise install the 
 
 ```text
 corepack enable
-corepack prepare pnpm@11.13.0 --activate
+corepack prepare pnpm@11.17.0 --activate
 ```
 
-If Corepack is unavailable, install it or run `npm install --global pnpm@11.13.0`. Do not silently use a different Node or pnpm version.
+If Corepack is unavailable, install it or run `npm install --global pnpm@11.17.0`. Do not silently use a different Node or pnpm version.
 
 Install Rust with rustup from <https://rustup.rs/>. Running Cargo in this repository selects and installs the pinned toolchain automatically. If needed, force it with:
 

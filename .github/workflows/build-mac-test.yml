@@ -9,12 +9,16 @@ permissions:
 jobs:
   build:
     name: macOS ${{ matrix.arch }}
-    runs-on: macos-13
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            os: macos-15-intel
+          - arch: arm64
+            os: macos-15
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       TALKING_QUILL_PACKAGE_TARGET: mac
@@ -36,7 +40,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.97.1
           targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
 
       - name: Install dependencies

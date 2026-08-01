@@ -5,10 +5,10 @@
   "description": "Local-first system-wide dictation for Windows and macOS",
   "author": "Talking Quill contributors",
   "license": "MIT",
-  "packageManager": "pnpm@11.13.0",
+  "packageManager": "pnpm@11.17.0",
   "engines": {
     "node": "24.15.0",
-    "pnpm": "11.13.0"
+    "pnpm": "11.17.0"
   },
   "scripts": {
     "build": "pnpm --filter @talking-quill/app build",
@@ -59,11 +59,16 @@
     "package:win": "node scripts/run-package.mjs win",
     "package:win:arm64": "node scripts/run-package.mjs win-arm64",
     "package:win:dir": "node scripts/run-package.mjs win-dir",
+    "package:unsigned:win": "node scripts/run-package.mjs win-unsigned",
+    "package:unsigned:win:arm64": "node scripts/run-package.mjs win-arm64-unsigned",
+    "package:unsigned:mac:x64": "node scripts/run-package.mjs mac-x64-unsigned",
+    "package:unsigned:mac:arm64": "node scripts/run-package.mjs mac-arm64-unsigned",
     "package:mac": "pnpm package:mac:x64 && pnpm package:mac:arm64",
     "package:mac:x64": "node scripts/run-package.mjs mac-x64",
     "package:mac:arm64": "node scripts/run-package.mjs mac-arm64",
     "performance:packaged": "node scripts/measure-packaged-performance.mjs",
-    "validate": "pnpm release:audit && pnpm dead-code && pnpm notices:check && pnpm model-manifest:check && pnpm audio-fixture:check && pnpm network:boundary && pnpm format:check && pnpm format:helper && pnpm lint && pnpm lint:helper && pnpm typecheck && pnpm test && pnpm test:helper && pnpm build"
+    "validate": "pnpm release:audit && pnpm dead-code && pnpm notices:check && pnpm model-manifest:check && pnpm audio-fixture:check && pnpm network:boundary && pnpm format:check && pnpm format:helper && pnpm lint && pnpm lint:helper && pnpm typecheck && pnpm test && pnpm test:helper && pnpm build",
+    "validate:unsigned-release": "node scripts/release-audit.mjs && pnpm dead-code && pnpm notices:check && pnpm model-manifest:check && pnpm audio-fixture:check && pnpm network:boundary && pnpm format:check && pnpm format:helper && pnpm lint && pnpm lint:helper && pnpm typecheck && pnpm test && pnpm test:helper && pnpm build"
   },
   "devDependencies": {
     "7zip-bin": "5.2.0",
@@ -96,6 +101,7 @@
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.3",
     "globals": "17.7.0",
+    "js-yaml": "4.1.1",
     "jsdom": "29.1.1",
     "knip": "5.83.0",
     "prettier": "3.9.5",

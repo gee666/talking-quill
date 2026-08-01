@@ -19,6 +19,7 @@ import type { SmartTranscriptionService } from '../smart/smart-transcription-ser
 import type { WelcomeService } from '../welcome/welcome-service';
 import type { UpdateService } from '../info/update-service';
 import type { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
+import type { ApplicationUpdateController } from '../info/application-update-controller';
 import type { SystemInfoService } from '../info/system-info-service';
 import type { NoticesService } from '../info/notices-service';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
@@ -47,6 +48,7 @@ export interface HandlerDependencies {
   readonly welcome: WelcomeService;
   readonly updates: UpdateService;
   readonly updateOperations: UpdateOperationCoordinator;
+  readonly applicationUpdates: ApplicationUpdateController;
   readonly systemInfo: SystemInfoService;
   readonly notices: NoticesService;
   readonly packagedMediaReady?: (role: 'capture' | 'widget') => void;
@@ -80,13 +82,18 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       screenRecording: dependencies.smart.status().screenPermission,
       helper: dependencies.state.getState().helper,
     }),
-    'info:check-update': ({ operationId }, context) =>
-      dependencies.updateOperations.run(context, operationId, (signal) =>
+    'info:check-update': async ({ operationId }, context) => {
+      const result = await dependencies.updateOperations.run(context, operationId, (signal) =>
         dependencies.updates.check(dependencies.appVersion, signal),
-      ),
+      );
+      dependencies.applicationUpdates.acceptCheckResult(result);
+      return result;
+    },
     'info:cancel-update': ({ operationId }, context) => ({
       cancelled: dependencies.updateOperations.cancel(context.webContentsId, operationId),
     }),
+    'info:update-state': () => dependencies.applicationUpdates.getState(),
+    'info:apply-update': () => dependencies.applicationUpdates.apply(),
     'info:open-permission': async ({ permission }) => {
       await dependencies.systemInfo.openPermission(permission);
       return { accepted: true };

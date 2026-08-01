@@ -36,7 +36,7 @@ export default defineConfig(({ mode }) => {
         ),
       },
       build: {
-        externalizeDeps: { exclude: ['zod', 'write-file-atomic'] },
+        externalizeDeps: { exclude: ['electron-updater', 'zod', 'write-file-atomic'] },
         rollupOptions: {
           input: {
             index: resolve(__dirname, 'src/main/index.ts'),

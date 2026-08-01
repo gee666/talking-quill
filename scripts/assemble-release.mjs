@@ -28,7 +28,22 @@ const provenanceNames = [
   'provenance-mac-x64.json',
   'provenance-mac-arm64.json',
 ];
-const expectedInputs = [...finalArtifacts, ...provenanceNames, 'THIRD_PARTY_NOTICES.txt'].sort();
+const updateAssets = [
+  `Talking-Quill-${version}-win-x64.exe.blockmap`,
+  `Talking-Quill-${version}-win-arm64.exe.blockmap`,
+  `Talking-Quill-${version}-mac-x64.zip.blockmap`,
+  `Talking-Quill-${version}-mac-arm64.zip.blockmap`,
+  'latest-x64.yml',
+  'latest-arm64.yml',
+  'latest-x64-mac.yml',
+  'latest-arm64-mac.yml',
+];
+const expectedInputs = [
+  ...finalArtifacts,
+  ...provenanceNames,
+  ...updateAssets,
+  'THIRD_PARTY_NOTICES.txt',
+].sort();
 const actualInputs = readdirSync(directory).sort();
 if (JSON.stringify(actualInputs) !== JSON.stringify(expectedInputs)) {
   throw new Error(`Release input allowlist mismatch: ${actualInputs.join(', ')}`);

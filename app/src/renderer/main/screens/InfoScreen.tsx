@@ -112,7 +112,7 @@ export function InfoScreen({
       <div className="screen__grid">
         <Card
           title="Version and updates"
-          description="Talking Quill only looks for a new version when you ask it to. It never checks in the background."
+          description="Talking Quill checks the public GitHub release feed when it starts. You can also check again here."
         >
           <div className="info-actions provider-actions">
             <Button busy={checking} onClick={() => void check()}>

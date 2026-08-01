@@ -40,7 +40,7 @@ describe('reproducible security tooling policy', () => {
     expect(isExpectedCargoAuditVersion('not-cargo-audit 0.22.2')).toBe(false);
     expect(isExpectedCargoAuditVersion('cargo-audit 1.0.22.2')).toBe(false);
     expect(JSON.parse(manifest)).toMatchObject({
-      packageManager: 'pnpm@11.13.0',
+      packageManager: 'pnpm@11.17.0',
       scripts: {
         'security:release-gate': 'pnpm install --frozen-lockfile && pnpm security:gate',
       },

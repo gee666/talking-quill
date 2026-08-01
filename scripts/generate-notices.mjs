@@ -14,6 +14,7 @@ const attributionPath = resolve(root, 'docs/attribution/anythingllm-mit.txt');
 const vendoredNoticeRoot = resolve(root, 'docs/third-party');
 const VENDORED_MISSING_MATERIAL = Object.freeze({
   'guid-typescript@1.0.9': ['guid-typescript-1.0.9-LICENSE.txt'],
+  'lazy-val@1.0.5': ['lazy-val-1.0.5-LICENSE.txt'],
   'onnxruntime-node@1.21.0': [
     'onnxruntime/v1.21.0/LICENSE',
     'onnxruntime/v1.21.0/ThirdPartyNotices.txt',

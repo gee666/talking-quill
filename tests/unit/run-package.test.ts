@@ -7,8 +7,12 @@ const expectedPlans = {
   win: ['package:win', 'nsis', 'win', 'x64'],
   'win-dir': ['package:win:dir', 'none', 'win', 'x64'],
   'win-arm64': ['package:win:arm64', 'nsis', 'win', 'arm64'],
+  'win-unsigned': ['package:win:unsigned', 'nsis', 'win', 'x64'],
+  'win-arm64-unsigned': ['package:win:arm64:unsigned', 'nsis', 'win', 'arm64'],
   'mac-x64': ['package:mac:x64', 'dmg-zip', 'mac', 'x64'],
   'mac-arm64': ['package:mac:arm64', 'dmg-zip', 'mac', 'arm64'],
+  'mac-x64-unsigned': ['package:mac:x64:unsigned', 'dmg-zip', 'mac', 'x64'],
+  'mac-arm64-unsigned': ['package:mac:arm64:unsigned', 'dmg-zip', 'mac', 'arm64'],
 } as const;
 
 describe('package orchestration', () => {

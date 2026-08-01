@@ -197,6 +197,7 @@ async function terminateProbeProcess(
     while (processGroupExists(pid) && Date.now() < deadline)
       await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
     if (processGroupExists(pid)) throw new Error('Pi probe process group did not terminate');
+    await waitForChildReaping(child, deadline, 'Pi probe root was not reaped');
     return;
   }
   const tools = windowsSystemTools(environment);
@@ -409,14 +410,26 @@ export async function terminateProcessTree(
   while (processGroupExists(pid) && Date.now() < deadline)
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
   if (processGroupExists(pid)) throw new Error('Pi process group did not terminate');
+  await waitForChildReaping(child, deadline, 'Pi process root was not reaped');
+}
+
+async function waitForChildReaping(
+  child: ChildProcessWithoutNullStreams,
+  deadline: number,
+  message: string,
+): Promise<void> {
+  while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  if (child.exitCode === null && child.signalCode === null) throw new Error(message);
 }
 
 function processGroupExists(pid: number): boolean {
   try {
     process.kill(-pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    return !isNoSuchProcess(error);
   }
 }
 
@@ -424,7 +437,11 @@ function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    return !isNoSuchProcess(error);
   }
+}
+
+function isNoSuchProcess(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ESRCH';
 }

@@ -15,7 +15,7 @@ describe('reproducible dependency manifests', () => {
   it('pins the package manager and every direct dependency exactly', async () => {
     const root = await readManifest('package.json');
     const app = await readManifest('app/package.json');
-    expect(root.packageManager).toBe('pnpm@11.13.0');
+    expect(root.packageManager).toBe('pnpm@11.17.0');
     for (const dependencies of [
       root.dependencies,
       root.devDependencies,

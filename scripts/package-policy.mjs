@@ -207,6 +207,7 @@ const REQUIRED_RENDERER_CHUNKS = Object.freeze([
   ['InfoScreen', 'js'],
   ['SettingsScreen', 'js'],
   ['SmartProcessingSection', 'js'],
+  ['UpdateDialog', 'js'],
   ['schemas', 'js'],
 ]);
 const REQUIRED_BRAND_LOGOS = Object.freeze(['logo-light', 'logo-dark']);
@@ -260,6 +261,7 @@ const ONNX_RESOURCE_PATHS = Object.freeze({
   ]),
 });
 const COMMON_RESOURCE_PATHS = [
+  'app-update.yml',
   'app.asar',
   'LICENSE',
   'THIRD_PARTY_NOTICES.txt',

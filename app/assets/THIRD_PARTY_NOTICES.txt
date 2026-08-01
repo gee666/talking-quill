@@ -3,11 +3,11 @@ Talking Quill — Production Third-Party Notices
 This inventory is generated from the production @talking-quill/app deployment graph, the shipped Electron runtime, and Cargo's offline normal-dependency trees for the Windows and macOS helper targets. Development-only and test-only dependencies are excluded.
 
 Source fingerprints
-pnpm-lock.yaml SHA-256: cd0b9502c5d9a44249024d661e2ac828b9ccc1330b606ba13bf0ae24a061fb88
+pnpm-lock.yaml SHA-256: 7ac8bb073bf4e69ef8f69d8ad749f2a4c91bc611724d77324c4eb05183d84b61
 helper/Cargo.lock SHA-256: 4c2277dcbdc6a9619cf403cacfbaa1ee10f7dffc8cdcbd46202de50f4f372b70
 scripts/model-manifest.json SHA-256: e5f139abb8b3baf5a31faf8235d64adc9ff3dc9c7d2b1aae808366e4e6124fff
 
-Production JavaScript/native dependencies (91 records)
+Production JavaScript/native dependencies (109 records)
 @huggingface/jinja@0.5.9 — SPDX: MIT
   https://github.com/huggingface/huggingface.js#readme
 @huggingface/transformers@3.8.1 — SPDX: Apache-2.0
@@ -34,6 +34,8 @@ Production JavaScript/native dependencies (91 records)
   https://github.com/protobufjs/protobuf.js#readme
 @types/node@24.13.3 — SPDX: MIT
   https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/node
+argparse@2.0.1 — SPDX: Python-2.0
+  https://github.com/nodeca/argparse#readme
 base64-js@1.5.1 — SPDX: MIT
   https://github.com/beatgammit/base64-js
 better-sqlite3@12.11.1 — SPDX: MIT
@@ -46,10 +48,14 @@ boolean@3.2.0 — SPDX: MIT
   https://github.com/thenativeweb/boolean#readme
 buffer@5.7.1 — SPDX: MIT
   https://github.com/feross/buffer
+builder-util-runtime@9.7.0 — SPDX: MIT
+  https://github.com/electron-userland/electron-builder
 chownr@1.1.4 — SPDX: ISC
   https://github.com/isaacs/chownr#readme
 chownr@3.0.0 — SPDX: BlueOak-1.0.0
   https://github.com/isaacs/chownr#readme
+debug@4.4.3 — SPDX: MIT
+  https://github.com/debug-js/debug#readme
 decompress-response@6.0.0 — SPDX: MIT
   https://github.com/sindresorhus/decompress-response#readme
 deep-extend@0.6.0 — SPDX: MIT
@@ -62,6 +68,8 @@ detect-libc@2.1.2 — SPDX: Apache-2.0
   https://github.com/lovell/detect-libc#readme
 detect-node@2.1.0 — SPDX: MIT
   https://github.com/iliakan/detect-node
+electron-updater@6.8.9 — SPDX: MIT
+  https://github.com/electron-userland/electron-builder
 electron@43.1.1 — SPDX: MIT
   https://www.npmjs.com/package/electron/v/43.1.1
 end-of-stream@1.4.5 — SPDX: MIT
@@ -82,6 +90,8 @@ flatbuffers@25.9.23 — SPDX: Apache-2.0
   https://google.github.io/flatbuffers/
 fs-constants@1.0.0 — SPDX: MIT
   https://github.com/mafintosh/fs-constants
+fs-extra@10.1.0 — SPDX: MIT
+  https://github.com/jprichardson/node-fs-extra
 github-from-package@0.0.0 — SPDX: MIT
   https://github.com/substack/github-from-package
 global-agent@3.0.0 — SPDX: BSD-3-Clause
@@ -90,8 +100,12 @@ globalthis@1.0.4 — SPDX: MIT
   https://github.com/ljharb/System.global#readme
 gopd@1.2.0 — SPDX: MIT
   https://github.com/ljharb/gopd#readme
+graceful-fs@4.2.11 — SPDX: ISC
+  https://github.com/isaacs/node-graceful-fs#readme
 guid-typescript@1.0.9 — SPDX: ISC
   https://github.com/NicolasDeveloper/guid-typescript#readme
+has-flag@4.0.0 — SPDX: MIT
+  https://github.com/sindresorhus/has-flag#readme
 has-property-descriptors@1.0.2 — SPDX: MIT
   https://github.com/inspect-js/has-property-descriptors#readme
 ieee754@1.2.1 — SPDX: BSD-3-Clause
@@ -100,8 +114,18 @@ inherits@2.0.4 — SPDX: ISC
   https://github.com/isaacs/inherits#readme
 ini@1.3.8 — SPDX: ISC
   https://github.com/isaacs/ini#readme
+js-yaml@4.3.0 — SPDX: MIT
+  https://github.com/nodeca/js-yaml#readme
 json-stringify-safe@5.0.1 — SPDX: ISC
   https://github.com/isaacs/json-stringify-safe
+jsonfile@6.2.1 — SPDX: MIT
+  https://github.com/jprichardson/node-jsonfile#readme
+lazy-val@1.0.5 — SPDX: MIT
+  https://github.com/develar/lazy-val
+lodash.escaperegexp@4.1.2 — SPDX: MIT
+  https://lodash.com/
+lodash.isequal@4.5.0 — SPDX: MIT
+  https://lodash.com/
 long@5.3.2 — SPDX: Apache-2.0
   https://github.com/dcodeIO/long.js#readme
 matcher@3.0.0 — SPDX: MIT
@@ -116,6 +140,8 @@ minizlib@3.1.0 — SPDX: MIT
   https://github.com/isaacs/minizlib#readme
 mkdirp-classic@0.5.3 — SPDX: MIT
   https://github.com/mafintosh/mkdirp-classic
+ms@2.1.3 — SPDX: MIT
+  https://github.com/vercel/ms#readme
 napi-build-utils@2.0.0 — SPDX: MIT
   https://github.com/inspiredware/napi-build-utils#readme
 node-abi@3.94.0 — SPDX: MIT
@@ -152,10 +178,14 @@ roarr@2.15.4 — SPDX: BSD-3-Clause
   https://github.com/gajus/roarr#readme
 safe-buffer@5.2.1 — SPDX: MIT
   https://github.com/feross/safe-buffer
+sax@1.6.0 — SPDX: BlueOak-1.0.0
+  https://github.com/isaacs/sax-js#readme
 scheduler@0.27.0 — SPDX: MIT
   https://react.dev/
 semver-compare@1.0.0 — SPDX: MIT
   https://github.com/substack/semver-compare
+semver@7.7.4 — SPDX: ISC
+  https://github.com/npm/node-semver#readme
 semver@7.8.5 — SPDX: ISC
   https://github.com/npm/node-semver#readme
 serialize-error@7.0.1 — SPDX: MIT
@@ -170,18 +200,24 @@ string_decoder@1.3.0 — SPDX: MIT
   https://github.com/nodejs/string_decoder
 strip-json-comments@2.0.1 — SPDX: MIT
   https://github.com/sindresorhus/strip-json-comments#readme
+supports-color@7.2.0 — SPDX: MIT
+  https://github.com/chalk/supports-color#readme
 tar-fs@2.1.5 — SPDX: MIT
   https://github.com/mafintosh/tar-fs
 tar-stream@2.2.0 — SPDX: MIT
   https://github.com/mafintosh/tar-stream
 tar@7.5.20 — SPDX: BlueOak-1.0.0
   https://github.com/isaacs/node-tar#readme
+tiny-typed-emitter@2.1.0 — SPDX: MIT
+  https://github.com/binier/tiny-typed-emitter#readme
 tunnel-agent@0.6.0 — SPDX: Apache-2.0
   https://github.com/mikeal/tunnel-agent#readme
 type-fest@0.13.1 — SPDX: (MIT OR CC0-1.0)
   https://github.com/sindresorhus/type-fest#readme
 undici-types@7.18.2 — SPDX: MIT
   https://undici.nodejs.org
+universalify@2.0.1 — SPDX: MIT
+  https://github.com/RyanZim/universalify#readme
 util-deprecate@1.0.2 — SPDX: MIT
   https://github.com/TooTallNate/util-deprecate
 wrappy@1.0.2 — SPDX: ISC
@@ -276,6 +312,31 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+--- SHA-256 01d9b49bb5c19cd9a2c3cae5d70bdb0616418d2ca0539452bd16c3da9af29054
+Applies to: lazy-val@1.0.5/lazy-val-1.0.5-LICENSE.txt
+
+MIT License
+
+Copyright (c) Vladimir Krivosheev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 --- SHA-256 041eace0dc37a66ab865bc397e229baa26a3a9e2fe255a3566421d00bbc30a5e
 Applies to: boolean@3.2.0/LICENSE.txt
 
@@ -342,7 +403,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --- SHA-256 0ae52fe329ccfd23fedbd688361bd0dedaf5cae3e3516eb2ad17831f2d8b347c
-Applies to: @isaacs/fs-minipass@4.0.1/LICENSE, chownr@1.1.4/LICENSE, ini@1.3.8/LICENSE, json-stringify-safe@5.0.1/LICENSE, once@1.4.0/LICENSE, semver@7.8.5/LICENSE, wrappy@1.0.2/LICENSE
+Applies to: @isaacs/fs-minipass@4.0.1/LICENSE, chownr@1.1.4/LICENSE, ini@1.3.8/LICENSE, json-stringify-safe@5.0.1/LICENSE, once@1.4.0/LICENSE, semver@7.7.4/LICENSE, semver@7.8.5/LICENSE, wrappy@1.0.2/LICENSE
 
 The ISC License
 
@@ -424,7 +485,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --- SHA-256 1a9975c75cfc205b54615d0f0daad869a240f5e348eb1a3d431fc7644dd5fd67
-Applies to: minipass@7.1.3/LICENSE.md, tar@7.5.20/LICENSE.md
+Applies to: minipass@7.1.3/LICENSE.md, sax@1.6.0/LICENSE.md, tar@7.5.20/LICENSE.md
 
 # Blue Oak Model License
 
@@ -7067,6 +7128,30 @@ LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+--- SHA-256 3a2b08f41ac1da5c53d0649e9744b05d6f82dbf5f73080b9d145b568eaae7e2c
+Applies to: universalify@2.0.1/LICENSE
+
+(The MIT License)
+
+Copyright (c) 2017, Ryan Zimmerman <opensrc@ryanzim.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the 'Software'), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 --- SHA-256 3a395674c5c917a5c484fbb4825d855da35333cc24cf770efa7e2f0420ecba14
 Applies to: inherits@2.0.4/LICENSE
 
@@ -7161,6 +7246,31 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+--- SHA-256 473321d7f2605e185a43fa9b6122a5b57fd5b67fa6fd77e76855a585c05147a7
+Applies to: tiny-typed-emitter@2.1.0/LICENSE
+
+MIT License
+
+Copyright (c) 2020 Zurab Benashvili (binier) <zura.bena@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 --- SHA-256 490ab72226a23a371207bdab8d59f0921ad44a43e9b071c96a3a028e81ed5926
 Applies to: better-sqlite3@12.11.1/LICENSE
 
@@ -7185,6 +7295,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--- SHA-256 4e27a715961c6af772df4dc5bf8fbfdf5ce58b64153681bfdb580e1707e1ce66
+Applies to: fs-extra@10.1.0/LICENSE
+
+(The MIT License)
+
+Copyright (c) 2011-2017 JP Richardson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
+(the 'Software'), to deal in the Software without restriction, including without limitation the rights to use, copy, modify,
+ merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 4f8ade273d406cf67b5a078d751d0b651e3f73b84f958b493e9254ab3ce47391
 Applies to: readable-stream@3.6.2/LICENSE, string_decoder@1.3.0/LICENSE
@@ -7677,6 +7806,76 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+--- SHA-256 71a8b71c2a0d5d301a3a178f57b1a2693b2bbd63510a9302ea09340897be211d
+Applies to: lodash.isequal@4.5.0/LICENSE
+
+Copyright JS Foundation and other contributors <https://js.foundation/>
+
+Based on Underscore.js, copyright Jeremy Ashkenas,
+DocumentCloud and Investigative Reporters & Editors <http://underscorejs.org/>
+
+This software consists of voluntary contributions made by many
+individuals. For exact contribution history, see the revision history
+available at https://github.com/lodash/lodash
+
+The following license applies to all parts of this software except as
+documented below:
+
+====
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+====
+
+Copyright and related rights for sample code are waived via CC0. Sample
+code is defined as all source code displayed within the prose of the
+documentation.
+
+CC0: http://creativecommons.org/publicdomain/zero/1.0/
+
+====
+
+Files located in the node_modules and vendor directories are externally
+maintained libraries used by this software which have their own
+licenses; we recommend you read them, as their terms may differ from the
+terms above.
+
+--- SHA-256 740bb4e91297defa503f6fb1055b164be677e5e7eeb1ae7d9535f8dc7934f50c
+Applies to: graceful-fs@4.2.11/LICENSE
+
+The ISC License
+
+Copyright (c) 2011-2022 Isaac Z. Schlueter, Ben Noordhuis, and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 --- SHA-256 783829b43aacb86cb8e6cedcd777210c13f2081aae94419cc7a30e112977d488
 Applies to: windows-link@0.2.1/license-apache-2.0, windows-sys@0.61.2/license-apache-2.0
 
@@ -7924,6 +8123,25 @@ Code generated by the command line utilities is owned by the owner
 of the input file used when generating it. This code is not
 standalone and requires a support library to be linked with it. This
 support library is itself covered by the above license.
+
+--- SHA-256 7b022446e9cfa7df5f57e4b6c18c49ac7dfc4646a2e65de267e12e4a64f7247b
+Applies to: jsonfile@6.2.1/LICENSE
+
+(The MIT License)
+
+Copyright (c) 2012-2015, JP Richardson <jprichardson@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
+(the 'Software'), to deal in the Software without restriction, including without limitation the rights to use, copy, modify,
+ merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 81a37b0427df05486f9ea78105a14f4edc19375dfa5ea882ebfb4be4b9a24c06
 Applies to: onnxruntime-common@1.21.0/onnxruntime/v1.21.0/ThirdPartyNotices.txt, onnxruntime-node@1.21.0/onnxruntime/v1.21.0/ThirdPartyNotices.txt
@@ -14191,6 +14409,31 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 END OF TERMS AND CONDITIONS
 
+--- SHA-256 8866342d12c60cb5cea24c32ab47a2a953faf7b436ad68fd95f810b4d4ee9ce7
+Applies to: builder-util-runtime@9.7.0/LICENSE, electron-updater@6.8.9/LICENSE
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Loopline Systems
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 --- SHA-256 8b7810752e660865e251773d121b477fd28d6ce866d257afb267de651a5816e6
 Applies to: rc@1.2.8/LICENSE.APACHE2
 
@@ -14209,6 +14452,264 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+--- SHA-256 8cb1adb54549bbffc30325e4a0a245978750efb5f150d684b700e1f92e0ebfcc
+Applies to: argparse@2.0.1/LICENSE
+
+A. HISTORY OF THE SOFTWARE
+==========================
+
+Python was created in the early 1990s by Guido van Rossum at Stichting
+Mathematisch Centrum (CWI, see http://www.cwi.nl) in the Netherlands
+as a successor of a language called ABC.  Guido remains Python's
+principal author, although it includes many contributions from others.
+
+In 1995, Guido continued his work on Python at the Corporation for
+National Research Initiatives (CNRI, see http://www.cnri.reston.va.us)
+in Reston, Virginia where he released several versions of the
+software.
+
+In May 2000, Guido and the Python core development team moved to
+BeOpen.com to form the BeOpen PythonLabs team.  In October of the same
+year, the PythonLabs team moved to Digital Creations, which became
+Zope Corporation.  In 2001, the Python Software Foundation (PSF, see
+https://www.python.org/psf/) was formed, a non-profit organization
+created specifically to own Python-related Intellectual Property.
+Zope Corporation was a sponsoring member of the PSF.
+
+All Python releases are Open Source (see http://www.opensource.org for
+the Open Source Definition).  Historically, most, but not all, Python
+releases have also been GPL-compatible; the table below summarizes
+the various releases.
+
+    Release         Derived     Year        Owner       GPL-
+                    from                                compatible? (1)
+
+    0.9.0 thru 1.2              1991-1995   CWI         yes
+    1.3 thru 1.5.2  1.2         1995-1999   CNRI        yes
+    1.6             1.5.2       2000        CNRI        no
+    2.0             1.6         2000        BeOpen.com  no
+    1.6.1           1.6         2001        CNRI        yes (2)
+    2.1             2.0+1.6.1   2001        PSF         no
+    2.0.1           2.0+1.6.1   2001        PSF         yes
+    2.1.1           2.1+2.0.1   2001        PSF         yes
+    2.1.2           2.1.1       2002        PSF         yes
+    2.1.3           2.1.2       2002        PSF         yes
+    2.2 and above   2.1.1       2001-now    PSF         yes
+
+Footnotes:
+
+(1) GPL-compatible doesn't mean that we're distributing Python under
+    the GPL.  All Python licenses, unlike the GPL, let you distribute
+    a modified version without making your changes open source.  The
+    GPL-compatible licenses make it possible to combine Python with
+    other software that is released under the GPL; the others don't.
+
+(2) According to Richard Stallman, 1.6.1 is not GPL-compatible,
+    because its license has a choice of law clause.  According to
+    CNRI, however, Stallman's lawyer has told CNRI's lawyer that 1.6.1
+    is "not incompatible" with the GPL.
+
+Thanks to the many outside volunteers who have worked under Guido's
+direction to make these releases possible.
+
+
+B. TERMS AND CONDITIONS FOR ACCESSING OR OTHERWISE USING PYTHON
+===============================================================
+
+PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
+--------------------------------------------
+
+1. This LICENSE AGREEMENT is between the Python Software Foundation
+("PSF"), and the Individual or Organization ("Licensee") accessing and
+otherwise using this software ("Python") in source or binary form and
+its associated documentation.
+
+2. Subject to the terms and conditions of this License Agreement, PSF hereby
+grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,
+analyze, test, perform and/or display publicly, prepare derivative works,
+distribute, and otherwise use Python alone or in any derivative version,
+provided, however, that PSF's License Agreement and PSF's notice of copyright,
+i.e., "Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
+2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020 Python Software Foundation;
+All Rights Reserved" are retained in Python alone or in any derivative version
+prepared by Licensee.
+
+3. In the event Licensee prepares a derivative work that is based on
+or incorporates Python or any part thereof, and wants to make
+the derivative work available to others as provided herein, then
+Licensee hereby agrees to include in any such work a brief summary of
+the changes made to Python.
+
+4. PSF is making Python available to Licensee on an "AS IS"
+basis.  PSF MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PSF MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+5. PSF SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON
+FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS
+A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON,
+OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+6. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+7. Nothing in this License Agreement shall be deemed to create any
+relationship of agency, partnership, or joint venture between PSF and
+Licensee.  This License Agreement does not grant permission to use PSF
+trademarks or trade name in a trademark sense to endorse or promote
+products or services of Licensee, or any third party.
+
+8. By copying, installing or otherwise using Python, Licensee
+agrees to be bound by the terms and conditions of this License
+Agreement.
+
+
+BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0
+-------------------------------------------
+
+BEOPEN PYTHON OPEN SOURCE LICENSE AGREEMENT VERSION 1
+
+1. This LICENSE AGREEMENT is between BeOpen.com ("BeOpen"), having an
+office at 160 Saratoga Avenue, Santa Clara, CA 95051, and the
+Individual or Organization ("Licensee") accessing and otherwise using
+this software in source or binary form and its associated
+documentation ("the Software").
+
+2. Subject to the terms and conditions of this BeOpen Python License
+Agreement, BeOpen hereby grants Licensee a non-exclusive,
+royalty-free, world-wide license to reproduce, analyze, test, perform
+and/or display publicly, prepare derivative works, distribute, and
+otherwise use the Software alone or in any derivative version,
+provided, however, that the BeOpen Python License is retained in the
+Software, alone or in any derivative version prepared by Licensee.
+
+3. BeOpen is making the Software available to Licensee on an "AS IS"
+basis.  BEOPEN MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, BEOPEN MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+4. BEOPEN SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF THE
+SOFTWARE FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS
+AS A RESULT OF USING, MODIFYING OR DISTRIBUTING THE SOFTWARE, OR ANY
+DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+5. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+6. This License Agreement shall be governed by and interpreted in all
+respects by the law of the State of California, excluding conflict of
+law provisions.  Nothing in this License Agreement shall be deemed to
+create any relationship of agency, partnership, or joint venture
+between BeOpen and Licensee.  This License Agreement does not grant
+permission to use BeOpen trademarks or trade names in a trademark
+sense to endorse or promote products or services of Licensee, or any
+third party.  As an exception, the "BeOpen Python" logos available at
+http://www.pythonlabs.com/logos.html may be used according to the
+permissions granted on that web page.
+
+7. By copying, installing or otherwise using the software, Licensee
+agrees to be bound by the terms and conditions of this License
+Agreement.
+
+
+CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1
+---------------------------------------
+
+1. This LICENSE AGREEMENT is between the Corporation for National
+Research Initiatives, having an office at 1895 Preston White Drive,
+Reston, VA 20191 ("CNRI"), and the Individual or Organization
+("Licensee") accessing and otherwise using Python 1.6.1 software in
+source or binary form and its associated documentation.
+
+2. Subject to the terms and conditions of this License Agreement, CNRI
+hereby grants Licensee a nonexclusive, royalty-free, world-wide
+license to reproduce, analyze, test, perform and/or display publicly,
+prepare derivative works, distribute, and otherwise use Python 1.6.1
+alone or in any derivative version, provided, however, that CNRI's
+License Agreement and CNRI's notice of copyright, i.e., "Copyright (c)
+1995-2001 Corporation for National Research Initiatives; All Rights
+Reserved" are retained in Python 1.6.1 alone or in any derivative
+version prepared by Licensee.  Alternately, in lieu of CNRI's License
+Agreement, Licensee may substitute the following text (omitting the
+quotes): "Python 1.6.1 is made available subject to the terms and
+conditions in CNRI's License Agreement.  This Agreement together with
+Python 1.6.1 may be located on the Internet using the following
+unique, persistent identifier (known as a handle): 1895.22/1013.  This
+Agreement may also be obtained from a proxy server on the Internet
+using the following URL: http://hdl.handle.net/1895.22/1013".
+
+3. In the event Licensee prepares a derivative work that is based on
+or incorporates Python 1.6.1 or any part thereof, and wants to make
+the derivative work available to others as provided herein, then
+Licensee hereby agrees to include in any such work a brief summary of
+the changes made to Python 1.6.1.
+
+4. CNRI is making Python 1.6.1 available to Licensee on an "AS IS"
+basis.  CNRI MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, CNRI MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON 1.6.1 WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+5. CNRI SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON
+1.6.1 FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS
+A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON 1.6.1,
+OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+6. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+7. This License Agreement shall be governed by the federal
+intellectual property law of the United States, including without
+limitation the federal copyright law, and, to the extent such
+U.S. federal law does not apply, by the law of the Commonwealth of
+Virginia, excluding Virginia's conflict of law provisions.
+Notwithstanding the foregoing, with regard to derivative works based
+on Python 1.6.1 that incorporate non-separable material that was
+previously distributed under the GNU General Public License (GPL), the
+law of the Commonwealth of Virginia shall govern this License
+Agreement only as to issues arising under or with respect to
+Paragraphs 4, 5, and 7 of this License Agreement.  Nothing in this
+License Agreement shall be deemed to create any relationship of
+agency, partnership, or joint venture between CNRI and Licensee.  This
+License Agreement does not grant permission to use CNRI trademarks or
+trade name in a trademark sense to endorse or promote products or
+services of Licensee, or any third party.
+
+8. By clicking on the "ACCEPT" button where indicated, or by copying,
+installing or otherwise using Python 1.6.1, Licensee agrees to be
+bound by the terms and conditions of this License Agreement.
+
+        ACCEPT
+
+
+CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2
+--------------------------------------------------
+
+Copyright (c) 1991 - 1995, Stichting Mathematisch Centrum Amsterdam,
+The Netherlands.  All rights reserved.
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee is hereby granted,
+provided that the above copyright notice appear in all copies and that
+both that copyright notice and this permission notice appear in
+supporting documentation, and that the name of Stichting Mathematisch
+Centrum or CWI not be used in advertising or publicity pertaining to
+distribution of the software without specific, written prior
+permission.
+
+STICHTING MATHEMATISCH CENTRUM DISCLAIMS ALL WARRANTIES WITH REGARD TO
+THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS, IN NO EVENT SHALL STICHTING MATHEMATISCH CENTRUM BE LIABLE
+FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --- SHA-256 909df91b60d332fc43aeb46e187078f2458f5e55fcba2e2ce28798e39ceda1a3
 Applies to: @protobufjs/aspromise@1.1.2/LICENSE, @protobufjs/base64@1.1.2/LICENSE, @protobufjs/codegen@2.0.5/LICENSE, @protobufjs/eventemitter@1.1.1/LICENSE, @protobufjs/fetch@1.1.1/LICENSE, @protobufjs/float@1.0.2/LICENSE, @protobufjs/path@1.1.2/LICENSE, @protobufjs/pool@1.1.0/LICENSE, @protobufjs/utf8@1.1.2/LICENSE
@@ -14445,6 +14946,57 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+--- SHA-256 95da58f9567fa87531d5516b69c1b369bc99a645c87b35c9d5ce339c91ff172a
+Applies to: lodash.escaperegexp@4.1.2/LICENSE
+
+Copyright jQuery Foundation and other contributors <https://jquery.org/>
+
+Based on Underscore.js, copyright Jeremy Ashkenas,
+DocumentCloud and Investigative Reporters & Editors <http://underscorejs.org/>
+
+This software consists of voluntary contributions made by many
+individuals. For exact contribution history, see the revision history
+available at https://github.com/lodash/lodash
+
+The following license applies to all parts of this software except as
+documented below:
+
+====
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+====
+
+Copyright and related rights for sample code are waived via CC0. Sample
+code is defined as all source code displayed within the prose of the
+documentation.
+
+CC0: http://creativecommons.org/publicdomain/zero/1.0/
+
+====
+
+Files located in the node_modules and vendor directories are externally
+maintained libraries used by this software which have their own
+licenses; we recommend you read them, as their terms may differ from the
+terms above.
+
 --- SHA-256 9cb46d55c15ba63d716cd7f3acc9017ece31b035e36b7b6dfb4f2f1f7a5d3c80
 Applies to: mkdirp-classic@0.5.3/LICENSE
 
@@ -14589,6 +15141,31 @@ The views and conclusions contained in the software and documentation are those
 of the authors and should not be interpreted as representing official policies, 
 either expressed or implied, of the FreeBSD Project.
 
+--- SHA-256 bd470a9114ffb0c125553667203e65dce3ed50a339a3f5c43de24e225c040b7a
+Applies to: js-yaml@4.3.0/LICENSE
+
+(The MIT License)
+
+Copyright (C) 2011-2015 by Vitaly Puzrin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
 --- SHA-256 bfea7a7ca3b8ee37cc9686d3c949ffeb93f3311aff81b55cc576831f11122ffc
 Applies to: prebuild-install@7.1.3/LICENSE
 
@@ -14655,6 +15232,19 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+--- SHA-256 c9808a775260db5602f6a0c29f5f8b78e81f9666a33623fedfa34a22208b1063
+Applies to: has-flag@4.0.0/license, supports-color@7.2.0/license
+
+MIT License
+
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 caf96060dc6de2af3adca29e7f50445b9ac26f860a8f646396a42e5d26cd9564
 Applies to: buffer@5.7.1/LICENSE
@@ -15434,6 +16024,29 @@ If the Work includes a "NOTICE" text file as part of its distribution, then any 
 
 END OF TERMS AND CONDITIONS
 
+--- SHA-256 d9e5aa2747f30eae5b2e977871c30b8638266900c131efa16e4caa844e89402e
+Applies to: debug@4.4.3/LICENSE
+
+(The MIT License)
+
+Copyright (c) 2014-2017 TJ Holowaychuk <tj@vision-media.ca>
+Copyright (c) 2018-2021 Josh Junon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+and associated documentation files (the 'Software'), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 --- SHA-256 df12b5d07fbd3cf2891a43bebdc8cdda70819efb37aac6c43f25001670a06bd2
 Applies to: simple-concat@1.0.1/LICENSE, simple-get@4.0.1/LICENSE
 
@@ -15574,6 +16187,31 @@ No contributor can revoke this license.
 without any warranty or condition, and no contributor
 will be liable to anyone for any damages related to this
 software or this license, under any kind of legal claim.***
+
+--- SHA-256 e91069c31b4e4daee9db0e946308531fe585f091b655bb68fee44a83830ab9b6
+Applies to: ms@2.1.3/license.md
+
+The MIT License (MIT)
+
+Copyright (c) 2020 Vercel, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 --- SHA-256 e9861036987ef519430f50a43532184b9fa0889cb6b3a0102acf7651181e8575
 Applies to: onnxruntime-common@1.21.0/onnxruntime/v1.21.0/LICENSE, onnxruntime-common@1.22.0-dev.20250409-89f8206ba4/onnxruntime/89f8206ba4/LICENSE, onnxruntime-node@1.21.0/onnxruntime/v1.21.0/LICENSE, onnxruntime-web@1.22.0-dev.20250409-89f8206ba4/onnxruntime/89f8206ba4/LICENSE

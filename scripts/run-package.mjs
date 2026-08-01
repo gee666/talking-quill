@@ -21,6 +21,18 @@ const PACKAGE_TARGETS = Object.freeze({
     platform: 'win',
     architecture: 'arm64',
   }),
+  'win-unsigned': Object.freeze({
+    command: 'package:win:unsigned',
+    artifactRequirement: 'nsis',
+    platform: 'win',
+    architecture: 'x64',
+  }),
+  'win-arm64-unsigned': Object.freeze({
+    command: 'package:win:arm64:unsigned',
+    artifactRequirement: 'nsis',
+    platform: 'win',
+    architecture: 'arm64',
+  }),
   'mac-x64': Object.freeze({
     command: 'package:mac:x64',
     artifactRequirement: 'dmg-zip',
@@ -33,6 +45,18 @@ const PACKAGE_TARGETS = Object.freeze({
     platform: 'mac',
     architecture: 'arm64',
   }),
+  'mac-x64-unsigned': Object.freeze({
+    command: 'package:mac:x64:unsigned',
+    artifactRequirement: 'dmg-zip',
+    platform: 'mac',
+    architecture: 'x64',
+  }),
+  'mac-arm64-unsigned': Object.freeze({
+    command: 'package:mac:arm64:unsigned',
+    artifactRequirement: 'dmg-zip',
+    platform: 'mac',
+    architecture: 'arm64',
+  }),
 });
 
 export function createPackagePlan(target) {
@@ -40,7 +64,9 @@ export function createPackagePlan(target) {
     ? PACKAGE_TARGETS[target]
     : undefined;
   if (configuration === undefined) {
-    throw new Error('Expected package target: win, win-arm64, win-dir, mac-x64, or mac-arm64');
+    throw new Error(
+      'Expected package target: win, win-arm64, win-dir, mac-x64, mac-arm64, or an unsigned variant',
+    );
   }
   return {
     ...configuration,

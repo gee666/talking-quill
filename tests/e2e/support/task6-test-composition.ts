@@ -1,4 +1,7 @@
-import type { HelperNotification } from '../../../app/src/shared/helper/protocol';
+import type {
+  HelperNotification,
+  HelperSessionCaptureMode,
+} from '../../../app/src/shared/helper/protocol';
 import {
   DEFAULT_GENERAL_PROFILE,
   DEFAULT_PROMPT_PROFILE,
@@ -29,6 +32,7 @@ class DeterministicHelper implements EchoHelperPort {
     },
   };
   readonly #notifications = new Set<(notification: HelperNotification) => void>();
+  #captureMode: HelperSessionCaptureMode = 'off';
 
   subscribeNotifications(listener: (notification: HelperNotification) => void): () => void {
     this.#notifications.add(listener);
@@ -47,11 +51,13 @@ class DeterministicHelper implements EchoHelperPort {
     return Promise.resolve({ enabled, bindings });
   }
 
-  setSessionCapture(active: boolean) {
-    return Promise.resolve({ active });
+  setSessionCapture(mode: Parameters<EchoHelperPort['setSessionCapture']>[0]) {
+    this.#captureMode = mode;
+    return Promise.resolve({ mode });
   }
 
   resetSessionCapture(): Promise<void> {
+    this.#captureMode = 'off';
     return Promise.resolve();
   }
 
@@ -65,6 +71,18 @@ class DeterministicHelper implements EchoHelperPort {
 
   emit(notification: HelperNotification): void {
     for (const listener of this.#notifications) listener(notification);
+  }
+
+  emitSessionKey(key: 'escape' | 'enter'): void {
+    const captured =
+      this.#captureMode === 'recording' ||
+      (this.#captureMode === 'cancel-only' && key === 'escape');
+    if (!captured) return;
+    this.emit({
+      jsonrpc: '2.0',
+      method: 'session.key',
+      params: { key, phase: 'down' },
+    });
   }
 }
 
@@ -195,12 +213,7 @@ export function createTask6TestComposition(
           shortcut: (alternate ? DEFAULT_PROMPT_PROFILE : DEFAULT_GENERAL_PROFILE).shortcut,
         },
       }),
-    key: (key: 'escape' | 'enter') =>
-      helper.emit({
-        jsonrpc: '2.0',
-        method: 'session.key',
-        params: { key, phase: 'down' },
-      }),
+    key: (key: 'escape' | 'enter') => helper.emitSessionKey(key),
     frames: (rms: number, count: number) => recording.frames(rms, count),
     setTranscript: (text: string) => {
       whisper.text = text;

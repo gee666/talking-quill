@@ -394,7 +394,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     ).toBeVisible();
     // Categorized in-process instrumentation is intentionally blocked before socket I/O. This is
     // scenario-routing evidence, not OS packet-capture evidence.
-    expect(await readEgressCategories(profile)).toEqual([]);
+    expect(await readEgressCategories(profile)).toEqual(['update']);
     const validEntry = launched.main.locator('li.history-entry').filter({
       hasText: 'Packaged valid thumbnail',
     });
@@ -563,7 +563,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
       .toBe(true);
     // Opening Smart processing now starts automatic model discovery, which is the first
     // categorized provider choke point the proof observer records.
-    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider']);
+    await expect.poll(() => readEgressCategories(profile)).toEqual(['update', 'provider']);
     const providerForm = launched.main.locator('form.stack');
     await providerForm
       .getByRole('combobox', { name: 'Model', exact: true })
@@ -574,20 +574,22 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     await providerForm.getByRole('button', { name: 'Save configuration' }).click();
     await expect(providerForm.getByText('Saved', { exact: true })).toBeVisible();
     await launched.main.getByRole('button', { name: 'Test connection' }).click();
-    await expect.poll(() => readEgressCategories(profile)).toEqual(['provider', 'provider']);
+    await expect
+      .poll(() => readEgressCategories(profile))
+      .toEqual(['update', 'provider', 'provider']);
 
     await launched.main.getByRole('button', { name: 'About' }).click();
     await expect(launched.main.getByRole('heading', { name: 'About Talking Quill' })).toBeVisible();
     await launched.main.getByRole('button', { name: 'Check for updates' }).click();
     await expect
       .poll(() => readEgressCategories(profile))
-      .toEqual(['provider', 'provider', 'update']);
+      .toEqual(['update', 'provider', 'provider', 'update']);
     await launched.main.getByRole('button', { name: 'Settings' }).click();
     await launched.main.getByRole('button', { name: 'Transcription model' }).click();
     await launched.main.getByRole('button', { name: 'Download', exact: true }).click();
     await expect
       .poll(() => readEgressCategories(profile))
-      .toEqual(['provider', 'provider', 'update', 'model-download']);
+      .toEqual(['update', 'provider', 'provider', 'update', 'model-download']);
     const firstExit = waitForExit(launched.child);
     await launched.main.getByRole('button', { name: 'Close window' }).click();
     await firstExit;

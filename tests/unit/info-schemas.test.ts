@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ApplicationUpdateStateSchema,
   InfoLocationSchema,
   InfoPermissionSchema,
   UpdateCheckResultSchema,
@@ -11,6 +12,31 @@ describe('Info IPC schemas', () => {
     expect(InfoLocationSchema.safeParse('C:/secret').success).toBe(false);
     expect(InfoPermissionSchema.safeParse('screen-recording').success).toBe(true);
     expect(InfoPermissionSchema.safeParse('camera').success).toBe(false);
+  });
+  it('requires a bounded update state with no installer path or arbitrary payload', () => {
+    expect(
+      ApplicationUpdateStateSchema.safeParse({
+        phase: 'available',
+        currentVersion: '1.0.0',
+        availableVersion: '1.1.0',
+        releaseUrl: 'https://github.com/gee666/talking-quill/releases/tag/v1.1.0',
+        percent: null,
+        message: null,
+        revision: 1,
+      }).success,
+    ).toBe(true);
+    expect(
+      ApplicationUpdateStateSchema.safeParse({
+        phase: 'available',
+        currentVersion: '1.0.0',
+        availableVersion: '1.1.0',
+        releaseUrl: null,
+        percent: null,
+        message: null,
+        revision: 1,
+        installerPath: 'C:/untrusted.exe',
+      }).success,
+    ).toBe(false);
   });
   it('requires a bounded HTTPS release result', () => {
     expect(

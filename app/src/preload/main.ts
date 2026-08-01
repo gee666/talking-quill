@@ -11,6 +11,9 @@ const api: MainApi = {
     status: () => invoke('info:status', {}),
     checkForUpdates: (operationId) => invoke('info:check-update', { operationId }),
     cancel: async (operationId) => (await invoke('info:cancel-update', { operationId })).cancelled,
+    updateState: () => invoke('info:update-state', {}),
+    applyUpdate: () => invoke('info:apply-update', {}),
+    onUpdateChanged: (listener) => subscribe('info:update-changed', listener),
     openPermissionSettings: async (permission) => {
       await invoke('info:open-permission', { permission });
     },

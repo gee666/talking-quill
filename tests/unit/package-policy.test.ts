@@ -34,6 +34,7 @@ const performanceLazyChunks = [
   'out/renderer/assets/InfoScreen-valid.js',
   'out/renderer/assets/SettingsScreen-valid.js',
   'out/renderer/assets/SmartProcessingSection-valid.js',
+  'out/renderer/assets/UpdateDialog-valid.js',
   'out/renderer/assets/schemas-valid.js',
 ] as const;
 
@@ -98,6 +99,7 @@ const validAsar = [
 ];
 
 const commonResources = [
+  'app-update.yml',
   'app.asar',
   'LICENSE',
   'THIRD_PARTY_NOTICES.txt',
@@ -130,7 +132,7 @@ const validResources = (target: 'win' | 'mac') => {
 
 describe('packaged runtime allowlist', () => {
   it('accepts only the expected runtime ASAR and native resource paths', () => {
-    expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(55);
+    expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(56);
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
     expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();
@@ -177,6 +179,7 @@ describe('packaged runtime allowlist', () => {
       'out/renderer/assets/InfoScreen-valid.js',
       'out/renderer/assets/SettingsScreen-valid.js',
       'out/renderer/assets/SmartProcessingSection-valid.js',
+      'out/renderer/assets/UpdateDialog-valid.js',
       'out/renderer/assets/schemas-valid.js',
       'out/renderer/assets/logo-light-valid.png',
       'out/renderer/assets/logo-dark-valid.png',

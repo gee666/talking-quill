@@ -15,6 +15,16 @@ const artifacts = [
   ['mac', 'arm64', 'dmg'],
   ['mac', 'arm64', 'zip'],
 ] as const;
+const updateAssets = [
+  'Talking-Quill-1.0.0-win-x64.exe.blockmap',
+  'Talking-Quill-1.0.0-win-arm64.exe.blockmap',
+  'Talking-Quill-1.0.0-mac-x64.zip.blockmap',
+  'Talking-Quill-1.0.0-mac-arm64.zip.blockmap',
+  'latest-x64.yml',
+  'latest-arm64.yml',
+  'latest-x64-mac.yml',
+  'latest-arm64-mac.yml',
+] as const;
 
 beforeEach(() => {
   rmSync(fixture, { recursive: true, force: true });
@@ -23,6 +33,7 @@ beforeEach(() => {
     const name = `Talking-Quill-1.0.0-${platform}-${arch}.${extension}`;
     writeFileSync(resolve(fixture, name), name);
   }
+  for (const name of updateAssets) writeFileSync(resolve(fixture, name), name);
   for (const [platform, arch] of [
     ['win', 'x64'],
     ['win', 'arm64'],
@@ -58,7 +69,7 @@ beforeEach(() => {
 });
 
 describe('release assembly tooling', () => {
-  it('binds six installers, four provenance records, notices, manifest, and checksums', () => {
+  it('binds installers, updater metadata, provenance, notices, manifest, and checksums', () => {
     expect(() =>
       run('scripts/assemble-release.mjs', ['v1.0.0', fixture], {
         TALKING_QUILL_RELEASE_COMMIT: 'b'.repeat(40),
@@ -71,10 +82,10 @@ describe('release assembly tooling', () => {
     const manifest = JSON.parse(
       readFileSync(resolve(fixture, 'release-manifest.json'), 'utf8'),
     ) as { assets: { name: string }[] };
-    expect(manifest.assets).toHaveLength(11);
+    expect(manifest.assets).toHaveLength(19);
     expect(
       readFileSync(resolve(fixture, 'SHA256SUMS.txt'), 'utf8').trim().split('\n'),
-    ).toHaveLength(12);
+    ).toHaveLength(20);
 
     const response = {
       draft: true,

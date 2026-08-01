@@ -1,5 +1,11 @@
 import type { AppState } from '../schemas/app-state';
-import type { InfoLocation, InfoPermission, InfoStatus, UpdateCheckResult } from '../schemas/info';
+import type {
+  ApplicationUpdateState,
+  InfoLocation,
+  InfoPermission,
+  InfoStatus,
+  UpdateCheckResult,
+} from '../schemas/info';
 import type { WelcomeState, WelcomeStep } from '../schemas/welcome';
 import type { ActivationTestState } from '../schemas/activation-test';
 import type { MicrophoneDeviceList, MicrophoneLevel, MicrophoneTestState } from '../schemas/audio';
@@ -63,6 +69,9 @@ export interface MainApi {
     status(): Promise<InfoStatus>;
     checkForUpdates(operationId: string): Promise<UpdateCheckResult>;
     cancel(operationId: string): Promise<boolean>;
+    updateState(): Promise<ApplicationUpdateState>;
+    applyUpdate(): Promise<ApplicationUpdateState>;
+    onUpdateChanged(listener: (state: ApplicationUpdateState) => void): Unsubscribe;
     openPermissionSettings(permission: InfoPermission): Promise<void>;
     openLocation(location: InfoLocation): Promise<void>;
     openRelease(url: string): Promise<void>;

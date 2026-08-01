@@ -10,6 +10,10 @@ import { presentAppStatus } from '../status-presentation';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
 
+const UpdateDialog = lazy(async () => {
+  const module = await import('./updates/UpdateDialog');
+  return { default: module.UpdateDialog };
+});
 const HistoryScreen = lazy(async () => {
   const module = await import('./screens/HistoryScreen');
   return { default: module.HistoryScreen };
@@ -61,25 +65,30 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
   useEffect(() => window.talkingQuill.windowControls.onMaximizedChanged(setMaximized), []);
   if (welcomeRequired || welcomeReopened) {
     return (
-      <WelcomeWizard
-        settings={settings}
-        state={state}
-        platform={bootstrap.platform}
-        reopened={welcomeReopened && !welcomeRequired}
-        onSettingsSaved={(next) => setSettings((current) => mergeSettingsSnapshot(current, next))}
-        onClose={() => {
-          setWelcomeReopened(false);
-          requestAnimationFrame(() =>
-            document.querySelector<HTMLElement>('#reopen-welcome')?.focus(),
-          );
-        }}
-        onComplete={(welcome) => {
-          setSettings((current) => mergeWelcomeState(current, welcome));
-          setWelcomeReopened(false);
-          setScreen('dashboard');
-          requestAnimationFrame(() => headingRef.current?.focus());
-        }}
-      />
+      <>
+        <WelcomeWizard
+          settings={settings}
+          state={state}
+          platform={bootstrap.platform}
+          reopened={welcomeReopened && !welcomeRequired}
+          onSettingsSaved={(next) => setSettings((current) => mergeSettingsSnapshot(current, next))}
+          onClose={() => {
+            setWelcomeReopened(false);
+            requestAnimationFrame(() =>
+              document.querySelector<HTMLElement>('#reopen-welcome')?.focus(),
+            );
+          }}
+          onComplete={(welcome) => {
+            setSettings((current) => mergeWelcomeState(current, welcome));
+            setWelcomeReopened(false);
+            setScreen('dashboard');
+            requestAnimationFrame(() => headingRef.current?.focus());
+          }}
+        />
+        <Suspense fallback={null}>
+          <UpdateDialog />
+        </Suspense>
+      </>
     );
   }
 
@@ -187,6 +196,9 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
           </Suspense>
         </main>
       </div>
+      <Suspense fallback={null}>
+        <UpdateDialog />
+      </Suspense>
     </div>
   );
 }

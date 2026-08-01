@@ -2,6 +2,7 @@ import { app, clipboard, safeStorage, session, shell } from 'electron';
 
 declare const __TALKING_QUILL_SOURCE_REVISION__: string;
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CAPTURE_PARTITION, UI_PARTITION } from '../../shared/constants/app';
@@ -43,6 +44,8 @@ import { SystemAudioCaptureController } from '../security/system-audio-capture';
 import { WelcomeService } from '../welcome/welcome-service';
 import { UpdateService } from '../info/update-service';
 import { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
+import { ApplicationUpdateController } from '../info/application-update-controller';
+import { createElectronUpdateBackend } from '../info/electron-update-backend';
 import { SystemInfoService } from '../info/system-info-service';
 import { NoticesService } from '../info/notices-service';
 import { DataLifecycleService } from '../data/data-lifecycle-service';
@@ -91,6 +94,7 @@ export class TalkingQuillApplication {
   #providerMutations: ProviderMutationService | null = null;
   #providerOperations: ProviderOperationCoordinator | null = null;
   #updateOperations: UpdateOperationCoordinator | null = null;
+  #applicationUpdates: ApplicationUpdateController | null = null;
   #windows: WindowManager | null = null;
   #tray: TrayController | null = null;
   #recording: RecordingService | null = null;
@@ -108,6 +112,7 @@ export class TalkingQuillApplication {
   #resetPending = false;
   #resetAcknowledgementToken: string | null = null;
   #skipDependentShutdown = false;
+  #updateInstallRequested = false;
 
   start(): Promise<void> {
     if (this.#startPromise !== null) return this.#startPromise;
@@ -310,6 +315,20 @@ export class TalkingQuillApplication {
       const updates = new UpdateService(
         new PinnedJsonTransport(undefined, { category: 'update', observeEgress }),
       );
+      const applicationUpdates = new ApplicationUpdateController({
+        currentVersion: app.getVersion(),
+        backend:
+          app.isPackaged &&
+          process.platform === 'win32' &&
+          (process.arch === 'x64' || process.arch === 'arm64') &&
+          existsSync(join(process.resourcesPath, 'app-update.yml'))
+            ? createElectronUpdateBackend(process.arch)
+            : null,
+        publish: (update) => events.send('info:update-changed', update),
+        requestInstall: () => this.#requestUpdateInstall(),
+      });
+      this.#applicationUpdates = applicationUpdates;
+      this.#ownRuntimeDisposer(cleanup, 'application-updates', () => applicationUpdates.dispose());
       const systemInfo = new SystemInfoService(paths, () => microphonePermission.openSettings());
       const notices = new NoticesService(
         app.isPackaged
@@ -473,6 +492,7 @@ export class TalkingQuillApplication {
           welcome,
           updates,
           updateOperations,
+          applicationUpdates,
           systemInfo,
           notices,
           ...(packagedMediaReady === undefined ? {} : { packagedMediaReady }),
@@ -489,6 +509,15 @@ export class TalkingQuillApplication {
 
       await windows.createAll();
       this.#assertStartupActive();
+      if (app.isPackaged) {
+        void updates
+          .check(app.getVersion(), this.#startupAbort.signal)
+          .then((result) => {
+            applicationUpdates.acceptCheckResult(result);
+            if (result.status === 'available') windows.showMain();
+          })
+          .catch(() => undefined);
+      }
       // Native activation remains disabled until every eager renderer has loaded, so a startup
       // shortcut cannot begin a session whose preloaded widget or capture surface is unavailable.
       echo.initialize();
@@ -584,6 +613,12 @@ export class TalkingQuillApplication {
     this.quit();
   }
 
+  #requestUpdateInstall(): void {
+    if (this.#lifecycle !== 'running' || this.#applicationUpdates === null) return;
+    this.#updateInstallRequested = true;
+    this.quit();
+  }
+
   quit(): void {
     if (this.#quitPromise !== null) return;
     this.#lifecycle = 'stopping';
@@ -647,6 +682,15 @@ export class TalkingQuillApplication {
     }
     reportLifecycleDiagnostics(diagnostics);
     this.#quitAllowed = true;
+    if (this.#updateInstallRequested) {
+      try {
+        if (this.#applicationUpdates === null) throw new Error('Update installer is unavailable');
+        this.#applicationUpdates.quitAndInstall();
+        return;
+      } catch {
+        this.#updateInstallRequested = false;
+      }
+    }
     app.quit();
   }
 
@@ -736,6 +780,7 @@ export class TalkingQuillApplication {
     this.#providerMutations = null;
     this.#providerOperations = null;
     this.#updateOperations = null;
+    this.#applicationUpdates = null;
     this.#diagnostics = null;
     this.#dataLifecycle = null;
     this.#runtimeDisposers.length = 0;

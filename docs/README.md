@@ -66,7 +66,7 @@ A manually started vision/image-echo test also captures and sends a screenshot; 
 - **Recording and model:** select and live-test a microphone, require manual finishing or choose silence detection, and opt into Windows system-audio capture for calls and other apps. System audio is off by default and currently unavailable on macOS. Manage Whisper and choose the spoken/source language here too.
 - **Smart processing:** configure/test providers, discover models where supported, and optionally enable vision. Pi adds installation-path and thinking-level settings.
 - **Voice Commands and vocabulary:** manage and preview trigger/snippet pairs, Smart-only vocabulary, and text import/export.
-- **Privacy and Info:** control future history, 7/30/90-day or no expiry, screenshots, diagnostics, and reset. Info includes manual updates, permissions, data/log folders, notices, and Welcome; updates are not automatic.
+- **Privacy and Info:** control future history, 7/30/90-day or no expiry, screenshots, diagnostics, and reset. Info includes update status, permissions, data/log folders, notices, and Welcome. Installed releases check the public GitHub release feed at startup. Windows asks before downloading and installing; unsigned macOS releases provide a manual release-page fallback because a stable Developer ID signature is required for safe automatic replacement.
 
 Supported Smart providers are OpenAI, Generic OpenAI, LM Studio, Local AI, KoboldCPP, Oobabooga Web UI, Docker Model Runner, Lemonade, Microsoft Foundry Local, oMLX, Groq, OpenRouter, Together AI, Fireworks AI, DeepSeek, Perplexity AI, Mistral, Novita AI, CometAPI, PPIO, APIpie, SambaNova, Cerebras, GiteeAI, Minimax, Moonshot AI, Z.AI, xAI, NVIDIA NIM, Privatemode, LiteLLM, Ollama, Pi, Anthropic, Google Gemini, Azure OpenAI, AWS Bedrock, and Cohere. Capabilities vary.
 
@@ -76,7 +76,7 @@ Settings, history, models, optional screenshots/diagnostics, temporary data, and
 
 History is enabled by default with no automatic expiry; screenshot retention and diagnostics are off. Disabling history or diagnostics stops future collection but leaves existing data. **Reset all application data** removes Talking Quill’s local data and restarts the app, without removing external provider software or models. On Windows, uninstall keeps app data unless deletion is explicitly selected.
 
-Network use includes requested, verified Hugging Face model downloads; provider discovery, tests, and Smart requests; manual GitHub update checks; and external Pi CLI/provider traffic.
+Network use includes requested, verified Hugging Face model downloads; provider discovery, tests, and Smart requests; startup and manual GitHub update checks; a Windows release download only after update consent; and external Pi CLI/provider traffic.
 
 ## Development
 

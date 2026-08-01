@@ -1,0 +1,19 @@
+extends: ../build/electron-builder.yml
+
+# This configuration is intentionally credential-free. It still ad-hoc signs macOS bundles
+# because modern Electron/Apple Silicon applications must carry a structurally valid signature.
+publish:
+  provider: github
+  owner: gee666
+  repo: talking-quill
+
+electronUpdaterCompatibility: '>=6.8.9'
+
+win:
+  signExecutable: false
+  verifyUpdateCodeSignature: false
+
+mac:
+  identity: '-'
+  hardenedRuntime: false
+  notarize: false

@@ -6,6 +6,7 @@ import {
   ResetApplicationDataResultSchema,
 } from '../schemas/data-lifecycle';
 import {
+  ApplicationUpdateStateSchema,
   InfoLocationSchema,
   InfoPermissionSchema,
   InfoStatusSchema,
@@ -146,6 +147,16 @@ export const invokeRegistry = Object.freeze({
     roles: ['main'] as const,
     request: z.object({ operationId: ProviderOperationIdSchema }).strict(),
     response: z.object({ cancelled: z.boolean() }).strict(),
+  }),
+  'info:update-state': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: ApplicationUpdateStateSchema,
+  }),
+  'info:apply-update': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: ApplicationUpdateStateSchema,
   }),
   'info:open-permission': defineInvoke({
     roles: ['main'] as const,
@@ -567,6 +578,10 @@ export const eventRegistry = Object.freeze({
   'app:state-changed': defineEvent({
     roles: ['main'] as const,
     payload: AppStateSchema,
+  }),
+  'info:update-changed': defineEvent({
+    roles: ['main'] as const,
+    payload: ApplicationUpdateStateSchema,
   }),
   'settings:changed': defineEvent({
     roles: ['main'] as const,
