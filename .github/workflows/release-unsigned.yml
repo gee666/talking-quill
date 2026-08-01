@@ -87,6 +87,8 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
       - run: pnpm install --frozen-lockfile
+      - name: Fetch every locked Rust target graph used by notice validation
+        run: pnpm rust:fetch-targets
       - run: pnpm validate:unsigned-release
       - if: matrix.os == 'windows-latest'
         run: pnpm security:gate
@@ -139,6 +141,8 @@ jobs:
         shell: pwsh
         run: if ((git status --porcelain --untracked-files=normal).Length -ne 0) { throw 'Package source is not clean.' }
       - run: pnpm install --frozen-lockfile
+      - name: Fetch every locked Rust target graph used by package validation
+        run: pnpm rust:fetch-targets
       - run: pnpm ${{ matrix.command }}
       - run: node scripts/stage-unsigned-release.mjs ${{ matrix.platform }} ${{ matrix.arch }}
       - name: Require source immutability after packaging
