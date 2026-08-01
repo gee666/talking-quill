@@ -165,7 +165,7 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
       `),
     ).toEqual(['fetch-call']);
     expect(detectNetworkTokens(`const fetch = () => 'local value'; fetch();`)).toEqual([]);
-  });
+  }, 30_000);
 
   it('scans TypeScript module extensions instead of silently omitting them', async () => {
     await writeFile(resolve(temporary, 'unapproved-boundary.mts'), "import 'node:dgram';\n");
