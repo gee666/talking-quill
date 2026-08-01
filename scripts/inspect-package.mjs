@@ -338,9 +338,11 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
     let detach = null;
     let extracted = null;
     if (sevenZip !== null) {
-      extracted = spawnSync(sevenZip, ['x', '-y', `-o${extractionRoot}`, artifact], {
-        stdio: 'pipe',
-      });
+      extracted = await extractArchiveWithRetry(
+        sevenZip,
+        ['x', '-y', `-o${extractionRoot}`, artifact],
+        extractionRoot,
+      );
       methods.add(sevenZip);
     } else if (/\.zip$/iu.test(artifact) && ditto !== null) {
       extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], { stdio: 'pipe' });
@@ -454,6 +456,20 @@ async function emitArtifactPaths(paths) {
     `artifact_paths<<TALKING_QUILL_ARTIFACT_PATHS\n${paths.join('\n')}\nTALKING_QUILL_ARTIFACT_PATHS\n`,
     'utf8',
   );
+}
+
+async function extractArchiveWithRetry(command, arguments_, extractionRoot) {
+  let result = null;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    await rm(extractionRoot, { recursive: true, force: true });
+    await mkdir(extractionRoot, { recursive: true });
+    result = spawnSync(command, arguments_, { stdio: 'pipe' });
+    if (result.status === 0) return result;
+    if (attempt < 6) await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+  }
+  const detail = result?.error?.message ?? result?.stderr?.toString().trim() ?? 'unknown error';
+  console.warn(`Final-artifact extraction failed after 6 attempts: ${detail}`);
+  return result;
 }
 
 function bundledSevenZip() {

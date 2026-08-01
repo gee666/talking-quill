@@ -49,7 +49,7 @@ describe('least-privilege macOS signing policy', () => {
     expect(options).toEqual({ entitlements: [], hardenedRuntime: true, timestamp: true });
   });
 
-  it('preserves reviewed electron-builder options for Electron helpers', () => {
+  it('preserves reviewed Electron helper options with a working-directory-independent path', () => {
     const electronHelper = resolve(
       app,
       'Contents/Frameworks/Talking Quill Helper.app/Contents/MacOS/Talking Quill Helper',
@@ -57,7 +57,10 @@ describe('least-privilege macOS signing policy', () => {
     const inherited = { entitlements: 'entitlements.mac.inherit.plist', hardenedRuntime: true };
     expect(
       signing.optionsForSignedFile({ app, optionsForFile: () => inherited }, electronHelper),
-    ).toBe(inherited);
+    ).toEqual({
+      entitlements: resolve('build/entitlements.mac.inherit.plist'),
+      hardenedRuntime: true,
+    });
   });
 
   it('binds entitlement bytes to the protected signer and rejects changed policy files', async () => {

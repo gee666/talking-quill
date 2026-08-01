@@ -62,7 +62,13 @@ function optionsForSignedFile(configuration, filePath) {
     return { ...inherited, entitlements: [], hardenedRuntime: true };
   }
   verifyEntitlements(inherited.entitlements);
-  return inherited;
+  if (typeof inherited.entitlements !== 'string') return inherited;
+  return {
+    ...inherited,
+    entitlements: path.isAbsolute(inherited.entitlements)
+      ? inherited.entitlements
+      : path.resolve(repositoryRoot, 'build', inherited.entitlements),
+  };
 }
 
 async function signWithLeastPrivilege(configuration) {
