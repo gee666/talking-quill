@@ -536,6 +536,7 @@ describe('packaged runtime allowlist', () => {
           'Applications',
           '.background',
           '.background/background.tiff',
+          '.background.tiff',
           'Talking Quill.app',
           'Talking Quill.app/Contents',
           'Talking Quill.app/Contents/MacOS',

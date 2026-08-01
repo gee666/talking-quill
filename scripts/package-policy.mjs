@@ -396,6 +396,7 @@ const MAC_FRAMEWORK_PATTERN =
 const MAC_PHYSICAL_EXACT = new Set([
   '.background',
   '.background/background.tiff',
+  '.background.tiff',
   '.DS_Store',
   '.VolumeIcon.icns',
   'Applications',
