@@ -90,7 +90,7 @@ const asarPath = resolve(resources, 'app.asar');
 if (!existsSync(asarPath)) throw new Error(`Missing package: ${asarPath}`);
 
 const asarEntries = listPackage(asarPath).map(normalizePackagePath);
-validateAsarEntries(asarEntries);
+validateAsarEntries(asarEntries, { platform: boundPlatform, architecture: boundArch });
 const testHarnessMarkers = [
   'talking-quill:task6-test-driver',
   'activationDown',
@@ -459,23 +459,30 @@ async function emitArtifactPaths(paths) {
 }
 
 async function extractArchiveWithRetry(command, arguments_, extractionRoot) {
+  const attempts = 16;
   let result = null;
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     await rm(extractionRoot, { recursive: true, force: true });
     await mkdir(extractionRoot, { recursive: true });
     result = spawnSync(command, arguments_, { stdio: 'pipe' });
     if (result.status === 0) return result;
-    if (attempt < 6) await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+    if (attempt < attempts) await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   }
   const detail = result?.error?.message ?? result?.stderr?.toString().trim() ?? 'unknown error';
-  console.warn(`Final-artifact extraction failed after 6 attempts: ${detail}`);
+  console.warn(`Final-artifact extraction failed after ${String(attempts)} attempts: ${detail}`);
   return result;
 }
 
 function bundledSevenZip() {
   try {
     const module = require('7zip-bin');
-    return typeof module.path7za === 'string' && existsSync(module.path7za) ? module.path7za : null;
+    // The ARM64 build cannot decode the NSIS compression methods used by electron-builder.
+    // Windows ARM64 provides x64 emulation, so use the bundled x64 extractor there.
+    const executable =
+      process.platform === 'win32' && process.arch === 'arm64'
+        ? resolve(dirname(require.resolve('7zip-bin/package.json')), 'win', 'x64', '7za.exe')
+        : module.path7za;
+    return typeof executable === 'string' && existsSync(executable) ? executable : null;
   } catch {
     return null;
   }

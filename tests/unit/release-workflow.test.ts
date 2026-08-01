@@ -50,6 +50,14 @@ describe('unsigned release workflow', () => {
     expect(install).toBeLessThan(sections.validate.indexOf('run: pnpm security:gate'));
   });
 
+  it('uses only inputs supported by the version-pinned Rust action', () => {
+    for (const source of workflowSources) {
+      expect(source).not.toMatch(
+        /uses: dtolnay\/rust-toolchain@[a-f0-9]{40}[^\n]*\n(?: {8}with:\n)? {10}toolchain:/u,
+      );
+    }
+  });
+
   it('pins JavaScript actions to reviewed Node.js 24 revisions', () => {
     for (const source of workflowSources) {
       const actions = [...source.matchAll(/\buses:\s*([^\s#]+)/gu)].flatMap((match) =>

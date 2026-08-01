@@ -127,6 +127,28 @@ export const ONNX_RUNTIME_PATHS = Object.freeze([
   'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
 ]);
 const ONNX_RUNTIME_EXACT_PATHS = new Set(ONNX_RUNTIME_PATHS);
+
+function requiredOnnxRuntimePaths(target) {
+  if (target === undefined) return ONNX_RUNTIME_PATHS;
+  if (
+    !['win', 'mac'].includes(target.platform) ||
+    !['x64', 'arm64'].includes(target.architecture)
+  ) {
+    throw new Error('ONNX runtime target must specify win|mac and x64|arm64');
+  }
+  const platform = target.platform === 'mac' ? 'darwin' : 'win32';
+  const binaryRoot = 'node_modules/onnxruntime-node/bin/napi-v3/';
+  const platformRoot = `${binaryRoot}${platform}`;
+  const architectureRoot = `${platformRoot}/${target.architecture}`;
+  return ONNX_RUNTIME_PATHS.filter(
+    (entry) =>
+      !entry.startsWith(binaryRoot) ||
+      entry === platformRoot ||
+      entry === architectureRoot ||
+      entry.startsWith(`${architectureRoot}/`),
+  );
+}
+
 const OUT_EXACT_PATHS = new Set([
   'out',
   'out/main',
@@ -282,7 +304,7 @@ const PLATFORM_RESOURCE_PATHS = Object.freeze({
   mac: Object.freeze(['electron.icns', 'helper/talking-quill-helper']),
 });
 
-export function validateAsarEntries(entries) {
+export function validateAsarEntries(entries, target) {
   const normalized = entries.map(normalizePackagePath);
   const unexpected = normalized.filter(
     (entry) =>
@@ -317,7 +339,7 @@ export function validateAsarEntries(entries) {
     if (!normalized.includes(required))
       throw new Error(`Required runtime file is missing: ${required}`);
   }
-  for (const required of ONNX_RUNTIME_PATHS) {
+  for (const required of requiredOnnxRuntimePaths(target)) {
     if (!normalized.includes(required)) {
       throw new Error(`Required ONNX runtime path is missing: ${required}`);
     }

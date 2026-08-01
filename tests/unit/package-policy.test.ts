@@ -98,6 +98,19 @@ const validAsar = [
   ...ONNX_RUNTIME_PATHS,
 ];
 
+const asarForTarget = (platform: 'win' | 'mac', architecture: 'x64' | 'arm64') => {
+  const binaryRoot = 'node_modules/onnxruntime-node/bin/napi-v3/';
+  const platformRoot = `${binaryRoot}${platform === 'mac' ? 'darwin' : 'win32'}`;
+  const architectureRoot = `${platformRoot}/${architecture}`;
+  return validAsar.filter(
+    (entry) =>
+      !entry.startsWith(binaryRoot) ||
+      entry === platformRoot ||
+      entry === architectureRoot ||
+      entry.startsWith(`${architectureRoot}/`),
+  );
+};
+
 const commonResources = [
   'app-update.yml',
   'app.asar',
@@ -136,6 +149,26 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
     expect(() => validateResourceEntries(validResources('mac'), 'mac')).not.toThrow();
+  });
+
+  it.each([
+    ['win', 'x64'],
+    ['win', 'arm64'],
+    ['mac', 'x64'],
+    ['mac', 'arm64'],
+  ] as const)('requires only the selected %s/%s ONNX native payload', (platform, architecture) => {
+    const entries = asarForTarget(platform, architecture);
+    expect(() => validateAsarEntries(entries, { platform, architecture })).not.toThrow();
+    const nativeLibrary =
+      platform === 'mac'
+        ? `node_modules/onnxruntime-node/bin/napi-v3/darwin/${architecture}/libonnxruntime.1.21.0.dylib`
+        : `node_modules/onnxruntime-node/bin/napi-v3/win32/${architecture}/onnxruntime.dll`;
+    expect(() =>
+      validateAsarEntries(
+        entries.filter((entry) => entry !== nativeLibrary),
+        { platform, architecture },
+      ),
+    ).toThrow(`Required ONNX runtime path is missing: ${nativeLibrary}`);
   });
 
   it.each(mergedRendererAssets)('retains the merged renderer allowlist for %s', (asset) => {
