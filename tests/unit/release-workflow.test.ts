@@ -42,9 +42,11 @@ describe('unsigned release workflow', () => {
 
   it('installs the pinned RustSec scanner before the Windows security gate', () => {
     const install = sections.validate.indexOf(
-      'run: cargo install cargo-audit --version 0.22.2 --locked',
+      'uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed',
     );
     expect(install).toBeGreaterThan(-1);
+    expect(sections.validate).toContain('tool: cargo-audit@0.22.2');
+    expect(sections.validate).toContain('fallback: none');
     expect(install).toBeLessThan(sections.validate.indexOf('run: pnpm security:gate'));
   });
 

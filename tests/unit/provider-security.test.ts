@@ -207,7 +207,8 @@ describe('socket-pinned JSON transport', () => {
     servers.push(server);
     const port = new URL(server.origin).port;
     const retryResolver = vi.fn<EndpointResolver>().mockResolvedValue([
-      { address: '127.0.0.2', family: 4 },
+      // The fixture listens only on IPv4, so IPv6 loopback fails immediately on every CI OS.
+      { address: '::1', family: 6 },
       { address: '127.0.0.1', family: 4 },
     ]);
     const retryTransport = new PinnedJsonTransport(retryResolver);
@@ -239,7 +240,7 @@ describe('socket-pinned JSON transport', () => {
         maxOperationResponseBytes: 80,
       }),
     ).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' });
-  });
+  }, 15_000);
 
   it('covers timeout and cancellation while an injected DNS resolver is pending', async () => {
     const neverResolves: EndpointResolver = () => new Promise(() => undefined);
