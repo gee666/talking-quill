@@ -92,7 +92,8 @@ describe('release assembly tooling', () => {
       prerelease: false,
       tag_name: 'v1.0.0',
       target_commitish: commit,
-      html_url: 'https://github.com/gee666/talking-quill/releases/tag/v1.0.0',
+      html_url:
+        'https://github.com/gee666/talking-quill/releases/tag/untagged-0123456789abcdef0123',
       assets: [
         ...manifest.assets.map(({ name }) => name),
         'release-manifest.json',
@@ -118,6 +119,12 @@ describe('release assembly tooling', () => {
       downloaded,
     ];
     run('scripts/verify-draft-release.mjs', verifyArguments);
+    response.html_url = 'https://github.com/gee666/talking-quill/releases/tag/v1.0.0';
+    writeFileSync(resolve(fixture, 'draft-response.json'), JSON.stringify(response));
+    expect(() => run('scripts/verify-draft-release.mjs', verifyArguments)).toThrow();
+    response.html_url =
+      'https://github.com/gee666/talking-quill/releases/tag/untagged-0123456789abcdef0123';
+    writeFileSync(resolve(fixture, 'draft-response.json'), JSON.stringify(response));
     const manifestPath = resolve(fixture, 'release-manifest.json');
     const wrongManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       sourceCommit: string;

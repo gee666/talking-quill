@@ -37,7 +37,7 @@ if (
   response.prerelease !== false ||
   response.tag_name !== tag ||
   response.target_commitish !== commit ||
-  response.html_url !== `https://github.com/${releaseConfig.repository}/releases/tag/${tag}` ||
+  !isAuthenticatedDraftUrl(response.html_url) ||
   !Array.isArray(actualAssets) ||
   JSON.stringify(actualAssets) !== JSON.stringify(expectedNames)
 )
@@ -65,6 +65,15 @@ for (const asset of response.assets) {
 console.log(
   `Authenticated draft verified ${tag} at ${commit} with ${actualAssets.length} byte-bound assets.`,
 );
+
+function isAuthenticatedDraftUrl(value) {
+  const prefix = `https://github.com/${releaseConfig.repository}/releases/tag/untagged-`;
+  return (
+    typeof value === 'string' &&
+    value.startsWith(prefix) &&
+    /^[0-9a-f]+$/u.test(value.slice(prefix.length))
+  );
+}
 
 function parseChecksums(source) {
   const values = new Map();

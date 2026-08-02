@@ -224,15 +224,29 @@ jobs:
             echo "Release $TAG appeared while the release was building." >&2
             exit 1
           fi
-          gh release create "$TAG" release-artifacts/* \
+          mkdir -p tmp/release-verification/downloaded
+          draft_created=false
+          cleanup_draft() {
+            if [ "$draft_created" = true ] && \
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                > tmp/release-verification/cleanup-draft.json 2>/dev/null && \
+              node -e '
+                const { readFileSync } = require("node:fs");
+                const release = JSON.parse(readFileSync("tmp/release-verification/cleanup-draft.json", "utf8"));
+                if (release.draft !== true || release.target_commitish !== process.env.COMMIT) process.exit(1);
+              '; then
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          }
+          trap cleanup_draft EXIT
+          gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --target "$COMMIT" \
             --title "Talking Quill $TAG (unsigned)" \
             --generate-notes
-          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
-          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"
-          mkdir -p tmp/release-verification/downloaded
+          draft_created=true
+          gh release upload "$TAG" release-artifacts/* --repo "$GITHUB_REPOSITORY"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > tmp/release-verification/draft.json
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir tmp/release-verification/downloaded
           node scripts/verify-draft-release.mjs \
@@ -241,6 +255,7 @@ jobs:
             release-artifacts/SHA256SUMS.txt \
             tmp/release-verification/draft.json \
             tmp/release-verification/downloaded
+          trap - EXIT
       - name: Publish only after byte verification
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,6 +264,19 @@ jobs:
         shell: bash
         run: |
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false
+          tag_verified=false
+          for attempt in {1..12}; do
+            if git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" && \
+              test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"; then
+              tag_verified=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$tag_verified" != true ]; then
+            echo 'Published release tag does not resolve to the release commit.' >&2
+            exit 1
+          fi
           for attempt in {1..12}; do
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > tmp/release-verification/public-tag.json
             gh api "repos/$GITHUB_REPOSITORY/releases/latest" > tmp/release-verification/public-latest.json

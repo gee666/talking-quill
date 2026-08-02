@@ -17,6 +17,7 @@ const sections = {
     releaseWorkflow.indexOf('\n  package:'),
     releaseWorkflow.indexOf('\n  assemble:'),
   ),
+  publish: releaseWorkflow.slice(releaseWorkflow.indexOf('\n  publish:')),
 };
 const approvedNode24Actions = new Set([
   'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
@@ -62,6 +63,24 @@ describe('unsigned release workflow', () => {
     expect(sevenZipPreparation).toContain('TALKING_QUILL_7ZIP_PATH=');
     expect(packageInspector).toContain("expectedArtifact.arch === 'arm64'");
     expect(packageInspector).toContain('configuredSevenZip ?? hostSevenZip');
+  });
+
+  it('verifies the draft before publishing and verifies the tag only after publication', () => {
+    const createDraft = sections.publish.indexOf('gh release create "$TAG"');
+    const armCleanup = sections.publish.indexOf('draft_created=true');
+    const uploadAssets = sections.publish.indexOf('gh release upload "$TAG"');
+    const publishStep = sections.publish.indexOf('gh release edit "$TAG"');
+    const tagFetch = sections.publish.indexOf('git fetch --force origin');
+    expect(sections.publish).toContain('trap cleanup_draft EXIT');
+    expect(sections.publish).toContain('release.draft !== true');
+    expect(sections.publish).toContain('release.target_commitish !== process.env.COMMIT');
+    expect(createDraft).toBeGreaterThan(-1);
+    expect(armCleanup).toBeGreaterThan(createDraft);
+    expect(uploadAssets).toBeGreaterThan(armCleanup);
+    expect(sections.publish).toContain('trap - EXIT');
+    expect(sections.publish).toContain('node scripts/verify-draft-release.mjs');
+    expect(publishStep).toBeGreaterThan(uploadAssets);
+    expect(tagFetch).toBeGreaterThan(publishStep);
   });
 
   it('uses only inputs supported by the version-pinned Rust action', () => {
