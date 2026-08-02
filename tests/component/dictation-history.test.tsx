@@ -163,8 +163,8 @@ describe('Dictation history', () => {
     render(<DictationHistory />);
     act(() => idleCallbacks[0]?.({ didTimeout: false, timeRemaining: () => 50 }));
     expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
+    await waitFor(() => expect(idleCallbacks).toHaveLength(2));
     expect(observe).toHaveBeenCalledOnce();
-    expect(idleCallbacks).toHaveLength(2);
     expect(thumbnail).not.toHaveBeenCalled();
 
     act(() => {
@@ -211,7 +211,7 @@ describe('Dictation history', () => {
     const { unmount } = render(<DictationHistory />);
     act(() => idleCallbacks[0]?.({ didTimeout: false, timeRemaining: () => 50 }));
     expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
-    expect(idleCallbacks).toHaveLength(2);
+    await waitFor(() => expect(idleCallbacks).toHaveLength(2));
 
     unmount();
     expect(cancelIdleCallback).toHaveBeenCalledWith(2);
@@ -261,7 +261,7 @@ describe('Dictation history', () => {
     const { unmount } = render(<DictationHistory />);
     act(() => idleCallbacks[0]?.({ didTimeout: false, timeRemaining: () => 50 }));
     expect(await screen.findByText('A locally stored transcript.')).toBeVisible();
-    expect(idleCallbacks).toHaveLength(2);
+    await waitFor(() => expect(idleCallbacks).toHaveLength(2));
 
     act(() => idleCallbacks[1]?.({ didTimeout: false, timeRemaining: () => 50 }));
     expect(
