@@ -55,7 +55,7 @@ jobs:
             echo "Tag $TAG already exists." >&2
             exit 1
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists." >&2
             exit 1
           fi
@@ -220,34 +220,48 @@ jobs:
             echo "Tag $TAG appeared while the release was building." >&2
             exit 1
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG appeared while the release was building." >&2
             exit 1
           fi
           mkdir -p tmp/release-verification/downloaded
           draft_created=false
+          draft_id=''
           cleanup_draft() {
-            if [ "$draft_created" = true ] && \
-              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            if [ "$draft_created" = true ] && [[ "$draft_id" =~ ^[0-9]+$ ]] && \
+              gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
                 > tmp/release-verification/cleanup-draft.json 2>/dev/null && \
               node -e '
                 const { readFileSync } = require("node:fs");
                 const release = JSON.parse(readFileSync("tmp/release-verification/cleanup-draft.json", "utf8"));
-                if (release.draft !== true || release.target_commitish !== process.env.COMMIT) process.exit(1);
+                if (release.draft !== true || release.tag_name !== process.env.TAG || release.target_commitish !== process.env.COMMIT) process.exit(1);
               '; then
-              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id" || true
             fi
           }
           trap cleanup_draft EXIT
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --target "$COMMIT" \
-            --title "Talking Quill $TAG (unsigned)" \
-            --generate-notes
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            --raw-field tag_name="$TAG" \
+            --raw-field target_commitish="$COMMIT" \
+            --raw-field name="Talking Quill $TAG (unsigned)" \
+            --field draft=true \
+            --field prerelease=false \
+            --field generate_release_notes=true \
+            > tmp/release-verification/created-draft.json
+          draft_id="$(node -e '
+            const { readFileSync } = require("node:fs");
+            const release = JSON.parse(readFileSync("tmp/release-verification/created-draft.json", "utf8"));
+            if (!Number.isInteger(release.id)) process.exit(1);
+            process.stdout.write(String(release.id));
+          ')"
           draft_created=true
+          node -e '
+            const { readFileSync } = require("node:fs");
+            const release = JSON.parse(readFileSync("tmp/release-verification/created-draft.json", "utf8"));
+            if (release.draft !== true || release.tag_name !== process.env.TAG || release.target_commitish !== process.env.COMMIT) process.exit(1);
+          '
           gh release upload "$TAG" release-artifacts/* --repo "$GITHUB_REPOSITORY"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > tmp/release-verification/draft.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" > tmp/release-verification/draft.json
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir tmp/release-verification/downloaded
           node scripts/verify-draft-release.mjs \
             "$TAG" "$COMMIT" \

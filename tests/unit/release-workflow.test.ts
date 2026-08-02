@@ -66,7 +66,9 @@ describe('unsigned release workflow', () => {
   });
 
   it('verifies the draft before publishing and verifies the tag only after publication', () => {
-    const createDraft = sections.publish.indexOf('gh release create "$TAG"');
+    const createDraft = sections.publish.indexOf(
+      'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+    );
     const armCleanup = sections.publish.indexOf('draft_created=true');
     const uploadAssets = sections.publish.indexOf('gh release upload "$TAG"');
     const publishStep = sections.publish.indexOf('gh release edit "$TAG"');
@@ -74,6 +76,8 @@ describe('unsigned release workflow', () => {
     expect(sections.publish).toContain('trap cleanup_draft EXIT');
     expect(sections.publish).toContain('release.draft !== true');
     expect(sections.publish).toContain('release.target_commitish !== process.env.COMMIT');
+    expect(sections.publish).toContain('releases/$draft_id');
+    expect(sections.publish).toContain('gh api --method DELETE');
     expect(createDraft).toBeGreaterThan(-1);
     expect(armCleanup).toBeGreaterThan(createDraft);
     expect(uploadAssets).toBeGreaterThan(armCleanup);
