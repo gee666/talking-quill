@@ -112,6 +112,7 @@ export async function openWhisperStreamingSession(options: {
             ? error
             : new WhisperClientError('CANCELLED', 'Streaming transcription was cancelled.'),
           false,
+          new Set(),
         );
       }
     };
@@ -256,6 +257,8 @@ export async function openWhisperStreamingSession(options: {
             }
           } else if (getFailureCancellation() !== null) {
             releaseDeferred = true;
+          } else {
+            await ensureWorkerSessionCancelled();
           }
           throw error;
         } finally {

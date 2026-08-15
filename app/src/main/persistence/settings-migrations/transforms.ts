@@ -40,6 +40,12 @@ import {
 import { LegacySettingsV22Schema, type LegacySettingsV22 } from './legacy-settings-v22';
 import { LegacySettingsV23Schema, type LegacySettingsV23 } from './legacy-settings-v23';
 import { LegacySettingsV24Schema, type LegacySettingsV24 } from './legacy-settings-v24';
+import {
+  LegacySettingsV25Schema,
+  LegacyV25LocalPiExtensionSourcesSchema,
+  type LegacySettingsV25,
+} from './legacy-settings-v25';
+import { LegacySettingsV26Schema, type LegacySettingsV26 } from './legacy-settings-v26';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
@@ -77,6 +83,7 @@ export function migrateRemovedLargeModel(input: unknown): unknown {
       ...structuredClone(DEFAULT_SETTINGS.recording),
       ...(recording as Record<string, unknown>),
     };
+    normalizeDefaultMicrophone(migrated.recording as Record<string, unknown>);
   }
   const transcription = migrated.transcription;
   if (
@@ -243,14 +250,38 @@ export function migrateSettingsV23(legacy: LegacySettingsV23): LegacySettingsV24
   });
 }
 
-export function migrateSettingsV24(legacy: LegacySettingsV24): Settings {
-  return SettingsSchema.parse({
+export function migrateSettingsV24(legacy: LegacySettingsV24): LegacySettingsV25 {
+  return LegacySettingsV25Schema.parse({
     ...structuredClone(legacy),
-    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    schemaVersion: 25,
     recording: {
       ...structuredClone(DEFAULT_SETTINGS.recording),
       ...structuredClone(legacy.recording),
     },
+  });
+}
+
+export function migrateSettingsV25(legacy: LegacySettingsV25): LegacySettingsV26 {
+  const migrated = structuredClone(legacy);
+  const piDraft = migrated.smartProcessing.providers.pi;
+  if (
+    piDraft?.piExtensionSources !== undefined &&
+    !LegacyV25LocalPiExtensionSourcesSchema.safeParse(piDraft.piExtensionSources).success
+  ) {
+    piDraft.piExtensionSources = [];
+  }
+  return LegacySettingsV26Schema.parse({
+    ...migrated,
+    schemaVersion: 26,
+  });
+}
+
+export function migrateSettingsV26(legacy: LegacySettingsV26): Settings {
+  const migrated = structuredClone(legacy);
+  normalizeDefaultMicrophone(migrated.recording);
+  return SettingsSchema.parse({
+    ...migrated,
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
   });
 }
 
@@ -377,10 +408,7 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
           ? legacy.app.launchAtLogin
           : DEFAULT_SETTINGS.app.launchAtLogin,
     },
-    recording: {
-      ...structuredClone(DEFAULT_SETTINGS.recording),
-      ...(legacy.recording ?? {}),
-    },
+    recording: normalizeLegacyRecording(legacy.recording),
     transcription: migrateLegacyTranscription(legacy.transcription),
     dictationProfiles: profiles,
     privacy: {
@@ -399,6 +427,21 @@ export function migrateLegacy(legacy: LegacySettingsBase): Settings {
     ),
     welcome: structuredClone(DEFAULT_SETTINGS.welcome),
   };
+}
+
+function normalizeLegacyRecording(
+  recording: LegacySettingsBase['recording'],
+): Settings['recording'] {
+  const migrated = {
+    ...structuredClone(DEFAULT_SETTINGS.recording),
+    ...(recording ?? {}),
+  };
+  normalizeDefaultMicrophone(migrated);
+  return migrated;
+}
+
+function normalizeDefaultMicrophone(recording: Record<string, unknown>): void {
+  if (recording.preferredMicrophoneId === 'default') recording.preferredMicrophoneId = null;
 }
 
 function legacyProfileEquals(

@@ -126,7 +126,15 @@ function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
   if (typeof v24 !== 'object' || v24 === null) {
     throw new Error('V23 migration did not emit settings');
   }
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>));
+  const v25 = SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>);
+  if (typeof v25 !== 'object' || v25 === null) {
+    throw new Error('V24 migration did not emit settings');
+  }
+  const v26 = SETTINGS_MIGRATIONS[25]?.(v25 as Readonly<Record<string, unknown>>);
+  if (typeof v26 !== 'object' || v26 === null) {
+    throw new Error('V25 migration did not emit settings');
+  }
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(v26 as Readonly<Record<string, unknown>>));
 }
 
 function validSettings(
@@ -1751,6 +1759,58 @@ describe('SettingsStore', () => {
         },
       },
     });
+  });
+
+  it('migrates a prerelease-like v25 Pi extension draft without recovery', async () => {
+    const path = await testPath();
+    const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    legacy.schemaVersion = 25;
+    const smartProcessing = legacy.smartProcessing as Record<string, unknown>;
+    smartProcessing.selectedProviderId = 'ollama';
+    smartProcessing.providers = {
+      pi: {
+        modelId: 'p/model',
+        thinking: 'off',
+        piExtensionSources: ['./extensions/first.ts', 'npm:@prerelease/pi-extension'],
+      },
+    };
+    await writeFile(path, JSON.stringify(legacy), 'utf8');
+
+    const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+    await store.initialize();
+
+    expect(store.getDiagnostic()).toBeNull();
+    expect(store.get().schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
+    expect(store.get().smartProcessing.selectedProviderId).toBe('ollama');
+    expect(store.get().smartProcessing.providers.pi?.piExtensionSources).toEqual([]);
+    expect(new ProviderConfigService(store).get('pi')).toMatchObject({
+      providerId: 'pi',
+      modelId: 'p/model',
+      piExtensionSources: [],
+    });
+  });
+
+  it('persists ordered Pi extension opt-ins without enabling any by default', async () => {
+    const path = await testPath();
+    const store = new SettingsStore(path);
+    await store.initialize();
+    expect(store.get().smartProcessing.providers.pi?.piExtensionSources).toBeUndefined();
+
+    const configs = new ProviderConfigService(store);
+    await configs.save({
+      providerId: 'pi',
+      modelId: 'p/model',
+      thinking: 'off',
+      piExtensionSources: ['C:\\Trusted Extensions\\first.ts', 'npm:@trusted/installed-extension'],
+    });
+    await store.flush();
+
+    const restarted = new SettingsStore(path);
+    await restarted.initialize();
+    expect(new ProviderConfigService(restarted).get('pi').piExtensionSources).toEqual([
+      'C:\\Trusted Extensions\\first.ts',
+      'npm:@trusted/installed-extension',
+    ]);
   });
 
   it('persists and explicitly clears the validated Pi installation preference', async () => {

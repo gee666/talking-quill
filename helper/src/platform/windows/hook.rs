@@ -29,7 +29,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{front_app::front_app, paste::inject_paste};
+use super::{audio_devices::AudioDeviceMonitor, front_app::front_app, paste::inject_paste};
 use crate::{
     keyboard::{
         ActivationBindings, ActivationKey, HelperEvent, KeyInput, KeyPhase, KeyboardReducer,
@@ -453,6 +453,7 @@ pub struct NativePlatform {
     state: Arc<SharedState>,
     gate: Arc<CallbackGate>,
     terminal: Arc<TerminalSignal>,
+    audio_monitor: AudioDeviceMonitor,
     owner_commands: Sender<OwnerCommand>,
     thread_id: u32,
     owner_completion: Receiver<()>,
@@ -540,6 +541,10 @@ impl Platform for NativePlatform {
         }
 
         let state = Arc::new(SharedState::new());
+        // Core Audio has its own COM/MTA worker. No registration, enumeration,
+        // callback drain, or unregister call can run on the keyboard owner.
+        let mut audio_monitor =
+            AudioDeviceMonitor::start(outbound.clone(), Arc::clone(&gate), Arc::clone(&terminal))?;
         let context = CallbackContext {
             state: Arc::clone(&state),
             keyboard: Mutex::new(CallbackKeyboard::default()),
@@ -552,7 +557,7 @@ impl Platform for NativePlatform {
         let (owner_completion_tx, owner_completion) = bounded(1);
         let (owner_commands, owner_command_receiver) = bounded(8);
         let owner_startup_state = Arc::clone(&startup_state);
-        let thread = thread::Builder::new()
+        let thread = match thread::Builder::new()
             .name("talking-quill-helper-win-hook".into())
             .spawn(move || {
                 hook_thread(
@@ -562,19 +567,27 @@ impl Platform for NativePlatform {
                     owner_command_receiver,
                     owner_completion_tx,
                 );
-            })
-            .map_err(|_| PlatformError::ThreadStopped)?;
+            }) {
+            Ok(thread) => thread,
+            Err(_) => {
+                let _ = audio_monitor.shutdown();
+                return Err(PlatformError::ThreadStopped);
+            }
+        };
 
         let thread_id = match ready_rx.recv_timeout(OWNER_COMPLETION_TIMEOUT) {
             Ok(Ok(thread_id)) => thread_id,
             Ok(Err(error)) => {
+                audio_monitor.begin_shutdown();
                 if owner_completed(&owner_completion, OWNER_COMPLETION_TIMEOUT) {
                     let _ = thread.join();
                 }
+                let _ = audio_monitor.shutdown();
                 return Err(error);
             }
             Err(_) => {
                 gate.close();
+                audio_monitor.begin_shutdown();
                 state.stopping.store(true, Ordering::Release);
                 state.hook_status.store(
                     hook_status_to_u8(HookStatus::Unavailable),
@@ -589,14 +602,27 @@ impl Platform for NativePlatform {
                 if owner_completed(&owner_completion, OWNER_COMPLETION_TIMEOUT) {
                     let _ = thread.join();
                 }
+                let _ = audio_monitor.shutdown();
                 return Err(PlatformError::ThreadStopped);
             }
         };
+
+        if terminal.is_triggered() {
+            gate.close();
+            audio_monitor.begin_shutdown();
+            let _ = post_owner_message(thread_id, WM_QUIT);
+            if owner_completed(&owner_completion, OWNER_COMPLETION_TIMEOUT) {
+                let _ = thread.join();
+            }
+            let _ = audio_monitor.shutdown();
+            return Err(PlatformError::NativeFailure);
+        }
 
         Ok(Self {
             state,
             gate,
             terminal,
+            audio_monitor,
             owner_commands,
             thread_id,
             owner_completion,
@@ -610,6 +636,10 @@ impl Platform for NativePlatform {
         } else {
             hook_status_from_u8(self.state.hook_status.load(Ordering::Acquire))
         }
+    }
+
+    fn protocol_initialized(&self) {
+        self.audio_monitor.protocol_initialized();
     }
 
     fn configure_activation(
@@ -656,30 +686,37 @@ impl Platform for NativePlatform {
     fn shutdown(&mut self) -> Option<TerminalReason> {
         self.gate.close();
         self.state.stopping.store(true, Ordering::Release);
-        let Some(thread) = self.thread.take() else {
-            return self.terminal.reason();
-        };
+        // Deactivate and wake the audio worker first, but never wait for it
+        // before asking the keyboard owner to uninstall WH_KEYBOARD_LL.
+        self.audio_monitor.begin_shutdown();
 
-        let _ = post_owner_message(self.thread_id, WM_QUIT);
-        let completed = owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT) || {
-            // Always re-check completion: the owner may exit before either
-            // retry post, making that post fail after completion was queued.
+        if let Some(thread) = self.thread.take() {
             let _ = post_owner_message(self.thread_id, WM_QUIT);
-            owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT)
-        };
-        if completed {
-            if thread.join().is_ok() {
-                self.state
-                    .hook_status
-                    .store(hook_status_to_u8(HookStatus::Stopped), Ordering::Release);
+            let completed = owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT) || {
+                // Always re-check completion: the owner may exit before either
+                // retry post, making that post fail after completion was queued.
+                let _ = post_owner_message(self.thread_id, WM_QUIT);
+                owner_completed(&self.owner_completion, OWNER_COMPLETION_TIMEOUT)
+            };
+            if completed {
+                if thread.join().is_ok() {
+                    self.state
+                        .hook_status
+                        .store(hook_status_to_u8(HookStatus::Stopped), Ordering::Release);
+                } else {
+                    self.mark_owner_failure(TerminalReason::HookStopped);
+                }
             } else {
-                self.mark_owner_failure(TerminalReason::HookStopped);
+                // Never join an owner whose queue did not dispatch WM_QUIT. The
+                // process owns the detached hook resources until imminent exit.
+                drop(thread);
+                self.mark_owner_failure(TerminalReason::OwnerThreadUnresponsive);
             }
-        } else {
-            // Never join an owner whose queue did not dispatch WM_QUIT. The
-            // process owns the detached hook resources until imminent exit.
-            drop(thread);
-            self.mark_owner_failure(TerminalReason::OwnerThreadUnresponsive);
+        }
+
+        if self.audio_monitor.shutdown().is_err() {
+            self.terminal
+                .trigger(TerminalReason::AudioDeviceMonitorUnavailable);
         }
         self.terminal.reason()
     }
@@ -775,6 +812,8 @@ fn hook_thread(
     // SAFETY: this no-remove peek creates the owner queue before hook
     // installation, so low-level callbacks always have a live message loop.
     unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
+    // SAFETY: reads the current native thread identifier after its queue exists.
+    let thread_id = unsafe { GetCurrentThreadId() };
 
     // SAFETY: the callback has the system ABI, and the boxed context remains
     // alive and registered until this owner thread unhooks.
@@ -805,6 +844,7 @@ fn hook_thread(
     keyboard.modifiers_fenced = keyboard.modifiers.mask() != ModifierMask::default();
 
     if !claim_startup(&startup_state) {
+        context.gate.close();
         // SAFETY: `hook` is valid and owned by this thread.
         unsafe { UnhookWindowsHookEx(hook) };
         CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);
@@ -814,9 +854,8 @@ fn hook_thread(
         .state
         .hook_status
         .store(hook_status_to_u8(HookStatus::Ready), Ordering::Release);
-    // SAFETY: reads the current native thread identifier.
-    let thread_id = unsafe { GetCurrentThreadId() };
     if ready.send(Ok(thread_id)).is_err() || context.state.stopping.load(Ordering::Acquire) {
+        context.gate.close();
         // SAFETY: `hook` is valid and owned by this thread.
         unsafe { UnhookWindowsHookEx(hook) };
         CALLBACK_CONTEXT.store(null_mut(), Ordering::Release);

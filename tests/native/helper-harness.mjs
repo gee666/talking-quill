@@ -50,7 +50,7 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 6 });
+const initialized = await request('initialize', { protocolVersion: 7 });
 await request('activation.configure', { enabled: false, bindings: [] });
 await request('session.set_capture', { mode: 'off' });
 const permissions = await request('permissions.get', {});

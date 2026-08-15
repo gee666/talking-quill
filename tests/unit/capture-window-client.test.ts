@@ -47,7 +47,7 @@ describe('CaptureWindowClient', () => {
     expect(test.port1.start).toHaveBeenCalledOnce();
     expect(test.webContents.postMessage).toHaveBeenCalledWith(
       'capture:port',
-      { protocolVersion: 2 },
+      { protocolVersion: 3 },
       [test.port2],
     );
 
@@ -63,6 +63,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await expect(starting).resolves.toMatchObject({
       captureId,
@@ -80,6 +81,63 @@ describe('CaptureWindowClient', () => {
     await expect(activating).resolves.toBeUndefined();
   });
 
+  it('correlates default rebinds and forwards only current binding invalidations', async () => {
+    const test = harness();
+    const captureId = randomUUID();
+    const invalidated = vi.fn();
+    const devicesInvalidated = vi.fn();
+    test.client.onDefaultInvalidated(invalidated);
+    test.client.onDevicesChanged(devicesInvalidated);
+    const starting = test.client.start(null, captureId);
+    const startCommand = lastCommand(test.port1);
+    test.port1.receive({
+      type: 'stream:started',
+      requestId: startCommand.requestId,
+      captureId,
+      sampleRate: 16_000,
+      channelCount: 1,
+      activeMicrophoneId: 'original',
+      preferredUnavailable: false,
+      bindingGeneration: 0,
+    });
+    await starting;
+
+    test.port1.receive({
+      type: 'stream:default-invalidated',
+      captureId: randomUUID(),
+      bindingGeneration: 0,
+    });
+    test.port1.receive({
+      type: 'stream:default-invalidated',
+      captureId,
+      bindingGeneration: 0,
+    });
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(captureId, 0);
+    test.port1.receive({ type: 'devices:invalidated', defaultInvalidated: true });
+    expect(devicesInvalidated).toHaveBeenCalledWith(true);
+
+    const rebinding = test.client.rebindDefault(captureId, 0);
+    const rebindCommand = lastCommand(test.port1);
+    expect(rebindCommand).toMatchObject({
+      type: 'stream:rebind-default',
+      captureId,
+      bindingGeneration: 0,
+    });
+    test.port1.receive({
+      type: 'stream:rebound',
+      requestId: rebindCommand.requestId,
+      captureId,
+      activeMicrophoneId: 'replacement',
+      bindingGeneration: 1,
+    });
+    await expect(rebinding).resolves.toEqual({
+      captureId,
+      activeMicrophoneId: 'replacement',
+      bindingGeneration: 1,
+    });
+  });
+
   it('requires a truthful positive acknowledgement for requested system audio', async () => {
     const test = harness();
     const captureId = randomUUID();
@@ -94,6 +152,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
       systemAudioIncluded: false,
     });
     await vi.waitFor(() => expect(lastCommand(test.port1).type).toBe('stream:stop'));
@@ -125,6 +184,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await starting;
     test.port1.receive({
@@ -161,6 +221,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await starting;
     test.port1.receive({
@@ -196,6 +257,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
 
     await expect(starting).rejects.toMatchObject({ code: 'capture-unavailable' });
@@ -217,6 +279,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await starting;
 
@@ -244,6 +307,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await starting;
 
@@ -306,6 +370,7 @@ describe('CaptureWindowClient', () => {
       channelCount: 1,
       activeMicrophoneId: null,
       preferredUnavailable: false,
+      bindingGeneration: 0,
     });
     await starting;
     const laterObserver = vi.fn();

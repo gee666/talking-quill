@@ -8,8 +8,10 @@ import {
   type SmartTranscriptProcessor,
   type VoiceCommandMatcherPort,
 } from '../../app/src/main/echo/echo-session-controller';
+import { CaptureClientError } from '../../app/src/main/audio/capture-window-client';
 import type {
   RecordingService,
+  DictationCapture,
   DictationCaptureCallbacks,
 } from '../../app/src/main/audio/recording-service';
 import type { HelperClient } from '../../app/src/main/helper';
@@ -182,6 +184,7 @@ function fixture(
         Promise.resolve({
           captureId: '00000000-0000-4000-8000-000000000010',
           activeMicrophoneId: 'default',
+          preferredUnavailable: false,
         })
       );
     },
@@ -400,6 +403,45 @@ describe('EchoSessionController integration', () => {
 
     expect(laterSubscriber).toHaveBeenCalled();
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
+  });
+
+  it('keeps dictation running and publishes a fallback warning without a device ID', async () => {
+    const test = fixture({
+      startDictation: () =>
+        Promise.resolve({
+          captureId: 'fallback-capture',
+          activeMicrophoneId: 'private-default-device-id',
+          preferredUnavailable: true,
+        }),
+    });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() =>
+      expect(test.controller.snapshot.message).toBe(
+        'Using the current system default because your selected microphone is unavailable.',
+      ),
+    );
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'arming',
+      message: 'Using the current system default because your selected microphone is unavailable.',
+    });
+    expect(test.controller.snapshot.message).not.toContain('private-default-device-id');
+    test.controller.cancel();
+    await test.controller.shutdown();
+  });
+
+  it('shows an actionable error when explicit and fallback microphone acquisition fail', async () => {
+    const test = fixture({
+      startDictation: () => Promise.reject(new CaptureClientError('device-unavailable')),
+    });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
+    expect(test.controller.snapshot.message).toBe(
+      'Your selected microphone is unavailable. Choose another microphone in Settings.',
+    );
+    expect(test.spies.insert).not.toHaveBeenCalled();
+    await test.controller.shutdown();
   });
 
   it('fails closed before sound, key capture, or microphone use when the widget is unavailable', async () => {
@@ -1548,7 +1590,7 @@ describe('EchoSessionController integration', () => {
   });
 
   it('waits for asynchronous capture startup when Enter arrives in the activation batch', async () => {
-    const startup = deferred<{ captureId: string; activeMicrophoneId: string }>();
+    const startup = deferred<DictationCapture>();
     const callbacks: { current: DictationCaptureCallbacks | null } = { current: null };
     const test = fixture({
       startDictation: (nextCallbacks) => {
@@ -1562,7 +1604,11 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot).toMatchObject({ phase: 'arming', dictationMode: 'quick' });
     await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
     expect(test.spies.stopDictation).not.toHaveBeenCalled();
-    startup.resolve({ captureId: 'batched-capture', activeMicrophoneId: 'default' });
+    startup.resolve({
+      captureId: 'batched-capture',
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+    });
     await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
     expect(test.controller.snapshot.phase).toBe('arming');
     expect(test.spies.transcribe).not.toHaveBeenCalled();
@@ -1574,7 +1620,7 @@ describe('EchoSessionController integration', () => {
   });
 
   it('keeps activation feedback when the first frame precedes capture startup acknowledgement', async () => {
-    const startup = deferred<{ captureId: string; activeMicrophoneId: string }>();
+    const startup = deferred<DictationCapture>();
     const callbacks: { current: DictationCaptureCallbacks | null } = { current: null };
     const test = fixture({
       startDictation: (nextCallbacks) => {
@@ -1586,7 +1632,11 @@ describe('EchoSessionController integration', () => {
     test.notify(key('enter'));
     await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
     callbacks.current?.onFrame(new Float32Array(320).fill(0.2), 0.2);
-    startup.resolve({ captureId: 'early-frame', activeMicrophoneId: 'default' });
+    startup.resolve({
+      captureId: 'early-frame',
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+    });
 
     await vi.waitFor(() => expect(test.spies.sound).toHaveBeenCalled());
     expect(test.spies.showWidget).toHaveBeenCalledOnce();
@@ -2340,6 +2390,75 @@ describe('EchoSessionController integration', () => {
     expect(capture).toHaveBeenCalledOnce();
   });
 
+  it('falls back to raw and resets after submit-time screenshot preparation times out', async () => {
+    vi.useFakeTimers();
+    const smartSettings = SettingsSchema.parse({
+      ...structuredClone(DEFAULT_SETTINGS),
+      smartProcessing: {
+        ...structuredClone(DEFAULT_SETTINGS.smartProcessing),
+        selectedProviderId: 'openai',
+        providers: { openai: { modelId: 'gpt-4.1' } },
+        onScreenAwarenessEnabled: true,
+      },
+    });
+    const cleanTranscript = vi.fn(() => Promise.resolve('unused'));
+    const smart = new SmartTranscriptionService({
+      settings: {
+        get: () => structuredClone(smartSettings),
+        subscribe: () => () => undefined,
+      } as unknown as SettingsStore,
+      configs: {
+        get: () => ({ providerId: 'openai', modelId: 'gpt-4.1' }),
+        smartRevision: () => 0,
+        subscribeSmartRevision: () => () => undefined,
+      } as unknown as ProviderConfigService,
+      providers: {
+        credentialBinding: () => 'openai',
+        capabilities: () => 'supported',
+        preflightCapability: () => Promise.resolve('supported'),
+        cleanTranscript,
+      } as unknown as ProviderService,
+      screenshots: {
+        permissionStatus: () => 'granted',
+        capture: () => Promise.reject(new ProviderError('TIMEOUT')),
+      } as unknown as ScreenshotService,
+      helper: {
+        getFrontApp: () =>
+          Promise.resolve({
+            processName: 'target',
+            windowTitle: 'document',
+            windowBounds: { x: 10, y: 20, width: 300, height: 200 },
+          }),
+      },
+      screenshotsDirectory: 'unused',
+    });
+    const test = fixture({ smartProcessor: smart });
+    await test.controller.updateProfile('general', { processingMode: 'smart' });
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    test.frame();
+    test.notify(key('enter'));
+
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.controller.snapshot.abortReason).toBe('timeout');
+    expect(test.spies.insert).toHaveBeenCalledWith(
+      'locally transcribed',
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(test.spies.historyRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'smart-fallback',
+        rawText: 'locally transcribed',
+        errorCategory: 'timeout',
+      }),
+    );
+    expect(cleanTranscript).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
+  });
+
   it('runs a real timed provider through Smart service into raw insertion and timeout history', async () => {
     const smartSettings = SettingsSchema.parse({
       ...structuredClone(DEFAULT_SETTINGS),
@@ -2980,13 +3099,17 @@ describe('EchoSessionController integration', () => {
   });
 
   it('cleans a resolved capture when cancellation wins before startup continuation claims it', async () => {
-    const startup = deferred<{ captureId: string; activeMicrophoneId: string }>();
+    const startup = deferred<DictationCapture>();
     const test = fixture({ startDictation: () => startup.promise });
     test.notify(activation('down'));
     await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
     void startup.promise.then(() => test.controller.cancel());
 
-    startup.resolve({ captureId: 'same-turn-capture', activeMicrophoneId: 'default' });
+    startup.resolve({
+      captureId: 'same-turn-capture',
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+    });
 
     await vi.waitFor(() =>
       expect(test.spies.stopDictation).toHaveBeenCalledWith('same-turn-capture'),
@@ -2997,9 +3120,9 @@ describe('EchoSessionController integration', () => {
 
   it('shutdown races a hung capture startup and cleans up a late capture after arming feedback', async () => {
     const startupControl: {
-      resolve: ((capture: { captureId: string; activeMicrophoneId: string }) => void) | null;
+      resolve: ((capture: DictationCapture) => void) | null;
     } = { resolve: null };
-    const startup = new Promise<{ captureId: string; activeMicrophoneId: string }>((resolve) => {
+    const startup = new Promise<DictationCapture>((resolve) => {
       startupControl.resolve = resolve;
     });
     const test = fixture({ startDictation: () => startup });
@@ -3008,7 +3131,11 @@ describe('EchoSessionController integration', () => {
     await expect(test.controller.shutdown()).resolves.toBeUndefined();
     expect(test.spies.showWidget).toHaveBeenCalledOnce();
     if (startupControl.resolve === null) throw new Error('Capture startup was not invoked');
-    startupControl.resolve({ captureId: 'late-capture', activeMicrophoneId: 'default' });
+    startupControl.resolve({
+      captureId: 'late-capture',
+      activeMicrophoneId: 'default',
+      preferredUnavailable: false,
+    });
     await vi.waitFor(() => expect(test.spies.stopDictation).toHaveBeenCalledWith('late-capture'));
     expect(test.spies.showWidget).toHaveBeenCalledOnce();
   });

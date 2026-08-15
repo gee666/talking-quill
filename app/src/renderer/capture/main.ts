@@ -15,7 +15,10 @@ const onPort = (event: MessageEvent<unknown>) => {
 
   let nextController: CapturePortController | null = null;
   const nextEngine = new CaptureEngine(createBrowserCaptureEnvironment(workletModuleUrl), {
-    onDevicesChanged: (devices) => nextController?.notifyDevicesChanged(devices),
+    onDevicesChanged: (defaultInvalidated) =>
+      nextController?.notifyDevicesChanged(defaultInvalidated),
+    onDefaultInvalidated: (bindingGeneration) =>
+      nextController?.notifyDefaultInvalidated(bindingGeneration),
     onFrame: (samples, rms) => nextController?.notifyFrame(samples, rms),
     onUnexpectedStop: (reason) => nextController?.notifyUnexpectedStop(reason),
   });

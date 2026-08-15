@@ -9,6 +9,7 @@ import { hardenWebContents } from '../security/web-contents-policy';
 import type { WindowRoleRegistry } from './window-role-registry';
 import type { RendererLoader } from './renderer-loader';
 import { physicalBoundsToDip } from './display-bounds';
+import type { WidgetVisibilityLease } from './widget-capture-exclusion';
 import { widgetContentBounds } from './widget-geometry';
 
 export interface WindowManagerCallbacks {
@@ -20,6 +21,12 @@ export interface WindowManagerCallbacks {
 const MAX_RENDERER_RECOVERY_ATTEMPTS = 2;
 const RENDERER_RECOVERY_BACKOFF_MS = 250;
 const RENDERER_STABILITY_WINDOW_MS = 30_000;
+export const RENDERER_LOAD_TIMEOUT_MS = 10_000;
+
+interface DesiredWidgetVisibility {
+  readonly size: Settings['app']['widgetSize'];
+  readonly targetBounds: HelperFrontApp['windowBounds'];
+}
 
 export class WindowManager {
   readonly #loader: RendererLoader;
@@ -30,6 +37,10 @@ export class WindowManager {
   readonly #recoveryAttempts = new Map<WindowRole, number>();
   readonly #recoveryTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
   readonly #stabilityTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
+  readonly #pendingRendererLoads = new Map<BrowserWindow, () => void>();
+  #desiredWidgetVisibility: DesiredWidgetVisibility | null = null;
+  #widgetVisibilityGeneration = 0;
+  #widgetTemporarilyHidden = false;
   #pendingMainClose: Promise<void> | null = null;
   #quitting = false;
 
@@ -71,29 +82,47 @@ export class WindowManager {
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'] = null,
   ): boolean {
-    const widget = this.#windows.get('widget');
-    if (widget === undefined || widget.isDestroyed()) return false;
-    const displayBounds =
-      targetBounds !== null && process.platform === 'win32'
-        ? physicalBoundsToDip(targetBounds, (point) => screen.screenToDipPoint(point))
-        : targetBounds;
-    const display =
-      displayBounds === null
-        ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
-        : screen.getDisplayMatching(displayBounds);
-    widget.setContentBounds(widgetContentBounds(size, display.workArea), false);
-    // Preserve renderer-selected hit testing across screenshot-only hide/show
-    // cycles so a stationary pointer can still click Stop or Cancel.
-    widget.showInactive();
-    return true;
+    this.#widgetVisibilityGeneration += 1;
+    this.#setDesiredWidgetVisibility(size, targetBounds);
+    return this.#showDesiredWidget();
   }
 
   isWidgetVisible(): boolean {
     const widget = this.#windows.get('widget');
-    return widget !== undefined && !widget.isDestroyed() && widget.isVisible();
+    const visible = widget !== undefined && !widget.isDestroyed() && widget.isVisible();
+    // A renderer recovery gap, including a not-yet-loaded replacement, must not make screenshot
+    // exclusion forget that an active session expects the widget to become visible.
+    return visible || (this.#desiredWidgetVisibility !== null && !this.#widgetTemporarilyHidden);
+  }
+
+  acquireWidgetVisibilityLease(): WidgetVisibilityLease | null {
+    return this.isWidgetVisible()
+      ? Object.freeze({ generation: this.#widgetVisibilityGeneration })
+      : null;
+  }
+
+  restoreWidgetVisibility(
+    lease: WidgetVisibilityLease,
+    size: Settings['app']['widgetSize'],
+    targetBounds: HelperFrontApp['windowBounds'],
+  ): boolean {
+    if (
+      lease.generation !== this.#widgetVisibilityGeneration ||
+      this.#desiredWidgetVisibility === null
+    ) {
+      return false;
+    }
+    this.#setDesiredWidgetVisibility(size, targetBounds);
+    return this.#showDesiredWidget();
   }
 
   hideWidget(preserveInteraction = false): void {
+    if (preserveInteraction) this.#widgetTemporarilyHidden = true;
+    else {
+      this.#widgetVisibilityGeneration += 1;
+      this.#desiredWidgetVisibility = null;
+      this.#widgetTemporarilyHidden = false;
+    }
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
       widget.setFocusable(false);
@@ -122,6 +151,7 @@ export class WindowManager {
   beginQuit(): void {
     if (this.#quitting) return;
     this.#quitting = true;
+    for (const invalidate of [...this.#pendingRendererLoads.values()]) invalidate();
     this.#clearTimers(this.#recoveryTimers);
     this.#clearTimers(this.#stabilityTimers);
   }
@@ -142,7 +172,84 @@ export class WindowManager {
     this.#roles.register(window.webContents, role, expectedUrl);
     hardenWebContents(window.webContents, expectedUrl);
     this.#attachRecovery(window, role);
-    await this.#loader.load(window, role);
+    const loadOutcome = await this.#loadRenderer(window, role);
+    if (loadOutcome === 'failed') {
+      this.#recover(role, window);
+      return;
+    }
+    if (loadOutcome === 'loaded') this.#restoreDesiredWidgetAfterLoad(role, window);
+  }
+
+  #loadRenderer(
+    window: BrowserWindow,
+    role: WindowRole,
+  ): Promise<'loaded' | 'failed' | 'invalidated'> {
+    return new Promise((resolve) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (outcome: 'loaded' | 'failed' | 'invalidated'): void => {
+        if (finished) return;
+        finished = true;
+        if (timer !== null) clearTimeout(timer);
+        if (this.#pendingRendererLoads.get(window) === invalidate) {
+          this.#pendingRendererLoads.delete(window);
+        }
+        resolve(outcome);
+      };
+      const invalidate = (): void => finish('invalidated');
+      this.#pendingRendererLoads.set(window, invalidate);
+      timer = setTimeout(() => finish('failed'), RENDERER_LOAD_TIMEOUT_MS);
+      timer.unref();
+      try {
+        void this.#loader.load(window, role).then(
+          () => finish('loaded'),
+          () => finish('failed'),
+        );
+      } catch {
+        finish('failed');
+      }
+    });
+  }
+
+  #setDesiredWidgetVisibility(
+    size: Settings['app']['widgetSize'],
+    targetBounds: HelperFrontApp['windowBounds'],
+  ): void {
+    this.#desiredWidgetVisibility = {
+      size,
+      targetBounds: targetBounds === null ? null : { ...targetBounds },
+    };
+    this.#widgetTemporarilyHidden = false;
+  }
+
+  #restoreDesiredWidgetAfterLoad(role: WindowRole, window: BrowserWindow): void {
+    if (
+      role === 'widget' &&
+      !this.#quitting &&
+      this.#windows.get(role) === window &&
+      !this.#widgetTemporarilyHidden
+    ) {
+      this.#showDesiredWidget();
+    }
+  }
+
+  #showDesiredWidget(): boolean {
+    const desired = this.#desiredWidgetVisibility;
+    const widget = this.#windows.get('widget');
+    if (desired === null || widget === undefined || widget.isDestroyed()) return false;
+    const displayBounds =
+      desired.targetBounds !== null && process.platform === 'win32'
+        ? physicalBoundsToDip(desired.targetBounds, (point) => screen.screenToDipPoint(point))
+        : desired.targetBounds;
+    const display =
+      displayBounds === null
+        ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+        : screen.getDisplayMatching(displayBounds);
+    widget.setContentBounds(widgetContentBounds(desired.size, display.workArea), false);
+    // Preserve renderer-selected hit testing across screenshot-only hide/show
+    // cycles so a stationary pointer can still click Stop or Cancel.
+    widget.showInactive();
+    return true;
   }
 
   #create(role: WindowRole): BrowserWindow {
@@ -245,10 +352,8 @@ export class WindowManager {
   }
 
   #attachRecovery(window: BrowserWindow, role: WindowRole): void {
-    let loaded = false;
     window.webContents.once('did-finish-load', () => {
       if (this.#quitting || this.#windows.get(role) !== window) return;
-      loaded = true;
       this.#clearRoleTimer(this.#stabilityTimers, role);
       const timer = setTimeout(() => {
         if (this.#stabilityTimers.get(role) !== timer) return;
@@ -263,13 +368,12 @@ export class WindowManager {
     window.webContents.on('did-fail-load', (_event, errorCode) => {
       if (errorCode !== -3) this.#recover(role, window);
     });
-    window.webContents.on('render-process-gone', () => {
-      if (loaded) this.#recover(role, window);
-    });
+    window.webContents.on('render-process-gone', () => this.#recover(role, window));
   }
 
   #recover(role: WindowRole, failed: BrowserWindow): void {
     if (this.#quitting || this.#windows.get(role) !== failed) return;
+    this.#pendingRendererLoads.get(failed)?.();
     this.#clearRoleTimer(this.#stabilityTimers, role);
     const attempts = (this.#recoveryAttempts.get(role) ?? 0) + 1;
     this.#recoveryAttempts.set(role, attempts);

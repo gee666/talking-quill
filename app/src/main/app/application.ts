@@ -1,4 +1,4 @@
-import { app, clipboard, safeStorage, session, shell } from 'electron';
+import { app, clipboard, powerMonitor, safeStorage, session, shell } from 'electron';
 
 declare const __TALKING_QUILL_SOURCE_REVISION__: string;
 import { randomUUID } from 'node:crypto';
@@ -19,6 +19,8 @@ import { SmartTranscriptionService } from '../smart/smart-transcription-service'
 import { VocabularyStore } from '../vocabulary/vocabulary-store';
 import { VocabularyFileService } from '../vocabulary/file-service';
 import { HelperClient, resolveHelperExecutable } from '../helper';
+import { installHelperInputDeviceRouter } from '../helper/helper-input-device-router';
+import { installHelperWakeRevalidator } from '../helper/helper-wake-revalidator';
 import { createHandlers } from '../ipc/handlers';
 import { IpcEventEmitter } from '../ipc/event-emitter';
 import { registerIpcTransport, type IpcTransportLifecycle } from '../ipc/transport';
@@ -342,6 +344,11 @@ export class TalkingQuillApplication {
       if (helper === null) throw new Error('The native helper is unavailable on this platform');
       this.#helper = helper;
       cleanup.add('helper', () => helper.stop());
+      this.#ownRuntimeDisposer(
+        cleanup,
+        'helper-input-device-routing',
+        installHelperInputDeviceRouter({ source: helper, target: recording }),
+      );
       const task6Loader = sourceHarness.loadTask6({ history, settings, recording });
       const task6Composition = task6Loader === null ? null : await task6Loader;
       const helperStartPromise =
@@ -409,11 +416,23 @@ export class TalkingQuillApplication {
                 }),
       });
       this.#echo = echo;
+      this.#ownRuntimeDisposer(
+        cleanup,
+        'helper-wake-revalidation',
+        installHelperWakeRevalidator({
+          source: powerMonitor,
+          isSafeToRevalidate: () =>
+            this.#lifecycle === 'running' &&
+            helper.readiness.status === 'ready' &&
+            echo.systemWakeRevalidationSafe,
+          recycle: () => helper.resetSessionCapture(),
+        }),
+      );
       cleanup.add('echo-model-readiness-target', modelRuntime.bindEcho(echo));
       cleanup.add('echo-session', () => echo.shutdown());
       const welcome = new WelcomeService(settings, {
         microphoneReady: () =>
-          task6Composition?.welcome.microphone ?? recording.getState().permission === 'granted',
+          task6Composition?.welcome.microphone ?? recording.microphoneReadyForWelcome(),
         microphoneObservation: () =>
           task6Composition?.welcome.microphone
             ? { boundDeviceId: 'source-e2e-microphone', observedRms: 0.2, sampleCount: 3_200 }
@@ -425,10 +444,12 @@ export class TalkingQuillApplication {
         modelRevision: (modelId) => modelRuntime.manifestRevision(modelId),
       });
       const removeModelWelcomeTarget = modelRuntime.bindWelcome(welcome);
-      recording.setWelcomeEvidenceInvalidator(() => {
-        if (settings.get().welcome.microphoneEvidence != null) {
-          void welcome.invalidateMicrophoneBinding();
-        }
+      recording.setWelcomeEvidenceInvalidator(() =>
+        welcome.invalidateMicrophoneBinding().catch(() => undefined),
+      );
+      recording.setWelcomeEvidenceValidationListener((known) => {
+        if (known) welcome.confirmMicrophoneBinding();
+        else welcome.beginMicrophoneBindingValidation();
       });
       cleanup.add('welcome-readiness-target', removeModelWelcomeTarget);
       const removeEchoState = echo.subscribe((snapshot) => state.setSession(snapshot));

@@ -225,6 +225,8 @@ export function RecordingSection({
     !devices.devices.some((device) => device.deviceId === preferred);
   const blocked = testState.status === 'blocked';
   const unavailable = testState.status === 'unavailable';
+  const usingFallback =
+    testState.status === 'active' && testState.preferredUnavailable && preferred !== null;
   const unavailableGuidance =
     testState.status !== 'unavailable'
       ? null
@@ -272,11 +274,24 @@ export function RecordingSection({
                 ? 'Stop test'
                 : 'Test my microphone'}
           </Button>
-          <Status tone={blocked || unavailable ? 'error' : testing ? 'success' : 'neutral'} live>
+          <Status
+            tone={
+              blocked || unavailable
+                ? 'error'
+                : usingFallback
+                  ? 'warning'
+                  : testing
+                    ? 'success'
+                    : 'neutral'
+            }
+            live
+          >
             {testState.status === 'starting'
               ? 'Asking for permission'
               : testState.status === 'active'
-                ? 'Listening — say something'
+                ? usingFallback
+                  ? 'Listening on the system default microphone'
+                  : 'Listening — say something'
                 : blocked
                   ? 'Microphone blocked'
                   : unavailable
@@ -285,7 +300,15 @@ export function RecordingSection({
           </Status>
         </div>
       </div>
-      {blocked ? (
+      {usingFallback ? (
+        <div className="permission-guidance" role="alert">
+          <p>
+            Your chosen microphone is unavailable. Talking Quill is using your computer’s current
+            default microphone instead. Choose another microphone in Settings to stop using the
+            fallback.
+          </p>
+        </div>
+      ) : blocked ? (
         <div className="permission-guidance" role="alert">
           <p>
             Your computer is blocking microphone access. Allow Talking Quill in{' '}

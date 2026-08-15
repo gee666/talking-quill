@@ -226,6 +226,7 @@ pub enum TerminalReason {
     EventTapDisabledByUserInput,
     ActivationConfigurationUnavailable,
     OwnerThreadUnresponsive,
+    AudioDeviceMonitorUnavailable,
 }
 
 impl TerminalReason {
@@ -242,6 +243,7 @@ impl TerminalReason {
             8 => Some(Self::EventTapDisabledByUserInput),
             9 => Some(Self::ActivationConfigurationUnavailable),
             10 => Some(Self::OwnerThreadUnresponsive),
+            11 => Some(Self::AudioDeviceMonitorUnavailable),
             _ => None,
         }
     }
@@ -405,6 +407,7 @@ pub trait Platform: Sized {
         terminal: Arc<TerminalSignal>,
     ) -> Result<Self, PlatformError>;
     fn hook_status(&self) -> HookStatus;
+    fn protocol_initialized(&self) {}
     fn configure_activation(
         &self,
         enabled: bool,
@@ -578,6 +581,7 @@ mod tests {
             TerminalReason::EventTapDisabledByUserInput,
             TerminalReason::ActivationConfigurationUnavailable,
             TerminalReason::OwnerThreadUnresponsive,
+            TerminalReason::AudioDeviceMonitorUnavailable,
         ] {
             let gate = Arc::new(CallbackGate::new());
             let (sender, _receiver) = crossbeam_channel::bounded(1);

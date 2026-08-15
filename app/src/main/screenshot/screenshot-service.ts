@@ -6,6 +6,10 @@ import { physicalBoundsToDip } from '../app/display-bounds';
 
 export const SCREENSHOT_MAX_EDGE = 1_568;
 export const SCREENSHOT_JPEG_QUALITY = 80;
+export const SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS = 5_000;
+export const SCREENSHOT_NATIVE_RECOVERY_COOLDOWN_MS = 30_000;
+
+type NativeCaptureCircuitState = 'closed' | 'open' | 'probing' | 'degraded';
 
 export interface CapturedScreenshot {
   readonly image: ProviderImage;
@@ -13,15 +17,30 @@ export interface CapturedScreenshot {
 
 export class ScreenshotService {
   readonly #setWidgetExcluded: (excluded: boolean) => void | Promise<void>;
+  readonly #nativeCaptureTimeoutMs: number;
+  readonly #nativeRecoveryCooldownMs: number;
   #captureTail: Promise<void> = Promise.resolve();
   #nativeCaptureSettled: Promise<void> | null = null;
+  #nativeCircuitState: NativeCaptureCircuitState = 'closed';
+  #nativeCircuitOpenedAt = 0;
+  #nativeRecoveryProbeUsed = false;
 
   constructor(
     options: {
       readonly setWidgetExcluded?: (excluded: boolean) => void | Promise<void>;
+      readonly nativeCaptureTimeoutMs?: number;
+      readonly nativeRecoveryCooldownMs?: number;
     } = {},
   ) {
     this.#setWidgetExcluded = options.setWidgetExcluded ?? (() => undefined);
+    this.#nativeCaptureTimeoutMs = Math.max(
+      1,
+      options.nativeCaptureTimeoutMs ?? SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS,
+    );
+    this.#nativeRecoveryCooldownMs = Math.max(
+      1,
+      options.nativeRecoveryCooldownMs ?? SCREENSHOT_NATIVE_RECOVERY_COOLDOWN_MS,
+    );
   }
 
   permissionStatus(): 'granted' | 'denied' | 'unknown' {
@@ -58,9 +77,10 @@ export class ScreenshotService {
   ): Promise<CapturedScreenshot> {
     assertNotAborted(signal);
     if (this.permissionStatus() === 'denied') throw new ProviderError('UNAVAILABLE');
-    if (this.#nativeCaptureSettled !== null) {
-      await waitForAbort(this.#nativeCaptureSettled, signal);
-    }
+    // Electron does not expose cancellation for getSources. Keep the circuit open while a native
+    // orphan is young, then permit one half-open probe. If that probe also wedges, the service
+    // remains degraded rather than piling up native calls; settlement closes the circuit again.
+    let recoveryProbe = this.#recoveryProbeAllowed();
     const bounds = this.#targetBounds(targetBounds);
     if (bounds === null) throw new ProviderError('UNAVAILABLE');
     const display = screen.getDisplayMatching(bounds);
@@ -74,18 +94,54 @@ export class ScreenshotService {
     await this.#setWidgetExcluded(true);
     try {
       await abortableDelay(34, signal);
-      const nativeCapture = desktopCapturer.getSources({ types: ['screen'], thumbnailSize });
-      const nativeCaptureSettled = nativeCapture.then(
-        () => undefined,
-        () => undefined,
-      );
+      if (
+        recoveryProbe &&
+        (this.#nativeCircuitState !== 'open' || this.#nativeCaptureSettled === null)
+      ) {
+        // The orphan recovered while the widget was being excluded. Continue as an ordinary
+        // capture so a failure cannot strand a stale half-open state without an observer.
+        recoveryProbe = false;
+      }
+      if (recoveryProbe) {
+        this.#nativeCircuitState = 'probing';
+        this.#nativeRecoveryProbeUsed = true;
+      }
+      let nativeCapture: ReturnType<typeof desktopCapturer.getSources>;
+      let nativeCaptureSettled: Promise<void>;
+      try {
+        nativeCapture = desktopCapturer.getSources({ types: ['screen'], thumbnailSize });
+        nativeCaptureSettled = nativeCapture.then(
+          () => undefined,
+          () => undefined,
+        );
+      } catch (error: unknown) {
+        if (recoveryProbe) this.#nativeCircuitState = 'degraded';
+        throw error;
+      }
+      // The original orphan remains owned by Electron. Replacing only our observer after the
+      // probe starts permits one service-lifetime liveness check without accumulating calls. A
+      // synchronous probe failure leaves the original observer able to recover the circuit.
       this.#nativeCaptureSettled = nativeCaptureSettled;
       void nativeCaptureSettled.then(() => {
         if (this.#nativeCaptureSettled === nativeCaptureSettled) {
           this.#nativeCaptureSettled = null;
+          this.#nativeCircuitState = 'closed';
         }
       });
-      const sources = await waitForAbort(nativeCapture, signal);
+      let sources: Awaited<typeof nativeCapture>;
+      try {
+        sources = await waitForAbort(nativeCapture, signal, this.#nativeCaptureTimeoutMs);
+      } catch (error: unknown) {
+        if (this.#nativeCaptureSettled === nativeCaptureSettled) {
+          if (recoveryProbe || this.#nativeRecoveryProbeUsed) {
+            this.#nativeCircuitState = 'degraded';
+          } else {
+            this.#nativeCircuitState = 'open';
+            this.#nativeCircuitOpenedAt = Date.now();
+          }
+        }
+        throw error;
+      }
       assertNotAborted(signal);
       const source = sources.find((candidate) => candidate.display_id === String(display.id));
       if (source === undefined) throw new ProviderError('UNAVAILABLE');
@@ -121,6 +177,21 @@ export class ScreenshotService {
     }
   }
 
+  #recoveryProbeAllowed(): boolean {
+    if (this.#nativeCircuitState === 'closed') {
+      if (this.#nativeCaptureSettled === null) return false;
+      throw new ProviderError('UNAVAILABLE');
+    }
+    if (
+      this.#nativeCircuitState === 'open' &&
+      !this.#nativeRecoveryProbeUsed &&
+      Date.now() - this.#nativeCircuitOpenedAt >= this.#nativeRecoveryCooldownMs
+    ) {
+      return true;
+    }
+    throw new ProviderError('UNAVAILABLE');
+  }
+
   #targetBounds(bounds: HelperFrontApp['windowBounds']): Rectangle | null {
     if (bounds === null) return null;
     return process.platform === 'win32'
@@ -133,10 +204,23 @@ function assertNotAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new ProviderError('CANCELLED');
 }
 
-function waitForAbort<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
+function waitForAbort<Value>(
+  operation: Promise<Value>,
+  signal: AbortSignal,
+  timeoutMs?: number,
+): Promise<Value> {
   assertNotAborted(signal);
   return new Promise<Value>((resolve, reject) => {
+    let finished = false;
+    const timer =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => finish(() => reject(new ProviderError('TIMEOUT'))), timeoutMs);
+    timer?.unref();
     const finish = (callback: () => void): void => {
+      if (finished) return;
+      finished = true;
+      if (timer !== null) clearTimeout(timer);
       signal.removeEventListener('abort', abort);
       callback();
     };

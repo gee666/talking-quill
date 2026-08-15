@@ -131,30 +131,189 @@ describe('ScreenshotService', () => {
     expect(exclusions).toEqual([true, false]);
   });
 
-  it('does not overlap a replacement native capture while an aborted capture is still pending', async () => {
-    let resolveAbandoned!: (sources: ReturnType<typeof electron.createSources>) => void;
+  it('times out a stuck native capture, restores the widget, and recovers after the orphan settles', async () => {
+    let resolveOrphan!: (sources: ReturnType<typeof electron.createSources>) => void;
     electron.desktopCapturer.getSources.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          resolveAbandoned = resolve;
+          resolveOrphan = resolve;
         }),
     );
-    const service = new ScreenshotService();
-    const firstController = new AbortController();
-    const first = service.capture({ x: 0, y: 0, width: 10, height: 10 }, firstController.signal);
-    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce());
-    firstController.abort();
-    await expect(first).rejects.toMatchObject({ code: 'CANCELLED' });
+    const exclusions: boolean[] = [];
+    const service = new ScreenshotService({
+      nativeCaptureTimeoutMs: 20,
+      setWidgetExcluded: (excluded) => {
+        exclusions.push(excluded);
+      },
+    });
 
-    const second = service.capture(
+    const first = service.capture(
       { x: 0, y: 0, width: 10, height: 10 },
       new AbortController().signal,
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const timedOut = expect(first).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce());
+    await timedOut;
+    expect(exclusions).toEqual([true, false]);
+
+    await expect(
+      service.capture({ x: 0, y: 0, width: 10, height: 10 }, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce();
-    resolveAbandoned(electron.createSources());
+    expect(exclusions).toEqual([true, false]);
+
+    resolveOrphan(electron.createSources());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(
+      service.capture({ x: 0, y: 0, width: 10, height: 10 }, new AbortController().signal),
+    ).resolves.toBeDefined();
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(2);
+    expect(exclusions).toEqual([true, false, true, false]);
+  });
+
+  it('allows one bounded recovery probe without piling up captures or repeated widget hides', async () => {
+    let resolveProbe!: (sources: ReturnType<typeof electron.createSources>) => void;
+    electron.desktopCapturer.getSources
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveProbe = resolve;
+          }),
+      );
+    const exclusions: boolean[] = [];
+    const service = new ScreenshotService({
+      nativeCaptureTimeoutMs: 20,
+      nativeRecoveryCooldownMs: 20,
+      setWidgetExcluded: (excluded) => {
+        exclusions.push(excluded);
+      },
+    });
+    const bounds = { x: 0, y: 0, width: 10, height: 10 };
+
+    const initial = service.capture(bounds, new AbortController().signal);
+    const initialTimeout = expect(initial).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce());
+    await initialTimeout;
+    await expect(service.capture(bounds, new AbortController().signal)).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(exclusions).toEqual([true, false]);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const probe = service.capture(bounds, new AbortController().signal);
+    const probeTimeout = expect(probe).rejects.toMatchObject({ code: 'TIMEOUT' });
     await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(2));
-    await expect(second).resolves.toBeDefined();
+    await probeTimeout;
+    expect(exclusions).toEqual([true, false, true, false]);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await expect(service.capture(bounds, new AbortController().signal)).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(2);
+    expect(exclusions).toEqual([true, false, true, false]);
+
+    resolveProbe(electron.createSources());
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(service.capture(bounds, new AbortController().signal)).resolves.toBeDefined();
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(3);
+    expect(exclusions).toEqual([true, false, true, false, true, false]);
+
+    electron.desktopCapturer.getSources.mockImplementationOnce(() => new Promise(() => undefined));
+    const laterOrphan = service.capture(bounds, new AbortController().signal);
+    const laterTimeout = expect(laterOrphan).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(4));
+    await laterTimeout;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await expect(service.capture(bounds, new AbortController().signal)).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(4);
+    expect(exclusions).toEqual([true, false, true, false, true, false, true, false]);
+  });
+
+  it('retains orphan settlement recovery when a half-open probe throws synchronously', async () => {
+    let resolveOrphan!: (sources: ReturnType<typeof electron.createSources>) => void;
+    electron.desktopCapturer.getSources
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOrphan = resolve;
+          }),
+      )
+      .mockImplementationOnce(() => {
+        throw new Error('synchronous native failure');
+      });
+    const exclusions: boolean[] = [];
+    const service = new ScreenshotService({
+      nativeCaptureTimeoutMs: 20,
+      nativeRecoveryCooldownMs: 20,
+      setWidgetExcluded: (excluded) => {
+        exclusions.push(excluded);
+      },
+    });
+    const bounds = { x: 0, y: 0, width: 10, height: 10 };
+
+    const initial = service.capture(bounds, new AbortController().signal);
+    const initialTimeout = expect(initial).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce());
+    await initialTimeout;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await expect(service.capture(bounds, new AbortController().signal)).rejects.toThrow(
+      'synchronous native failure',
+    );
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(2);
+    expect(exclusions).toEqual([true, false, true, false]);
+
+    resolveOrphan(electron.createSources());
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(service.capture(bounds, new AbortController().signal)).resolves.toBeDefined();
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(3);
+  });
+
+  it('revalidates a half-open probe when the orphan settles during widget exclusion', async () => {
+    let resolveOrphan!: (sources: ReturnType<typeof electron.createSources>) => void;
+    electron.desktopCapturer.getSources
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOrphan = resolve;
+          }),
+      )
+      .mockImplementationOnce(() => {
+        throw new Error('synchronous native failure');
+      });
+    const exclusions: boolean[] = [];
+    const service = new ScreenshotService({
+      nativeCaptureTimeoutMs: 20,
+      nativeRecoveryCooldownMs: 20,
+      setWidgetExcluded: (excluded) => {
+        exclusions.push(excluded);
+        if (excluded && exclusions.filter(Boolean).length === 2) {
+          resolveOrphan(electron.createSources());
+        }
+      },
+    });
+    const bounds = { x: 0, y: 0, width: 10, height: 10 };
+
+    const initial = service.capture(bounds, new AbortController().signal);
+    const initialTimeout = expect(initial).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.waitFor(() => expect(electron.desktopCapturer.getSources).toHaveBeenCalledOnce());
+    await initialTimeout;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await expect(service.capture(bounds, new AbortController().signal)).rejects.toThrow(
+      'synchronous native failure',
+    );
+    await expect(service.capture(bounds, new AbortController().signal)).resolves.toBeDefined();
+    expect(electron.desktopCapturer.getSources).toHaveBeenCalledTimes(3);
+    expect(exclusions).toEqual([true, false, true, false, true, false]);
   });
 
   it('fails closed without focused-window bounds and performs no capture', async () => {

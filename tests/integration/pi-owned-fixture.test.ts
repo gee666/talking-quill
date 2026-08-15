@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PiProvider } from '../../app/src/main/providers/pi';
@@ -14,6 +14,11 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
   let wrapper = '';
   let argsLog = '';
   let extensionMarker = '';
+  let npmExtensionMarker = '';
+  let ambientExtensionMarker = '';
+  let unrelatedPackageMarker = '';
+  let extensionSource = '';
+  let npmPackageRoot = '';
   let server: MockProviderServer;
   const prefix = process.env.TALKING_QUILL_REAL_NPM_PI_PREFIX ?? '';
 
@@ -23,6 +28,11 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     agent = resolve(root, 'agent');
     argsLog = resolve(root, 'args.log');
     extensionMarker = resolve(root, 'extension-loaded.txt');
+    npmExtensionMarker = resolve(root, 'npm-extension-loaded.txt');
+    ambientExtensionMarker = resolve(root, 'ambient-extension-loaded.txt');
+    unrelatedPackageMarker = resolve(root, 'unrelated-package-loaded.txt');
+    extensionSource = resolve(agent, 'extensions', 'trusted evidence.ts');
+    npmPackageRoot = resolve(agent, 'npm', 'node_modules', 'talking-quill-explicit-extension');
     await mkdir(resolve(agent, 'extensions'), { recursive: true });
     server = await startMockProviderServer((request, response) => {
       if (JSON.stringify(request.body).includes('HANG_UNTIL_CANCELLED')) return;
@@ -72,8 +82,27 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     );
     await writeFile(resolve(agent, 'APPEND_SYSTEM.md'), 'GLOBAL_APPEND_SYSTEM_EVIDENCE');
     await writeFile(
-      resolve(agent, 'extensions', 'evidence.ts'),
+      extensionSource,
       `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(extensionMarker)}, 'loaded');\nexport default function evidence() {}\n`,
+    );
+    await writeFile(
+      resolve(agent, 'extensions', 'ambient evidence.ts'),
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(ambientExtensionMarker)}, 'loaded');\nexport default function ambientEvidence() {}\n`,
+    );
+    await writeFixturePiPackage(
+      npmPackageRoot,
+      'talking-quill-explicit-extension',
+      npmExtensionMarker,
+    );
+    await writeFixturePiPackage(
+      resolve(agent, 'npm', 'node_modules', 'talking-quill-unrelated-extension'),
+      'talking-quill-unrelated-extension',
+      unrelatedPackageMarker,
+    );
+    await writeFile(
+      resolve(agent, 'settings.json'),
+      JSON.stringify({ packages: ['npm:talking-quill-unrelated-extension'] }),
+      'utf8',
     );
     const installed =
       process.platform === 'win32' ? resolve(prefix, 'pi.cmd') : resolve(prefix, 'bin/pi');
@@ -95,7 +124,7 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     if (root) await removeTestDirectory(root);
   });
 
-  it('proves list parity, fixed Test Connection, exact argv/stdin, extensions, and disabled tools', async () => {
+  it('isolates auto-discovered extensions by default and loads only ordered opt-ins', async () => {
     const environment = {
       ...process.env,
       PATH: `${prefix}${delimiter}${process.env.PATH ?? ''}`,
@@ -134,15 +163,51 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     const logged = await readFile(argsLog, 'utf8');
     expect(logged).toContain('--list-models');
     expect(logged).toContain(
-      '-p --model talking-quill-local/mock-model --thinking high --no-tools --no-session --no-context-files --no-approve --no-skills --no-prompt-templates --no-themes --offline',
+      '-p --model talking-quill-local/mock-model --thinking high --no-tools --no-extensions --no-session --no-context-files --no-approve --no-skills --no-prompt-templates --no-themes --offline',
     );
+    expect(logged).not.toContain(' -e ');
+    await expect(readFile(extensionMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const optedInInvocation = {
+      ...invocation,
+      config: {
+        ...invocation.config,
+        piExtensionSources: [extensionSource, 'npm:talking-quill-explicit-extension'],
+      },
+    };
+    await provider.listModels(optedInInvocation, AbortSignal.timeout(30_000));
+    await expect(
+      provider.cleanTranscript(
+        optedInInvocation,
+        { input: 'CONFIGURED_EXTENSION_PROMPT' },
+        AbortSignal.timeout(30_000),
+      ),
+    ).resolves.toBe('LOCAL_NONBILLABLE_OK');
     expect(await readFile(extensionMarker, 'utf8')).toBe('loaded');
+    expect(await readFile(npmExtensionMarker, 'utf8')).toBe('loaded');
+    await expect(readFile(ambientExtensionMarker, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(readFile(unrelatedPackageMarker, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    const optedInLog = await readFile(argsLog, 'utf8');
+    const canonicalNpmPackageRoot = await realpath(npmPackageRoot);
+    const firstSourceArgument =
+      process.platform === 'win32' ? `"${extensionSource}"` : extensionSource;
+    const secondSourceArgument =
+      process.platform === 'win32' && /\s/u.test(canonicalNpmPackageRoot)
+        ? `"${canonicalNpmPackageRoot}"`
+        : canonicalNpmPackageRoot;
+    expect(optedInLog).toContain(`--offline -e ${firstSourceArgument} -e ${secondSourceArgument}`);
+    expect(optedInLog).not.toContain('npm:talking-quill-explicit-extension');
     const completionRequests = server.requests.filter(({ url }) =>
       url.endsWith('/chat/completions'),
     );
-    expect(completionRequests).toHaveLength(2);
+    expect(completionRequests).toHaveLength(3);
     expect(JSON.stringify(completionRequests[0]?.body)).toContain('TALKING_QUILL_CONNECTION_OK');
     expect(JSON.stringify(completionRequests[1]?.body)).toContain('EXACT_STDIN_PROMPT');
+    expect(JSON.stringify(completionRequests[2]?.body)).toContain('CONFIGURED_EXTENSION_PROMPT');
     for (const request of completionRequests) {
       expect(request.body).not.toHaveProperty('tools');
       expect(JSON.stringify(request.body)).toContain('GLOBAL_APPEND_SYSTEM_EVIDENCE');
@@ -184,3 +249,26 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     await expect(completion).rejects.toMatchObject({ code: 'CANCELLED' });
   }, 60_000);
 });
+
+async function writeFixturePiPackage(
+  packageRoot: string,
+  packageName: string,
+  marker: string,
+): Promise<void> {
+  const extensions = resolve(packageRoot, 'extensions');
+  await mkdir(extensions, { recursive: true });
+  await writeFile(
+    resolve(packageRoot, 'package.json'),
+    JSON.stringify({
+      name: packageName,
+      version: '1.0.0',
+      pi: { extensions: ['./extensions/index.ts'] },
+    }),
+    'utf8',
+  );
+  await writeFile(
+    resolve(extensions, 'index.ts'),
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'loaded');\nexport default function evidence() {}\n`,
+    'utf8',
+  );
+}

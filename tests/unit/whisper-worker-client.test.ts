@@ -84,7 +84,11 @@ class FakeWorker extends EventEmitter {
     });
   }
 
-  replyFailure(requestType: string, code: 'INFERENCE_FAILED', message: string): void {
+  replyFailure(
+    requestType: string,
+    code: 'INFERENCE_FAILED' | 'WORKER_CRASHED',
+    message: string,
+  ): void {
     const requests = this.messages.map((request) => WhisperWorkerRequestSchema.parse(request));
     const request = [...requests].reverse().find((candidate) => candidate.type === requestType);
     if (request === undefined) throw new Error('No matching worker request');
@@ -468,7 +472,7 @@ describe('WhisperWorkerClient', () => {
     await client.close();
   });
 
-  it('starts short control deadlines only after earlier inference leaves the dispatch queue', async () => {
+  it('includes dispatch-queue time in control deadlines and keeps later work healthy', async () => {
     vi.useFakeTimers();
     const workers: FakeWorker[] = [];
     const client = createClient(workers);
@@ -480,22 +484,24 @@ describe('WhisperWorkerClient', () => {
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
     expect(latestRequestType(workers[0])).toBe('transcribe');
 
-    let controlSettled = false;
-    const pressure = client.memoryPressure().finally(() => {
-      controlSettled = true;
+    const pressureFailure = expect(client.memoryPressure()).rejects.toMatchObject({
+      code: 'WORKER_CRASHED',
+      message: 'Whisper worker request timed out while waiting for dispatch.',
     });
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
     expect(requestCount(workers[0], 'memory-pressure')).toBe(0);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(controlSettled).toBe(false);
+    await pressureFailure;
     expect(workers[0]?.killed).toBe(false);
 
     workers[0]?.replyTranscription('first complete');
     await transcription;
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
-    expect(latestRequestType(workers[0])).toBe('memory-pressure');
-    workers[0]?.replyAcknowledged('memory-pressure');
-    await pressure;
+    expect(requestCount(workers[0], 'memory-pressure')).toBe(0);
+    expect(latestRequestType(workers[0])).toBe('transcribe');
+    workers[0]?.replyTranscription('next complete');
+    await expect(next).resolves.toMatchObject({ text: 'next complete' });
     await client.close();
   });
 
@@ -543,7 +549,7 @@ describe('WhisperWorkerClient', () => {
     await client.close();
   });
 
-  it('does not let queued session cancellation time out unrelated inference', async () => {
+  it('bounds queued session cleanup, replaces the generation, and accepts later work', async () => {
     vi.useFakeTimers();
     const workers: FakeWorker[] = [];
     const client = createClient(workers);
@@ -559,18 +565,57 @@ describe('WhisperWorkerClient', () => {
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
     expect(latestRequestType(workers[0])).toBe('transcribe');
 
+    const unrelatedFailure = expect(unrelated).rejects.toMatchObject({ code: 'WORKER_CRASHED' });
     const cancellation = session.cancel();
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
     expect(requestCount(workers[0], 'session-cancel')).toBe(0);
     await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.all([unrelatedFailure, cancellation]);
+    expect(workers[0]?.killed).toBe(true);
+
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    expect(workers).toHaveLength(2);
+    expect(latestRequestType(workers[1])).toBe('transcribe');
+    workers[1]?.replyTranscription('recovered');
+    await expect(next).resolves.toMatchObject({ text: 'recovered' });
+    await client.close();
+  });
+
+  it('cleans up a session whose finish deadline expires before dispatch', async () => {
+    vi.useFakeTimers();
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers);
+    const opening = client.startSession(options);
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    workers[0]?.replyAcknowledged('session-open');
+    const session = await opening;
+    const unrelated = client.transcribe(
+      new Float32Array([0.1]),
+      options,
+      new AbortController().signal,
+    );
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+
+    const finishFailure = expect(session.finish()).rejects.toMatchObject({
+      code: 'WORKER_CRASHED',
+      message: 'Whisper worker request timed out while waiting for dispatch.',
+    });
+    const unrelatedFailure = expect(unrelated).rejects.toMatchObject({ code: 'WORKER_CRASHED' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(requestCount(workers[0], 'session-finish')).toBe(0);
+    expect(requestCount(workers[0], 'session-cancel')).toBe(0);
     expect(workers[0]?.killed).toBe(false);
 
-    workers[0]?.replyTranscription('unrelated complete');
-    await unrelated;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.all([finishFailure, unrelatedFailure]);
+    expect(workers[0]?.killed).toBe(true);
+
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
     for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
-    expect(latestRequestType(workers[0])).toBe('session-cancel');
-    workers[0]?.replyAcknowledged('session-cancel');
-    await cancellation;
+    expect(workers).toHaveLength(2);
+    workers[1]?.replyTranscription('after finish cleanup');
+    await expect(next).resolves.toMatchObject({ text: 'after finish cleanup' });
     await client.close();
   });
 
@@ -830,14 +875,18 @@ describe('WhisperWorkerClient', () => {
     await client.close();
   });
 
-  it('retains a streaming model lease until an unkillable worker actually exits', async () => {
+  it('holds a retired lease when kill returns false until a late exit confirms cleanup', async () => {
     vi.useFakeTimers();
     const workers: FakeWorker[] = [];
-    const release = vi.fn();
+    const releases = [vi.fn(), vi.fn()];
+    let acquisitions = 0;
     const client = new WhisperWorkerClient({
       cacheDirectory: 'models',
       workerPath: 'worker.js',
-      acquireModelUse: async (modelId) => ({ ...(await readyAcquirer(modelId)), release }),
+      acquireModelUse: async (modelId) => ({
+        ...(await readyAcquirer(modelId)),
+        release: releases[acquisitions++] ?? vi.fn(),
+      }),
       spawn: () => {
         const worker = new FakeWorker();
         worker.autoExitOnKill = false;
@@ -854,15 +903,62 @@ describe('WhisperWorkerClient', () => {
     for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
     const worker = workers[0];
     if (worker === undefined) throw new Error('Worker missing');
-    vi.spyOn(worker, 'kill').mockImplementation(() => {
-      throw new Error('kill failed');
-    });
+    const kill = vi.spyOn(worker, 'kill').mockReturnValue(false);
     const pushFailure = expect(push).rejects.toMatchObject({ code: 'CANCELLED' });
     const cancellation = session.cancel();
     await vi.advanceTimersByTimeAsync(4_500);
     await Promise.all([pushFailure, cancellation]);
-    expect(release).not.toHaveBeenCalled();
-    await expect(client.close()).rejects.toMatchObject({ code: 'WORKER_CRASHED' });
+    expect(releases[0]).not.toHaveBeenCalled();
+
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
+    for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
+    expect(workers).toHaveLength(2);
+    expect(latestRequestType(workers[1])).toBe('transcribe');
+    expect(kill.mock.calls.length).toBeGreaterThan(3);
+    worker.replyTranscription('stale');
+    workers[1]?.replyTranscription('recovered');
+    await expect(next).resolves.toMatchObject({ text: 'recovered' });
+    expect(releases[0]).not.toHaveBeenCalled();
+    expect(releases[1]).toHaveBeenCalledOnce();
+
+    await client.close();
+    expect(releases[0]).not.toHaveBeenCalled();
+    worker.exit(1);
+    expect(releases[0]).toHaveBeenCalledOnce();
+    worker.exit(1);
+    expect(releases[0]).toHaveBeenCalledOnce();
+  });
+
+  it('releases a lease once after kill confirms termination without an exit event', async () => {
+    vi.useFakeTimers();
+    const workers: FakeWorker[] = [];
+    const release = vi.fn();
+    const client = new WhisperWorkerClient({
+      cacheDirectory: 'models',
+      workerPath: 'worker.js',
+      acquireModelUse: async (modelId) => ({ ...(await readyAcquirer(modelId)), release }),
+      spawn: () => {
+        const worker = new FakeWorker();
+        worker.autoExitOnKill = false;
+        workers.push(worker);
+        queueMicrotask(() => worker.ready());
+        return worker;
+      },
+    });
+    const controller = new AbortController();
+    const request = client.transcribe(new Float32Array([0.1]), options, controller.signal);
+    for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
+    const worker = workers[0];
+    if (worker === undefined) throw new Error('Worker missing');
+    const kill = vi.spyOn(worker, 'kill').mockReturnValueOnce(true).mockReturnValue(false);
+    const requestFailure = expect(request).rejects.toMatchObject({ code: 'CANCELLED' });
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(4_500);
+
+    await requestFailure;
+    expect(kill).toHaveBeenCalledTimes(3);
+    expect(release).toHaveBeenCalledOnce();
+    await client.close();
     worker.exit(1);
     expect(release).toHaveBeenCalledOnce();
   });
@@ -912,6 +1008,7 @@ describe('WhisperWorkerClient', () => {
     expect(releases[0]).not.toHaveBeenCalled();
     worker.exit(1);
     expect(releases[0]).toHaveBeenCalledOnce();
+    await client.close();
   });
 
   it('lets cancellation interrupt an existing termination barrier', async () => {
@@ -940,14 +1037,18 @@ describe('WhisperWorkerClient', () => {
     worker.exit(1);
   });
 
-  it('bounds unresponsive termination even when process.kill throws', async () => {
+  it('bounds unresponsive termination while holding the retired generation lease', async () => {
     vi.useFakeTimers();
     const workers: FakeWorker[] = [];
-    const release = vi.fn();
+    const releases = [vi.fn(), vi.fn()];
+    let acquisitions = 0;
     const client = new WhisperWorkerClient({
       cacheDirectory: 'models',
       workerPath: 'worker.js',
-      acquireModelUse: async (modelId) => ({ ...(await readyAcquirer(modelId)), release }),
+      acquireModelUse: async (modelId) => ({
+        ...(await readyAcquirer(modelId)),
+        release: releases[acquisitions++] ?? vi.fn(),
+      }),
       spawn: () => {
         const worker = new FakeWorker();
         worker.autoExitOnKill = false;
@@ -971,10 +1072,47 @@ describe('WhisperWorkerClient', () => {
     controller.abort();
     await vi.advanceTimersByTimeAsync(4_500);
     await expect(request).resolves.toMatchObject({ code: 'CANCELLED' });
-    expect(release).not.toHaveBeenCalled();
-    await expect(client.close()).rejects.toMatchObject({ code: 'WORKER_CRASHED' });
+    expect(releases[0]).not.toHaveBeenCalled();
+
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
+    for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
+    expect(workers).toHaveLength(2);
+    workers[1]?.replyTranscription('replacement');
+    await expect(next).resolves.toMatchObject({ text: 'replacement' });
+    expect(releases[0]).not.toHaveBeenCalled();
+    expect(releases[1]).toHaveBeenCalledOnce();
     worker.exit(1);
-    expect(release).toHaveBeenCalledOnce();
+    expect(releases[0]).toHaveBeenCalledOnce();
+    await client.close();
+  });
+
+  it('replaces a worker generation after a fatal pipeline-disposal response', async () => {
+    const workers: FakeWorker[] = [];
+    const client = createClient(workers, false);
+    const warm = client.transcribe(new Float32Array([0.1]), options, new AbortController().signal);
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('transcribe'));
+    workers[0]?.replyTranscription('warm');
+    await warm;
+
+    const pressure = client.memoryPressure();
+    await vi.waitFor(() => expect(latestRequestType(workers[0])).toBe('memory-pressure'));
+    workers[0]?.replyFailure(
+      'memory-pressure',
+      'WORKER_CRASHED',
+      'Whisper pipeline cleanup failed; the worker must be replaced.',
+    );
+    await vi.waitFor(() => expect(workers[0]?.killed).toBe(true));
+    workers[0]?.exit(1);
+    await expect(pressure).rejects.toMatchObject({ code: 'WORKER_CRASHED' });
+
+    const next = client.transcribe(new Float32Array([0.2]), options, new AbortController().signal);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    workers[1]?.ready();
+    await vi.waitFor(() => expect(latestRequestType(workers[1])).toBe('transcribe'));
+    workers[1]?.replyTranscription('replacement');
+    await expect(next).resolves.toMatchObject({ text: 'replacement' });
+    workers[1]?.exit(0);
+    await client.close();
   });
 
   it('times out a healthy worker that ignores an operation after readiness', async () => {

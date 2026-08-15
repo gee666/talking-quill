@@ -44,14 +44,23 @@ const electron = vi.hoisted(() => {
     readonly webContents = new WebContents();
     readonly options: { readonly title?: string };
     readonly show = vi.fn();
-    readonly hide = vi.fn();
+    readonly hide = vi.fn(() => {
+      this.visible = false;
+    });
     readonly focus = vi.fn();
     readonly minimize = vi.fn();
     readonly maximize = vi.fn();
     readonly unmaximize = vi.fn();
     readonly restore = vi.fn();
     readonly close = vi.fn();
+    readonly setContentBounds = vi.fn();
+    readonly setFocusable = vi.fn();
+    readonly setIgnoreMouseEvents = vi.fn();
+    readonly showInactive = vi.fn(() => {
+      this.visible = true;
+    });
     destroyed = false;
+    visible = false;
 
     constructor(options: { readonly title?: string }) {
       super();
@@ -77,6 +86,10 @@ const electron = vi.hoisted(() => {
       return false;
     }
 
+    isVisible(): boolean {
+      return this.visible;
+    }
+
     resetForTest(): void {
       this.destroyed = false;
     }
@@ -94,6 +107,13 @@ const electron = vi.hoisted(() => {
     },
     screen: {
       screenToDipPoint: (point: unknown) => point,
+      getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+      getDisplayNearestPoint: () => ({
+        workArea: { x: 0, y: 0, width: 1_920, height: 1_080 },
+      }),
+      getDisplayMatching: () => ({
+        workArea: { x: 0, y: 0, width: 1_920, height: 1_080 },
+      }),
     },
   };
 });
@@ -104,7 +124,8 @@ vi.mock('electron', () => ({
   screen: electron.screen,
 }));
 
-import { WindowManager } from '../../app/src/main/app/window-manager';
+import { WidgetCaptureExclusion } from '../../app/src/main/app/widget-capture-exclusion';
+import { RENDERER_LOAD_TIMEOUT_MS, WindowManager } from '../../app/src/main/app/window-manager';
 import type { RendererLoader } from '../../app/src/main/app/renderer-loader';
 import type { WindowRoleRegistry } from '../../app/src/main/app/window-role-registry';
 import type { SettingsStore } from '../../app/src/main/persistence/settings-store';
@@ -115,12 +136,15 @@ beforeEach(() => {
   electron.reset();
 });
 
-function createManager(requestQuit = vi.fn()): WindowManager {
+function createManager(
+  requestQuit = vi.fn(),
+  load: RendererLoader['load'] = vi.fn(() => Promise.resolve()),
+): WindowManager {
   return new WindowManager(
     {
       allowsDevTools: false,
       urlFor: (role: string) => `talking-quill://app/${role}/index.html`,
-      load: vi.fn(() => Promise.resolve()),
+      load,
     } as unknown as RendererLoader,
     {
       register: vi.fn(),
@@ -137,6 +161,12 @@ function createManager(requestQuit = vi.fn()): WindowManager {
 function mainWindows() {
   return electron.BrowserWindow.instances.filter(
     ({ options }) => options.title === 'Talking Quill',
+  );
+}
+
+function widgetWindows() {
+  return electron.BrowserWindow.instances.filter(
+    ({ options }) => options.title === 'Talking Quill Widget',
   );
 }
 
@@ -157,6 +187,157 @@ describe('WindowManager renderer recovery', () => {
     expect(mainWindows()).toHaveLength(1);
     await manager.createAll();
     expect(electron.BrowserWindow.instances).toHaveLength(3);
+  });
+
+  it('recovers a renderer crash before its first did-finish-load event', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = widgetWindows()[0];
+
+    first?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(first?.destroyed).toBe(true);
+    expect(widgetWindows()).toHaveLength(2);
+  });
+
+  it('restores desired widget visibility after replacing its renderer', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = widgetWindows()[0];
+    first?.webContents.emit('did-finish-load');
+    expect(manager.showWidget('large', { x: 10, y: 20, width: 800, height: 600 })).toBe(true);
+    expect(first?.showInactive).toHaveBeenCalledOnce();
+
+    first?.webContents.emit('render-process-gone');
+    expect(manager.isWidgetVisible()).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);
+
+    const replacement = widgetWindows()[1];
+    expect(replacement).toBeDefined();
+    expect(replacement?.showInactive).toHaveBeenCalledOnce();
+    expect(replacement?.setContentBounds).toHaveBeenCalledOnce();
+  });
+
+  it('does not let late capture restoration override a terminal widget hide', async () => {
+    let resolveFrontApp!: (value: {
+      processName: string;
+      windowTitle: string;
+      windowBounds: { x: number; y: number; width: number; height: number };
+    }) => void;
+    const frontApp = new Promise<{
+      processName: string;
+      windowTitle: string;
+      windowBounds: { x: number; y: number; width: number; height: number };
+    }>((resolve) => {
+      resolveFrontApp = resolve;
+    });
+    const manager = createManager();
+    await manager.createAll();
+    const widget = widgetWindows()[0];
+    manager.showWidget('default', null);
+    const exclusion = new WidgetCaptureExclusion({
+      windows: manager,
+      getWidgetSize: () => 'large',
+      getFrontApp: () => frontApp,
+    });
+
+    await exclusion.setExcluded(true);
+    const restoration = exclusion.setExcluded(false);
+    await Promise.resolve();
+    manager.hideWidget();
+    resolveFrontApp({
+      processName: 'target',
+      windowTitle: 'document',
+      windowBounds: { x: 10, y: 20, width: 800, height: 600 },
+    });
+    await restoration;
+
+    expect(manager.isWidgetVisible()).toBe(false);
+    expect(widget?.showInactive).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a not-yet-loaded replacement hidden for capture, then restores it', async () => {
+    let finishReplacementLoad!: () => void;
+    const load = vi.fn<RendererLoader['load']>((_window, role) => {
+      if (role !== 'widget' || widgetWindows().length < 2) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        finishReplacementLoad = resolve;
+      });
+    });
+    const manager = createManager(vi.fn(), load);
+    await manager.createAll();
+    const first = widgetWindows()[0];
+    first?.webContents.emit('did-finish-load');
+    manager.showWidget('default', null);
+    first?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+
+    const replacement = widgetWindows()[1];
+    expect(replacement).toBeDefined();
+    const exclusion = new WidgetCaptureExclusion({
+      windows: manager,
+      getWidgetSize: () => 'large',
+      getFrontApp: () =>
+        Promise.resolve({
+          processName: 'target',
+          windowTitle: 'document',
+          windowBounds: { x: 10, y: 20, width: 800, height: 600 },
+        }),
+    });
+    await exclusion.setExcluded(true);
+    finishReplacementLoad();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(replacement?.showInactive).not.toHaveBeenCalled();
+
+    await exclusion.setExcluded(false);
+    expect(replacement?.showInactive).toHaveBeenCalledOnce();
+  });
+
+  it('bounds rejected replacement loads and requests quit after retry exhaustion', async () => {
+    const requestQuit = vi.fn();
+    let widgetLoads = 0;
+    const load = vi.fn<RendererLoader['load']>((_window, role) => {
+      if (role !== 'widget') return Promise.resolve();
+      widgetLoads += 1;
+      return widgetLoads === 1
+        ? Promise.resolve()
+        : Promise.reject(new Error('renderer load rejected'));
+    });
+    const manager = createManager(requestQuit, load);
+    await manager.createAll();
+
+    widgetWindows()[0]?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(widgetWindows()).toHaveLength(3);
+    expect(requestQuit).toHaveBeenCalledOnce();
+  });
+
+  it('times out never-settling replacement loads and stops after bounded retries', async () => {
+    const requestQuit = vi.fn();
+    let widgetLoads = 0;
+    const load = vi.fn<RendererLoader['load']>((_window, role) => {
+      if (role !== 'widget') return Promise.resolve();
+      widgetLoads += 1;
+      return widgetLoads === 1 ? Promise.resolve() : new Promise<void>(() => undefined);
+    });
+    const manager = createManager(requestQuit, load);
+    await manager.createAll();
+
+    widgetWindows()[0]?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+    expect(widgetWindows()).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(RENDERER_LOAD_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(widgetWindows()).toHaveLength(3);
+
+    await vi.advanceTimersByTimeAsync(RENDERER_LOAD_TIMEOUT_MS);
+    expect(requestQuit).toHaveBeenCalledOnce();
+    expect(widgetWindows()).toHaveLength(3);
   });
 
   it('does not let an old stability window reset replacement retry attempts', async () => {

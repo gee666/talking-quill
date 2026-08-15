@@ -3,7 +3,7 @@ import type { InvokeRequest, PortTransferDescriptor } from '../../app/src/shared
 
 export const validEnabledRequest: InvokeRequest<'app:set-enabled'> = { enabled: true };
 export const validCapturePort: PortTransferDescriptor<'capture:port'> = {
-  protocolVersion: 2,
+  protocolVersion: 3,
 };
 
 export const invalidCapturePort: PortTransferDescriptor<'capture:port'> = {

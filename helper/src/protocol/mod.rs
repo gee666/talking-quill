@@ -1,4 +1,4 @@
-//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 6).
+//! Talking Quill native-helper protocol (JSON-RPC 2.0, protocol version 7).
 //!
 //! # Transport and framing
 //!
@@ -49,8 +49,8 @@
 //! and are Invalid Request.
 //!
 //! - `initialize`
-//!   - Params: `{"protocolVersion":6}`.
-//!   - Result: `{"protocolVersion":6,"helperVersion":string,
+//!   - Params: `{"protocolVersion":7}`.
+//!   - Result: `{"protocolVersion":7,"helperVersion":string,
 //!     "platform":string,"architecture":string,"hookStatus":HOOK_STATUS,
 //!     "permissions":PERMISSIONS}`.
 //! - `activation.configure`
@@ -104,7 +104,7 @@
 //! `"permission_denied"`, `"conflicting_modifiers"`, `"secure_input"`,
 //! `"os_rejected"`, or `"unavailable"`.
 //!
-//! `initialize` with `protocolVersion` exactly 6 must be the first successful
+//! `initialize` with `protocolVersion` exactly 7 must be the first successful
 //! command. Before it succeeds, other allowlisted commands return Invalid
 //! helper state. A failed or incompatible initialization leaves the helper
 //! uninitialized. After success, every later `initialize` returns Invalid
@@ -114,7 +114,7 @@
 //! disabled and `initialize` does not enable it; the host must explicitly send
 //! `activation.configure` with `"enabled":true`.
 //!
-//! # Outbound keyboard notifications
+//! # Outbound notifications
 //!
 //! While initialized and capture is enabled as appropriate, the helper may
 //! emit these ID-less JSON-RPC notifications. Platform-neutral reduction uses
@@ -135,6 +135,10 @@
 //!   activation configuration changes before the trigger is released.
 //! - `session.key` params:
 //!   `{"key":"escape"|"enter","phase":"down"|"up"}`.
+//! - On Windows, `audio.input_devices_changed` params are `{}`. A fresh helper
+//!   emits one coalesced post-initialize resynchronization, then emits only for
+//!   capture/eConsole default changes or changes to its opaque capture-endpoint
+//!   topology snapshot. Native endpoint IDs never cross the protocol boundary.
 //!
 //! # Responses and errors
 //!
@@ -182,4 +186,4 @@ pub use messages::{
 pub(crate) use server::HandleOutcome;
 pub use server::Server;
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;

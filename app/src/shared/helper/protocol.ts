@@ -8,7 +8,7 @@ import {
 } from '../schemas/dictation-profiles';
 import { ShortcutSchema, shortcutIdentity } from '../schemas/shortcut';
 
-export const HELPER_PROTOCOL_VERSION = 6 as const;
+export const HELPER_PROTOCOL_VERSION = 7 as const;
 export const HELPER_MAX_FRAME_BYTES = 16 * 1024;
 const HelperNumericRequestIdSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const HelperStringRequestIdSchema = z
@@ -256,6 +256,13 @@ export const HelperNotificationSchema = z.discriminatedUnion('method', [
       params: z
         .object({ key: z.enum(['escape', 'enter']), phase: z.enum(['down', 'up']) })
         .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      jsonrpc: z.literal('2.0'),
+      method: z.literal('audio.input_devices_changed'),
+      params: emptySchema,
     })
     .strict(),
 ]);

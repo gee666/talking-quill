@@ -49,6 +49,16 @@ describe('microphone permission policy', () => {
     expect(readPermissionCheckMediaTypes({ mediaTypes: ['audio'] })).toEqual([]);
   });
 
+  it('authorizes at most two separately checked requests for explicit-device fallback', () => {
+    const source = platform();
+    const controller = new MicrophonePermissionController(source.value, () => 1_000);
+    controller.authorize(7, 'capture-id', 2);
+
+    expect(controller.allowsRequest(audioRequest)).toBe(true);
+    expect(controller.allowsRequest(audioRequest)).toBe(true);
+    expect(controller.allowsRequest(audioRequest)).toBe(false);
+  });
+
   it('forces acquisition through a bounded request and grants enumeration checks separately', () => {
     const source = platform();
     const controller = new MicrophonePermissionController(source.value, () => 1_000);
@@ -57,11 +67,6 @@ describe('microphone permission policy', () => {
     expect(controller.allowsCheck(audioRequest)).toBe(false);
     controller.notePolicyDenied(audioRequest);
     expect(controller.takePolicyDenial('capture-id')).toBe(false);
-    expect(controller.allowsRequest(audioRequest)).toBe(true);
-    expect(controller.allowsRequest(audioRequest)).toBe(false);
-
-    controller.authorize(7, 'fallback-capture', 2);
-    expect(controller.allowsRequest(audioRequest)).toBe(true);
     expect(controller.allowsRequest(audioRequest)).toBe(true);
     expect(controller.allowsRequest(audioRequest)).toBe(false);
 

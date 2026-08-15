@@ -176,6 +176,16 @@ const piFields = Object.freeze([
       ].map((option) => Object.freeze(option)),
     ),
   }),
+  Object.freeze({
+    key: 'piExtensionSources' as const,
+    label: 'Pi extension sources',
+    kind: 'textarea' as const,
+    required: false,
+    secret: false,
+    placeholder: 'C:\\path\\to\\extension.ts or npm:@scope/package',
+    description:
+      "Optional local extension paths or npm:package names, one per line. Relative paths use Talking Quill's data folder. npm packages must already be installed with pi install; only listed packages load. Extensions run as code with your user permissions—only add trusted sources.",
+  }),
 ]);
 
 const azureFields = Object.freeze([
@@ -291,7 +301,8 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = deepFreeze([
   ProviderCatalogEntrySchema.parse({
     id: 'pi',
     displayName: 'Pi',
-    description: 'Use your installed Pi CLI in print mode with tools and sessions disabled.',
+    description:
+      'Use your installed Pi CLI in print mode with tools, sessions, and extension discovery disabled by default.',
     logo: 'pi.png',
     destinationHint: 'cloud',
     defaultModel: null,

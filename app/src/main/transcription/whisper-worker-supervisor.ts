@@ -59,6 +59,7 @@ interface TerminationIntent {
   restart: boolean;
   readonly settled: Promise<void>;
   readonly cancelledRequestIds: ReadonlySet<string> | null;
+  terminationConfirmed: boolean;
   forceTimer: ReturnType<typeof setTimeout> | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
   deadlineTimer: ReturnType<typeof setTimeout> | null;
@@ -71,6 +72,7 @@ export class WhisperWorkerSupervisor {
   readonly #forceKill: (pid: number) => void;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #sessionLeaseReleases = new Map<number, Set<() => void>>();
+  readonly #retiredProcesses = new Map<number, WorkerProcess>();
   #dispatchTail: Promise<void> = Promise.resolve();
   #process: WorkerProcess | null = null;
   #generation = 0;
@@ -80,7 +82,6 @@ export class WhisperWorkerSupervisor {
   #resolveGenerationExit: (() => void) | null = null;
   #termination: TerminationIntent | null = null;
   #closing = false;
-  #unusable = false;
   #closePromise: Promise<void> | null = null;
   #restartAttempts = 0;
   #restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -117,8 +118,7 @@ export class WhisperWorkerSupervisor {
       this.#generation === generation &&
       this.#process !== null &&
       this.#termination === null &&
-      !this.#closing &&
-      !this.#unusable
+      !this.#closing
     );
   }
 
@@ -126,37 +126,53 @@ export class WhisperWorkerSupervisor {
     create: (requestId: string) => WhisperWorkerRequest,
     options: WorkerRequestOptions,
   ): Promise<WhisperWorkerResult> {
-    const { signal } = options;
-    await this.waitForTermination(options.signal);
-    this.#assertRequestAllowed(options);
-    if (this.#closing && this.#process === null) {
-      throw new WhisperClientError('CANCELLED', 'Whisper worker is closing.');
-    }
-    let process: WorkerProcess;
+    const deadline = createRequestDeadline(options.timeoutMs, options.signal);
+    let dispatched = false;
+    let releaseTurn = (): void => undefined;
     try {
-      process = this.#ensureProcess();
-    } catch {
-      this.#scheduleRestart();
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker could not start.');
-    }
-    const generation = this.#generation;
-    const requestId = randomUUID();
-    options.captureRequestId?.(requestId);
-    const request = WhisperWorkerRequestSchema.parse(create(requestId));
+      await this.#waitForTermination(deadline.signal);
+      this.#assertRequestAllowed(options);
+      if (this.#closing && this.#process === null) {
+        throw new WhisperClientError('CANCELLED', 'Whisper worker is closing.');
+      }
+      let process: WorkerProcess;
+      try {
+        process = this.#ensureProcess();
+      } catch {
+        this.#scheduleRestart();
+        throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker could not start.');
+      }
+      const generation = this.#generation;
+      const requestId = randomUUID();
+      options.captureRequestId?.(requestId);
+      const request = WhisperWorkerRequestSchema.parse(create(requestId));
 
-    const precedingRequest = this.#dispatchTail;
-    let releaseTurn!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
-    });
-    this.#dispatchTail = precedingRequest.catch(() => undefined).then(() => turn);
-    try {
-      await waitForDispatchTurn(precedingRequest, signal);
+      const precedingRequest = this.#dispatchTail;
+      const turn = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      this.#dispatchTail = precedingRequest.catch(() => undefined).then(() => turn);
+      await waitForDispatchTurn(precedingRequest, deadline.signal);
+      if (deadline.timedOut()) throw requestQueueTimeoutError();
       this.#assertRequestAllowed(options, process, generation);
       options.captureGeneration?.(generation);
-      return await this.#dispatchRequest(process, generation, requestId, request, options);
+      dispatched = true;
+      return await this.#dispatchRequest(
+        process,
+        generation,
+        requestId,
+        request,
+        options,
+        deadline.signal,
+      );
+    } catch (error: unknown) {
+      if (!dispatched && deadline.timedOut() && options.signal?.aborted !== true) {
+        throw requestQueueTimeoutError();
+      }
+      throw error;
     } finally {
       releaseTurn();
+      deadline.dispose();
     }
   }
 
@@ -191,27 +207,32 @@ export class WhisperWorkerSupervisor {
       restart,
       settled: terminationSettled,
       cancelledRequestIds,
+      terminationConfirmed: false,
       forceTimer: null,
       retryTimer: null,
       deadlineTimer: null,
     };
     this.#termination = termination;
-    this.#tryKill(process);
+    termination.terminationConfirmed = this.#tryKill(process);
     if (this.#termination !== termination || this.#process !== process) return terminationSettled;
     termination.forceTimer = setTimeout(() => {
       if (this.#termination !== termination || this.#process !== process) return;
       const pid = process.pid;
-      if (pid === undefined) this.#tryKill(process);
-      else {
+      if (pid === undefined) {
+        termination.terminationConfirmed =
+          this.#tryKill(process) || termination.terminationConfirmed;
+      } else {
         try {
           this.#forceKill(pid);
         } catch {
-          this.#tryKill(process);
+          termination.terminationConfirmed =
+            this.#tryKill(process) || termination.terminationConfirmed;
         }
       }
       termination.retryTimer = setTimeout(() => {
         if (this.#termination === termination && this.#process === process) {
-          this.#tryKill(process);
+          termination.terminationConfirmed =
+            this.#tryKill(process) || termination.terminationConfirmed;
         }
       }, FORCE_KILL_RETRY_MS);
       termination.retryTimer.unref();
@@ -219,8 +240,10 @@ export class WhisperWorkerSupervisor {
     termination.forceTimer.unref();
     termination.deadlineTimer = setTimeout(() => {
       if (this.#termination !== termination || this.#process !== process) return;
-      this.#unusable = true;
-      this.#rejectGeneration(generation, termination, termination.error, false);
+      // Electron can terminate a utility process without emitting its exit event. Quarantine an
+      // unconfirmed generation so replacement readers can proceed while its leases remain held.
+      if (!termination.terminationConfirmed) this.#retiredProcesses.set(generation, process);
+      this.#handleExit(generation, termination.terminationConfirmed);
       resolveDeadline();
     }, TERMINATION_DEADLINE_MS);
     termination.deadlineTimer.unref();
@@ -228,16 +251,22 @@ export class WhisperWorkerSupervisor {
   }
 
   async waitForTermination(signal?: AbortSignal): Promise<void> {
+    await this.#waitForTermination(signal);
+  }
+
+  async #waitForTermination(signal?: AbortSignal): Promise<void> {
     const termination = this.#termination;
     if (termination !== null) await waitForDispatchTurn(termination.settled, signal);
   }
 
   releaseUseWhenSafe(generation: number, release: () => void): void {
-    if (
-      generation > 0 &&
+    const terminatingCurrentGeneration =
       this.#generation === generation &&
       this.#process !== null &&
-      (this.#termination?.generation === generation || this.#unusable)
+      this.#termination?.generation === generation;
+    if (
+      generation > 0 &&
+      (terminatingCurrentGeneration || this.#retiredProcesses.has(generation))
     ) {
       this.registerSessionLease(generation, release);
       return;
@@ -265,9 +294,7 @@ export class WhisperWorkerSupervisor {
   async #closeInternal(): Promise<void> {
     this.#closing = true;
     this.#clearSupervisionTimers();
-    if (this.#unusable) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker termination failed.');
-    }
+    this.#retryRetiredProcessCleanup();
     const process = this.#process;
     const generation = this.#generation;
     const exited = this.#generationExit;
@@ -282,7 +309,6 @@ export class WhisperWorkerSupervisor {
         new WhisperClientError('CANCELLED', 'Whisper worker closed.'),
         false,
       );
-      this.#assertUsableTermination();
       return;
     }
     const shutdownState: { protocolError: WhisperClientError | null } = {
@@ -315,14 +341,7 @@ export class WhisperWorkerSupervisor {
     } else {
       await exited;
     }
-    this.#assertUsableTermination();
     if (shutdownState.protocolError !== null) throw shutdownState.protocolError;
-  }
-
-  #assertUsableTermination(): void {
-    if (this.#unusable) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker termination failed.');
-    }
   }
 
   #assertRequestAllowed(
@@ -332,9 +351,6 @@ export class WhisperWorkerSupervisor {
   ): void {
     if (options.signal?.aborted === true) {
       throw new WhisperClientError('CANCELLED', 'Transcription was cancelled.');
-    }
-    if (this.#unusable) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker could not be terminated.');
     }
     if (this.#closing && options.allowClosing !== true) {
       throw new WhisperClientError('CANCELLED', 'Whisper worker is closing.');
@@ -363,21 +379,11 @@ export class WhisperWorkerSupervisor {
     requestId: string,
     request: WhisperWorkerRequest,
     options: WorkerRequestOptions,
+    requestSignal: AbortSignal,
   ): Promise<WhisperWorkerResult> {
-    const timeoutController = new AbortController();
-    const timeout = setTimeout(
-      () => timeoutController.abort('worker request timeout'),
-      options.timeoutMs,
-    );
-    timeout.unref();
-    const requestSignal =
-      options.signal === undefined
-        ? timeoutController.signal
-        : AbortSignal.any([options.signal, timeoutController.signal]);
     options.onDispatched?.(requestId);
     return new Promise((resolve, reject) => {
       const cleanup = (): void => {
-        clearTimeout(timeout);
         requestSignal.removeEventListener('abort', onAbort);
       };
       const onAbort = () => {
@@ -392,7 +398,6 @@ export class WhisperWorkerSupervisor {
           new Set([requestId]),
         );
       };
-      requestSignal.addEventListener('abort', onAbort, { once: true });
       this.#pending.set(requestId, {
         generation,
         accepts: options.accepts ?? (() => true),
@@ -405,6 +410,8 @@ export class WhisperWorkerSupervisor {
           reject(error);
         },
       });
+      if (requestSignal.aborted) onAbort();
+      else requestSignal.addEventListener('abort', onAbort, { once: true });
       try {
         process.postMessage(request);
       } catch {
@@ -419,9 +426,7 @@ export class WhisperWorkerSupervisor {
   }
 
   #ensureProcess(): WorkerProcess {
-    if (this.#unusable) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker client is unusable.');
-    }
+    this.#retryRetiredProcessCleanup();
     if (this.#termination !== null) {
       throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker is still terminating.');
     }
@@ -450,7 +455,13 @@ export class WhisperWorkerSupervisor {
   }
 
   #handleMessage(generation: number, raw: unknown): void {
-    if (generation !== this.#generation || this.#termination?.generation === generation) return;
+    if (
+      generation !== this.#generation ||
+      this.#lastExitedGeneration === generation ||
+      this.#termination?.generation === generation
+    ) {
+      return;
+    }
     const response = WhisperWorkerResponseSchema.safeParse(raw);
     if (!response.success) {
       void this.beginTermination(
@@ -467,6 +478,15 @@ export class WhisperWorkerSupervisor {
       response.data.result.type === 'ready'
     ) {
       this.#markHealthy(generation);
+      return;
+    }
+    if (!response.data.ok && response.data.error.code === 'WORKER_CRASHED') {
+      void this.beginTermination(
+        generation,
+        'unavailable',
+        new WhisperClientError('WORKER_CRASHED', response.data.error.message),
+        true,
+      );
       return;
     }
     const pending = this.#pending.get(response.data.requestId);
@@ -501,7 +521,11 @@ export class WhisperWorkerSupervisor {
     this.#stabilityTimer.unref();
   }
 
-  #handleExit(generation: number): void {
+  #handleExit(generation: number, confirmed = true): void {
+    if (confirmed && this.#retiredProcesses.has(generation)) {
+      this.#confirmRetiredGeneration(generation);
+      return;
+    }
     if (generation !== this.#generation || this.#lastExitedGeneration === generation) return;
     this.#lastExitedGeneration = generation;
     const termination = this.#termination?.generation === generation ? this.#termination : null;
@@ -515,16 +539,33 @@ export class WhisperWorkerSupervisor {
     const fallbackError = this.#closing
       ? new WhisperClientError('CANCELLED', 'Whisper worker closed.')
       : new WhisperClientError('WORKER_CRASHED', 'Whisper worker exited unexpectedly.');
-    this.#rejectGeneration(generation, termination, fallbackError);
+    this.#rejectGeneration(generation, termination, fallbackError, confirmed);
     if (!this.#closing && (termination === null || termination.restart)) this.#scheduleRestart();
   }
 
-  #tryKill(process: WorkerProcess): void {
+  #tryKill(process: WorkerProcess): boolean {
     try {
-      process.kill();
+      return process.kill();
     } catch {
       // The bounded termination deadline handles a process API that keeps failing.
+      return false;
     }
+  }
+
+  #retryRetiredProcessCleanup(): void {
+    for (const [generation, process] of this.#retiredProcesses) {
+      try {
+        if (process.kill()) this.#confirmRetiredGeneration(generation);
+      } catch {
+        // Keep the quarantined handle so a later request or close can retry cleanup. Do not
+        // force-kill by cached PID here because the exited process's PID may have been reused.
+      }
+    }
+  }
+
+  #confirmRetiredGeneration(generation: number): void {
+    if (!this.#retiredProcesses.delete(generation)) return;
+    this.#releaseGenerationLeases(generation);
   }
 
   #rejectGeneration(
@@ -549,18 +590,20 @@ export class WhisperWorkerSupervisor {
           : (termination?.error ?? fallbackError),
       );
     }
-    const sessionReleases = releaseLeases ? this.#sessionLeaseReleases.get(generation) : undefined;
-    if (sessionReleases !== undefined) {
-      this.#sessionLeaseReleases.delete(generation);
-      for (const release of sessionReleases) release();
-    }
+    if (releaseLeases) this.#releaseGenerationLeases(generation);
+  }
+
+  #releaseGenerationLeases(generation: number): void {
+    const releases = this.#sessionLeaseReleases.get(generation);
+    if (releases === undefined) return;
+    this.#sessionLeaseReleases.delete(generation);
+    for (const release of releases) release();
   }
 
   #scheduleRestart(): void {
     if (
       this.#restartTimer !== null ||
       this.#closing ||
-      this.#unusable ||
       this.#restartAttempts >= MAX_AUTOMATIC_RESTARTS
     ) {
       return;
@@ -569,12 +612,7 @@ export class WhisperWorkerSupervisor {
     this.#restartAttempts += 1;
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = null;
-      if (
-        !this.#closing &&
-        !this.#unusable &&
-        this.#process === null &&
-        this.#termination === null
-      ) {
+      if (!this.#closing && this.#process === null && this.#termination === null) {
         try {
           this.#ensureProcess();
         } catch {
@@ -629,6 +667,34 @@ function assertAcknowledged(
       `Whisper worker returned the wrong acknowledgement for ${operation}.`,
     );
   }
+}
+
+function createRequestDeadline(
+  timeoutMs: number,
+  callerSignal: AbortSignal | undefined,
+): {
+  readonly signal: AbortSignal;
+  readonly timedOut: () => boolean;
+  readonly dispose: () => void;
+} {
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort('worker request timeout'), timeoutMs);
+  timeout.unref();
+  return {
+    signal:
+      callerSignal === undefined
+        ? timeoutController.signal
+        : AbortSignal.any([callerSignal, timeoutController.signal]),
+    timedOut: () => timeoutController.signal.aborted,
+    dispose: () => clearTimeout(timeout),
+  };
+}
+
+function requestQueueTimeoutError(): WhisperClientError {
+  return new WhisperClientError(
+    'WORKER_CRASHED',
+    'Whisper worker request timed out while waiting for dispatch.',
+  );
 }
 
 function waitForDispatchTurn(

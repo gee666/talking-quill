@@ -13,6 +13,7 @@ const PROBE_TIMEOUT_MS = 15_000;
 const REQUIRED_FLAGS = ['--list-models', '--model', '--thinking'] as const;
 const SAFETY_FLAGS = [
   '--no-tools',
+  '--no-extensions',
   '--no-session',
   '--no-context-files',
   '--no-approve',
@@ -90,7 +91,8 @@ export async function validatePiExecutable(
       help.code !== 0 ||
       version.stdout.trim().length === 0 ||
       !hasHelpOption(helpText, '-p') ||
-      ![...REQUIRED_FLAGS, ...SAFETY_FLAGS].every((flag) => hasHelpOption(helpText, flag))
+      ![...REQUIRED_FLAGS, ...SAFETY_FLAGS].every((flag) => hasHelpOption(helpText, flag)) ||
+      !hasRepeatableExtensionOption(helpText)
     )
       throw new ProviderError('PI_INCOMPATIBLE');
     const versionText = version.stdout.trim().split(/\r?\n/u)[0]?.slice(0, 64) ?? 'compatible';
@@ -110,6 +112,17 @@ export async function validatePiExecutable(
 function hasHelpOption(help: string, option: string): boolean {
   const escaped = option.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   return new RegExp(`(?:^|[\\s,|])${escaped}(?=[\\s,=|<]|$)`, 'mu').test(help);
+}
+
+function hasRepeatableExtensionOption(help: string): boolean {
+  return help
+    .split(/\r?\n/u)
+    .some(
+      (line) =>
+        hasHelpOption(line, '-e') &&
+        hasHelpOption(line, '--extension') &&
+        /\b(?:repeatable|multiple times)\b/iu.test(line),
+    );
 }
 
 function targetPath(platform: NodeJS.Platform): PlatformPath {

@@ -266,12 +266,15 @@ export class EchoCapturePipeline {
       },
     );
 
-    await raceWithAbort(
+    const [, , capture] = await raceWithAbort(
       Promise.all([this.#modelUseOpening, helperCaptureOpening, capturePromise]),
       owner.signal,
     );
     if (!this.#captureStillCurrent(owner)) return;
-    this.#dispatch({ type: 'capture-started' });
+    this.#dispatch({
+      type: 'capture-started',
+      preferredUnavailable: capture.preferredUnavailable,
+    });
   }
 
   async beginExtendedTranscription(): Promise<void> {

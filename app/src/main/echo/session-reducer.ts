@@ -28,7 +28,7 @@ export type EchoSessionEvent =
     }
   | { readonly type: 'hold-elapsed'; readonly now: number }
   | { readonly type: 'shortcut-up'; readonly now: number }
-  | { readonly type: 'capture-started' }
+  | { readonly type: 'capture-started'; readonly preferredUnavailable?: boolean }
   | { readonly type: 'audio-started' }
   | { readonly type: 'level'; readonly rms: number; readonly elapsedMs: number }
   | {
@@ -122,6 +122,10 @@ export function reduceEchoSession(
       ...state,
       captureReady: state.captureReady || event.type === 'capture-started',
       audioReady: state.audioReady || event.type === 'audio-started',
+      message:
+        event.type === 'capture-started' && event.preferredUnavailable === true
+          ? 'Using the current system default because your selected microphone is unavailable.'
+          : state.message,
     };
     if (!ready.submitPending || !ready.captureReady || !ready.audioReady) {
       return transition(ready);

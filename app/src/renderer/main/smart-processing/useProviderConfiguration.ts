@@ -398,6 +398,9 @@ export function useProviderConfiguration({
       ) {
         return;
       }
+      const piExtensionSourcesChanged =
+        selectedId === 'pi' &&
+        !stringArraysEqual(draft.piExtensionSources, savedDraft.piExtensionSources);
       const lease = operations.invalidate();
       const parsed = RunnableProviderConfigSchema.safeParse({ providerId: selectedId, ...draft });
       if (!parsed.success) {
@@ -429,6 +432,12 @@ export function useProviderConfiguration({
           });
         }
         setSaveState('success');
+        if (piExtensionSourcesChanged) {
+          await operations.refreshPiAfterConfigSave(
+            saved.settings.smartProcessing.providers.pi ?? draft,
+            lease,
+          );
+        }
         await operations.verifyDestination(selectedId, lease);
       } catch (error: unknown) {
         if (coordinator.isCurrent(lease) && saveOperationRef.current === operationId) {
@@ -449,6 +458,7 @@ export function useProviderConfiguration({
       onSettingsSaved,
       operations,
       saveState,
+      savedDraft.piExtensionSources,
       selectedId,
     ],
   );
@@ -631,6 +641,14 @@ export function useProviderConfiguration({
     saveSecret,
     deleteSecret,
   } as const;
+}
+
+function stringArraysEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export type ProviderConfigurationController = ReturnType<typeof useProviderConfiguration>;

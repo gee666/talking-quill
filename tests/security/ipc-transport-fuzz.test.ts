@@ -182,7 +182,7 @@ describe('registry-complete IPC transport fuzzing', () => {
     }
     for (const [channel, contract] of Object.entries(portTransferRegistry)) {
       expect(contract.roles, channel).toEqual(['capture']);
-      expect(contract.descriptor.safeParse({ protocolVersion: 2 }).success, channel).toBe(true);
+      expect(contract.descriptor.safeParse({ protocolVersion: 3 }).success, channel).toBe(true);
       for (const [caseIndex, value] of arbitrary.entries()) {
         expect(
           contract.descriptor.safeParse(value).success,

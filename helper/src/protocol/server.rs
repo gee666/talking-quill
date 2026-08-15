@@ -10,14 +10,14 @@ use crate::{
     platform::{CallbackGate, Platform, PlatformError, TerminalReason, TerminalSignal},
 };
 
-/// `initialize` params schema: `{ "protocolVersion": 6 }`.
+/// `initialize` params schema: `{ "protocolVersion": 7 }`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct InitializeParams {
     protocol_version: u16,
 }
 
-/// Protocol-v6 `activation.configure` params schema.
+/// Protocol-v7 `activation.configure` params schema.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigureActivationParams {
@@ -295,6 +295,9 @@ impl<P: Platform> Server<P> {
         }
         self.initialized = true;
         self.gate.open();
+        // Platform workers may retain pre-initialize state but must not publish
+        // it before the initialize response has been queued.
+        self.platform.protocol_initialized();
         if self.terminal.is_triggered() {
             self.gate.close();
             false

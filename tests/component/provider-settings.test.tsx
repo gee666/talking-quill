@@ -946,9 +946,15 @@ describe('Smart processing settings', () => {
     listModels.mockRejectedValueOnce({ code: 'INVALID_RESPONSE' });
     await user.click(screen.getByRole('button', { name: 'Refresh list' }));
     expect(await screen.findByText(/model list was malformed or incompatible/i)).toBeVisible();
+
+    listModels.mockRejectedValueOnce({ code: 'INVALID_CONFIG' });
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
+    expect(
+      await screen.findByText(/installed npm package is missing or invalid.*pi install/i),
+    ).toBeVisible();
   });
 
-  it('renders many Pi models without auto-selection and persists non-default thinking', async () => {
+  it('validates local Pi extension paths, blocks stale refresh, and rediscovers after save', async () => {
     listModels.mockResolvedValue([
       { id: 'p/one', name: 'p/one', contextWindow: 8_000, vision: 'unsupported' },
       { id: 'p/two', name: 'p/two', contextWindow: 8_000, vision: 'unsupported' },
@@ -963,18 +969,90 @@ describe('Smart processing settings', () => {
     expect(model).toHaveValue('');
     await user.selectOptions(model, 'p/two');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking level' }), 'xhigh');
+    const extensionSources = screen.getByRole('textbox', { name: 'Pi extension sources' });
+    expect(
+      screen.getByText(
+        /local extension paths or npm:package.*installed with pi install.*only listed packages load.*run as code.*trusted sources/i,
+      ),
+    ).toBeVisible();
+
+    const savesBeforeInvalidPath = saveConfig.mock.calls.length;
+    await user.type(extensionSources, 'C:\\bad%TEMP%\\cleanup.ts');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    expect(await screen.findByText(/Windows command characters/i)).toBeVisible();
+    expect(saveConfig).toHaveBeenCalledTimes(savesBeforeInvalidPath);
+
+    await user.clear(extensionSources);
+    await user.type(extensionSources, 'npm:@trusted/cleanup@1.0.0');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    expect(await screen.findByText(/exact installed npm:package name/i)).toBeVisible();
+    expect(saveConfig).toHaveBeenCalledTimes(savesBeforeInvalidPath);
+
+    await user.clear(extensionSources);
+    await user.type(
+      extensionSources,
+      'C:\\Trusted Extensions\\cleanup.ts{enter}npm:@trusted/cleanup',
+    );
+    expect(extensionSources).toHaveValue(
+      'C:\\Trusted Extensions\\cleanup.ts\nnpm:@trusted/cleanup',
+    );
+    const modelCallsBeforeSave = callsFor(listModels, 'pi').length;
+    expect(screen.getByRole('button', { name: 'Refresh list' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
     await waitFor(() =>
       expect(saveConfig).toHaveBeenLastCalledWith({
         providerId: 'pi',
         modelId: 'p/two',
         thinking: 'xhigh',
+        piExtensionSources: ['C:\\Trusted Extensions\\cleanup.ts', 'npm:@trusted/cleanup'],
       }),
     );
     expect(settings.smartProcessing.providers.pi).toMatchObject({
       modelId: 'p/two',
       thinking: 'xhigh',
+      piExtensionSources: ['C:\\Trusted Extensions\\cleanup.ts', 'npm:@trusted/cleanup'],
     });
+    await waitFor(() =>
+      expect(callsFor(listModels, 'pi').length).toBeGreaterThan(modelCallsBeforeSave),
+    );
+  });
+
+  it('refetches Pi models for an extension A-to-B-to-A save even after A was attempted', async () => {
+    settings = settingsWithConfig(settings, {
+      providerId: 'pi',
+      modelId: 'p/one',
+      thinking: 'off',
+      piExtensionSources: ['./extensions/a.ts'],
+    });
+    const discovered = [
+      { id: 'p/one', name: 'p/one', contextWindow: 8_000, vision: 'unsupported' as const },
+    ];
+    listModels.mockResolvedValue(discovered);
+    const user = renderSettings();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Smart processing' }));
+    await waitFor(() => expect(callsFor(listModels, 'pi')).toHaveLength(1));
+    expect(callsFor(listModels, 'pi')[0]?.[2]).toBe(false);
+
+    const extensionSources = screen.getByRole('textbox', { name: 'Pi extension sources' });
+    await user.clear(extensionSources);
+    await user.type(extensionSources, './extensions/b.ts');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    await waitFor(() => expect(callsFor(listModels, 'pi')).toHaveLength(2));
+    expect(callsFor(listModels, 'pi')[1]?.[2]).toBe(true);
+
+    const returningToA = deferred<readonly (typeof discovered)[number][]>();
+    listModels.mockReturnValueOnce(returningToA.promise);
+    await user.clear(extensionSources);
+    await user.type(extensionSources, './extensions/a.ts');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    await waitFor(() => expect(callsFor(listModels, 'pi')).toHaveLength(3));
+    expect(callsFor(listModels, 'pi')[2]?.[2]).toBe(true);
+    expect(await screen.findByText(/Looking for available models/i)).toBeVisible();
+    returningToA.resolve(discovered);
+    await waitFor(() =>
+      expect(screen.queryByText(/Looking for available models/i)).not.toBeInTheDocument(),
+    );
   });
 
   it('retains a disappeared exact Pi model on refresh and permits cancellation', async () => {
@@ -997,6 +1075,8 @@ describe('Smart processing settings', () => {
     await user.selectOptions(selector, 'p/current');
     expect(screen.queryByRole('textbox', { name: 'Pi model name' })).toBeNull();
     expect(selector).toHaveValue('p/current');
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh list' })).toBeEnabled());
 
     const pending = deferred<readonly []>();
     listModels.mockReturnValueOnce(pending.promise);

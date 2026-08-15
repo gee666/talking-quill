@@ -66,11 +66,11 @@ describe('native helper framing', () => {
 });
 
 describe('native helper JSON-RPC schemas', () => {
-  it('requires protocol v6 and has no lossy default activation key handshake field', () => {
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 6 }).success).toBe(true);
-    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 5 }).success).toBe(false);
+  it('requires protocol v7 and has no lossy default activation key handshake field', () => {
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 7 }).success).toBe(true);
+    expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 6 }).success).toBe(false);
     const initialized = {
-      protocolVersion: 6,
+      protocolVersion: 7,
       helperVersion: '1.0.0',
       platform: 'windows',
       architecture: 'x86_64',
@@ -391,6 +391,19 @@ describe('native helper JSON-RPC schemas', () => {
         params: { phase: 'down', profileId: 'general', key: 'Z', shift: false },
       }).success,
     ).toBe(false);
+    const inputDevicesChanged = {
+      jsonrpc: '2.0',
+      method: 'audio.input_devices_changed',
+      params: {},
+    } as const;
+    expect(HelperNotificationSchema.safeParse(inputDevicesChanged).success).toBe(true);
+    for (const malformed of [
+      { ...inputDevicesChanged, params: null },
+      { ...inputDevicesChanged, params: { endpointId: 'raw-core-audio-id' } },
+      { jsonrpc: '2.0', method: inputDevicesChanged.method },
+    ]) {
+      expect(HelperNotificationSchema.safeParse(malformed).success).toBe(false);
+    }
     expect(
       HelperNotificationSchema.safeParse({
         jsonrpc: '2.0',

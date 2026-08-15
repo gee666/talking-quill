@@ -14,7 +14,7 @@ import {
   type LogitsProcessorListFactory,
 } from './language-detection';
 import { WhisperRequestQueue } from './request-queue';
-import { WhisperRuntime } from './runtime';
+import { WhisperRuntime, WhisperRuntimePoisonedError } from './runtime';
 import { WorkerModelVerificationError, verifyModelFiles } from './verify-model';
 
 const MAX_PENDING_WORKER_REQUESTS = 64;
@@ -46,6 +46,7 @@ async function startWorker(): Promise<void> {
     cacheDirectory,
     revisions,
     ...(idleUnloadMs === undefined ? {} : { idleUnloadMs }),
+    onFatalError: () => setImmediate(() => process.exit(1)),
     verify: async (modelId, revision, cache) => {
       await verifyModelFiles(cache, readManifestModel(models, modelId, revision));
     },
@@ -65,7 +66,11 @@ async function startWorker(): Promise<void> {
   });
 
   const pressureTimer = setInterval(() => {
-    if (totalmem() > 0 && freemem() / totalmem() < 0.08) void runtime.memoryPressure();
+    if (totalmem() > 0 && freemem() / totalmem() < 0.08) {
+      void runtime.memoryPressure().catch(() => {
+        process.stderr.write('Whisper worker memory-pressure cleanup failed.\n');
+      });
+    }
   }, 30_000);
   pressureTimer.unref();
 
@@ -225,6 +230,12 @@ function mapWorkerError(error: unknown): {
   readonly code: WhisperWorkerErrorCode;
   readonly message: string;
 } {
+  if (error instanceof WhisperRuntimePoisonedError) {
+    return {
+      code: 'WORKER_CRASHED',
+      message: 'Whisper pipeline cleanup failed; the worker must be replaced.',
+    };
+  }
   if (error instanceof WorkerModelVerificationError) {
     return {
       code: error.code,

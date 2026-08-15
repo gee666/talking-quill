@@ -61,21 +61,24 @@ describe('capture MessagePort contracts', () => {
         includeSystemAudio: false,
       },
       'stream:activate': { type: 'stream:activate', requestId, captureId },
+      'stream:rebind-default': {
+        type: 'stream:rebind-default',
+        requestId,
+        captureId,
+        bindingGeneration: 0,
+      },
       'stream:stop': { type: 'stream:stop', requestId, captureId },
     };
     const messagesByType: {
       [Type in CapturePortMessage['type']]: Extract<CapturePortMessage, { type: Type }>;
     } = {
-      'port:ready': { type: 'port:ready', protocolVersion: 2 },
+      'port:ready': { type: 'port:ready', protocolVersion: 3 },
       'devices:list-result': {
         type: 'devices:list-result',
         requestId,
         devices: [{ deviceId: 'default', label: 'Default microphone', isDefault: true }],
       },
-      'devices:changed': {
-        type: 'devices:changed',
-        devices: [{ deviceId: 'default', label: 'Default microphone', isDefault: true }],
-      },
+      'devices:invalidated': { type: 'devices:invalidated', defaultInvalidated: true },
       'stream:started': {
         type: 'stream:started',
         requestId,
@@ -84,9 +87,22 @@ describe('capture MessagePort contracts', () => {
         channelCount: 1,
         activeMicrophoneId: null,
         preferredUnavailable: false,
+        bindingGeneration: 0,
         systemAudioIncluded: false,
       },
       'stream:activated': { type: 'stream:activated', requestId, captureId },
+      'stream:default-invalidated': {
+        type: 'stream:default-invalidated',
+        captureId,
+        bindingGeneration: 0,
+      },
+      'stream:rebound': {
+        type: 'stream:rebound',
+        requestId,
+        captureId,
+        bindingGeneration: 1,
+        activeMicrophoneId: 'replacement',
+      },
       'stream:frame': {
         type: 'stream:frame',
         captureId,
@@ -113,14 +129,17 @@ describe('capture MessagePort contracts', () => {
       'devices:list',
       'stream:start',
       'stream:activate',
+      'stream:rebind-default',
       'stream:stop',
     ]);
     expect(messages.map((message) => message.type)).toEqual([
       'port:ready',
       'devices:list-result',
-      'devices:changed',
+      'devices:invalidated',
       'stream:started',
       'stream:activated',
+      'stream:default-invalidated',
+      'stream:rebound',
       'stream:frame',
       'stream:stopped',
       'request:error',
@@ -158,8 +177,8 @@ describe('capture MessagePort contracts', () => {
   });
 
   it('accepts only the versioned descriptor and strict commands', () => {
-    expect(CapturePortDescriptorSchema.parse({ protocolVersion: 2 })).toEqual({
-      protocolVersion: 2,
+    expect(CapturePortDescriptorSchema.parse({ protocolVersion: 3 })).toEqual({
+      protocolVersion: 3,
     });
     expect(CapturePortDescriptorSchema.safeParse({ protocolVersion: 1 }).success).toBe(false);
     expect(
@@ -169,6 +188,15 @@ describe('capture MessagePort contracts', () => {
         captureId: randomUUID(),
         preferredMicrophoneId: null,
         unexpected: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      CapturePortCommandSchema.safeParse({
+        type: 'stream:start',
+        requestId: randomUUID(),
+        captureId: randomUUID(),
+        preferredMicrophoneId: 'default',
+        includeSystemAudio: false,
       }).success,
     ).toBe(false);
   });
@@ -212,7 +240,8 @@ describe('capture MessagePort contracts', () => {
     ).toBe(false);
     expect(
       CapturePortMessageSchema.safeParse({
-        type: 'devices:changed',
+        type: 'devices:list-result',
+        requestId: randomUUID(),
         devices: [{ deviceId: '', label: '', isDefault: true }],
       }).success,
     ).toBe(false);
@@ -225,6 +254,7 @@ describe('capture MessagePort contracts', () => {
         Promise.resolve({
           activeMicrophoneId: 'default',
           preferredUnavailable: false,
+          bindingGeneration: 0,
           sampleRate: 16_000,
           channelCount: 1,
         }),
@@ -270,6 +300,7 @@ describe('capture MessagePort contracts', () => {
         Promise.resolve({
           activeMicrophoneId: 'default',
           preferredUnavailable: false,
+          bindingGeneration: 0,
           sampleRate: 16_000,
           channelCount: 1,
         }),
@@ -311,11 +342,83 @@ describe('capture MessagePort contracts', () => {
     controller.close();
   });
 
+  it('rebinds an active default source without resetting capture ownership or frame sequence', async () => {
+    const port = new FakeCapturePort();
+    const rebindDefault = vi.fn(() =>
+      Promise.resolve({ activeMicrophoneId: 'replacement', bindingGeneration: 1 }),
+    );
+    const engine = {
+      start: vi.fn(() =>
+        Promise.resolve({
+          activeMicrophoneId: 'original',
+          preferredUnavailable: false,
+          bindingGeneration: 0,
+          systemAudioIncluded: true,
+          sampleRate: 16_000,
+          channelCount: 1,
+        }),
+      ),
+      stop: vi.fn(() => Promise.resolve()),
+      activate: vi.fn(() => Promise.resolve()),
+      rebindDefault,
+      listDevices: vi.fn(() => Promise.resolve([])),
+      disposeImmediately: vi.fn(),
+    } as unknown as CaptureEngine;
+    const controller = new CapturePortController(port as unknown as MessagePort, engine);
+    const captureId = randomUUID();
+    port.emit({
+      type: 'stream:start',
+      requestId: randomUUID(),
+      captureId,
+      preferredMicrophoneId: null,
+      includeSystemAudio: true,
+    });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:started', captureId }),
+      ),
+    );
+    port.emit({ type: 'stream:activate', requestId: randomUUID(), captureId });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stream:activated', captureId }),
+      ),
+    );
+    controller.notifyFrame(new Float32Array(320), 0.1);
+    const requestId = randomUUID();
+    port.emit({
+      type: 'stream:rebind-default',
+      requestId,
+      captureId,
+      bindingGeneration: 0,
+    });
+    await vi.waitFor(() =>
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'stream:rebound',
+        requestId,
+        captureId,
+        activeMicrophoneId: 'replacement',
+        bindingGeneration: 1,
+      }),
+    );
+    controller.notifyFrame(new Float32Array(320), 0.2);
+
+    expect(rebindDefault).toHaveBeenCalledWith(0);
+    expect(
+      port.postMessage.mock.calls
+        .map(([message]) => message as CapturePortMessage)
+        .filter((message) => message.type === 'stream:frame')
+        .map((message) => message.sequence),
+    ).toEqual([0, 1]);
+    controller.close();
+  });
+
   it('cancels a pending start out of band and rejects its pending request', async () => {
     const port = new FakeCapturePort();
     const pending = deferred<{
       activeMicrophoneId: string | null;
       preferredUnavailable: boolean;
+      bindingGeneration: number;
       sampleRate: 16_000;
       channelCount: 1;
     }>();
@@ -358,6 +461,7 @@ describe('capture MessagePort contracts', () => {
     pending.resolve({
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       sampleRate: 16_000,
       channelCount: 1,
     });
@@ -376,6 +480,7 @@ describe('capture MessagePort contracts', () => {
         Promise.resolve({
           activeMicrophoneId: 'default',
           preferredUnavailable: false,
+          bindingGeneration: 0,
           sampleRate: 16_000,
           channelCount: 1,
         }),
@@ -427,6 +532,7 @@ describe('capture MessagePort contracts', () => {
     const pending = deferred<{
       activeMicrophoneId: string | null;
       preferredUnavailable: boolean;
+      bindingGeneration: number;
       sampleRate: 16_000;
       channelCount: 1;
     }>();
@@ -463,6 +569,7 @@ describe('capture MessagePort contracts', () => {
     pending.resolve({
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       sampleRate: 16_000,
       channelCount: 1,
     });
@@ -484,6 +591,7 @@ describe('capture MessagePort contracts', () => {
         Promise.resolve({
           activeMicrophoneId: 'x'.repeat(1_025),
           preferredUnavailable: false,
+          bindingGeneration: 0,
           sampleRate: 16_000,
           channelCount: 1,
         }),
@@ -514,6 +622,7 @@ describe('capture MessagePort contracts', () => {
         Promise.resolve({
           activeMicrophoneId: 'default',
           preferredUnavailable: false,
+          bindingGeneration: 0,
           sampleRate: 16_000,
           channelCount: 1,
         }),

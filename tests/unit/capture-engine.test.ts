@@ -106,6 +106,7 @@ function harness(
     readonly sampleRate?: number;
     readonly immediateProcessorError?: boolean;
     readonly closeAudioContext?: () => Promise<void>;
+    readonly resumeAudioContext?: () => Promise<void>;
   } = {},
 ) {
   const mediaDevices = new EventTarget() as EventTarget & {
@@ -140,7 +141,7 @@ function harness(
     connect: workletConnect,
     disconnect: workletDisconnect,
   }) as unknown as AudioWorkletNode;
-  const contextResume = vi.fn(() => Promise.resolve());
+  const contextResume = vi.fn(options.resumeAudioContext ?? (() => Promise.resolve()));
   const contextClose = vi.fn(options.closeAudioContext ?? (() => Promise.resolve()));
   const context = {
     sampleRate: options.sampleRate ?? 48_000,
@@ -156,6 +157,7 @@ function harness(
   const frames = vi.fn();
   const devicesChanged = vi.fn();
   const unexpectedStop = vi.fn();
+  const defaultInvalidated = vi.fn();
   const environment: CaptureEnvironment = {
     mediaDevices: mediaDevices as unknown as MediaDevices,
     createAudioContext: () => context,
@@ -171,6 +173,7 @@ function harness(
   };
   const engine = new CaptureEngine(environment, {
     onDevicesChanged: devicesChanged,
+    onDefaultInvalidated: defaultInvalidated,
     onFrame: frames,
     onUnexpectedStop: unexpectedStop,
   });
@@ -188,6 +191,7 @@ function harness(
     contextClose,
     frames,
     devicesChanged,
+    defaultInvalidated,
     unexpectedStop,
     runTimers: () => {
       const callbacks = [...timers.values()];
@@ -299,29 +303,67 @@ describe('CaptureEngine', () => {
     expect(systemTrack.stop).toHaveBeenCalledOnce();
   });
 
-  it('retries system default when an enumerated preferred device disappears during acquisition', async () => {
-    const fallbackTrack = new FakeTrack('default');
-    let acquisition = 0;
+  it.each([
+    new DOMException('missing', 'NotFoundError'),
+    new DOMException('disconnected', 'NotReadableError'),
+    new DOMException('constraint', 'OverconstrainedError'),
+  ])(
+    'falls back once to the system default for an expected exact-device failure',
+    async (error) => {
+      const fallbackTrack = new FakeTrack('current-default');
+      let request = 0;
+      const test = harness({
+        devices: [mediaDevice('default', 'Default'), mediaDevice('preferred', 'Preferred')],
+        getUserMedia: () => {
+          request += 1;
+          return request === 1 ? Promise.reject(error) : Promise.resolve(stream(fallbackTrack));
+        },
+      });
+
+      await expect(test.engine.start('preferred')).resolves.toMatchObject({
+        activeMicrophoneId: 'current-default',
+        preferredUnavailable: true,
+      });
+      expect(test.getUserMedia).toHaveBeenCalledTimes(2);
+      expect(test.getUserMedia.mock.calls[0]?.[0].audio).toEqual(
+        expect.objectContaining({ deviceId: { exact: 'preferred' } }),
+      );
+      const fallbackAudio = test.getUserMedia.mock.calls[1]?.[0].audio;
+      if (typeof fallbackAudio !== 'object') {
+        throw new Error('Expected default audio constraints');
+      }
+      expect('deviceId' in fallbackAudio).toBe(false);
+
+      await test.engine.activate();
+      test.mediaDevices.dispatchEvent(new Event('devicechange'));
+      expect(test.defaultInvalidated).toHaveBeenCalledWith(0);
+      await test.engine.stop();
+    },
+  );
+
+  it.each(['NotAllowedError', 'SecurityError'])(
+    'never falls back from an exact-device %s denial',
+    async (name) => {
+      const test = harness({
+        getUserMedia: () => Promise.reject(new DOMException('denied', name)),
+      });
+
+      await expect(test.engine.start('preferred')).rejects.toMatchObject({
+        code: 'permission-denied',
+      });
+      expect(test.getUserMedia).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('makes no more than two requests when exact and fallback acquisition both fail', async () => {
     const test = harness({
-      devices: [mediaDevice('default', 'Default'), mediaDevice('preferred', 'Preferred')],
-      getUserMedia: () => {
-        acquisition += 1;
-        return acquisition === 1
-          ? Promise.reject(new DOMException('disconnected', 'NotReadableError'))
-          : Promise.resolve(stream(fallbackTrack));
-      },
+      getUserMedia: () => Promise.reject(new DOMException('missing', 'NotFoundError')),
     });
 
-    await expect(test.engine.start('preferred')).resolves.toMatchObject({
-      activeMicrophoneId: 'default',
-      preferredUnavailable: true,
+    await expect(test.engine.start('preferred')).rejects.toMatchObject({
+      code: 'device-unavailable',
     });
     expect(test.getUserMedia).toHaveBeenCalledTimes(2);
-    expect(test.getUserMedia.mock.calls[0]?.[0].audio).toEqual(
-      expect.objectContaining({ deviceId: { exact: 'preferred' } }),
-    );
-    expect(test.getUserMedia.mock.calls[1]?.[0].audio).not.toHaveProperty('deviceId');
-    await test.engine.stop();
   });
 
   it('sanitizes, deduplicates, and caps untrusted operating-system device metadata', async () => {
@@ -357,36 +399,23 @@ describe('CaptureEngine', () => {
     ).toBe(true);
   });
 
-  it('falls back without deleting a missing preference and debounces hot-plug snapshots', async () => {
-    let acquisition = 0;
-    const test = harness({
-      devices: [mediaDevice('default', '')],
-      getUserMedia: () => {
-        acquisition += 1;
-        return acquisition === 1
-          ? Promise.reject(new DOMException('missing', 'NotFoundError'))
-          : Promise.resolve(stream(new FakeTrack('default')));
-      },
-    });
-    expect(await test.engine.start('disconnected')).toMatchObject({ preferredUnavailable: true });
-    await test.engine.activate();
+  it('debounces hot-plug invalidations without enumerating in the renderer', async () => {
+    const test = harness();
     test.mediaDevices.dispatchEvent(new Event('devicechange'));
     test.mediaDevices.dispatchEvent(new Event('devicechange'));
     expect(test.devicesChanged).not.toHaveBeenCalled();
     test.runTimers();
     await vi.waitFor(() => expect(test.devicesChanged).toHaveBeenCalledOnce());
-    await test.engine.stop();
+    expect(test.mediaDevices.enumerateDevices).not.toHaveBeenCalled();
   });
 
-  it('ignores an unusable persisted microphone preference without passing it to browser media APIs', async () => {
+  it('rejects an unusable explicit preference without opening another microphone', async () => {
     const test = harness();
 
-    await expect(test.engine.start('microphone\u0085id')).resolves.toMatchObject({
-      activeMicrophoneId: 'default',
-      preferredUnavailable: true,
+    await expect(test.engine.start('microphone\u0085id')).rejects.toMatchObject({
+      code: 'device-unavailable',
     });
-    expect(test.getUserMedia.mock.calls[0]?.[0].audio).not.toHaveProperty('deviceId');
-    await test.engine.stop();
+    expect(test.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('refreshes anonymous enumeration after permission and reports Bluetooth hot-plug labels', async () => {
@@ -409,16 +438,7 @@ describe('CaptureEngine', () => {
 
     test.mediaDevices.dispatchEvent(new Event('devicechange'));
     test.runTimers();
-    await vi.waitFor(() =>
-      expect(test.devicesChanged).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({
-            deviceId: 'bluetooth-headset',
-            label: 'Bluetooth Hands-Free AG Audio',
-          }),
-        ]),
-      ),
-    );
+    await vi.waitFor(() => expect(test.devicesChanged).toHaveBeenCalledOnce());
   });
 
   it.each([
@@ -478,7 +498,7 @@ describe('CaptureEngine', () => {
     const test = harness({ getUserMedia: () => Promise.resolve(stream(track)) });
     await expect(test.engine.start(null)).rejects.toMatchObject({ code: 'device-unavailable' });
     expect(track.stop).toHaveBeenCalledOnce();
-    expect(test.contextClose).toHaveBeenCalledOnce();
+    expect(test.contextClose).not.toHaveBeenCalled();
     expect(test.contextResume).not.toHaveBeenCalled();
   });
 
@@ -555,10 +575,133 @@ describe('CaptureEngine', () => {
     await test.engine.stop();
   });
 
-  it('ends and cleans an active graph exactly once when the track is unplugged', async () => {
-    const track = new FakeTrack('hotplug');
+  it('rebinds only the default microphone source and ignores retired-track ended events', async () => {
+    const original = new FakeTrack('physical-one');
+    const replacement = new FakeTrack('physical-two');
+    const systemTrack = new FakeTrack('system-audio');
+    let acquisition = 0;
+    const test = harness({
+      getUserMedia: () => {
+        acquisition += 1;
+        return Promise.resolve(stream(acquisition === 1 ? original : replacement));
+      },
+      getDisplayMedia: () => Promise.resolve(stream(systemTrack)),
+    });
+    await expect(test.engine.start(null, true)).resolves.toMatchObject({
+      activeMicrophoneId: 'physical-one',
+      bindingGeneration: 0,
+    });
+    await test.engine.activate();
+
+    await expect(test.engine.rebindDefault(0)).resolves.toEqual({
+      activeMicrophoneId: 'physical-two',
+      bindingGeneration: 1,
+    });
+    expect(test.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(test.getDisplayMedia).toHaveBeenCalledOnce();
+    expect(test.contextResume).toHaveBeenCalledOnce();
+    expect(original.stop).toHaveBeenCalledOnce();
+    expect(replacement.stop).not.toHaveBeenCalled();
+    expect(systemTrack.stop).not.toHaveBeenCalled();
+
+    original.dispatchEvent(new Event('ended'));
+    expect(test.defaultInvalidated).not.toHaveBeenCalled();
+    expect(test.unexpectedStop).not.toHaveBeenCalled();
+    await test.engine.stop();
+    expect(replacement.stop).toHaveBeenCalledOnce();
+    expect(systemTrack.stop).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces concurrent default rebinds and cleans a late replacement after stop', async () => {
+    const original = new FakeTrack('physical-one');
+    const replacement = new FakeTrack('late-replacement');
+    const pending = deferred<MediaStream>();
+    let acquisition = 0;
+    const test = harness({
+      getUserMedia: () => {
+        acquisition += 1;
+        return acquisition === 1 ? Promise.resolve(stream(original)) : pending.promise;
+      },
+    });
+    await test.engine.start(null);
+    await test.engine.activate();
+
+    const first = test.engine.rebindDefault(0);
+    const second = test.engine.rebindDefault(0);
+    await vi.waitFor(() => expect(test.getUserMedia).toHaveBeenCalledTimes(2));
+    expect(first).toBe(second);
+    const stopping = test.engine.stop();
+    let stopSettled = false;
+    void stopping.then(() => {
+      stopSettled = true;
+    });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    pending.resolve(stream(replacement));
+
+    await stopping;
+    await expect(first).rejects.toMatchObject({ code: 'capture-failed' });
+    expect(original.stop).toHaveBeenCalledOnce();
+    expect(replacement.stop).toHaveBeenCalledOnce();
+    expect(test.contextClose).toHaveBeenCalledOnce();
+  });
+
+  it('clears failed default-start bookkeeping before later device changes', async () => {
+    const test = harness({
+      getUserMedia: () => Promise.reject(new DOMException('missing', 'NotFoundError')),
+    });
+    await expect(test.engine.start(null)).rejects.toMatchObject({ code: 'no-device' });
+
+    test.mediaDevices.dispatchEvent(new Event('devicechange'));
+    test.runTimers();
+    expect(test.defaultInvalidated).not.toHaveBeenCalled();
+    expect(test.devicesChanged).toHaveBeenCalledWith(false);
+  });
+
+  it('reports a default change that arrives while default acquisition is pending', async () => {
+    const pending = deferred<MediaStream>();
+    const test = harness({ getUserMedia: () => pending.promise });
+    const starting = test.engine.start(null);
+    await vi.waitFor(() => expect(test.getUserMedia).toHaveBeenCalledOnce());
+    test.mediaDevices.dispatchEvent(new Event('devicechange'));
+    pending.resolve(stream(new FakeTrack('former-default')));
+
+    await starting;
+    await test.engine.activate();
+    expect(test.defaultInvalidated).toHaveBeenCalledWith(0);
+    await test.engine.stop();
+  });
+
+  it('reports a default change that arrives before activation completes', async () => {
+    const resume = deferred<undefined>();
+    const test = harness({ resumeAudioContext: () => resume.promise });
+    await test.engine.start(null);
+    test.mediaDevices.dispatchEvent(new Event('devicechange'));
+    expect(test.defaultInvalidated).not.toHaveBeenCalled();
+
+    const activating = test.engine.activate();
+    resume.resolve(undefined);
+    await activating;
+    expect(test.defaultInvalidated).toHaveBeenCalledWith(0);
+    await test.engine.stop();
+  });
+
+  it('requests an in-place rebind when an active default track ends', async () => {
+    const track = new FakeTrack('default-physical');
     const test = harness({ getUserMedia: () => Promise.resolve(stream(track)) });
     await test.engine.start(null);
+    await test.engine.activate();
+    track.dispatchEvent(new Event('ended'));
+
+    expect(test.defaultInvalidated).toHaveBeenCalledWith(0);
+    expect(test.unexpectedStop).not.toHaveBeenCalled();
+    await test.engine.stop();
+  });
+
+  it('ends and cleans an explicit active graph exactly once when the track is unplugged', async () => {
+    const track = new FakeTrack('hotplug');
+    const test = harness({ getUserMedia: () => Promise.resolve(stream(track)) });
+    await test.engine.start('hotplug');
     await test.engine.activate();
     track.dispatchEvent(new Event('ended'));
     await vi.waitFor(() => expect(test.unexpectedStop).toHaveBeenCalledWith('device-lost'));

@@ -301,13 +301,18 @@ describe('Whisper runtime', () => {
     });
     const inference = runtime.transcribe(new Float32Array([0.1]), options);
     await vi.waitFor(() => expect(resolveInference).not.toBeNull());
-    await runtime.memoryPressure();
+    let pressureSettled = false;
+    const pressure = runtime.memoryPressure().finally(() => {
+      pressureSettled = true;
+    });
     expect(dispose).not.toHaveBeenCalled();
+    expect(pressureSettled).toBe(false);
     const completeInference = resolveInference as ((value: unknown) => void) | null;
     if (completeInference === null) throw new Error('Inference resolver was not installed');
     completeInference({ text: 'ok' });
     await inference;
-    await vi.waitFor(() => expect(dispose).toHaveBeenCalledTimes(1));
+    await pressure;
+    expect(dispose).toHaveBeenCalledTimes(1);
 
     const immediate = Object.assign(() => Promise.resolve({ text: 'ok' }), {
       dispose,
@@ -323,35 +328,109 @@ describe('Whisper runtime', () => {
     expect(dispose).toHaveBeenCalledTimes(2);
   });
 
-  it('waits for pipeline disposal before loading a replacement', async () => {
-    let resolveDispose: (() => void) | null = null;
-    const dispose = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveDispose = resolve;
-        }),
-    );
-    let loads = 0;
+  it('poisons the generation after bounded stalled disposal without overlapping pipelines', async () => {
+    vi.useFakeTimers();
+    const dispose = vi.fn(() => new Promise<void>(() => undefined));
+    const onFatalError = vi.fn();
     const factory = vi.fn(() => {
-      loads += 1;
       const inference = (() => Promise.resolve({ text: 'ok' })) as WhisperPipeline;
-      return Promise.resolve(loads === 1 ? Object.assign(inference, { dispose }) : inference);
+      return Promise.resolve(Object.assign(inference, { dispose }));
     });
-    const runtime = new WhisperRuntime({ cacheDirectory: 'models', revisions, factory });
+    const runtime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory,
+      disposalTimeoutMs: 100,
+      onFatalError,
+    });
     await runtime.transcribe(new Float32Array([0.1]), options);
 
-    const unloading = runtime.unload();
-    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
-    const reloading = runtime.transcribe(new Float32Array([0.2]), options);
-    await Promise.resolve();
+    const unloadFailure = expect(runtime.unload()).rejects.toMatchObject({
+      name: 'WhisperRuntimePoisonedError',
+    });
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    expect(dispose).toHaveBeenCalledOnce();
+    const reloadFailure = expect(
+      runtime.transcribe(new Float32Array([0.2]), options),
+    ).rejects.toMatchObject({ name: 'WhisperRuntimePoisonedError' });
+    await vi.advanceTimersByTimeAsync(100);
+
+    await Promise.all([unloadFailure, reloadFailure]);
+    await expect(runtime.transcribe(new Float32Array([0.3]), options)).rejects.toMatchObject({
+      name: 'WhisperRuntimePoisonedError',
+    });
+    expect(onFatalError).toHaveBeenCalledOnce();
     expect(factory).toHaveBeenCalledOnce();
-    const finishDispose = resolveDispose as (() => void) | null;
-    if (finishDispose === null) throw new Error('Disposal resolver was not installed');
-    finishDispose();
-    await unloading;
-    await expect(reloading).resolves.toMatchObject({ text: 'ok' });
-    expect(factory).toHaveBeenCalledTimes(2);
-    await runtime.shutdown();
+  });
+
+  it('poisons a model-switch generation when retiring its warm pipeline rejects', async () => {
+    const dispose = vi.fn(() => Promise.reject(new Error('dispose rejected')));
+    const onFatalError = vi.fn();
+    const factory = vi.fn((modelId: keyof typeof revisions) => {
+      const pipeline = (() => Promise.resolve({ text: modelId })) as WhisperPipeline;
+      return Promise.resolve(
+        modelId === 'Xenova/whisper-small' ? Object.assign(pipeline, { dispose }) : pipeline,
+      );
+    });
+    const runtime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory,
+      onFatalError,
+    });
+    await runtime.transcribe(new Float32Array([0.1]), options);
+
+    await expect(
+      runtime.transcribe(new Float32Array([0.2]), {
+        ...options,
+        modelId: 'onnx-community/whisper-large-v3-turbo',
+      }),
+    ).rejects.toMatchObject({ name: 'WhisperRuntimePoisonedError' });
+    await expect(runtime.transcribe(new Float32Array([0.3]), options)).rejects.toMatchObject({
+      name: 'WhisperRuntimePoisonedError',
+    });
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(onFatalError).toHaveBeenCalledOnce();
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it('reports deferred memory-pressure disposal rejection and poisons the generation', async () => {
+    let resolveInference: ((value: unknown) => void) | null = null;
+    const dispose = vi.fn(() => Promise.reject(new Error('dispose rejected')));
+    const onFatalError = vi.fn();
+    const factory = vi.fn(() =>
+      Promise.resolve(
+        Object.assign(
+          () =>
+            new Promise<unknown>((resolve) => {
+              resolveInference = resolve;
+            }),
+          { dispose },
+        ) as WhisperPipeline,
+      ),
+    );
+    const runtime = new WhisperRuntime({
+      cacheDirectory: 'models',
+      revisions,
+      factory,
+      onFatalError,
+    });
+    const inference = runtime.transcribe(new Float32Array([0.1]), options);
+    await vi.waitFor(() => expect(resolveInference).not.toBeNull());
+    const pressureFailure = expect(runtime.memoryPressure()).rejects.toMatchObject({
+      name: 'WhisperRuntimePoisonedError',
+    });
+    const completeInference = resolveInference as ((value: unknown) => void) | null;
+    if (completeInference === null) throw new Error('Inference resolver was not installed');
+    completeInference({ text: 'first' });
+
+    await inference;
+    await pressureFailure;
+    await expect(runtime.transcribe(new Float32Array([0.2]), options)).rejects.toMatchObject({
+      name: 'WhisperRuntimePoisonedError',
+    });
+    expect(onFatalError).toHaveBeenCalledOnce();
+    expect(factory).toHaveBeenCalledOnce();
   });
 
   it('defensively accepts nullable segment timestamp edges', () => {

@@ -20,6 +20,7 @@ import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 import type { WindowManager } from '../app/window-manager';
+import { CaptureClientError } from '../audio/capture-window-client';
 import type { IpcEventEmitter } from '../ipc/event-emitter';
 import type { SettingsStore } from '../persistence/settings-store';
 import { ProviderError } from '../providers/errors';
@@ -190,6 +191,15 @@ export class EchoSessionController {
 
   get activationTestState(): ActivationTestState {
     return this.#activationTest.state;
+  }
+
+  get systemWakeRevalidationSafe(): boolean {
+    return (
+      !this.#disposed &&
+      this.#state.phase === 'idle' &&
+      !this.#activationTest.state.active &&
+      !this.#profiles.shortcutCaptureActive
+    );
   }
 
   get snapshot(): EchoSessionSnapshot {
@@ -366,7 +376,13 @@ export class EchoSessionController {
   }
 
   #onHelperNotification(notification: HelperNotification): void {
-    if (this.#disposed || notification.method === 'paste.committed') return;
+    if (
+      this.#disposed ||
+      notification.method === 'paste.committed' ||
+      notification.method === 'audio.input_devices_changed'
+    ) {
+      return;
+    }
     if (notification.method === 'activation.event') {
       const startsActivation = notification.params.phase !== 'up';
       if (startsActivation) {
@@ -848,7 +864,9 @@ function piFallbackCategory(providerId: string, error: unknown): PiFallbackCateg
 }
 
 function publicSessionError(error: unknown): string {
-  void error;
+  if (error instanceof CaptureClientError && error.code === 'device-unavailable') {
+    return 'Your selected microphone is unavailable. Choose another microphone in Settings.';
+  }
   return 'Dictation could not be completed.';
 }
 

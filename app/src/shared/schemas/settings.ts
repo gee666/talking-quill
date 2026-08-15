@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { WelcomeSettingsSchema } from './welcome';
 import { VoiceCommandListSchema } from './commands';
 import { VocabularyListSchema } from './vocabulary';
-import { MicrophoneIdSchema, SilencePresetSchema } from './audio';
+import { MicrophonePreferenceIdSchema, SilencePresetSchema } from './audio';
 import { ProcessingModeSchema } from './history';
 import { WhisperModelIdSchema } from './model-manifest';
 import { DictationProfileListSchema, defaultDictationProfiles } from './dictation-profiles';
@@ -14,11 +14,13 @@ import {
   ProviderBaseUrlSchema,
   ProviderIdSchema,
   ProviderModelIdSchema,
+  PersistedPiExtensionSourcesSchema,
+  PiExtensionSourcesSchema,
   PiThinkingLevelSchema,
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 25 as const;
+export const SETTINGS_SCHEMA_VERSION = 27 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 
@@ -48,7 +50,7 @@ export const AppSettingsSchema = z
 
 export const RecordingSettingsSchema = z
   .object({
-    preferredMicrophoneId: MicrophoneIdSchema.nullable(),
+    preferredMicrophoneId: MicrophonePreferenceIdSchema.nullable(),
     silencePreset: SilencePresetSchema,
     autoSubmitOnSilence: z.boolean(),
     includeSystemAudio: z.boolean(),
@@ -83,6 +85,7 @@ const ProviderDraftFieldsSchema = z
     region: AwsRegionSchema.optional(),
     modelType: AzureModelTypeSchema.optional(),
     thinking: PiThinkingLevelSchema.optional(),
+    piExtensionSources: PersistedPiExtensionSourcesSchema.optional(),
   })
   .strict();
 
@@ -91,6 +94,7 @@ export type ProviderSettingsDraft = z.infer<typeof ProviderSettingsDraftSchema>;
 
 const ProviderSettingsMutationSchema = ProviderDraftFieldsSchema.extend({
   baseUrl: ProviderBaseUrlSchema.optional(),
+  piExtensionSources: PiExtensionSourcesSchema.optional(),
 });
 const ProviderDraftsSchema = z
   .partialRecord(ProviderIdSchema, ProviderSettingsDraftSchema)

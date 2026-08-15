@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-helper"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "crossbeam-channel",
  "libc",

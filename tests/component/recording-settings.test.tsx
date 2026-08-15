@@ -58,6 +58,7 @@ beforeEach(() => {
     captureId: 'd9428888-122b-11e1-b85c-61cd3cbb3210',
     activeMicrophoneId: 'default',
     preferredUnavailable: false,
+    bindingGeneration: 0,
     sampleRate: 16_000,
     channelCount: 1,
   });
@@ -172,6 +173,36 @@ describe('Recording settings', () => {
     expect(stopTest).toHaveBeenCalled();
     view.unmount();
     expect(stopTest).toHaveBeenCalledTimes(2);
+  });
+
+  it('visibly reports when a microphone test is using the system-default fallback', async () => {
+    const user = userEvent.setup();
+    startTest.mockResolvedValueOnce({
+      status: 'active',
+      permission: 'granted',
+      captureId: 'd9428888-122b-11e1-b85c-61cd3cbb3210',
+      activeMicrophoneId: 'default',
+      preferredUnavailable: true,
+      bindingGeneration: 0,
+      sampleRate: 16_000,
+      channelCount: 1,
+    });
+    render(
+      <RecordingSection
+        settings={{
+          ...settings,
+          recording: { ...settings.recording, preferredMicrophoneId: 'studio' },
+        }}
+        platform="win32"
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Test my microphone' }));
+    expect(await screen.findByText('Listening on the system default microphone')).toBeVisible();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Your chosen microphone is unavailable. Talking Quill is using your computer’s current default microphone instead.',
+    );
+    expect(screen.queryByText(/studio microphone is unavailable/iu)).not.toBeInTheDocument();
   });
 
   it('allows a pending permission request to be cancelled immediately', async () => {

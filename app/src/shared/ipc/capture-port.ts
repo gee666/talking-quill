@@ -6,10 +6,15 @@ import {
   PCM_FRAME_SAMPLES,
   PCM_SAMPLE_RATE,
 } from '../constants/audio';
-import { MicrophoneDeviceSchema, MicrophoneIdSchema } from '../schemas/audio';
+import {
+  MicrophoneDeviceSchema,
+  MicrophoneIdSchema,
+  MicrophonePreferenceIdSchema,
+} from '../schemas/audio';
 
 const RequestIdSchema = z.uuid();
 const CaptureIdSchema = z.uuid();
+const BindingGenerationSchema = z.number().int().nonnegative();
 
 export const CapturePortDescriptorSchema = z
   .object({ protocolVersion: z.literal(CAPTURE_PORT_PROTOCOL_VERSION) })
@@ -22,7 +27,7 @@ export const CapturePortCommandSchema = z.discriminatedUnion('type', [
       type: z.literal('stream:start'),
       requestId: RequestIdSchema,
       captureId: CaptureIdSchema,
-      preferredMicrophoneId: MicrophoneIdSchema.nullable(),
+      preferredMicrophoneId: MicrophonePreferenceIdSchema.nullable(),
       includeSystemAudio: z.boolean().default(false),
     })
     .strict(),
@@ -31,6 +36,14 @@ export const CapturePortCommandSchema = z.discriminatedUnion('type', [
       type: z.literal('stream:activate'),
       requestId: RequestIdSchema,
       captureId: CaptureIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('stream:rebind-default'),
+      requestId: RequestIdSchema,
+      captureId: CaptureIdSchema,
+      bindingGeneration: BindingGenerationSchema,
     })
     .strict(),
   z
@@ -70,8 +83,8 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
-      type: z.literal('devices:changed'),
-      devices: z.array(MicrophoneDeviceSchema).max(MAX_MICROPHONE_DEVICES),
+      type: z.literal('devices:invalidated'),
+      defaultInvalidated: z.boolean(),
     })
     .strict(),
   z
@@ -83,6 +96,7 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
       channelCount: z.literal(PCM_CHANNEL_COUNT),
       activeMicrophoneId: MicrophoneIdSchema.nullable(),
       preferredUnavailable: z.boolean(),
+      bindingGeneration: BindingGenerationSchema,
       systemAudioIncluded: z.boolean().default(false),
     })
     .strict(),
@@ -91,6 +105,22 @@ export const CapturePortMessageSchema = z.discriminatedUnion('type', [
       type: z.literal('stream:activated'),
       requestId: RequestIdSchema,
       captureId: CaptureIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('stream:default-invalidated'),
+      captureId: CaptureIdSchema,
+      bindingGeneration: BindingGenerationSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('stream:rebound'),
+      requestId: RequestIdSchema,
+      captureId: CaptureIdSchema,
+      bindingGeneration: BindingGenerationSchema,
+      activeMicrophoneId: MicrophoneIdSchema.nullable(),
     })
     .strict(),
   z

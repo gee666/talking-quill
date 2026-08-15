@@ -4,8 +4,8 @@
  * The settings screen remounts the Smart processing section on every section switch, and any draft
  * edit bumps the provider lease generation, so per-component state would re-arm discovery after a
  * navigation away and back or after an edit-then-revert. Keeping the memory at module scope makes
- * both of those inert while a genuine configuration change (different provider, endpoint, region or
- * credential epoch) still produces a new key and therefore one fresh attempt.
+ * both of those inert while a genuine configuration change (different provider, endpoint, region,
+ * Pi extension opt-ins, or credential epoch) still produces a new key and therefore one fresh attempt.
  */
 const attempted = new Set<string>();
 
@@ -14,8 +14,9 @@ export function autoDiscoveryKey(
   providerId: string,
   credentialBinding: string,
   credentialEpoch: number,
+  providerConfigurationIdentity: string,
 ): string {
-  return `${providerId}\u0000${credentialBinding}\u0000${String(credentialEpoch)}`;
+  return `${providerId}\u0000${credentialBinding}\u0000${String(credentialEpoch)}\u0000${providerConfigurationIdentity}`;
 }
 
 /** Returns `true` exactly once per key: the caller may then start one discovery. */

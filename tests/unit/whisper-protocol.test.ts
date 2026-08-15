@@ -137,6 +137,14 @@ describe('Whisper worker protocol', () => {
         result: { type: 'ready', networkGuarded: true, networkProbeCompleted: false },
       }).success,
     ).toBe(true);
+    expect(
+      WhisperWorkerResponseSchema.safeParse({
+        version: 2,
+        requestId: 'fatal-disposal',
+        ok: false,
+        error: { code: 'WORKER_CRASHED', message: 'Worker replacement is required.' },
+      }).success,
+    ).toBe(true);
   });
 
   it('bounds worker transcript responses by characters and UTF-8 bytes', () => {

@@ -79,6 +79,9 @@ export class ProviderConfigService {
       ...(config.region === undefined ? {} : { region: config.region }),
       ...(config.modelType === undefined ? {} : { modelType: config.modelType }),
       ...(config.thinking === undefined ? {} : { thinking: config.thinking }),
+      ...(config.piExtensionSources === undefined
+        ? {}
+        : { piExtensionSources: config.piExtensionSources }),
     };
     return this.#settings.update({
       smartProcessing: {

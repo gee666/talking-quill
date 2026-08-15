@@ -32,7 +32,8 @@ export function piSpawnCommand(
   if (platform !== 'win32' || !/\.(?:cmd|bat)$/iu.test(executable)) return { executable, args };
   if (!args.every(isSafePiArgument) || /["%!\r\n\0]/u.test(executable))
     throw new ProviderError('INVALID_CONFIG');
-  const command = `""${executable}"${args.length === 0 ? '' : ` ${args.join(' ')}`}"`;
+  const serializedArgs = args.map(serializeWindowsCmdArgument);
+  const command = `""${executable}"${serializedArgs.length === 0 ? '' : ` ${serializedArgs.join(' ')}`}"`;
   return {
     executable: windowsSystemTools(environment).cmd,
     args: ['/d', '/s', '/c', command],
@@ -41,10 +42,25 @@ export function piSpawnCommand(
 
 function isSafePiArgument(value: string): boolean {
   return (
-    /^--?[a-z][a-z-]*$/u.test(value) ||
-    /^(?:off|minimal|low|medium|high|xhigh)$/u.test(value) ||
-    /^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,511}$/u.test(value)
+    value.length > 0 &&
+    value.length <= 512 &&
+    value.trim() === value &&
+    noControlCharacters(value) &&
+    !/["%!&|<>^()]/u.test(value)
   );
+}
+
+function noControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 0x20 || codePoint === 0x7f) return false;
+  }
+  return true;
+}
+
+function serializeWindowsCmdArgument(value: string): string {
+  if (!/\s/u.test(value)) return value;
+  return `"${value.replace(/(\\+)$/u, '$1$1')}"`;
 }
 
 export function windowsSystemTools(environment: NodeJS.ProcessEnv): WindowsSystemTools {

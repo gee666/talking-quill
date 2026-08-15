@@ -8,6 +8,8 @@ import { LegacySettingsV21Schema } from './settings-migrations/legacy-settings-v
 import { LegacySettingsV22Schema } from './settings-migrations/legacy-settings-v22';
 import { LegacySettingsV23Schema } from './settings-migrations/legacy-settings-v23';
 import { LegacySettingsV24Schema } from './settings-migrations/legacy-settings-v24';
+import { LegacySettingsV25Schema } from './settings-migrations/legacy-settings-v25';
+import { LegacySettingsV26Schema } from './settings-migrations/legacy-settings-v26';
 import {
   migrateFiveStepWelcome,
   migrateLegacy,
@@ -16,6 +18,8 @@ import {
   migrateSettingsV22,
   migrateSettingsV23,
   migrateSettingsV24,
+  migrateSettingsV25,
+  migrateSettingsV26,
   migrateRemovedLargeModel,
   migrateUnverifiedWelcome,
   stripDiagnosticLoggingField,
@@ -151,4 +155,6 @@ export const SETTINGS_MIGRATIONS: SettingsMigrations = Object.freeze({
   22: (input) => migrateSettingsV22(LegacySettingsV22Schema.parse(stripRecordingOptions(input))),
   23: (input) => migrateSettingsV23(LegacySettingsV23Schema.parse(stripRecordingOptions(input))),
   24: (input) => migrateSettingsV24(LegacySettingsV24Schema.parse(stripRecordingOptions(input))),
+  25: (input) => migrateSettingsV25(LegacySettingsV25Schema.parse(input)),
+  26: (input) => migrateSettingsV26(LegacySettingsV26Schema.parse(input)),
 });

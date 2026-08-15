@@ -2,6 +2,7 @@ import {
   ModelInfoSchema,
   ProviderCompletionRequestSchema,
   ProviderConfigSchema,
+  parsePiNpmExtensionSource,
   type Destination,
   type ModelInfo,
   type ProviderCompletionRequest,
@@ -9,13 +10,17 @@ import {
   type ProviderValidationResult,
   type VisionCapability,
 } from '../../shared/schemas/providers';
+import { constants as fsConstants, type Stats } from 'node:fs';
+import { access, readFile, realpath, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { posix, resolve, win32 } from 'node:path';
 import type { ProviderInvocationConfig, SmartProvider } from './contracts';
 import type { EgressObserver } from '../security/egress-audit';
 import { ProviderError } from './errors';
 import { MAX_NATIVE_OUTPUT_CHARACTERS } from './native-common';
 import { resolveCanonicalPiCli } from './pi-discovery';
 import { identityKey, revalidatePiCliIdentity, type PiCliIdentity } from './pi-executable';
-import { runPiInvocation, type SpawnPi } from './pi-process-runtime';
+import { environmentValue, runPiInvocation, type SpawnPi } from './pi-process-runtime';
 export { resolveCanonicalPiCli } from './pi-discovery';
 export type { PiCliIdentity } from './pi-executable';
 export { terminateProcessTree } from './pi-process-runtime';
@@ -26,6 +31,8 @@ const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 const MAX_MODELS = 5_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const PI_EXTENSION_RESOLUTION_TIMEOUT_MS = 5_000;
+const PI_EXTENSION_PACKAGE_JSON_MAX_BYTES = 1024 * 1024;
 const PI_TERMINATION_RESERVE_MS = 5_000;
 const PI_MIN_OPERATION_TIMEOUT_MS = PI_TERMINATION_RESERVE_MS + 500;
 const CONNECTION_TEST_PROMPT = 'Reply with exactly: TALKING_QUILL_CONNECTION_OK';
@@ -43,6 +50,11 @@ export interface PiProviderOptions {
   readonly interactiveHome?: string;
   readonly resolveCli?: (signal?: AbortSignal) => Promise<PiCliIdentity>;
   readonly revalidateCli?: (identity: PiCliIdentity, signal?: AbortSignal) => Promise<void>;
+  readonly canonicalizeExtensionPath?: (path: string) => Promise<string>;
+  readonly statExtensionPath?: (path: string) => Promise<Stats>;
+  readonly accessExtensionPath?: (path: string, mode?: number) => Promise<void>;
+  readonly readExtensionFile?: (path: string) => Promise<string>;
+  readonly extensionResolutionTimeoutMs?: number;
 }
 
 type PiConfig = ProviderConfig & {
@@ -53,6 +65,14 @@ type PiConfig = ProviderConfig & {
 interface ModelCatalog {
   readonly key: string;
   readonly models: readonly ModelInfo[];
+}
+interface ResolvedPiExtensions {
+  readonly args: readonly string[];
+  readonly cacheKey: readonly (readonly (string | number)[])[];
+}
+interface ResolvedPiExtension {
+  readonly argument: string;
+  readonly cacheKey: readonly (string | number)[];
 }
 interface ModelCache extends ModelCatalog {
   readonly expiresAt: number;
@@ -70,6 +90,11 @@ export class PiProvider implements SmartProvider {
   readonly #configuredPath: () => string | null;
   readonly #resolveCli: (signal?: AbortSignal) => Promise<PiCliIdentity>;
   readonly #revalidateCli: (identity: PiCliIdentity, signal?: AbortSignal) => Promise<void>;
+  readonly #canonicalizeExtensionPath: (path: string) => Promise<string>;
+  readonly #statExtensionPath: (path: string) => Promise<Stats>;
+  readonly #accessExtensionPath: (path: string, mode?: number) => Promise<void>;
+  readonly #readExtensionFile: (path: string) => Promise<string>;
+  readonly #extensionResolutionTimeoutMs: number;
   #identity: { readonly configuredPath: string | null; readonly value: PiCliIdentity } | null =
     null;
   #models: ModelCache | null = null;
@@ -87,6 +112,12 @@ export class PiProvider implements SmartProvider {
     this.#now = options.now ?? Date.now;
     this.#observeEgress = options.observeEgress ?? (() => undefined);
     this.#configuredPath = options.configuredPath ?? (() => null);
+    this.#canonicalizeExtensionPath = options.canonicalizeExtensionPath ?? realpath;
+    this.#statExtensionPath = options.statExtensionPath ?? stat;
+    this.#accessExtensionPath = options.accessExtensionPath ?? access;
+    this.#readExtensionFile = options.readExtensionFile ?? ((path) => readFile(path, 'utf8'));
+    this.#extensionResolutionTimeoutMs =
+      options.extensionResolutionTimeoutMs ?? PI_EXTENSION_RESOLUTION_TIMEOUT_MS;
     this.#resolveCli =
       options.resolveCli ??
       ((signal) =>
@@ -114,11 +145,13 @@ export class PiProvider implements SmartProvider {
     signal: AbortSignal,
   ): Promise<ProviderValidationResult> {
     const config = this.#runtimeConfig(invocation.config);
+    this.#observeEgress('provider');
+    const extensions = await this.#resolveExtensions(config, signal);
     const identity = await this.#resolveIdentity(signal);
     const models = parsePiModels(
       await this.#runResolved(
         identity,
-        ['--list-models', ...identity.safetyFlags],
+        ['--list-models', ...identity.safetyFlags, ...extensions.args],
         null,
         signal,
         DEFAULT_TIMEOUT_MS,
@@ -126,10 +159,17 @@ export class PiProvider implements SmartProvider {
     );
     if (models.length > 0 && !models.some(({ id }) => id === config.modelId))
       throw new ProviderError('MODEL_NOT_FOUND');
-    this.#observeEgress('provider');
     const output = await this.#runResolved(
       identity,
-      ['-p', '--model', config.modelId, '--thinking', config.thinking, ...identity.safetyFlags],
+      [
+        '-p',
+        '--model',
+        config.modelId,
+        '--thinking',
+        config.thinking,
+        ...identity.safetyFlags,
+        ...extensions.args,
+      ],
       CONNECTION_TEST_PROMPT,
       signal,
       Math.max(config.timeoutMs ?? DEFAULT_TIMEOUT_MS, PI_MIN_OPERATION_TIMEOUT_MS),
@@ -142,20 +182,21 @@ export class PiProvider implements SmartProvider {
     invocation: ProviderInvocationConfig,
     signal: AbortSignal,
   ): Promise<readonly ModelInfo[]> {
-    this.#baseConfig(invocation.config);
+    const config = this.#baseConfig(invocation.config);
+    this.#observeEgress('provider');
+    const extensions = await this.#resolveExtensions(config, signal);
     const identity = await this.#resolveIdentity(signal);
-    const key = identityKey(identity);
+    const key = JSON.stringify([identityKey(identity), extensions.cacheKey]);
     if (
       invocation.refreshModels !== true &&
       this.#models?.key === key &&
       this.#models.expiresAt > this.#now()
     )
       return this.#models.models;
-    this.#observeEgress('provider');
     const models = parsePiModels(
       await this.#runResolved(
         identity,
-        ['--list-models', ...identity.safetyFlags],
+        ['--list-models', ...identity.safetyFlags, ...extensions.args],
         null,
         signal,
         DEFAULT_TIMEOUT_MS,
@@ -180,11 +221,20 @@ export class PiProvider implements SmartProvider {
     const modelId = request.modelId ?? config.modelId;
     assertModelId(modelId);
     this.#observeEgress('provider');
+    const extensions = await this.#resolveExtensions(config, signal);
     try {
       const identity = await this.#resolveIdentity(signal);
       const output = await this.#runResolved(
         identity,
-        ['-p', '--model', modelId, '--thinking', config.thinking, ...identity.safetyFlags],
+        [
+          '-p',
+          '--model',
+          modelId,
+          '--thinking',
+          config.thinking,
+          ...identity.safetyFlags,
+          ...extensions.args,
+        ],
         request.input,
         signal,
         Math.max(config.timeoutMs ?? DEFAULT_TIMEOUT_MS, PI_MIN_OPERATION_TIMEOUT_MS),
@@ -225,6 +275,162 @@ export class PiProvider implements SmartProvider {
       throw new ProviderError('INVALID_CONFIG');
     assertModelId(config.modelId);
     return config as PiConfig;
+  }
+
+  async #resolveExtensions(
+    config: Pick<ProviderConfig, 'piExtensionSources'>,
+    signal: AbortSignal,
+  ): Promise<ResolvedPiExtensions> {
+    const args: string[] = [];
+    const cacheKey: (readonly (string | number)[])[] = [];
+    const sources = config.piExtensionSources ?? [];
+    if (sources.length === 0)
+      return Object.freeze({ args: Object.freeze(args), cacheKey: Object.freeze(cacheKey) });
+    const budget = new AbortController();
+    const budgetTimer = setTimeout(() => budget.abort(), this.#extensionResolutionTimeoutMs);
+    try {
+      for (const source of sources) {
+        const packageName = parsePiNpmExtensionSource(source);
+        const extension =
+          packageName === null
+            ? await this.#resolveLocalExtension(source, signal, budget.signal)
+            : await this.#resolveInstalledNpmExtension(packageName, signal, budget.signal);
+        args.push('-e', extension.argument);
+        cacheKey.push(extension.cacheKey);
+      }
+      return Object.freeze({ args: Object.freeze(args), cacheKey: Object.freeze(cacheKey) });
+    } catch (error: unknown) {
+      throwIfPiAborted(signal);
+      if (error instanceof ProviderError && error.code === 'TIMEOUT') throw error;
+      throw new ProviderError('INVALID_CONFIG');
+    } finally {
+      clearTimeout(budgetTimer);
+    }
+  }
+
+  async #resolveLocalExtension(
+    source: string,
+    signal: AbortSignal,
+    budgetSignal: AbortSignal,
+  ): Promise<ResolvedPiExtension> {
+    const canonicalPath = await runPiExtensionFileSystemOperation(
+      () => this.#canonicalizeExtensionPath(resolve(this.#workingDirectory, source)),
+      signal,
+      budgetSignal,
+    );
+    if (isNetworkRootedPath(canonicalPath)) throw new Error('network path');
+    const metadata = await runPiExtensionFileSystemOperation(
+      () => this.#statExtensionPath(canonicalPath),
+      signal,
+      budgetSignal,
+    );
+    if (!metadata.isFile()) throw new Error('not a file');
+    await runPiExtensionFileSystemOperation(
+      () => this.#accessExtensionPath(canonicalPath, fsConstants.R_OK),
+      signal,
+      budgetSignal,
+    );
+    return Object.freeze({
+      argument: source,
+      cacheKey: Object.freeze(['local', canonicalPath, ...fileIdentityParts(metadata)]),
+    });
+  }
+
+  async #resolveInstalledNpmExtension(
+    packageName: string,
+    signal: AbortSignal,
+    budgetSignal: AbortSignal,
+  ): Promise<ResolvedPiExtension> {
+    const paths = this.#platform === 'win32' ? win32 : posix;
+    const agentDirectory = effectivePiAgentDirectory(
+      this.#environment,
+      this.#platform,
+      this.#workingDirectory,
+    );
+    const installRoot = paths.resolve(agentDirectory, 'npm');
+    const nodeModulesRoot = paths.resolve(installRoot, 'node_modules');
+    const requestedPackageRoot = paths.resolve(nodeModulesRoot, packageName);
+    if (
+      isNetworkRootedPath(agentDirectory) ||
+      !isPathWithin(nodeModulesRoot, requestedPackageRoot, this.#platform)
+    ) {
+      throw new Error('invalid package path');
+    }
+    const canonicalInstallRoot = await runPiExtensionFileSystemOperation(
+      () => this.#canonicalizeExtensionPath(installRoot),
+      signal,
+      budgetSignal,
+    );
+    const canonicalPackageRoot = await runPiExtensionFileSystemOperation(
+      () => this.#canonicalizeExtensionPath(requestedPackageRoot),
+      signal,
+      budgetSignal,
+    );
+    if (
+      isNetworkRootedPath(canonicalInstallRoot) ||
+      isNetworkRootedPath(canonicalPackageRoot) ||
+      !isPathWithin(canonicalInstallRoot, canonicalPackageRoot, this.#platform)
+    ) {
+      throw new Error('network or escaped package path');
+    }
+    const packageMetadata = await runPiExtensionFileSystemOperation(
+      () => this.#statExtensionPath(canonicalPackageRoot),
+      signal,
+      budgetSignal,
+    );
+    if (!packageMetadata.isDirectory()) throw new Error('package root is not a directory');
+    await runPiExtensionFileSystemOperation(
+      () => this.#accessExtensionPath(canonicalPackageRoot, fsConstants.R_OK),
+      signal,
+      budgetSignal,
+    );
+
+    const packageJsonPath = paths.join(canonicalPackageRoot, 'package.json');
+    const canonicalPackageJsonPath = await runPiExtensionFileSystemOperation(
+      () => this.#canonicalizeExtensionPath(packageJsonPath),
+      signal,
+      budgetSignal,
+    );
+    if (
+      isNetworkRootedPath(canonicalPackageJsonPath) ||
+      !samePath(paths.dirname(canonicalPackageJsonPath), canonicalPackageRoot, this.#platform)
+    ) {
+      throw new Error('invalid package manifest path');
+    }
+    const packageJsonMetadata = await runPiExtensionFileSystemOperation(
+      () => this.#statExtensionPath(canonicalPackageJsonPath),
+      signal,
+      budgetSignal,
+    );
+    if (
+      !packageJsonMetadata.isFile() ||
+      packageJsonMetadata.size > PI_EXTENSION_PACKAGE_JSON_MAX_BYTES
+    ) {
+      throw new Error('invalid package manifest');
+    }
+    await runPiExtensionFileSystemOperation(
+      () => this.#accessExtensionPath(canonicalPackageJsonPath, fsConstants.R_OK),
+      signal,
+      budgetSignal,
+    );
+    const manifestText = await runPiExtensionFileSystemOperation(
+      () => this.#readExtensionFile(canonicalPackageJsonPath),
+      signal,
+      budgetSignal,
+    );
+    const manifest = parseInstalledPiExtensionManifest(manifestText, packageName);
+    return Object.freeze({
+      argument: canonicalPackageRoot,
+      cacheKey: Object.freeze([
+        'npm',
+        packageName,
+        manifest.version,
+        canonicalPackageRoot,
+        ...fileIdentityParts(packageMetadata),
+        canonicalPackageJsonPath,
+        ...fileIdentityParts(packageJsonMetadata),
+      ]),
+    });
   }
 
   async #resolveIdentity(signal: AbortSignal): Promise<PiCliIdentity> {
@@ -380,6 +586,123 @@ function withInteractiveHome(
     ['USERPROFILE', home],
   ]);
 }
+function effectivePiAgentDirectory(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  workingDirectory: string,
+): string {
+  const paths = platform === 'win32' ? win32 : posix;
+  const configured = environmentValue(environment, platform, 'PI_CODING_AGENT_DIR');
+  const environmentHome = environmentValue(
+    environment,
+    platform,
+    platform === 'win32' ? 'USERPROFILE' : 'HOME',
+  );
+  const home =
+    environmentHome === undefined || environmentHome.length === 0 ? homedir() : environmentHome;
+  const source =
+    configured === undefined || configured.length === 0
+      ? paths.join(home, '.pi', 'agent')
+      : expandPiAgentTilde(configured, home, platform);
+  return paths.resolve(workingDirectory, source);
+}
+
+function expandPiAgentTilde(path: string, home: string, platform: NodeJS.Platform): string {
+  if (path === '~') return home;
+  if (path.startsWith('~/') || (platform === 'win32' && path.startsWith('~\\')))
+    return (platform === 'win32' ? win32 : posix).join(home, path.slice(2));
+  return path;
+}
+
+function isPathWithin(root: string, candidate: string, platform: NodeJS.Platform): boolean {
+  const paths = platform === 'win32' ? win32 : posix;
+  const relativePath = paths.relative(root, candidate);
+  return (
+    relativePath.length > 0 &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${paths.sep}`) &&
+    !paths.isAbsolute(relativePath)
+  );
+}
+
+function samePath(left: string, right: string, platform: NodeJS.Platform): boolean {
+  return platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function parseInstalledPiExtensionManifest(
+  manifestText: string,
+  expectedPackageName: string,
+): { readonly version: string } {
+  const manifest: unknown = JSON.parse(manifestText);
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest))
+    throw new Error('invalid package manifest');
+  const name = 'name' in manifest ? manifest.name : undefined;
+  const version = 'version' in manifest ? manifest.version : undefined;
+  if (
+    name !== expectedPackageName ||
+    typeof version !== 'string' ||
+    version.length === 0 ||
+    version.length > 128 ||
+    version.trim() !== version
+  ) {
+    throw new Error('package manifest does not match the configured package');
+  }
+  return Object.freeze({ version });
+}
+
+function fileIdentityParts(metadata: Stats): readonly (string | number)[] {
+  return Object.freeze([
+    String(metadata.dev),
+    String(metadata.ino),
+    metadata.size,
+    metadata.mtimeMs,
+  ]);
+}
+
+function isNetworkRootedPath(path: string): boolean {
+  return /^(?:[\\/]{2}|[\\/]\?\?[\\/])/u.test(path);
+}
+
+function runPiExtensionFileSystemOperation<Result>(
+  operation: () => Promise<Result>,
+  signal: AbortSignal,
+  budgetSignal: AbortSignal,
+): Promise<Result> {
+  if (signal.aborted) return Promise.reject(new ProviderError('CANCELLED'));
+  if (budgetSignal.aborted) return Promise.reject(new ProviderError('TIMEOUT'));
+  let pending: Promise<Result>;
+  try {
+    pending = operation();
+  } catch (error: unknown) {
+    return Promise.reject(error instanceof Error ? error : new ProviderError('UNAVAILABLE'));
+  }
+  return new Promise<Result>((resolveOperation, rejectOperation) => {
+    let settled = false;
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', cancelled);
+      budgetSignal.removeEventListener('abort', timedOut);
+      callback();
+    };
+    const cancelled = (): void => settle(() => rejectOperation(new ProviderError('CANCELLED')));
+    const timedOut = (): void => settle(() => rejectOperation(new ProviderError('TIMEOUT')));
+    signal.addEventListener('abort', cancelled, { once: true });
+    budgetSignal.addEventListener('abort', timedOut, { once: true });
+    void pending.then(
+      (result) => settle(() => resolveOperation(result)),
+      (error: unknown) =>
+        settle(() =>
+          rejectOperation(error instanceof Error ? error : new ProviderError('UNAVAILABLE')),
+        ),
+    );
+  });
+}
+
+function throwIfPiAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new ProviderError('CANCELLED');
+}
+
 function waitForAbort<Result>(operation: Promise<Result>, signal: AbortSignal): Promise<Result> {
   if (signal.aborted) return Promise.reject(new ProviderError('CANCELLED'));
   return new Promise((resolveOperation, rejectOperation) => {

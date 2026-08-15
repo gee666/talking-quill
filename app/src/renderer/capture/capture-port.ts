@@ -8,7 +8,6 @@ import {
   CapturePortMessageSchema,
   type CapturePortMessage,
 } from '../../shared/ipc/capture-port';
-import type { MicrophoneDevice } from '../../shared/schemas/audio';
 import { CaptureEngineError } from './capture-engine';
 import type { CaptureEngine, CaptureStopReason } from './capture-engine';
 
@@ -53,8 +52,16 @@ export class CapturePortController {
     this.#engine.disposeImmediately();
   }
 
-  notifyDevicesChanged(devices: readonly MicrophoneDevice[]): void {
-    this.#send({ type: 'devices:changed', devices: [...devices] });
+  notifyDevicesChanged(defaultInvalidated: boolean): void {
+    this.#send({ type: 'devices:invalidated', defaultInvalidated });
+  }
+
+  notifyDefaultInvalidated(bindingGeneration: number): void {
+    const captureId = this.#captureId;
+    if (captureId === null || (this.#phase !== 'activating' && this.#phase !== 'active')) {
+      return;
+    }
+    this.#send({ type: 'stream:default-invalidated', captureId, bindingGeneration });
   }
 
   notifyFrame(samples: Float32Array, rms: number): void {
@@ -108,6 +115,10 @@ export class CapturePortController {
     }
     if (command.type === 'stream:activate') {
       void this.#activate(command.requestId, command.captureId);
+      return;
+    }
+    if (command.type === 'stream:rebind-default') {
+      void this.#rebindDefault(command.requestId, command.captureId, command.bindingGeneration);
       return;
     }
     void this.#stop(command.requestId, command.captureId);
@@ -171,6 +182,32 @@ export class CapturePortController {
         this.#captureId = null;
         this.#phase = 'idle';
       }
+      this.#sendError(
+        requestId,
+        captureId,
+        error instanceof CaptureEngineError ? error.code : 'capture-failed',
+      );
+    }
+  }
+
+  async #rebindDefault(
+    requestId: string,
+    captureId: string,
+    bindingGeneration: number,
+  ): Promise<void> {
+    if (this.#captureId !== captureId || this.#phase !== 'active') {
+      this.#sendError(requestId, captureId, 'capture-failed');
+      return;
+    }
+    try {
+      const result = await this.#engine.rebindDefault(bindingGeneration);
+      if (!this.#isCaptureInPhase(captureId, 'active')) {
+        this.#sendError(requestId, captureId, 'capture-failed');
+        return;
+      }
+      this.#send({ type: 'stream:rebound', requestId, captureId, ...result });
+    } catch (error: unknown) {
+      if (this.#closed) return;
       this.#sendError(
         requestId,
         captureId,

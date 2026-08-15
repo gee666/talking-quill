@@ -121,6 +121,36 @@ describe('WelcomeService', () => {
     expect(service.state()).toMatchObject({ completedAt: null, lastStep: 3 });
   });
 
+  it('blocks an in-flight completion while explicit binding presence is being revalidated', async () => {
+    const root = await createTestDirectory('welcome-binding-validation-race');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    let modelChecks = 0;
+    let releaseModelCheck!: () => void;
+    const delayedModel = new Promise<boolean>((resolve) => {
+      releaseModelCheck = () => resolve(true);
+    });
+    const service = new WelcomeService(store, {
+      ...ready(),
+      modelReady: () => {
+        modelChecks += 1;
+        return modelChecks === 1 ? Promise.resolve(true) : delayedModel;
+      },
+    });
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
+
+    const completion = service.complete();
+    await Promise.resolve();
+    service.beginMicrophoneBindingValidation();
+    releaseModelCheck();
+    await expect(completion).rejects.toThrow('changed while');
+
+    service.confirmMicrophoneBinding();
+    const completed = await service.complete();
+    expect(typeof completed.completedAt).toBe('number');
+  });
+
   it('rolls back when invalidation arrives during the final completion write', async () => {
     let blockCompletionWrite = false;
     let completionWriteStarted!: () => void;
@@ -191,6 +221,44 @@ describe('WelcomeService', () => {
     expect(service.state()).toMatchObject({ completedAt: null, lastStep: 3 });
   });
 
+  it('invalidates in-flight microphone evidence when the binding changes during persistence', async () => {
+    let blockEvidenceWrite = false;
+    let evidenceWriteStarted!: () => void;
+    let releaseEvidenceWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      evidenceWriteStarted = resolve;
+    });
+    const writeReleased = new Promise<void>((resolve) => {
+      releaseEvidenceWrite = resolve;
+    });
+    const store = new SettingsStore('memory://welcome-microphone-race', {
+      io: {
+        read: () => Promise.resolve(null),
+        write: async (_path, value) => {
+          const lastStep = (value as { welcome?: { lastStep?: number } }).welcome?.lastStep;
+          if (blockEvidenceWrite && lastStep === 3) {
+            evidenceWriteStarted();
+            await writeReleased;
+          }
+        },
+        preserveInvalid: () => Promise.resolve(null),
+      },
+    });
+    await store.initialize();
+    const service = new WelcomeService(store, ready());
+    await service.setStep(2);
+    blockEvidenceWrite = true;
+
+    const forward = service.setStep(3);
+    await writeStarted;
+    const invalidation = service.invalidateMicrophoneBinding();
+    releaseEvidenceWrite();
+
+    await expect(forward).rejects.toThrow('changed while');
+    await invalidation;
+    expect(service.state()).toMatchObject({ lastStep: 2, microphoneEvidence: null });
+  });
+
   it('rejects skipped steps and every unavailable Raw prerequisite', async () => {
     const root = await createTestDirectory('welcome-guards');
     roots.push(root);
@@ -212,6 +280,72 @@ describe('WelcomeService', () => {
     await service.setStep(2);
     await expect(service.setStep(3)).rejects.toThrow('Speak');
     expect(store.get().welcome.microphoneEvidence).toBeNull();
+  });
+
+  it('keeps a failed microphone invalidation dirty in memory', async () => {
+    let rejectInvalidation = false;
+    const store = new SettingsStore('memory://welcome-failed-microphone-invalidation', {
+      io: {
+        read: () => Promise.resolve(null),
+        write: (_path, value) => {
+          const welcome = (
+            value as { welcome?: { lastStep?: number; microphoneEvidence?: unknown } }
+          ).welcome;
+          if (
+            rejectInvalidation &&
+            welcome?.lastStep === 2 &&
+            welcome.microphoneEvidence === null
+          ) {
+            return Promise.reject(new Error('settings write failed'));
+          }
+          return Promise.resolve();
+        },
+        preserveInvalid: () => Promise.resolve(null),
+      },
+    });
+    await store.initialize();
+    const service = new WelcomeService(store, ready());
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
+    rejectInvalidation = true;
+
+    await expect(service.invalidateMicrophoneBinding()).rejects.toThrow('settings write failed');
+    await expect(service.complete()).rejects.toThrow('Microphone setup');
+  });
+
+  it('requires explicit microphone evidence to match the selected bound device', async () => {
+    const root = await createTestDirectory('welcome-explicit-microphone');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    await store.update({ recording: { preferredMicrophoneId: 'studio-microphone' } });
+    const mismatched = new WelcomeService(store, ready());
+    await mismatched.setStep(2);
+    await expect(mismatched.setStep(3)).rejects.toThrow('selected microphone');
+
+    const matching = new WelcomeService(store, {
+      ...ready(),
+      microphoneObservation: () => ({
+        boundDeviceId: 'studio-microphone',
+        observedRms: 0.2,
+        sampleCount: 3_200,
+      }),
+    });
+    await matching.setStep(3);
+    expect(store.get().welcome.microphoneEvidence).toMatchObject({
+      boundDeviceId: 'studio-microphone',
+    });
+  });
+
+  it('rejects completion when persisted evidence belongs to a different explicit microphone', async () => {
+    const root = await createTestDirectory('welcome-stale-explicit-microphone');
+    roots.push(root);
+    const store = new SettingsStore(join(root, 'settings.json'));
+    await store.initialize();
+    const service = new WelcomeService(store, ready());
+    for (const step of [2, 3, 4, 5] as const) await service.setStep(step);
+    await store.update({ recording: { preferredMicrophoneId: 'studio-microphone' } });
+
+    await expect(service.complete()).rejects.toThrow('Microphone setup');
   });
 
   it('revalidates persisted microphone evidence against the current policy at completion', async () => {

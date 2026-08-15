@@ -136,11 +136,36 @@ export const ProviderBaseUrlSchema = CredentialFreeProviderUrlSchema.refine((val
   );
 }, 'Provider endpoints must use HTTP or HTTPS and include a hostname.');
 export const ProviderModelIdSchema = z.string().trim().min(1).max(512);
+export const LegacyPiExtensionSourceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .regex(/^(?!-).+$/u)
+  .refine(noControlCharacters, 'Extension paths cannot contain control characters.');
+export const LegacyPiExtensionSourcesSchema = z.array(LegacyPiExtensionSourceSchema).max(8);
+export const PersistedPiExtensionSourceSchema = LegacyPiExtensionSourceSchema.refine(
+  isNonNetworkPiExtensionPath,
+  'UNC, network, and namespaced paths cannot be used for Pi extensions.',
+);
+export const PersistedPiExtensionSourcesSchema = z.array(PersistedPiExtensionSourceSchema).max(8);
+export const PiExtensionSourceSchema = PersistedPiExtensionSourceSchema.refine(
+  isLocalPiExtensionPathOrNpmPackage,
+  'Enter a local extension path or an exact installed npm:package name. URLs, git sources, and version ranges are not supported.',
+).refine(
+  (value) => parsePiNpmExtensionSource(value) !== null || noWindowsCommandCharacters(value),
+  'Extension paths cannot contain Windows command characters: " % ! & | < > ^ ( ).',
+);
+export const PiExtensionSourcesSchema = z.array(PiExtensionSourceSchema).max(8);
 
 export const PersistedProviderConfigSchema = createProviderConfigSchema(
   PersistedProviderBaseUrlSchema,
+  PersistedPiExtensionSourcesSchema,
 );
-export const ProviderConfigSchema = createProviderConfigSchema(ProviderBaseUrlSchema);
+export const ProviderConfigSchema = createProviderConfigSchema(
+  ProviderBaseUrlSchema,
+  PiExtensionSourcesSchema,
+);
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RunnableProviderConfig = Omit<ProviderConfig, 'providerId'> & {
   readonly providerId: RunnableProviderId;
@@ -156,7 +181,10 @@ export const RunnableProviderConfigSchema = ProviderConfigSchema.pipe(
   ),
 );
 
-function createProviderConfigSchema(baseUrlSchema: z.ZodType<string>) {
+function createProviderConfigSchema(
+  baseUrlSchema: z.ZodType<string>,
+  piExtensionSourcesSchema: z.ZodType<string[]>,
+) {
   return z
     .object({
       providerId: ProviderIdSchema,
@@ -179,6 +207,7 @@ function createProviderConfigSchema(baseUrlSchema: z.ZodType<string>) {
       region: AwsRegionSchema.optional(),
       modelType: AzureModelTypeSchema.optional(),
       thinking: PiThinkingLevelSchema.optional(),
+      piExtensionSources: piExtensionSourcesSchema.optional(),
     })
     .strict()
     .superRefine((config, context) => {
@@ -229,6 +258,13 @@ function createProviderConfigSchema(baseUrlSchema: z.ZodType<string>) {
           code: 'custom',
           path: ['thinking'],
           message: 'Thinking level is required only for Pi.',
+        });
+      }
+      if (config.piExtensionSources !== undefined && config.providerId !== 'pi') {
+        context.addIssue({
+          code: 'custom',
+          path: ['piExtensionSources'],
+          message: 'Extension sources are supported only by Pi.',
         });
       }
     });
@@ -301,9 +337,10 @@ export const ProviderFieldSchema = z
       'region',
       'modelType',
       'thinking',
+      'piExtensionSources',
     ]),
     label: z.string().min(1).max(80),
-    kind: z.enum(['url', 'secret', 'text', 'number', 'select', 'model']),
+    kind: z.enum(['url', 'secret', 'text', 'number', 'select', 'model', 'textarea']),
     required: z.boolean(),
     secret: z.boolean(),
     placeholder: z.string().max(256).optional(),
@@ -371,6 +408,42 @@ export const PublicProviderErrorSchema = z
   })
   .strict();
 export type PublicProviderError = z.infer<typeof PublicProviderErrorSchema>;
+
+function noControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 0x20 || codePoint === 0x7f) return false;
+  }
+  return true;
+}
+
+function isNonNetworkPiExtensionPath(value: string): boolean {
+  return !/^(?:[\\/]{2}|[\\/]\?\?[\\/])/u.test(value);
+}
+
+export function parsePiNpmExtensionSource(value: string): string | null {
+  const match = /^npm:((?:@[A-Za-z0-9~-][A-Za-z0-9._~-]*\/)?[A-Za-z0-9~-][A-Za-z0-9._~-]*)$/u.exec(
+    value,
+  );
+  return match?.[1] ?? null;
+}
+
+function isLocalPiExtensionPathOrNpmPackage(value: string): boolean {
+  return parsePiNpmExtensionSource(value) !== null || isLocalPiExtensionPath(value);
+}
+
+function isLocalPiExtensionPath(value: string): boolean {
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return true;
+  return (
+    !/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value) &&
+    !value.startsWith('@') &&
+    !/^[^\\/]+@[^\\/]+:/u.test(value)
+  );
+}
+
+function noWindowsCommandCharacters(value: string): boolean {
+  return !/["%!&|<>^()]/u.test(value);
+}
 
 function decodedBase64Length(value: string): number {
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;

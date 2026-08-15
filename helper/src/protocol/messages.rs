@@ -204,6 +204,7 @@ pub enum Outbound {
     Response(RpcResponse),
     Event(HelperEvent),
     PasteCommitted(RequestId),
+    InputDevicesChanged,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +228,7 @@ enum NotificationParams<'a> {
     ActivationComplete(ActivationCompleteParams),
     Session(SessionKeyEventParams<'a>),
     PasteCommitted(PasteCommittedParams<'a>),
+    InputDevicesChanged(EmptyNotificationParams),
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +236,9 @@ enum NotificationParams<'a> {
 struct PasteCommittedParams<'a> {
     request_id: &'a RequestId,
 }
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct EmptyNotificationParams {}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 struct ActivationEventParams {
@@ -304,6 +309,11 @@ pub fn encode_outbound(message: &Outbound) -> Result<Vec<u8>, OutboundEncodingEr
                 params: NotificationParams::PasteCommitted(PasteCommittedParams { request_id }),
             })
         }
+        Outbound::InputDevicesChanged => SerializableOutbound::Notification(RpcNotification {
+            jsonrpc: "2.0",
+            method: "audio.input_devices_changed",
+            params: NotificationParams::InputDevicesChanged(EmptyNotificationParams {}),
+        }),
     };
     let payload = serde_json::to_vec(&serializable)?;
     if payload.len() > MAX_FRAME_BYTES {
@@ -450,6 +460,20 @@ mod tests {
         );
         let payload = encode_outbound(&outbound).unwrap();
         assert!(payload.len() <= MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn input_device_change_notification_contains_no_endpoint_identifier() {
+        let payload = encode_outbound(&Outbound::InputDevicesChanged).unwrap();
+        let notification: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            notification,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "audio.input_devices_changed",
+                "params": {},
+            })
+        );
     }
 
     #[test]

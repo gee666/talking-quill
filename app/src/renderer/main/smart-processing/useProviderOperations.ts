@@ -154,7 +154,7 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
       readonly refresh?: boolean;
       readonly configurationDirty: boolean;
     }): Promise<void> => {
-      if (configurationDirty && providerId !== 'pi') return;
+      if (configurationDirty) return;
       await runModelDiscovery({
         providerId,
         draft,
@@ -182,7 +182,7 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
       readonly configurationDirty?: boolean;
       readonly expectedLease?: ProviderLease;
     }): Promise<void> => {
-      if (configurationDirty && providerId !== 'pi') return;
+      if (configurationDirty) return;
       await runModelDiscovery({
         providerId,
         draft,
@@ -203,6 +203,20 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
       });
     },
     [discoverModelsQuietly],
+  );
+
+  const refreshPiAfterConfigSave = useCallback(
+    async (draft: ProviderSettingsDraft, expectedLease: ProviderLease): Promise<void> => {
+      setModels([]);
+      await runModelDiscovery({
+        providerId: 'pi',
+        draft,
+        refresh: true,
+        verifyAfter: false,
+        expectedLease,
+      });
+    },
+    [runModelDiscovery],
   );
 
   const testConnection = useCallback(
@@ -286,6 +300,7 @@ export function useProviderOperations(coordinator: ProviderUiCoordinator) {
     discoverModels,
     discoverModelsQuietly,
     discoverPiImmediately,
+    refreshPiAfterConfigSave,
     testConnection,
     verifyDestination,
     setConnectionError,

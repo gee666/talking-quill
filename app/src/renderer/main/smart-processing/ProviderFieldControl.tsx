@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ModelInfo,
   ProviderCatalogEntry,
   ProviderField,
 } from '../../../shared/schemas/providers';
 import type { ProviderSettingsDraft } from '../../../shared/schemas/settings';
-import { Button, Input, Select, Status } from '../../design';
+import { Button, Input, Select, Status, TextArea } from '../../design';
 import { formatOperationElapsed, type RequestState } from './provider-utils';
 
 const MAX_VISIBLE_MODELS = 200;
@@ -181,6 +181,18 @@ export function ProviderFieldControl({
     );
   }
 
+  if (field.kind === 'textarea') {
+    return (
+      <ExtensionSourcesField
+        field={field}
+        value={value}
+        error={error}
+        disabled={controlsDisabled}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (field.kind === 'select' && field.options !== undefined) {
     return (
       <Select
@@ -225,4 +237,60 @@ export function ProviderFieldControl({
       }}
     />
   );
+}
+
+function ExtensionSourcesField({
+  field,
+  value,
+  error,
+  disabled,
+  onChange,
+}: {
+  readonly field: ProviderField;
+  readonly value: ProviderSettingsDraft[keyof ProviderSettingsDraft];
+  readonly error?: string | undefined;
+  readonly disabled: boolean;
+  readonly onChange: (value: ProviderSettingsDraft[keyof ProviderSettingsDraft]) => void;
+}) {
+  const externalText = extensionSourcesText(value);
+  const [text, setText] = useState(externalText);
+  const localCanonicalText = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (localCanonicalText.current === externalText) {
+      localCanonicalText.current = null;
+      return;
+    }
+    setText(externalText);
+  }, [externalText]);
+
+  return (
+    <TextArea
+      label={field.label}
+      required={field.required}
+      rows={4}
+      value={text}
+      {...(field.placeholder === undefined ? {} : { placeholder: field.placeholder })}
+      {...(field.description === undefined ? {} : { hint: field.description })}
+      {...(error === undefined ? {} : { error })}
+      disabled={disabled}
+      spellCheck={false}
+      onChange={(event) => {
+        const raw = event.currentTarget.value;
+        const sources = raw
+          .split(/\r?\n/u)
+          .map((source) => source.trim())
+          .filter(Boolean);
+        setText(raw);
+        localCanonicalText.current = sources.join('\n');
+        onChange(sources.length === 0 ? undefined : sources);
+      }}
+    />
+  );
+}
+
+function extensionSourcesText(value: ProviderSettingsDraft[keyof ProviderSettingsDraft]): string {
+  return Array.isArray(value) && value.every((source) => typeof source === 'string')
+    ? value.join('\n')
+    : '';
 }

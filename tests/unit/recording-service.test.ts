@@ -29,22 +29,32 @@ class FakeCaptureClient {
       captureId: string,
       includeSystemAudio?: boolean,
     ) => Promise<CaptureStarted>
-  >((_preferred, captureId, includeSystemAudio) =>
+  >((preferred, captureId, includeSystemAudio) =>
     Promise.resolve({
       captureId,
-      activeMicrophoneId: 'default',
+      activeMicrophoneId: preferred ?? 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       systemAudioIncluded: includeSystemAudio === true,
       sampleRate: 16_000,
       channelCount: 1,
     }),
   );
   readonly activate = vi.fn<(captureId: string) => Promise<void>>(() => Promise.resolve());
+  readonly rebindDefault = vi.fn((captureId: string, bindingGeneration: number) =>
+    Promise.resolve({
+      captureId,
+      activeMicrophoneId: `rebound-${String(bindingGeneration + 1)}`,
+      bindingGeneration: bindingGeneration + 1,
+    }),
+  );
   readonly stop = vi.fn(() => Promise.resolve());
   readonly reset = vi.fn();
   readonly dispose = vi.fn();
   frameListener: ((frame: CaptureFrame) => void) | null = null;
-  deviceListener: ((devices: readonly MicrophoneDevice[]) => void) | null = null;
+  deviceListener: ((defaultInvalidated: boolean) => void) | null = null;
+  defaultInvalidationListener: ((captureId: string, bindingGeneration: number) => void) | null =
+    null;
   stopListener: ((captureId: string, reason: UnexpectedCaptureStopReason) => void) | null = null;
 
   onFrame(listener: (frame: CaptureFrame) => void): () => void {
@@ -54,10 +64,19 @@ class FakeCaptureClient {
     };
   }
 
-  onDevicesChanged(listener: (devices: readonly MicrophoneDevice[]) => void): () => void {
+  onDevicesChanged(listener: (defaultInvalidated: boolean) => void): () => void {
     this.deviceListener = listener;
     return () => {
       this.deviceListener = null;
+    };
+  }
+
+  onDefaultInvalidated(
+    listener: (captureId: string, bindingGeneration: number) => void,
+  ): () => void {
+    this.defaultInvalidationListener = listener;
+    return () => {
+      this.defaultInvalidationListener = null;
     };
   }
 
@@ -248,6 +267,207 @@ describe('RecordingService ownership', () => {
     await test.service.shutdown();
   });
 
+  it('rebinds an active default test in place and resets its evidence metadata', async () => {
+    const test = harness();
+    const invalidateMicrophone = vi.fn();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    test.capture.frameListener?.({
+      captureId: state.captureId,
+      sequence: 0,
+      samples: new Float32Array(320),
+      rms: 0.4,
+    });
+    expect(test.service.microphoneTestObservation()).toMatchObject({
+      observedRms: 0.4,
+      sampleCount: 320,
+    });
+
+    test.capture.defaultInvalidationListener?.(state.captureId, 0);
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(test.service.getState()).toMatchObject({
+        status: 'active',
+        captureId: state.captureId,
+        activeMicrophoneId: 'rebound-1',
+        bindingGeneration: 1,
+      }),
+    );
+    expect(test.capture.start).toHaveBeenCalledOnce();
+    expect(test.capture.activate).toHaveBeenCalledOnce();
+    expect(test.service.microphoneTestObservation()).toMatchObject({
+      boundDeviceId: 'rebound-1',
+      observedRms: 0,
+      sampleCount: 0,
+    });
+    expect(test.events.send).toHaveBeenCalledWith('recording:test-level', {
+      captureId: state.captureId,
+      rms: 0,
+    });
+    expect(invalidateMicrophone).toHaveBeenCalled();
+    await test.service.shutdown();
+  });
+
+  it('coalesces binding races into one follow-up rebind', async () => {
+    const test = harness();
+    const firstRebind = deferred<{
+      captureId: string;
+      activeMicrophoneId: string;
+      bindingGeneration: number;
+    }>();
+    test.capture.rebindDefault.mockReturnValueOnce(firstRebind.promise);
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+
+    test.service.invalidateInputDevices();
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledOnce());
+    test.capture.defaultInvalidationListener?.(state.captureId, 0);
+    test.capture.defaultInvalidationListener?.(state.captureId, 1);
+    expect(test.capture.rebindDefault).toHaveBeenCalledOnce();
+
+    firstRebind.resolve({
+      captureId: state.captureId,
+      activeMicrophoneId: 'replacement-one',
+      bindingGeneration: 1,
+    });
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledTimes(2));
+    expect(test.capture.rebindDefault).toHaveBeenLastCalledWith(state.captureId, 1);
+    await vi.waitFor(() => expect(test.service.getState()).toMatchObject({ bindingGeneration: 2 }));
+    await test.service.shutdown();
+  });
+
+  it('invalidates idle explicit evidence when current presence cannot be authorized', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const invalidateMicrophone = vi.fn();
+    const validationChanged = vi.fn<(known: boolean) => void>();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    test.service.setWelcomeEvidenceValidationListener(validationChanged);
+    test.capture.listDevices.mockResolvedValue([
+      { deviceId: 'studio', label: 'Studio', isDefault: false },
+    ]);
+
+    test.capture.deviceListener?.(false);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(invalidateMicrophone).toHaveBeenCalledOnce());
+    expect(validationChanged).toHaveBeenCalledWith(false);
+    expect(test.service.microphoneReadyForWelcome()).toBe(false);
+    await test.service.shutdown();
+  });
+
+  it('drains a native default invalidation received while activation is pending', async () => {
+    const test = harness();
+    const activation = deferred<undefined>();
+    test.capture.activate.mockReturnValueOnce(activation.promise);
+    const starting = test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    await vi.waitFor(() => expect(test.capture.activate).toHaveBeenCalledOnce());
+    const captureId = test.capture.activate.mock.calls[0]?.[0] ?? '';
+
+    test.service.invalidateInputDevices();
+    expect(test.capture.rebindDefault).not.toHaveBeenCalled();
+    activation.resolve(undefined);
+    await expect(starting).resolves.toMatchObject({ status: 'active', captureId });
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledOnce());
+    await test.service.shutdown();
+  });
+
+  it('does not re-invalidate rebound evidence from the delayed device-list signal', async () => {
+    const test = harness();
+    const invalidateMicrophone = vi.fn();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    test.capture.defaultInvalidationListener?.(state.captureId, 0);
+    await vi.waitFor(() => expect(test.service.getState()).toMatchObject({ bindingGeneration: 1 }));
+    invalidateMicrophone.mockClear();
+    test.capture.frameListener?.({
+      captureId: state.captureId,
+      sequence: 1,
+      samples: new Float32Array(320),
+      rms: 0.4,
+    });
+
+    test.capture.deviceListener?.(true);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(3));
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
+    expect(test.service.microphoneTestObservation()).toMatchObject({
+      observedRms: 0.4,
+      sampleCount: 320,
+    });
+    await test.service.shutdown();
+  });
+
+  it('never rebinds or invalidates an active explicit microphone that remains available', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const studio = { deviceId: 'studio', label: 'Studio', isDefault: false };
+    const invalidateMicrophone = vi.fn();
+    const validationChanged = vi.fn<(known: boolean) => void>();
+    test.capture.listDevices.mockResolvedValue([studio]);
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    test.service.setWelcomeEvidenceValidationListener(validationChanged);
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    test.capture.frameListener?.({
+      captureId: state.captureId,
+      sequence: 0,
+      samples: new Float32Array(320),
+      rms: 0.4,
+    });
+
+    test.service.invalidateInputDevices();
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(2));
+    expect(test.capture.rebindDefault).not.toHaveBeenCalled();
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
+    expect(validationChanged.mock.calls.map(([known]) => known)).toEqual([false, true]);
+    expect(test.service.microphoneTestObservation()).toMatchObject({
+      boundDeviceId: 'studio',
+      observedRms: 0.4,
+      sampleCount: 320,
+    });
+    await test.service.shutdown();
+  });
+
+  it('fails a default rebind after the bounded retry budget', async () => {
+    const test = harness();
+    const onUnexpectedStop = vi.fn();
+    const dictation = await test.service.startDictation({
+      onFrame: vi.fn(),
+      onUnexpectedStop,
+    });
+    test.capture.rebindDefault.mockRejectedValue(new CaptureClientError('device-unavailable'));
+    test.capture.stop.mockRejectedValueOnce(new Error('capture renderer stopped responding'));
+
+    test.capture.defaultInvalidationListener?.(dictation.captureId, 0);
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(test.capture.stop).toHaveBeenCalledWith(dictation.captureId));
+    await vi.waitFor(() => expect(onUnexpectedStop).toHaveBeenCalledWith('device-unavailable'));
+    expect(test.capture.reset).toHaveBeenCalledOnce();
+    await test.service.shutdown();
+  });
+
+  it('keeps dictation ownership and PCM routing across a successful default rebind', async () => {
+    const test = harness();
+    const onFrame = vi.fn();
+    const onUnexpectedStop = vi.fn();
+    const dictation = await test.service.startDictation({ onFrame, onUnexpectedStop });
+
+    test.capture.defaultInvalidationListener?.(dictation.captureId, 0);
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledOnce());
+    const samples = new Float32Array(320).fill(0.25);
+    test.capture.frameListener?.({
+      captureId: dictation.captureId,
+      sequence: 10,
+      samples,
+      rms: 0.25,
+    });
+    expect(onFrame).toHaveBeenCalledWith(samples, 0.25);
+    expect(onUnexpectedStop).not.toHaveBeenCalled();
+    await test.service.stopDictation(dictation.captureId);
+    expect(test.capture.stop).toHaveBeenCalledWith(dictation.captureId);
+    await test.service.shutdown();
+  });
+
   it('stops the capture and clears the lease when the owning WebContents is destroyed', async () => {
     const test = harness();
     const owner = new FakeOwner();
@@ -317,6 +537,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,
@@ -406,6 +627,105 @@ describe('RecordingService ownership', () => {
     await test.service.shutdown();
   });
 
+  it.each(['no-device', 'device-unavailable'] as const)(
+    'invalidates prior evidence when microphone startup fails with %s',
+    async (code) => {
+      const test = harness();
+      const invalidateMicrophone = vi.fn();
+      const validationChanged = vi.fn<(known: boolean) => void>();
+      test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+      test.service.setWelcomeEvidenceValidationListener(validationChanged);
+      test.capture.start.mockRejectedValueOnce(new CaptureClientError(code));
+
+      await expect(
+        test.service.startTest(new FakeOwner() as unknown as Electron.WebContents),
+      ).resolves.toMatchObject({ status: 'unavailable', reason: code });
+      expect(invalidateMicrophone).toHaveBeenCalledOnce();
+      expect(validationChanged).toHaveBeenCalledWith(false);
+      expect(test.service.microphoneReadyForWelcome()).toBe(false);
+      await test.service.shutdown();
+    },
+  );
+
+  it('keeps fallback capture active without treating it as explicit-device evidence', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const invalidateMicrophone = vi.fn();
+    const validationChanged = vi.fn<(known: boolean) => void>();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    test.service.setWelcomeEvidenceValidationListener(validationChanged);
+    test.capture.start.mockImplementationOnce((_preferred, captureId) => {
+      expect(test.permission.allowsRequest(permissionRequest)).toBe(true);
+      expect(test.permission.allowsRequest(permissionRequest)).toBe(true);
+      expect(test.permission.allowsRequest(permissionRequest)).toBe(false);
+      return Promise.resolve({
+        captureId,
+        activeMicrophoneId: 'current-default',
+        preferredUnavailable: true,
+        bindingGeneration: 0,
+        systemAudioIncluded: false,
+        sampleRate: 16_000,
+        channelCount: 1,
+      });
+    });
+
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    expect(state).toMatchObject({
+      activeMicrophoneId: 'current-default',
+      preferredUnavailable: true,
+    });
+    test.capture.frameListener?.({
+      captureId: state.captureId,
+      sequence: 0,
+      samples: new Float32Array(1_600),
+      rms: 0.3,
+    });
+
+    expect(test.service.microphoneTestObservation()).toBeNull();
+    expect(test.service.microphoneReadyForWelcome()).toBe(false);
+    expect(validationChanged).toHaveBeenCalledWith(false);
+    expect(invalidateMicrophone).toHaveBeenCalled();
+    await expect(test.service.getDevices()).resolves.toMatchObject({
+      preferredMicrophoneId: 'studio',
+      preferredAvailable: false,
+    });
+
+    test.capture.defaultInvalidationListener?.(state.captureId, 0);
+    await vi.waitFor(() => expect(test.capture.rebindDefault).toHaveBeenCalledOnce());
+    expect(test.service.getState()).toMatchObject({
+      status: 'active',
+      preferredUnavailable: true,
+      bindingGeneration: 1,
+    });
+    await test.service.shutdown();
+  });
+
+  it('accepts matching exact-capture evidence when ancillary enumeration fails', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const invalidateMicrophone = vi.fn();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    test.capture.listDevices.mockRejectedValueOnce(new Error('enumeration failed'));
+
+    const state = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (state.status !== 'active') throw new Error('Expected an active test');
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    test.capture.frameListener?.({
+      captureId: state.captureId,
+      sequence: 0,
+      samples: new Float32Array(1_600),
+      rms: 0.2,
+    });
+
+    expect(test.service.microphoneTestObservation()).toEqual({
+      boundDeviceId: 'studio',
+      observedRms: 0.2,
+      sampleCount: 1_600,
+    });
+    expect(test.service.microphoneReadyForWelcome()).toBe(true);
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
+    await test.service.shutdown();
+  });
+
   it('does not claim Windows denial for an unexplained NotAllowedError', async () => {
     const test = harness({ permission: 'granted' });
     test.capture.start.mockRejectedValueOnce(new CaptureClientError('permission-denied'));
@@ -427,11 +747,102 @@ describe('RecordingService ownership', () => {
       isDefault: false,
     };
     test.capture.listDevices.mockResolvedValueOnce([bluetooth]);
-    await test.service.getDevices();
-    test.capture.deviceListener?.([]);
-    test.capture.listDevices.mockResolvedValueOnce([]);
+    const active = await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    if (active.status !== 'active') throw new Error('Expected an active test');
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    await test.service.stopTest();
+    test.capture.listDevices.mockResolvedValue([]);
+    test.capture.deviceListener?.(false);
 
     await expect(test.service.getDevices()).resolves.toMatchObject({ devices: [bluetooth] });
+    await test.service.shutdown();
+  });
+
+  it('serializes dirty device refreshes and publishes the newest authorized generation', async () => {
+    const test = harness();
+    const first = deferred<MicrophoneDevice[]>();
+    const second = deferred<MicrophoneDevice[]>();
+    test.capture.listDevices.mockReset();
+    test.capture.listDevices.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    test.capture.deviceListener?.(false);
+    const dirty = test.service.getDevices();
+    expect(test.capture.listDevices).toHaveBeenCalledOnce();
+
+    first.resolve([{ deviceId: 'first', label: 'First', isDefault: false }]);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(2));
+    let dirtySettled = false;
+    void dirty.then(() => {
+      dirtySettled = true;
+    });
+    await Promise.resolve();
+    expect(dirtySettled).toBe(false);
+    second.resolve([{ deviceId: 'second', label: 'Second', isDefault: false }]);
+    await expect(dirty).resolves.toMatchObject({
+      devices: [expect.objectContaining({ deviceId: 'second' })],
+    });
+    await test.service.shutdown();
+  });
+
+  it('does not publish or invalidate from a superseded device enumeration', async () => {
+    const test = harness({ preferredMicrophoneId: 'studio' });
+    const studio = { deviceId: 'studio', label: 'Studio', isDefault: false };
+    test.capture.listDevices.mockResolvedValueOnce([studio]);
+    await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    const invalidateMicrophone = vi.fn();
+    test.service.setWelcomeEvidenceInvalidator(invalidateMicrophone);
+    const stale = deferred<MicrophoneDevice[]>();
+    const current = deferred<MicrophoneDevice[]>();
+    test.capture.listDevices
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    const eventsBefore = test.events.send.mock.calls.length;
+
+    const first = test.service.getDevices();
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(2));
+    test.capture.deviceListener?.(false);
+    let firstSettled = false;
+    void first.then(() => {
+      firstSettled = true;
+    });
+    stale.resolve([]);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(3));
+    expect(firstSettled).toBe(false);
+    expect(test.events.send.mock.calls).toHaveLength(eventsBefore + 1);
+    expect(test.events.send).toHaveBeenLastCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({ preferredAvailable: false }),
+    );
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
+
+    current.resolve([studio]);
+    await first;
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(3));
+    expect(test.events.send).toHaveBeenLastCalledWith(
+      'recording:devices-changed',
+      expect.objectContaining({ preferredAvailable: true }),
+    );
+    expect(invalidateMicrophone).not.toHaveBeenCalled();
+    await test.service.shutdown();
+  });
+
+  it('clears stale devices only from an authorized empty snapshot', async () => {
+    const test = harness();
+    const stale = { deviceId: 'stale', label: 'Stale', isDefault: false };
+    test.capture.listDevices.mockResolvedValueOnce([stale]);
+    await test.service.startTest(new FakeOwner() as unknown as Electron.WebContents);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledOnce());
+    await expect(test.service.getDevices()).resolves.toMatchObject({ devices: [stale] });
+
+    test.capture.listDevices.mockResolvedValueOnce([]);
+    test.capture.deviceListener?.(false);
+    await vi.waitFor(() => expect(test.capture.listDevices).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(false));
+    test.capture.listDevices.mockResolvedValue([]);
+    await expect(test.service.getDevices()).resolves.toMatchObject({ devices: [] });
     await test.service.shutdown();
   });
 
@@ -445,6 +856,38 @@ describe('RecordingService ownership', () => {
     expect(
       test.events.send.mock.calls.filter(([channel]) => channel === 'recording:devices-changed'),
     ).toHaveLength(initialEvents);
+    await test.service.shutdown();
+  });
+
+  it('continues dictation on the default microphone when the explicit preference falls back', async () => {
+    const test = harness({ preferredMicrophoneId: 'stale-device' });
+    const onFrame = vi.fn();
+    test.capture.start.mockImplementationOnce((_preferred, captureId) =>
+      Promise.resolve({
+        captureId,
+        activeMicrophoneId: 'current-default',
+        preferredUnavailable: true,
+        bindingGeneration: 0,
+        systemAudioIncluded: false,
+        sampleRate: 16_000,
+        channelCount: 1,
+      }),
+    );
+
+    const dictation = await test.service.startDictation({
+      onFrame,
+      onUnexpectedStop: vi.fn(),
+    });
+    expect(dictation.activeMicrophoneId).toBe('current-default');
+    const samples = new Float32Array(320).fill(0.2);
+    test.capture.frameListener?.({
+      captureId: dictation.captureId,
+      sequence: 0,
+      samples,
+      rms: 0.2,
+    });
+    expect(onFrame).toHaveBeenCalledWith(samples, 0.2);
+    expect(test.service.microphoneReadyForWelcome()).toBe(false);
     await test.service.shutdown();
   });
 
@@ -501,9 +944,7 @@ describe('RecordingService ownership', () => {
     });
     expect(firstOnFrame).not.toHaveBeenCalled();
     expect(secondOnFrame).not.toHaveBeenCalled();
-    test.capture.deviceListener?.([
-      { deviceId: 'stale-event', label: 'Stale event', isDefault: false },
-    ]);
+    test.capture.deviceListener?.(false);
     expect(test.events.send).not.toHaveBeenCalledWith(
       'recording:devices-changed',
       expect.objectContaining({
@@ -516,7 +957,7 @@ describe('RecordingService ownership', () => {
     ]);
     await firstEnumeration.promise;
     await Promise.resolve();
-    expect(test.permission.allowsCheck(permissionRequest)).toBe(true);
+    await vi.waitFor(() => expect(test.permission.allowsCheck(permissionRequest)).toBe(true));
     expect(test.events.send).not.toHaveBeenCalledWith(
       'recording:devices-changed',
       expect.objectContaining({
@@ -742,6 +1183,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,
@@ -768,6 +1210,7 @@ describe('RecordingService ownership', () => {
       captureId,
       activeMicrophoneId: 'default',
       preferredUnavailable: false,
+      bindingGeneration: 0,
       systemAudioIncluded: false,
       sampleRate: 16_000,
       channelCount: 1,

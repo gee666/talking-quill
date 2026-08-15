@@ -8,6 +8,10 @@ import {
 } from '../constants/audio';
 
 export const MicrophoneIdSchema = z.string().min(1).max(MAX_MICROPHONE_ID_LENGTH);
+export const MicrophonePreferenceIdSchema = MicrophoneIdSchema.refine(
+  (deviceId) => deviceId !== 'default',
+  'The system default microphone is represented by null.',
+);
 export const SilencePresetSchema = z.enum(['aggressive', 'average', 'relaxed']);
 export const MicrophonePermissionStateSchema = z.enum([
   'not-determined',
@@ -55,6 +59,7 @@ const ActiveTestStateSchema = z
     captureId: z.uuid(),
     activeMicrophoneId: MicrophoneIdSchema.nullable(),
     preferredUnavailable: z.boolean(),
+    bindingGeneration: z.number().int().nonnegative(),
     sampleRate: z.literal(PCM_SAMPLE_RATE),
     channelCount: z.literal(PCM_CHANNEL_COUNT),
   })

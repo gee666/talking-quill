@@ -38,13 +38,21 @@ function migrateV21ToCurrent(input: Readonly<Record<string, unknown>>) {
   if (typeof v23 !== 'object' || v23 === null) throw new Error('V22 migration did not emit v23');
   const v24 = SETTINGS_MIGRATIONS[23]?.(v23 as Readonly<Record<string, unknown>>);
   if (typeof v24 !== 'object' || v24 === null) throw new Error('V23 migration did not emit v24');
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>));
+  const v25 = SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>);
+  if (typeof v25 !== 'object' || v25 === null) throw new Error('V24 migration did not emit v25');
+  return migrateV25ToCurrent(v25 as Readonly<Record<string, unknown>>);
+}
+
+function migrateV25ToCurrent(input: Readonly<Record<string, unknown>>) {
+  const v26 = SETTINGS_MIGRATIONS[25]?.(input);
+  if (typeof v26 !== 'object' || v26 === null) throw new Error('V25 migration did not emit v26');
+  return SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(v26 as Readonly<Record<string, unknown>>));
 }
 
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 24 }, (_, index) => index + 1),
+      Array.from({ length: 26 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
@@ -62,11 +70,81 @@ describe('frozen settings migrations', () => {
     delete (recording as Record<string, unknown>).autoSubmitOnSilence;
     delete (recording as Record<string, unknown>).includeSystemAudio;
 
-    const migrated = SettingsSchema.parse(SETTINGS_MIGRATIONS[24]?.(source));
+    const v25 = SETTINGS_MIGRATIONS[24]?.(source);
+    expect(v25).toMatchObject({ schemaVersion: 25 });
+    const migrated = migrateV25ToCurrent(v25 as Readonly<Record<string, unknown>>);
     expect(migrated.recording).toMatchObject({
       autoSubmitOnSilence: true,
       includeSystemAudio: false,
     });
+  });
+
+  it('preserves released v25 drafts without activating dormant prerelease npm extensions', () => {
+    const released = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    released.schemaVersion = 25;
+    const releasedMigrated = migrateV25ToCurrent(released);
+    expect(releasedMigrated.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
+    expect(releasedMigrated.smartProcessing.providers.pi?.piExtensionSources).toBeUndefined();
+
+    const prerelease = structuredClone(released);
+    const smartProcessing = readRecord(prerelease.smartProcessing);
+    if (smartProcessing === null) throw new Error('Missing Smart processing settings');
+    (smartProcessing as Record<string, unknown>).selectedProviderId = 'pi';
+    const providers = readRecord(smartProcessing.providers);
+    if (providers === null) throw new Error('Missing provider drafts');
+    (providers as Record<string, unknown>).pi = {
+      modelId: 'p/model',
+      thinking: 'off',
+      piExtensionSources: ['./extensions/first.ts', 'npm:@prerelease/pi-extension'],
+    };
+
+    const prereleaseMigrated = migrateV25ToCurrent(prerelease);
+    expect(prereleaseMigrated.smartProcessing.providers.pi).toEqual({
+      modelId: 'p/model',
+      thinking: 'off',
+      piExtensionSources: [],
+    });
+  });
+
+  it('sanitizes an inactive prerelease Pi draft while preserving the selected provider', () => {
+    const prerelease = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    prerelease.schemaVersion = 25;
+    const smartProcessing = readRecord(prerelease.smartProcessing);
+    if (smartProcessing === null) throw new Error('Missing Smart processing settings');
+    (smartProcessing as Record<string, unknown>).selectedProviderId = 'ollama';
+    const providers = readRecord(smartProcessing.providers);
+    if (providers === null) throw new Error('Missing provider drafts');
+    (providers as Record<string, unknown>).pi = {
+      modelId: 'p/model',
+      thinking: 'off',
+      piExtensionSources: ['git:github.com/prerelease/pi-extension'],
+    };
+
+    const migrated = migrateV25ToCurrent(prerelease);
+    expect(migrated.smartProcessing.selectedProviderId).toBe('ollama');
+    expect(migrated.smartProcessing.providers.pi).toEqual({
+      modelId: 'p/model',
+      thinking: 'off',
+      piExtensionSources: [],
+    });
+  });
+
+  it('canonicalizes the literal default microphone without changing explicit selections', () => {
+    const legacyDefault = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    legacyDefault.schemaVersion = 26;
+    const defaultRecording = readRecord(legacyDefault.recording);
+    if (defaultRecording === null) throw new Error('Missing recording settings');
+    (defaultRecording as Record<string, unknown>).preferredMicrophoneId = 'default';
+
+    const migratedDefault = SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(legacyDefault));
+    expect(migratedDefault.recording.preferredMicrophoneId).toBeNull();
+
+    const explicit = structuredClone(legacyDefault);
+    const explicitRecording = readRecord(explicit.recording);
+    if (explicitRecording === null) throw new Error('Missing recording settings');
+    (explicitRecording as Record<string, unknown>).preferredMicrophoneId = 'studio-microphone';
+    const migratedExplicit = SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(explicit));
+    expect(migratedExplicit.recording.preferredMicrophoneId).toBe('studio-microphone');
   });
 
   it('makes v19 emit literal v20 and v20 emit frozen v21 before current migration', () => {
@@ -89,7 +167,7 @@ describe('frozen settings migrations', () => {
     });
 
     const current = migrateV21ToCurrent(v21);
-    expect(current.schemaVersion).toBe(25);
+    expect(current.schemaVersion).toBe(27);
     expect(current.transcription.language).toBe('fr');
     expect(current.dictationProfiles.map(({ id }) => id)).toEqual([
       'general',
@@ -127,9 +205,9 @@ describe('frozen settings migrations', () => {
 
     const v24 = SETTINGS_MIGRATIONS[23]?.(source);
     if (typeof v24 !== 'object' || v24 === null) throw new Error('V23 migration did not emit v24');
-    const migrated = SettingsSchema.parse(
-      SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>),
-    );
+    const v25 = SETTINGS_MIGRATIONS[24]?.(v24 as Readonly<Record<string, unknown>>);
+    if (typeof v25 !== 'object' || v25 === null) throw new Error('V24 migration did not emit v25');
+    const migrated = migrateV25ToCurrent(v25 as Readonly<Record<string, unknown>>);
     expect(
       migrated.dictationProfiles.find(({ id }) => id === 'prompt-to-english')?.shortcut.keys,
     ).toEqual(['X', 'Q']);
@@ -424,7 +502,9 @@ function expectFrozenCanariesToSurvive(
 
   const recording = readRecord(source.recording);
   if (typeof recording?.preferredMicrophoneId === 'string') {
-    expect(migrated.recording.preferredMicrophoneId).toBe(recording.preferredMicrophoneId);
+    expect(migrated.recording.preferredMicrophoneId).toBe(
+      recording.preferredMicrophoneId === 'default' ? null : recording.preferredMicrophoneId,
+    );
   }
   const transcription = readRecord(source.transcription);
   if (typeof transcription?.language === 'string') {

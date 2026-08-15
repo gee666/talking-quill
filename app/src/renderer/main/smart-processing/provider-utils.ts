@@ -93,7 +93,15 @@ export function draftsEqual(left: ProviderSettingsDraft, right: ProviderSettings
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
   for (const key of keys) {
     const field = key as keyof ProviderSettingsDraft;
-    if (left[field] !== right[field]) return false;
+    const leftValue = left[field];
+    const rightValue = right[field];
+    if (Array.isArray(leftValue) && Array.isArray(rightValue)) {
+      if (
+        leftValue.length !== rightValue.length ||
+        leftValue.some((value, index) => value !== rightValue[index])
+      )
+        return false;
+    } else if (leftValue !== rightValue) return false;
   }
   return true;
 }
@@ -103,7 +111,7 @@ export function providerFieldErrors(
 ): Readonly<Record<string, string>> {
   const errors: Record<string, string> = {};
   for (const issue of issues) {
-    const field = issue.path.at(-1);
+    const field = [...issue.path].reverse().find((segment) => typeof segment === 'string');
     if (typeof field === 'string' && errors[field] === undefined) errors[field] = issue.message;
   }
   return errors;
@@ -124,6 +132,8 @@ export function piDiscoveryError(error: unknown): string {
       return 'The installed Pi model list was malformed or incompatible. Update Pi, then retry.';
     case 'NO_MODELS':
       return 'Pi returned no models. Authenticate or enter a strict provider/model ID manually.';
+    case 'INVALID_CONFIG':
+      return 'A configured Pi extension path or installed npm package is missing or invalid. Install npm packages with pi install, fix the listed sources, save, and retry.';
     case 'PI_NOT_FOUND':
       return 'Pi was not found. Run npm install -g @earendil-works/pi-coding-agent, then use Auto-detect.';
     case 'PI_CONFIG_INVALID':
@@ -144,6 +154,9 @@ export function actionableError(error: unknown, providerId?: RunnableProviderId)
   }
   if (providerId === 'pi' && code === 'MODEL_NOT_FOUND') {
     return 'The selected Pi model disappeared. Open Settings and select another model.';
+  }
+  if (providerId === 'pi' && code === 'INVALID_CONFIG') {
+    return 'A configured Pi extension path or installed npm package is missing or invalid. Install npm packages with pi install, then fix and save the extension list.';
   }
   return (
     (code === null ? undefined : ACTIONABLE_ERRORS[code]) ??

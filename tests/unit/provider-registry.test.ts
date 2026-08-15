@@ -3,6 +3,7 @@ import {
   OPENAI_COMPATIBLE_PROVIDER_IDS,
   PROVIDER_IDS,
   NATIVE_CLOUD_PROVIDER_IDS,
+  PersistedProviderConfigSchema,
   ProviderCatalogEntrySchema,
   ProviderConfigSchema,
 } from '../../app/src/shared/schemas/providers';
@@ -121,6 +122,68 @@ describe('provider registry and presets', () => {
     expect(
       ProviderConfigSchema.parse({ providerId: 'openrouter', timeoutMs: 3_000 }),
     ).toMatchObject({ providerId: 'openrouter', timeoutMs: 3_000 });
+    expect(
+      ProviderConfigSchema.parse({
+        providerId: 'pi',
+        piExtensionSources: [
+          'C:\\Trusted Extensions\\cleanup.ts',
+          './extensions/format.ts',
+          'npm:trusted-extension',
+          'npm:@trusted/pi-extension',
+        ],
+      }).piExtensionSources,
+    ).toEqual([
+      'C:\\Trusted Extensions\\cleanup.ts',
+      './extensions/format.ts',
+      'npm:trusted-extension',
+      'npm:@trusted/pi-extension',
+    ]);
+    expect(() =>
+      ProviderConfigSchema.parse({
+        providerId: 'openai',
+        piExtensionSources: ['/trusted/extension.ts'],
+      }),
+    ).toThrow();
+    expect(
+      PersistedProviderConfigSchema.safeParse({
+        providerId: 'pi',
+        piExtensionSources: ['npm:@prerelease/pi-extension'],
+      }).success,
+    ).toBe(true);
+    for (const source of [
+      '',
+      '   ',
+      '--no-tools',
+      'bad\nsource',
+      'npm:',
+      'npm:../pi-extension',
+      'npm:@trusted/../pi-extension',
+      'npm:@trusted/pi-extension@1.0.0',
+      'npm:pi-extension@^1',
+      'npm:@trusted/pi-extension/extra',
+      'npm:https://example.test/extension',
+      'git:github.com/trusted/pi-extension',
+      'https://example.test/extension.ts',
+      '\\\\server\\share\\extension.ts',
+      '//server/share/extension.ts',
+      '\\\\?\\UNC\\server\\share\\extension.ts',
+      '\\\\.\\UNC\\server\\share\\extension.ts',
+      '\\??\\UNC\\server\\share\\extension.ts',
+      'C:\\bad%TEMP%\\extension.ts',
+      './bad&(extension).ts',
+    ]) {
+      expect(
+        ProviderConfigSchema.safeParse({ providerId: 'pi', piExtensionSources: [source] }).success,
+      ).toBe(false);
+      if (source.startsWith('\\\\') || source.startsWith('//') || source.startsWith('\\??\\')) {
+        expect(
+          PersistedProviderConfigSchema.safeParse({
+            providerId: 'pi',
+            piExtensionSources: [source],
+          }).success,
+        ).toBe(false);
+      }
+    }
   });
 
   it('registers every native cloud adapter as credentialed and runnable', () => {

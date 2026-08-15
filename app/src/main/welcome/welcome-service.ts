@@ -32,6 +32,7 @@ export class WelcomeService {
   readonly #now: () => number;
   #operation: Promise<unknown> = Promise.resolve();
   #invalidationGeneration = 0;
+  #microphoneBindingValid = true;
   #stepUpdateController: AbortController | null = null;
   #completionUpdateController: AbortController | null = null;
 
@@ -49,7 +50,19 @@ export class WelcomeService {
     return Object.freeze({ ...this.#settings.get().welcome, reopened });
   }
 
+  beginMicrophoneBindingValidation(): void {
+    this.#microphoneBindingValid = false;
+    this.#invalidationGeneration += 1;
+    this.#stepUpdateController?.abort();
+    this.#completionUpdateController?.abort();
+  }
+
+  confirmMicrophoneBinding(): void {
+    this.#microphoneBindingValid = true;
+  }
+
   async invalidateMicrophoneBinding(): Promise<void> {
+    this.#microphoneBindingValid = false;
     await this.#invalidate(MICROPHONE_STEP, {
       microphoneTested: false,
       microphoneEvidence: null,
@@ -98,6 +111,9 @@ export class WelcomeService {
         }
         if (this.#invalidationGeneration !== invalidationGeneration) {
           throw setupChangedError();
+        }
+        if (parsed > current && current === MICROPHONE_STEP) {
+          this.#microphoneBindingValid = true;
         }
         return this.state();
       } finally {
@@ -184,8 +200,15 @@ export class WelcomeService {
   async #evidenceForLeaving(step: WelcomeStep): Promise<NonNullable<SettingsPatch['welcome']>> {
     if (step === MICROPHONE_STEP) {
       const observation = this.#prerequisites.microphoneObservation();
-      if (!this.#prerequisites.microphoneReady() || !isUsableMicrophoneEvidence(observation)) {
-        throw prerequisiteError('Speak during the microphone test before continuing.');
+      if (
+        !this.#prerequisites.microphoneReady() ||
+        !isUsableMicrophoneEvidence(observation) ||
+        !microphoneMatchesPreference(
+          observation.boundDeviceId,
+          this.#settings.get().recording.preferredMicrophoneId,
+        )
+      ) {
+        throw prerequisiteError('Speak during the selected microphone test before continuing.');
       }
       return {
         microphoneTested: true,
@@ -218,10 +241,15 @@ export class WelcomeService {
     const settings = this.#settings.get();
     const microphone = settings.welcome.microphoneEvidence;
     if (
+      !this.#microphoneBindingValid ||
       !this.#prerequisites.microphoneReady() ||
       microphone == null ||
       microphone.observedRms < USABLE_RMS_THRESHOLD ||
-      microphone.sampleCount < MIN_OBSERVED_SAMPLES
+      microphone.sampleCount < MIN_OBSERVED_SAMPLES ||
+      !microphoneMatchesPreference(
+        microphone.boundDeviceId,
+        settings.recording.preferredMicrophoneId,
+      )
     ) {
       throw prerequisiteError('Microphone setup is no longer ready. Return to step 2.');
     }
@@ -256,6 +284,13 @@ function isUsableMicrophoneEvidence(
     observation.observedRms >= USABLE_RMS_THRESHOLD &&
     observation.sampleCount >= MIN_OBSERVED_SAMPLES
   );
+}
+
+function microphoneMatchesPreference(
+  boundDeviceId: string | null,
+  preferredMicrophoneId: string | null,
+): boolean {
+  return preferredMicrophoneId === null || boundDeviceId === preferredMicrophoneId;
 }
 
 function setupChangedError(): PublicAppError {

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { invokeRegistry } from '../../app/src/shared/ipc/registry';
-import { MicrophoneIdSchema } from '../../app/src/shared/schemas/audio';
+import {
+  MicrophoneIdSchema,
+  MicrophonePreferenceIdSchema,
+} from '../../app/src/shared/schemas/audio';
 import { HistoryCreateSchema } from '../../app/src/shared/schemas/history';
 import {
   PROVIDER_IDS,
@@ -48,6 +51,9 @@ describe('shared schema invariants', () => {
     for (const invalid of ['', 'm'.repeat(1_025)]) {
       expect(MicrophoneIdSchema.safeParse(invalid).success, JSON.stringify(invalid)).toBe(false);
     }
+    expect(MicrophoneIdSchema.safeParse('default').success).toBe(true);
+    expect(MicrophonePreferenceIdSchema.safeParse('default').success).toBe(false);
+    expect(MicrophonePreferenceIdSchema.safeParse('studio-microphone').success).toBe(true);
   });
 
   it('accepts only transport-supported endpoints for new configuration without breaking v19 data', () => {

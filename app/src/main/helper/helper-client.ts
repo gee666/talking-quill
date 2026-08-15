@@ -86,6 +86,8 @@ export class HelperClient {
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #plannedExit: { readonly reason: HelperReadinessReason; readonly restart: boolean } | null = null;
   #failureTimes: number[] = [];
+  #crashLoopOpen = false;
+  #halfOpenProbe = false;
   #readiness: HelperReadiness = INITIAL_HELPER_READINESS;
 
   constructor(options: HelperClientOptions) {
@@ -128,9 +130,16 @@ export class HelperClient {
     return () => this.#notificationListeners.delete(listener);
   }
 
+  subscribeInputDeviceInvalidations(listener: () => void): () => void {
+    return this.subscribeNotifications((notification) => {
+      if (notification.method === 'audio.input_devices_changed') listener();
+    });
+  }
+
   async start(): Promise<void> {
     const revision = ++this.#runIntentRevision;
     this.#desiredRunning = true;
+    this.#clearRestart();
     await this.#startForIntent(revision);
   }
 
@@ -165,6 +174,9 @@ export class HelperClient {
   async stop(): Promise<void> {
     this.#runIntentRevision += 1;
     this.#desiredRunning = false;
+    this.#failureTimes = [];
+    this.#crashLoopOpen = false;
+    this.#halfOpenProbe = false;
     await this.#stopCurrentProcess();
   }
 
@@ -333,6 +345,7 @@ export class HelperClient {
       return;
     }
     if (!this.#canLaunch()) return;
+    if (this.#crashLoopOpen) this.#halfOpenProbe = true;
     this.#launching = this.#launch().finally(() => {
       this.#launching = null;
     });
@@ -449,6 +462,10 @@ export class HelperClient {
     } catch (error) {
       if (!this.#desiredRunning) return;
       const reason = error instanceof HelperBinaryError ? error.reason : 'binary-invalid';
+      if (this.#halfOpenProbe) {
+        this.#recordFailure(reason);
+        return;
+      }
       this.#setReadiness({
         status: 'unavailable',
         reason,
@@ -535,6 +552,23 @@ export class HelperClient {
           permissions,
         );
       }
+      const capture = await this.#rpcChannel.request(
+        session,
+        'session.set_capture',
+        { mode: 'off' },
+        {
+          timeoutMs: remainingLaunchTime(),
+          timeoutReason: 'handshake-timeout',
+          allowDraining: false,
+          supervision: true,
+        },
+      );
+      if (capture.mode !== 'off') {
+        throw new HelperClientError(
+          'rpc-error',
+          'Native helper did not confirm disabled session capture',
+        );
+      }
       if (readiness.status === 'ready') this.#activation.setBlockedByHealth(false);
       await this.#activation.reconcileFreshHelper(
         session,
@@ -542,6 +576,11 @@ export class HelperClient {
         'handshake-timeout',
       );
       if (!this.#isActiveChild(child, session)) return;
+      if (this.#halfOpenProbe) {
+        this.#failureTimes = [];
+        this.#crashLoopOpen = false;
+        this.#halfOpenProbe = false;
+      }
       this.#setReadiness(readiness);
       this.#startHeartbeat(child, session);
     } catch (error) {
@@ -660,16 +699,29 @@ export class HelperClient {
   }
 
   #recordFailure(reason: HelperReadinessReason, restart = true): void {
-    const now = Date.now();
-    this.#failureTimes = this.#failureTimes.filter((time) => now - time < FAILURE_WINDOW_MS);
-    this.#failureTimes.push(now);
-    if (!restart || this.#failureTimes.length >= FAILURE_LIMIT) {
+    if (!restart) {
+      this.#failureTimes = [];
+      this.#crashLoopOpen = false;
+      this.#halfOpenProbe = false;
+      this.#clearRestart();
       this.#setReadiness({
         status: reason === 'protocol-mismatch' ? 'incompatible' : 'unavailable',
-        reason: this.#failureTimes.length >= FAILURE_LIMIT ? 'crash-loop' : reason,
+        reason,
         helperVersion: this.#readiness.helperVersion,
         permissions: this.#readiness.permissions,
       });
+      return;
+    }
+
+    const now = Date.now();
+    if (this.#halfOpenProbe) {
+      this.#openCrashLoop();
+      return;
+    }
+    this.#failureTimes = this.#failureTimes.filter((time) => now - time < FAILURE_WINDOW_MS);
+    this.#failureTimes.push(now);
+    if (this.#failureTimes.length >= FAILURE_LIMIT) {
+      this.#openCrashLoop();
       return;
     }
 
@@ -680,7 +732,23 @@ export class HelperClient {
       permissions: this.#readiness.permissions,
     });
     const delayIndex = Math.min(this.#failureTimes.length - 1, RESTART_DELAYS_MS.length - 1);
-    const restartAfter = RESTART_DELAYS_MS[delayIndex];
+    this.#scheduleRestart(RESTART_DELAYS_MS[delayIndex] ?? RESTART_DELAYS_MS[0]);
+  }
+
+  #openCrashLoop(): void {
+    this.#failureTimes = [];
+    this.#crashLoopOpen = true;
+    this.#halfOpenProbe = false;
+    this.#setReadiness({
+      status: 'unavailable',
+      reason: 'crash-loop',
+      helperVersion: this.#readiness.helperVersion,
+      permissions: this.#readiness.permissions,
+    });
+    this.#scheduleRestart(FAILURE_WINDOW_MS);
+  }
+
+  #scheduleRestart(restartAfter: number): void {
     const revision = this.#runIntentRevision;
     this.#clearRestart();
     this.#restartTimer = setTimeout(() => {

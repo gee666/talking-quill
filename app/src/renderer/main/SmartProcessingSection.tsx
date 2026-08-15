@@ -150,6 +150,9 @@ export function SmartProcessingSection({
       configuration.selectedId,
       configuration.persistedCredentialBinding,
       configuration.credentialEpoch,
+      configuration.selectedId === 'pi'
+        ? JSON.stringify(configuration.savedDraft.piExtensionSources ?? [])
+        : '',
     );
     if (!claimAutoDiscovery(attempt)) return;
     void operations.discoverModelsQuietly({
@@ -163,6 +166,7 @@ export function SmartProcessingSection({
     configuration.credentialEpoch,
     configuration.draft,
     configuration.persistedCredentialBinding,
+    configuration.savedDraft.piExtensionSources,
     configuration.selectedId,
     configurationDirty,
     coordinator,
@@ -273,7 +277,7 @@ export function SmartProcessingSection({
                   operationsDisabled={
                     !configuration.providerSelectionPersisted ||
                     configuration.endpointRepairRequired ||
-                    (configuration.dirty && configuration.selectedId !== 'pi')
+                    configuration.dirty
                   }
                   onChange={(value) => {
                     pi.clearMessage();

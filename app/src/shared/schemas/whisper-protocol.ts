@@ -114,6 +114,7 @@ export const WhisperWorkerErrorCodeSchema = z.enum([
   'CANCELLED',
   'INFERENCE_FAILED',
   'PROTOCOL_ERROR',
+  'WORKER_CRASHED',
 ]);
 
 export const WhisperWorkerResponseSchema = z.discriminatedUnion('ok', [

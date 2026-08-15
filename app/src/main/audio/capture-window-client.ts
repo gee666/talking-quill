@@ -17,9 +17,16 @@ export interface CaptureStarted {
   readonly captureId: string;
   readonly activeMicrophoneId: string | null;
   readonly preferredUnavailable: boolean;
+  readonly bindingGeneration: number;
   readonly systemAudioIncluded: boolean;
   readonly sampleRate: 16_000;
   readonly channelCount: 1;
+}
+
+export interface CaptureRebound {
+  readonly captureId: string;
+  readonly activeMicrophoneId: string | null;
+  readonly bindingGeneration: number;
 }
 
 export interface CaptureFrame {
@@ -67,7 +74,10 @@ export class CaptureWindowClient {
   readonly #channelFactory: CaptureMessageChannelFactory;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #frameListeners = new Set<(frame: CaptureFrame) => void>();
-  readonly #deviceListeners = new Set<(devices: readonly MicrophoneDevice[]) => void>();
+  readonly #deviceListeners = new Set<(defaultInvalidated: boolean) => void>();
+  readonly #defaultInvalidationListeners = new Set<
+    (captureId: string, bindingGeneration: number) => void
+  >();
   readonly #stopListeners = new Set<
     (captureId: string, reason: UnexpectedCaptureStopReason) => void
   >();
@@ -142,6 +152,7 @@ export class CaptureWindowClient {
       captureId,
       activeMicrophoneId: response.activeMicrophoneId,
       preferredUnavailable: response.preferredUnavailable,
+      bindingGeneration: response.bindingGeneration,
       systemAudioIncluded: response.systemAudioIncluded,
       sampleRate: response.sampleRate,
       channelCount: response.channelCount,
@@ -163,6 +174,27 @@ export class CaptureWindowClient {
     }
   }
 
+  async rebindDefault(captureId: string, bindingGeneration: number): Promise<CaptureRebound> {
+    if (this.#activeCaptureId !== captureId) throw new CaptureClientError('capture-unavailable');
+    const response = await this.#request({
+      type: 'stream:rebind-default',
+      requestId: randomUUID(),
+      captureId,
+      bindingGeneration,
+    });
+    if (response.type !== 'stream:rebound' || response.captureId !== captureId) {
+      throw new CaptureClientError('capture-failed');
+    }
+    if (this.#activeCaptureId !== captureId) {
+      throw new CaptureClientError('capture-unavailable');
+    }
+    return {
+      captureId,
+      activeMicrophoneId: response.activeMicrophoneId,
+      bindingGeneration: response.bindingGeneration,
+    };
+  }
+
   async stop(captureId: string = this.#activeCaptureId ?? ''): Promise<void> {
     if (captureId.length === 0) return;
     const response = await this.#request({
@@ -181,9 +213,16 @@ export class CaptureWindowClient {
     return () => this.#frameListeners.delete(listener);
   }
 
-  onDevicesChanged(listener: (devices: readonly MicrophoneDevice[]) => void): () => void {
+  onDevicesChanged(listener: (defaultInvalidated: boolean) => void): () => void {
     this.#deviceListeners.add(listener);
     return () => this.#deviceListeners.delete(listener);
+  }
+
+  onDefaultInvalidated(
+    listener: (captureId: string, bindingGeneration: number) => void,
+  ): () => void {
+    this.#defaultInvalidationListeners.add(listener);
+    return () => this.#defaultInvalidationListeners.delete(listener);
   }
 
   onUnexpectedStop(
@@ -202,6 +241,7 @@ export class CaptureWindowClient {
     this.reset();
     this.#frameListeners.clear();
     this.#deviceListeners.clear();
+    this.#defaultInvalidationListeners.clear();
     this.#stopListeners.clear();
   }
 
@@ -235,10 +275,21 @@ export class CaptureWindowClient {
     }
     const message = parsed.data;
     if (message.type === 'port:ready') return;
-    if (message.type === 'devices:changed') {
+    if (message.type === 'devices:invalidated') {
       for (const listener of this.#deviceListeners) {
         try {
-          listener(message.devices);
+          listener(message.defaultInvalidated);
+        } catch {
+          // One consumer must not block independent capture consumers.
+        }
+      }
+      return;
+    }
+    if (message.type === 'stream:default-invalidated') {
+      if (message.captureId !== this.#activeCaptureId) return;
+      for (const listener of this.#defaultInvalidationListeners) {
+        try {
+          listener(message.captureId, message.bindingGeneration);
         } catch {
           // One consumer must not block independent capture consumers.
         }

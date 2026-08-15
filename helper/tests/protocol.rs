@@ -105,6 +105,10 @@ impl Platform for FakePlatform {
         HookStatus::Ready
     }
 
+    fn protocol_initialized(&self) {
+        self.state.record("protocol_initialized");
+    }
+
     fn configure_activation(
         &self,
         enabled: bool,
@@ -334,9 +338,9 @@ fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
 }
 
 fn initialize(server: &mut Server<FakePlatform>, receiver: &Receiver<Outbound>) {
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
     let response = receive(receiver);
-    assert_eq!(response["result"]["protocolVersion"], 6);
+    assert_eq!(response["result"]["protocolVersion"], 7);
     assert!(response["result"].get("defaultActivationKey").is_none());
 }
 
@@ -373,7 +377,7 @@ fn inbound_allowlist_is_exact() {
 }
 
 #[test]
-fn initialization_must_be_first_exactly_once_and_exactly_version_six() {
+fn initialization_must_be_first_exactly_once_and_exactly_version_seven() {
     let (mut server, receiver, state, gate) = setup_observable();
     assert!(!gate.is_open());
 
@@ -399,6 +403,16 @@ fn initialization_must_be_first_exactly_once_and_exactly_version_six() {
 
     initialize(&mut server, &receiver);
     assert!(gate.is_open());
+    assert_eq!(
+        state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == "protocol_initialized")
+            .count(),
+        1
+    );
 
     assert!(server.handle_payload(&request(4, "initialize", json!({}))));
     assert_error(&receiver, -32_002, json!(4));
@@ -454,7 +468,7 @@ fn string_request_ids_are_echoed_by_responses_and_paste_commit_notifications() {
     assert!(server.handle_payload(&request_with_id(
         json!("initialize-id"),
         "initialize",
-        json!({"protocolVersion": 6}),
+        json!({"protocolVersion": 7}),
     )));
     assert_eq!(receive(&receiver)["id"], "initialize-id");
 
@@ -600,7 +614,7 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 6})),
+        request(1, "initialize", json!({"protocolVersion": 7})),
         request(2, "ping", json!({})),
         request(3, "shutdown", json!({})),
     ] {
@@ -627,7 +641,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
     let mut eof_input = Vec::new();
     write_frame(
         &mut eof_input,
-        &request(1, "initialize", json!({"protocolVersion": 6})),
+        &request(1, "initialize", json!({"protocolVersion": 7})),
     )
     .unwrap();
     let mut eof_output = Vec::new();
@@ -645,7 +659,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
 fn framed_runner_does_not_wait_for_eof_after_shutdown() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 6})),
+        request(1, "initialize", json!({"protocolVersion": 7})),
         request(2, "shutdown", json!({})),
     ] {
         write_frame(&mut input, &payload).unwrap();
@@ -755,7 +769,7 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
 #[test]
 fn full_framed_coordinator_dispatches_every_registered_method_in_sequence() {
     let calls = [
-        (1, "initialize", json!({"protocolVersion": 6})),
+        (1, "initialize", json!({"protocolVersion": 7})),
         (
             2,
             "activation.configure",
@@ -1115,7 +1129,7 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
 #[test]
 fn valid_notifications_are_never_executed_or_answered() {
     let (mut server, receiver, state, gate) = setup_observable();
-    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 6}),)));
+    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 7}),)));
     assert!(receiver.try_recv().is_err());
     assert!(!gate.is_open());
 
@@ -1123,7 +1137,7 @@ fn valid_notifications_are_never_executed_or_answered() {
     state.calls.lock().unwrap().clear();
 
     for (method, params) in [
-        ("initialize", json!({"protocolVersion": 6})),
+        ("initialize", json!({"protocolVersion": 7})),
         (
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
@@ -1170,7 +1184,7 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
         Arc::clone(&terminal),
     );
 
-    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
+    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
     assert!(!gate.is_open());
     assert_eq!(
         terminal.reason(),
@@ -1200,7 +1214,7 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
     let _ = outbound_rx.recv().unwrap();
     assert!(gate.is_open());
     drop(outbound_rx);
@@ -1235,7 +1249,7 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
         Arc::clone(&gate),
         terminal,
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 6}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
     assert!(gate.is_open());
 
     assert!(!server.handle_payload(&request(2, "ping", json!({}))));
@@ -1310,7 +1324,7 @@ proptest! {
 }
 
 #[test]
-fn protocol_v6_configures_ordered_chords_and_preserves_every_wire_field() {
+fn protocol_v7_configures_ordered_chords_and_preserves_every_wire_field() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
     let values = json!({
@@ -1343,7 +1357,7 @@ fn protocol_v6_configures_ordered_chords_and_preserves_every_wire_field() {
 }
 
 #[test]
-fn protocol_v6_enforces_binding_count_enablement_key_and_conflict_rules() {
+fn protocol_v7_enforces_binding_count_enablement_key_and_conflict_rules() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
 
@@ -1411,7 +1425,7 @@ fn protocol_v6_enforces_binding_count_enablement_key_and_conflict_rules() {
 }
 
 #[test]
-fn protocol_v6_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
+fn protocol_v7_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
     let values = json!({

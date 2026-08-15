@@ -17,6 +17,15 @@ import {
   type TranscriptionResult,
 } from '../../shared/schemas/transcription';
 
+const PIPELINE_DISPOSAL_TIMEOUT_MS = 30_000;
+
+export class WhisperRuntimePoisonedError extends Error {
+  constructor(detail: string) {
+    super(`Whisper pipeline disposal failed; worker replacement is required. ${detail}`);
+    this.name = 'WhisperRuntimePoisonedError';
+  }
+}
+
 export interface WhisperPipeline {
   (pcm: Float32Array, options: Readonly<Record<string, unknown>>): Promise<unknown>;
   detectLanguage?(pcm: Float32Array): Promise<WhisperSourceLanguage>;
@@ -64,20 +73,29 @@ interface TimestampedChunk {
   readonly timestamp: readonly [number | null, number | null];
 }
 
+interface PendingMemoryPressure {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (error: Error) => void;
+}
+
 export class WhisperRuntime {
   readonly #cacheDirectory: string;
   readonly #revisions: Readonly<Record<WhisperModelId, string>>;
   readonly #factory: WhisperPipelineFactory;
   readonly #verify: WhisperModelVerifier;
+  readonly #onFatalError: ((error: WhisperRuntimePoisonedError) => void) | undefined;
   readonly #sessions = new Map<string, StreamingState>();
   readonly #idleWaiters = new Set<() => void>();
   readonly #idleUnloadMs: number;
+  readonly #disposalTimeoutMs: number;
   #pipeline: Promise<LoadedPipeline> | null = null;
   #disposal: Promise<void> | null = null;
   #idleTimer: ReturnType<typeof setTimeout> | null = null;
   #busy = 0;
   #pipelineLoadCount = 0;
-  #memoryPressurePending = false;
+  #memoryPressurePending: PendingMemoryPressure | null = null;
+  #poisoned: WhisperRuntimePoisonedError | null = null;
 
   constructor(options: {
     readonly cacheDirectory: string;
@@ -85,12 +103,16 @@ export class WhisperRuntime {
     readonly factory: WhisperPipelineFactory;
     readonly verify?: WhisperModelVerifier;
     readonly idleUnloadMs?: number;
+    readonly disposalTimeoutMs?: number;
+    readonly onFatalError?: (error: WhisperRuntimePoisonedError) => void;
   }) {
     this.#cacheDirectory = options.cacheDirectory;
     this.#revisions = options.revisions;
     this.#factory = options.factory;
     this.#verify = options.verify ?? (() => Promise.resolve());
+    this.#onFatalError = options.onFatalError;
     this.#idleUnloadMs = options.idleUnloadMs ?? WHISPER_IDLE_UNLOAD_MS;
+    this.#disposalTimeoutMs = options.disposalTimeoutMs ?? PIPELINE_DISPOSAL_TIMEOUT_MS;
   }
 
   async checkModel(modelId: WhisperModelId): Promise<void> {
@@ -123,6 +145,7 @@ export class WhisperRuntime {
   }
 
   openSession(sessionId: string, options: TranscriptionOptions): void {
+    this.#assertUsable();
     if (this.#sessions.has(sessionId)) throw new Error('Streaming session already exists.');
     this.#sessions.set(sessionId, {
       options,
@@ -204,13 +227,14 @@ export class WhisperRuntime {
 
   async unload(modelId?: WhisperModelId): Promise<void> {
     for (;;) {
+      this.#assertUsable();
       if (this.#busy > 0) {
         await new Promise<void>((resolve) => this.#idleWaiters.add(resolve));
         continue;
       }
       const loaded = this.#pipeline;
       if (loaded === null) {
-        if (this.#disposal !== null) await this.#disposal;
+        if (this.#disposal !== null) await this.#awaitDisposal(this.#disposal);
         return;
       }
       const resolved = await loaded.catch(() => null);
@@ -232,11 +256,13 @@ export class WhisperRuntime {
   }
 
   async memoryPressure(): Promise<void> {
-    if (this.#busy > 0) {
-      this.#memoryPressurePending = true;
+    this.#assertUsable();
+    if (this.#busy === 0) {
+      await this.unload();
       return;
     }
-    await this.unload();
+    this.#memoryPressurePending ??= pendingMemoryPressure();
+    await this.#memoryPressurePending.promise;
   }
 
   async shutdown(): Promise<void> {
@@ -248,6 +274,7 @@ export class WhisperRuntime {
     modelId: WhisperModelId,
     operation: (pipeline: WhisperPipeline, reused: boolean) => Promise<Result>,
   ): Promise<PipelineCall<Result>> {
+    this.#assertUsable();
     this.#busy += 1;
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
     this.#idleTimer = null;
@@ -266,11 +293,12 @@ export class WhisperRuntime {
       if (this.#busy === 0) {
         for (const resolve of this.#idleWaiters) resolve();
         this.#idleWaiters.clear();
-        if (this.#memoryPressurePending) {
-          this.#memoryPressurePending = false;
-          void this.unload().catch(() => undefined);
-        } else {
+        const memoryPressure = this.#memoryPressurePending;
+        if (memoryPressure === null) {
           this.#armIdleUnload();
+        } else {
+          this.#memoryPressurePending = null;
+          void this.unload().then(memoryPressure.resolve, memoryPressure.reject);
         }
       }
     }
@@ -279,7 +307,8 @@ export class WhisperRuntime {
   async #load(
     modelId: WhisperModelId,
   ): Promise<{ readonly pipeline: LoadedPipeline; readonly reused: boolean }> {
-    if (this.#disposal !== null) await this.#disposal;
+    this.#assertUsable();
+    if (this.#disposal !== null) await this.#awaitDisposal(this.#disposal);
     const currentPromise = this.#pipeline;
     const current = currentPromise === null ? null : await currentPromise.catch(() => null);
     if (current?.modelId === modelId) return { pipeline: current, reused: true };
@@ -287,6 +316,7 @@ export class WhisperRuntime {
       if (this.#pipeline === currentPromise) this.#pipeline = null;
       await this.#disposePipeline(current.value);
     }
+    this.#assertUsable();
     const revision = this.#revisions[modelId];
     const loadStartedAt = performance.now();
     const loading = this.#verify(modelId, revision, this.#cacheDirectory)
@@ -310,16 +340,49 @@ export class WhisperRuntime {
   }
 
   async #disposePipeline(pipeline: WhisperPipeline): Promise<void> {
-    if (this.#disposal !== null) await this.#disposal;
-    const disposal = Promise.resolve()
-      .then(() => pipeline.dispose?.())
-      .then(() => undefined);
+    this.#assertUsable();
+    if (this.#disposal !== null) await this.#awaitDisposal(this.#disposal);
+    const disposal = withTimeout(
+      Promise.resolve()
+        .then(() => pipeline.dispose?.())
+        .then(() => undefined),
+      this.#disposalTimeoutMs,
+      'Whisper pipeline disposal timed out.',
+    );
     this.#disposal = disposal;
     try {
       await disposal;
+    } catch (error: unknown) {
+      throw this.#poison(error);
     } finally {
       if (this.#disposal === disposal) this.#disposal = null;
     }
+  }
+
+  async #awaitDisposal(disposal: Promise<void>): Promise<void> {
+    try {
+      await disposal;
+    } catch (error: unknown) {
+      throw this.#poison(error);
+    }
+    this.#assertUsable();
+  }
+
+  #poison(error: unknown): WhisperRuntimePoisonedError {
+    if (this.#poisoned !== null) return this.#poisoned;
+    const detail = error instanceof Error ? error.message : 'Unknown disposal failure.';
+    const poisoned = new WhisperRuntimePoisonedError(detail);
+    this.#poisoned = poisoned;
+    try {
+      this.#onFatalError?.(poisoned);
+    } catch {
+      // The runtime remains poisoned even if its owner cannot initiate process exit.
+    }
+    return poisoned;
+  }
+
+  #assertUsable(): void {
+    if (this.#poisoned !== null) throw this.#poisoned;
   }
 
   #armIdleUnload(): void {
@@ -420,6 +483,37 @@ class PcmQueue {
     this.#length = 0;
     return output;
   }
+}
+
+function pendingMemoryPressure(): PendingMemoryPressure {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function withTimeout(
+  operation: Promise<void>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    timeout.unref();
+    void operation.then(
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error('Whisper pipeline disposal failed.'));
+      },
+    );
+  });
 }
 
 function mergePipelineMetadata(

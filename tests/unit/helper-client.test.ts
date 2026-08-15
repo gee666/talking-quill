@@ -50,7 +50,12 @@ async function waitFor(predicate: () => boolean, timeoutMilliseconds = 4_000): P
   }
 }
 
-function createControlledClient(options: { readonly deferStartupHealth?: boolean } = {}): {
+function createControlledClient(
+  options: {
+    readonly deferStartupHealth?: boolean;
+    readonly deferStartupCapture?: boolean;
+  } = {},
+): {
   client: HelperClient;
   writes: Buffer[];
   requests: { readonly id: number; readonly method: string; readonly params: unknown }[];
@@ -79,6 +84,7 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
   const decoder = new HelperFrameDecoder();
   let blockNext = false;
   let startupHealthResponses = options.deferStartupHealth === true ? 0 : 2;
+  let startupCaptureResponses = options.deferStartupCapture === true ? 0 : 1;
   const kill = vi.fn(() => true);
 
   stdin.write = (frame: Buffer): boolean => {
@@ -98,7 +104,7 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
               jsonrpc: '2.0',
               id: request.id,
               result: {
-                protocolVersion: 6,
+                protocolVersion: 7,
                 helperVersion: '1.0.0',
                 platform: process.platform === 'win32' ? 'windows' : 'macos',
                 architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',
@@ -137,6 +143,25 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
               jsonrpc: '2.0',
               id: request.id,
               result: { ok: true, hookStatus: 'ready' },
+            }),
+          );
+        });
+      } else if (
+        startupCaptureResponses > 0 &&
+        request.method === 'session.set_capture' &&
+        typeof request.params === 'object' &&
+        request.params !== null &&
+        'mode' in request.params &&
+        request.params.mode === 'off'
+      ) {
+        startupCaptureResponses -= 1;
+        queueMicrotask(() => {
+          stdout.emit(
+            'data',
+            encodeHelperFrame({
+              jsonrpc: '2.0',
+              id: request.id,
+              result: { mode: 'off' },
             }),
           );
         });
@@ -208,6 +233,94 @@ function createControlledClient(options: { readonly deferStartupHealth?: boolean
     },
     kill,
   };
+}
+
+function createAutomaticChild(
+  requests: { readonly id: number; readonly method: string; readonly params: unknown }[],
+): ChildProcessWithoutNullStreams {
+  const stdin = new EventEmitter() as EventEmitter & {
+    destroyed: boolean;
+    writable: boolean;
+    write: (frame: Buffer, callback?: (error?: Error | null) => void) => boolean;
+  };
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const decoder = new HelperFrameDecoder();
+  stdin.destroyed = false;
+  stdin.writable = true;
+  let closed = false;
+
+  const processEmitter = new EventEmitter() as EventEmitter & {
+    stdin: typeof stdin;
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: () => boolean;
+  };
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    stdin.writable = false;
+    processEmitter.exitCode = 0;
+    processEmitter.emit('close', 0, null);
+  };
+  const respond = (id: number, result: unknown): void => {
+    queueMicrotask(() => {
+      stdout.emit('data', encodeHelperFrame({ jsonrpc: '2.0', id, result }));
+    });
+  };
+  stdin.write = (frame): boolean => {
+    for (const payload of decoder.push(frame)) {
+      const request = JSON.parse(payload.toString('utf8')) as {
+        id: number;
+        method: string;
+        params: unknown;
+      };
+      requests.push(request);
+      if (request.method === 'initialize') {
+        respond(request.id, {
+          protocolVersion: 7,
+          helperVersion: '1.0.0',
+          platform: process.platform === 'win32' ? 'windows' : 'macos',
+          architecture: process.arch === 'arm64' ? 'aarch64' : 'x86_64',
+          hookStatus: 'ready',
+          permissions: {
+            accessibility: 'not_applicable',
+            inputMonitoring: 'not_applicable',
+            eventPost: 'not_applicable',
+          },
+        });
+      } else if (request.method === 'permissions.get') {
+        respond(request.id, {
+          accessibility: 'not_applicable',
+          inputMonitoring: 'not_applicable',
+          eventPost: 'not_applicable',
+        });
+      } else if (request.method === 'ping') {
+        respond(request.id, { ok: true, hookStatus: 'ready' });
+      } else if (
+        request.method === 'session.set_capture' ||
+        request.method === 'activation.configure'
+      ) {
+        respond(request.id, request.params);
+      } else if (request.method === 'shutdown') {
+        respond(request.id, {});
+        queueMicrotask(close);
+      }
+    }
+    return true;
+  };
+  processEmitter.stdin = stdin;
+  processEmitter.stdout = stdout;
+  processEmitter.stderr = stderr;
+  processEmitter.exitCode = null;
+  processEmitter.signalCode = null;
+  processEmitter.kill = () => {
+    queueMicrotask(close);
+    return true;
+  };
+  return processEmitter as unknown as ChildProcessWithoutNullStreams;
 }
 
 describe('supervised native HelperClient', () => {
@@ -884,8 +997,11 @@ describe('supervised native HelperClient', () => {
     await expect(client.ping()).resolves.toMatchObject({ ok: true });
   });
 
-  it('confirms startup health before replaying retained enabled activation', async () => {
-    const controlled = createControlledClient({ deferStartupHealth: true });
+  it('confirms capture is disabled before replaying retained activation on a fresh helper', async () => {
+    const controlled = createControlledClient({
+      deferStartupHealth: true,
+      deferStartupCapture: true,
+    });
     await controlled.client.configureActivation(true, [shortcutFromLegacyActivation('Q', false)]);
 
     const starting = controlled.client.start();
@@ -903,12 +1019,21 @@ describe('supervised native HelperClient', () => {
       hookStatus: 'ready',
     });
     await vi.waitFor(() =>
+      expect(latestRequest(controlled.requests, 'session.set_capture').params).toEqual({
+        mode: 'off',
+      }),
+    );
+    expect(controlled.requests.some(({ method }) => method === 'activation.configure')).toBe(false);
+    expect(controlled.client.readiness.status).toBe('starting');
+    controlled.emitResult(latestRequest(controlled.requests, 'session.set_capture').id, {
+      mode: 'off',
+    });
+    await vi.waitFor(() =>
       expect(latestRequest(controlled.requests, 'activation.configure').params).toEqual({
         enabled: true,
         bindings: [shortcutFromLegacyActivation('Q', false)],
       }),
     );
-    expect(controlled.client.readiness.status).toBe('starting');
     controlled.emitResult(latestRequest(controlled.requests, 'activation.configure').id, {
       enabled: true,
       bindings: [shortcutFromLegacyActivation('Q', false)],
@@ -1089,6 +1214,46 @@ describe('supervised native HelperClient', () => {
     await expect(client.ping()).resolves.toMatchObject({ ok: true });
   });
 
+  it('routes validated input-device invalidations without exposing endpoint identifiers', async () => {
+    const controlled = createControlledClient();
+    const invalidated = vi.fn();
+    const remove = controlled.client.subscribeInputDeviceInvalidations(invalidated);
+    await controlled.client.start();
+
+    controlled.emitStdout(
+      Buffer.concat([
+        encodeHelperFrame({
+          jsonrpc: '2.0',
+          method: 'activation.event',
+          params: {
+            phase: 'down',
+            profileId: 'general',
+            shortcut: shortcutFromLegacyActivation('Z', false).shortcut,
+          },
+        }),
+        encodeHelperFrame({
+          jsonrpc: '2.0',
+          method: 'audio.input_devices_changed',
+          params: {},
+        }),
+      ]),
+    );
+
+    expect(invalidated).toHaveBeenCalledOnce();
+    remove();
+    controlled.emitStdout(
+      encodeHelperFrame({
+        jsonrpc: '2.0',
+        method: 'audio.input_devices_changed',
+        params: {},
+      }),
+    );
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(controlled.client.readiness.status).toBe('ready');
+    controlled.close();
+    await controlled.client.stop();
+  });
+
   it('keeps protocol supervision healthy when a notification listener throws', async () => {
     const client = createClient('notify');
     client.subscribeNotifications(() => {
@@ -1109,6 +1274,95 @@ describe('supervised native HelperClient', () => {
     });
     await new Promise((resolveWait) => setTimeout(resolveWait, 350));
     expect(client.readiness.status).toBe('incompatible');
+  });
+
+  it('probes a crash loop at bounded intervals and recovers on a later half-open launch', async () => {
+    vi.useFakeTimers();
+    let launches = 0;
+    const recoveredRequests: {
+      readonly id: number;
+      readonly method: string;
+      readonly params: unknown;
+    }[] = [];
+    const client = new HelperClient({
+      executablePath: process.execPath,
+      expectedHelperVersion: '1.0.0',
+      platform: process.platform === 'win32' ? 'win32' : 'darwin',
+      architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
+      spawnHelper: () => {
+        launches += 1;
+        if (launches <= 6) throw new Error('helper launch failed');
+        return createAutomaticChild(recoveredRequests);
+      },
+    });
+    clients.push(client);
+    try {
+      await client.start();
+      for (const [index, delay] of [250, 1_000, 4_000, 15_000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay);
+        await vi.waitFor(() => expect(launches).toBe(index + 2));
+      }
+      expect(launches).toBe(5);
+      expect(client.readiness).toMatchObject({
+        status: 'unavailable',
+        reason: 'crash-loop',
+      });
+
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(launches).toBe(5);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(launches).toBe(6));
+      await vi.waitFor(() => expect(client.readiness.reason).toBe('crash-loop'));
+
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(launches).toBe(6);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(client.readiness.status).toBe('ready'));
+      expect(launches).toBe(7);
+      expect(
+        recoveredRequests.some(
+          ({ method, params }) =>
+            method === 'session.set_capture' &&
+            typeof params === 'object' &&
+            params !== null &&
+            'mode' in params &&
+            params.mode === 'off',
+        ),
+      ).toBe(true);
+    } finally {
+      await client.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending half-open probe when stopped', async () => {
+    vi.useFakeTimers();
+    let launches = 0;
+    const client = new HelperClient({
+      executablePath: process.execPath,
+      expectedHelperVersion: '1.0.0',
+      platform: process.platform === 'win32' ? 'win32' : 'darwin',
+      architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
+      spawnHelper: () => {
+        launches += 1;
+        throw new Error('helper launch failed');
+      },
+    });
+    clients.push(client);
+    try {
+      await client.start();
+      for (let attempt = 1; attempt < 5; attempt += 1) await client.restart();
+      expect(client.readiness.reason).toBe('crash-loop');
+
+      await client.stop();
+      await vi.advanceTimersByTimeAsync(10 * 120_000);
+
+      expect(launches).toBe(5);
+      expect(client.readiness).toMatchObject({ status: 'stopped', reason: 'shutdown' });
+    } finally {
+      await client.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('rejects malformed protocol output and opens the crash-loop circuit', async () => {

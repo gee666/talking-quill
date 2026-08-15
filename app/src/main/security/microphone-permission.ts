@@ -58,16 +58,13 @@ export class MicrophonePermissionController {
     return this.#lastKnownStatus;
   }
 
-  authorize(webContentsId: number, captureId: string, acquisitionLimit = 1): void {
-    if (!Number.isInteger(acquisitionLimit) || acquisitionLimit < 1 || acquisitionLimit > 2) {
-      throw new Error('Invalid microphone acquisition limit');
-    }
+  authorize(webContentsId: number, captureId: string, maximumRequests: 1 | 2 = 1): void {
     this.#lease = {
       webContentsId,
       captureId,
       mode: 'acquire',
       expiresAt: this.#now() + MICROPHONE_AUTHORIZATION_TTL_MS,
-      remainingRequests: acquisitionLimit,
+      remainingRequests: maximumRequests,
     };
     this.#lastPolicyDenialCaptureId = null;
   }

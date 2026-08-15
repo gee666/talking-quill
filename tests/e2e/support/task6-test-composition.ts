@@ -94,7 +94,11 @@ class DeterministicRecording implements EchoRecordingPort {
   startDictation(callbacks: Parameters<EchoRecordingPort['startDictation']>[0]) {
     this.callbacks = callbacks;
     this.starts += 1;
-    return Promise.resolve({ captureId: CAPTURE_ID, activeMicrophoneId: 'task6-mic' });
+    return Promise.resolve({
+      captureId: CAPTURE_ID,
+      activeMicrophoneId: 'task6-mic',
+      preferredUnavailable: false,
+    });
   }
 
   stopDictation(): Promise<void> {
