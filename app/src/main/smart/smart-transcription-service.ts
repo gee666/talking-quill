@@ -5,6 +5,7 @@ import type { HelperClient } from '../helper';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { ProviderConfigService } from '../providers/provider-config-service';
 import type { ProviderService } from '../providers/provider-service';
+import type { PreparedCompletionLease } from '../providers/contracts';
 import { ProviderError } from '../providers/errors';
 import { providerModelSelectionPolicy } from '../../shared/provider-model-selection';
 import { resolveVisionCapability } from '../providers/vision-capabilities';
@@ -36,6 +37,9 @@ export interface SmartProcessingResult {
 export interface FrozenSmartTranscriptSession {
   readonly providerId: string;
   readonly modelId: string | null;
+  /** Starts provider-only work that is safe before the user submits any transcript. */
+  prepareForListening?(signal: AbortSignal): Promise<void>;
+  /** Prepares submit-time context and joins any provider preparation already in flight. */
   prepare(signal: AbortSignal): Promise<void>;
   process(text: string, signal: AbortSignal): Promise<SmartProcessingResult>;
   commitScreenshot(): void;
@@ -306,14 +310,26 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     let retained: RetainedScreenshotHandle | null = null;
     let preparedScreenshot: CapturedScreenshot | null = null;
     let preparationError: unknown = null;
-    let prepared = false;
+    let completionLease: PreparedCompletionLease | null = null;
+    let consumingLease: PreparedCompletionLease | null = null;
+    let completionPreparation: Promise<void> | null = null;
+    let preparation: Promise<void> | null = null;
     let used = false;
     let disposed = false;
     let revisionInvalid = false;
     const activeOperations = new Set<AbortController>();
+    const closeCompletionLease = (reason: string): void => {
+      const unused = completionLease;
+      const consuming = consumingLease;
+      completionLease = null;
+      consumingLease = null;
+      unused?.requestClose(reason);
+      if (consuming !== unused) consuming?.requestClose(reason);
+    };
     const removeRevision = this.#configs.subscribeSmartRevision((nextRevision) => {
       if (nextRevision === revision) return;
       revisionInvalid = true;
+      closeCompletionLease('stale-config');
       for (const controller of activeOperations) controller.abort();
     });
     const removePrivacy = this.#settings.subscribe((next) => {
@@ -334,15 +350,50 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
       removePrivacy();
       for (const controller of activeOperations) controller.abort();
       activeOperations.clear();
+      closeCompletionLease(revisionInvalid ? 'stale-config' : 'unused');
     };
-
-    return Object.freeze({
-      providerId,
-      modelId,
-      prepare: async (signal: AbortSignal): Promise<void> => {
-        if (prepared || disposed) throw new ProviderError('INVALID_CONFIG');
-        prepared = true;
-        if (!osaRequested) return;
+    const prepareCompletion = (signal: AbortSignal): Promise<void> => {
+      if (completionPreparation !== null) return completionPreparation;
+      if (disposed) return Promise.reject(new ProviderError('INVALID_CONFIG'));
+      if (providerId !== 'pi') {
+        completionPreparation = Promise.resolve();
+        return completionPreparation;
+      }
+      completionPreparation = (async () => {
+        const operation = sessionOperation(
+          this.#configs,
+          revision,
+          signal,
+          activeOperations,
+          () => revisionInvalid,
+        );
+        let candidate: PreparedCompletionLease | null = null;
+        try {
+          operation.assertActive();
+          candidate = await this.#providers.prepareCompletion(config, operation.signal);
+          operation.assertActive();
+          completionLease = candidate;
+          candidate = null;
+        } catch (error: unknown) {
+          candidate?.requestClose(revisionInvalid ? 'stale-config' : 'cancelled');
+          const normalized = operation.normalize(error);
+          if (
+            normalized instanceof ProviderError &&
+            (normalized.code === 'CANCELLED' || normalized.code === 'STALE_CONFIG')
+          ) {
+            throw normalized;
+          }
+          preparationError = normalized;
+        } finally {
+          operation.dispose();
+        }
+      })();
+      return completionPreparation;
+    };
+    const prepareSession = (signal: AbortSignal): Promise<void> => {
+      if (preparation !== null) return preparation;
+      if (disposed) return Promise.reject(new ProviderError('INVALID_CONFIG'));
+      preparation = (async () => {
         const operation = sessionOperation(
           this.#configs,
           revision,
@@ -352,30 +403,38 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
         );
         try {
           operation.assertActive();
-          if (modelId === null) throw new ProviderError('INVALID_CONFIG');
-          const liveCapability = resolveVisionCapability({
-            providerCapability: await this.#providers.preflightCapability(
-              config,
+          const screenshotPreparation = (async (): Promise<CapturedScreenshot | null> => {
+            if (!osaRequested) return null;
+            if (modelId === null) throw new ProviderError('INVALID_CONFIG');
+            const liveCapability = resolveVisionCapability({
+              providerCapability: await this.#providers.preflightCapability(
+                config,
+                modelId,
+                operation.signal,
+              ),
+              providerId,
               modelId,
-              operation.signal,
-            ),
-            providerId,
-            modelId,
-            binding,
-            overrides: settings.smartProcessing.visionOverrides,
-          });
+              binding,
+              overrides: settings.smartProcessing.visionOverrides,
+            });
+            operation.assertActive();
+            if (liveCapability !== 'supported') throw new ProviderError('INVALID_CONFIG');
+            const front = await this.#helper.getFrontApp();
+            operation.assertActive();
+            return await this.#screenshots.capture(front.windowBounds, operation.signal);
+          })();
+          const [, screenshot] = await Promise.all([
+            prepareCompletion(operation.signal),
+            screenshotPreparation,
+          ]);
           operation.assertActive();
-          if (liveCapability !== 'supported') throw new ProviderError('INVALID_CONFIG');
-          const front = await this.#helper.getFrontApp();
-          operation.assertActive();
-          preparedScreenshot = await this.#screenshots.capture(
-            front.windowBounds,
-            operation.signal,
-          );
-          operation.assertActive();
+          preparedScreenshot = screenshot;
         } catch (error: unknown) {
           const normalized = operation.normalize(error);
-          if (normalized instanceof ProviderError && normalized.code === 'CANCELLED') {
+          if (
+            normalized instanceof ProviderError &&
+            (normalized.code === 'CANCELLED' || normalized.code === 'STALE_CONFIG')
+          ) {
             throw normalized;
           }
           preparationError = normalized;
@@ -383,7 +442,15 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
         } finally {
           operation.dispose();
         }
-      },
+      })();
+      return preparation;
+    };
+
+    return Object.freeze({
+      providerId,
+      modelId,
+      prepareForListening: prepareCompletion,
+      prepare: prepareSession,
       process: async (text: string, signal: AbortSignal): Promise<SmartProcessingResult> => {
         if (used || disposed) throw new ProviderError('INVALID_CONFIG');
         used = true;
@@ -399,28 +466,41 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
           if (modelId === null && modelSelectionPolicy === 'required') {
             throw new ProviderError('INVALID_CONFIG');
           }
-          if (!prepared) {
-            if (osaRequested) throw new ProviderError('INVALID_CONFIG');
-            prepared = true;
-          }
-          if (preparationError !== null) {
+          await prepareSession(operation.signal);
+          operation.assertActive();
+          const fallbackFromPreparation =
+            preparationError instanceof ProviderError && preparationError.fallbackEligible;
+          if (preparationError !== null && !fallbackFromPreparation) {
             throw preparationError instanceof Error
               ? preparationError
               : new ProviderError('INVALID_CONFIG');
           }
           const screenshot = preparedScreenshot;
+          const request = {
+            input: buildSmartCleanupPrompt(text, vocabulary, profilePrompt, voiceCommands),
+            ...(modelId === null ? {} : { modelId }),
+            temperature: SMART_TEMPERATURE,
+            maxOutputTokens: config.maxOutputTokens ?? SMART_DEFAULT_OUTPUT_TOKENS,
+            ...(screenshot === null ? {} : { image: screenshot.image }),
+          };
           operation.assertActive();
-          const output = await this.#providers.cleanTranscript(
-            config,
-            {
-              input: buildSmartCleanupPrompt(text, vocabulary, profilePrompt, voiceCommands),
-              ...(modelId === null ? {} : { modelId }),
-              temperature: SMART_TEMPERATURE,
-              maxOutputTokens: config.maxOutputTokens ?? SMART_DEFAULT_OUTPUT_TOKENS,
-              ...(screenshot === null ? {} : { image: screenshot.image }),
-            },
-            operation.signal,
-          );
+          const lease = completionLease;
+          completionLease = null;
+          let output: string;
+          if (lease === null) {
+            output = await this.#providers.cleanTranscript(config, request, operation.signal);
+          } else {
+            consumingLease = lease;
+            try {
+              output = await lease.complete(request, operation.signal);
+            } catch (error: unknown) {
+              operation.assertActive();
+              if (!(error instanceof ProviderError && error.fallbackEligible)) throw error;
+              output = await this.#providers.cleanTranscript(config, request, operation.signal);
+            } finally {
+              if (consumingLease === lease) consumingLease = null;
+            }
+          }
           operation.assertActive();
           const normalized = normalizeSmartOutput(output);
           operation.assertActive();
@@ -467,6 +547,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
         }
       },
       cleanup: () => {
+        closeCompletionLease(revisionInvalid ? 'stale-config' : 'unused');
         const current = retained;
         retained = null;
         preparedScreenshot = null;

@@ -394,9 +394,17 @@ describe('external Pi adapter', () => {
       ]);
       expect(calls[0]).not.toContain(`npm:${packageName}`);
 
-      await writeInstalledPiExtensionPackage(agentDirectory, packageName, '1.0.1');
+      await writeFile(
+        resolve(packageRoot, 'extensions', 'index.ts'),
+        'export default function changedImplementationAndMetadata() {}\n',
+        'utf8',
+      );
       await provider.listModels(invocation, signal);
       expect(calls).toHaveLength(2);
+
+      await writeInstalledPiExtensionPackage(agentDirectory, packageName, '1.0.1');
+      await provider.listModels(invocation, signal);
+      expect(calls).toHaveLength(3);
     } finally {
       await removeTestDirectory(directory);
     }
@@ -478,40 +486,45 @@ describe('external Pi adapter', () => {
     }
   });
 
-  it('bounds a never-settling installed package manifest read without spawning Pi', async () => {
-    const directory = await createTestDirectory('pi-package-read-timeout');
-    try {
-      const agentDirectory = resolve(directory, 'agent');
-      await writeInstalledPiExtensionPackage(agentDirectory, 'installed-extension', '1.0.0');
-      const spawnPi = vi.fn();
-      const resolveCli = vi.fn(() => Promise.resolve({ ...identity, canonicalPath: '/opt/pi' }));
-      const provider = new PiProvider({
-        spawnPi,
-        environment: { ...process.env, PI_CODING_AGENT_DIR: agentDirectory },
-        platform: process.platform,
-        extensionResolutionTimeoutMs: 25,
-        readExtensionFile: () => new Promise<never>(() => undefined),
-        resolveCli,
-      });
+  it.each(['manifest', 'directory'] as const)(
+    'bounds a never-settling installed package %s read without spawning Pi',
+    async (stage) => {
+      const directory = await createTestDirectory('pi-package-read-timeout');
+      try {
+        const agentDirectory = resolve(directory, 'agent');
+        await writeInstalledPiExtensionPackage(agentDirectory, 'installed-extension', '1.0.0');
+        const spawnPi = vi.fn();
+        const resolveCli = vi.fn(() => Promise.resolve({ ...identity, canonicalPath: '/opt/pi' }));
+        const provider = new PiProvider({
+          spawnPi,
+          environment: { ...process.env, PI_CODING_AGENT_DIR: agentDirectory },
+          platform: process.platform,
+          extensionResolutionTimeoutMs: 25,
+          ...(stage === 'manifest'
+            ? { readExtensionFile: () => new Promise<never>(() => undefined) }
+            : { readExtensionDirectory: () => new Promise<never>(() => undefined) }),
+          resolveCli,
+        });
 
-      await expect(
-        provider.listModels(
-          {
-            config: {
-              providerId: 'pi',
-              piExtensionSources: ['npm:installed-extension'],
+        await expect(
+          provider.listModels(
+            {
+              config: {
+                providerId: 'pi',
+                piExtensionSources: ['npm:installed-extension'],
+              },
+              credential: null,
             },
-            credential: null,
-          },
-          new AbortController().signal,
-        ),
-      ).rejects.toMatchObject({ code: 'TIMEOUT' });
-      expect(resolveCli).not.toHaveBeenCalled();
-      expect(spawnPi).not.toHaveBeenCalled();
-    } finally {
-      await removeTestDirectory(directory);
-    }
-  });
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({ code: 'TIMEOUT' });
+        expect(resolveCli).not.toHaveBeenCalled();
+        expect(spawnPi).not.toHaveBeenCalled();
+      } finally {
+        await removeTestDirectory(directory);
+      }
+    },
+  );
 
   it.each(['realpath', 'stat', 'access'] as const)(
     'bounds a never-settling extension %s operation without spawning Pi',

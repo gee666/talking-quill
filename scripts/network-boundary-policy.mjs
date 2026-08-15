@@ -49,6 +49,17 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
       'Runs trusted System32 discovery tools and identity-validated Pi executables with fixed hardened arguments, bounded stdio, and process-tree cleanup.',
     tokens: Object.freeze(['node:child_process']),
   }),
+  'app/src/main/providers/pi-rpc-operation.ts': Object.freeze({
+    category: 'provider-cli-process-only',
+    reason:
+      'Owns one identity-approved Pi RPC child using fixed hardened arguments and bounded process-tree retirement.',
+    tokens: Object.freeze(['node:child_process']),
+  }),
+  'app/src/main/providers/pi-rpc-transport.ts': Object.freeze({
+    category: 'provider-cli-process-type-only',
+    reason: 'Uses the child-process type for bounded stdio RPC and never creates a process.',
+    tokens: Object.freeze(['node:child_process']),
+  }),
   'app/src/main/helper/helper-client.ts': Object.freeze({
     category: 'native-helper-process-only',
     reason:

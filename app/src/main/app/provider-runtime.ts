@@ -30,6 +30,8 @@ export function createProviderRuntime(options: {
   readonly appData: string;
   readonly home: string;
   readonly resolvePiCli?: PiProviderOptions['resolveCli'];
+  /** Optional enum-only Pi RPC timing sink; never receives prompts or provider configuration. */
+  readonly onPiRpcTiming?: PiProviderOptions['onRpcTiming'];
 }): ProviderRuntime {
   const credentials = new ProviderCredentialService(options.vault);
   const configs = new ProviderConfigService(options.settings);
@@ -62,6 +64,7 @@ export function createProviderRuntime(options: {
         configuredPath: () => piInstallation.configuredPath(),
         ...interactivePaths,
         ...(options.resolvePiCli === undefined ? {} : { resolveCli: options.resolvePiCli }),
+        ...(options.onPiRpcTiming === undefined ? {} : { onRpcTiming: options.onPiRpcTiming }),
       },
     }),
     credentials,

@@ -33,15 +33,22 @@ const RETRYABLE_CODES = new Set<PublicProviderErrorCode>([
   'REMOTE_FAILURE',
 ]);
 
+export interface ProviderErrorMetadata {
+  /** True only when an ordinary completion fallback is known not to duplicate a dispatched prompt. */
+  readonly fallbackEligible?: boolean;
+}
+
 export class ProviderError extends Error {
   readonly code: PublicProviderErrorCode;
   readonly retryable: boolean;
+  readonly fallbackEligible: boolean;
 
-  constructor(code: PublicProviderErrorCode) {
+  constructor(code: PublicProviderErrorCode, metadata: ProviderErrorMetadata = {}) {
     super(PUBLIC_MESSAGES[code]);
     this.name = 'ProviderError';
     this.code = code;
     this.retryable = RETRYABLE_CODES.has(code);
+    this.fallbackEligible = metadata.fallbackEligible === true;
   }
 
   toPublicError(): PublicProviderError {

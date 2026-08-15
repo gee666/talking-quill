@@ -348,6 +348,52 @@ describe('provider application integration', () => {
     await expect(completion).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
   });
 
+  it('quiesces provider admission and drains non-cooperative provider work before teardown', async () => {
+    let releaseRequest!: (response: JsonTransportResponse) => void;
+    const response = new Promise<JsonTransportResponse>((resolveResponse) => {
+      releaseRequest = resolveResponse;
+    });
+    const request = vi.fn(() => response);
+    const transport: JsonTransport = {
+      classify: () => Promise.resolve('cloud'),
+      request,
+    };
+    const service = new ProviderService(new ProviderRegistry({ transport }), {
+      getCredential: () => 'integration-secret',
+    });
+    const providerConfig = {
+      providerId: 'generic-openai' as const,
+      baseUrl: 'https://provider.example/v1',
+      modelId: 'model',
+    };
+    const completion = service.cleanTranscript(
+      providerConfig,
+      { input: 'raw' },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+    service.dispose();
+    await expect(completion).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(
+      service.prepareCompletion(providerConfig, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    let drained = false;
+    const drain = service.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    releaseRequest({
+      status: 200,
+      destination: 'cloud',
+      body: { choices: [{ message: { content: 'late clean output' } }] },
+    });
+    await drain;
+    expect(drained).toBe(true);
+  });
+
   it('owns cancellable operations per renderer and aborts them on destruction/dispose', async () => {
     const coordinator = new ProviderOperationCoordinator();
     const destroyedListeners = new Set<() => void>();

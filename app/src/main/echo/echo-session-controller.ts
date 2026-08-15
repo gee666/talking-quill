@@ -95,6 +95,12 @@ export class EchoSessionController {
   #activeBinding: Readonly<ActivationBinding> | null = null;
   #pendingOperationalError: string | null = null;
   #shutdownOperation: Promise<void> | null = null;
+  #smartPreparation: {
+    readonly sessionId: string;
+    readonly captureGeneration: number;
+    readonly session: NonNullable<SessionOutcomeWriter['smartSession']>;
+    readonly promise: Promise<void>;
+  } | null = null;
   #disposed = false;
 
   constructor(options: {
@@ -518,7 +524,11 @@ export class EchoSessionController {
   }
 
   #manageSessionTransition(previous: EchoSessionState, next: EchoSessionState): void {
-    if (next.phase === 'idle' || isTerminalPhase(next.phase)) this.#activeBinding = null;
+    if (next.phase === 'idle' || isTerminalPhase(next.phase)) {
+      this.#activeBinding = null;
+      this.#smartPreparation = null;
+      if (next.phase !== 'completed') this.#outcomes.discardSmartSession();
+    }
     if (previous.phase === 'idle' && next.phase === 'arming') {
       this.#capture.beginGeneration();
       this.#abort = new AbortController();
@@ -532,6 +542,7 @@ export class EchoSessionController {
         this.#sessionProfile ?? DEFAULT_GENERAL_PROFILE,
         processingMode,
       );
+      this.#startSmartPreparation(next);
       this.#capture.arm(sessionSettings);
     }
     const previousHelperMode = helperCaptureModeForPhase(previous.phase);
@@ -543,6 +554,48 @@ export class EchoSessionController {
       this.#captureReconciler.requestBestEffort(nextHelperMode, this.#capture.generation);
     }
     this.#capture.observeTransition(previous, next);
+  }
+
+  #startSmartPreparation(state: EchoSessionState): void {
+    const session = this.#outcomes.smartSession;
+    if (
+      state.processingMode !== 'smart' ||
+      state.sessionId === null ||
+      session === null ||
+      this.#abort === null
+    ) {
+      return;
+    }
+    if (session.prepareForListening === undefined) return;
+    const captureGeneration = this.#capture.generation;
+    const promise = raceWithAbort(
+      session.prepareForListening(this.#abort.signal),
+      this.#abort.signal,
+    );
+    this.#smartPreparation = {
+      sessionId: state.sessionId,
+      captureGeneration,
+      session,
+      promise,
+    };
+    // Preparation is intentionally speculative. Submission or teardown owns its result, while this
+    // observer prevents cancellation/failure before submission from becoming an unhandled rejection.
+    void promise.catch(() => undefined);
+  }
+
+  #preparedSmartSession(session: NonNullable<SessionOutcomeWriter['smartSession']>): Promise<void> {
+    const preparation = this.#smartPreparation;
+    const signal = this.#operationSignal();
+    const submitted = raceWithAbort(session.prepare(signal), signal);
+    if (
+      preparation !== null &&
+      preparation.session === session &&
+      preparation.sessionId === this.#state.sessionId &&
+      preparation.captureGeneration === this.#capture.generation
+    ) {
+      return Promise.all([preparation.promise, submitted]).then(() => undefined);
+    }
+    return submitted;
   }
 
   async #drainEffects(): Promise<void> {
@@ -599,24 +652,24 @@ export class EchoSessionController {
       const smartSession = this.#outcomes.smartSession;
       const smartPreparation =
         this.#state.processingMode === 'smart' && smartSession !== null
-          ? raceWithAbort(smartSession.prepare(signal), signal)
+          ? this.#preparedSmartSession(smartSession)
           : Promise.resolve();
-      // Screenshot/provider preparation and local inference are independent. Run them together so
-      // Smart mode pays only the slower latency rather than adding both waits after recording.
-      const [, text] = await Promise.all([
-        smartPreparation,
-        raceWithAbort(this.#capture.transcribe(), signal),
-      ]);
+      void smartPreparation.catch(() => undefined);
+      // Smart provider preparation starts in arming and submit-time context preparation overlaps
+      // local inference. The local transcript remains authoritative for command bypass.
+      const text = await raceWithAbort(this.#capture.transcribe(), signal);
       const match: VoiceCommandMatch | null = this.#commands?.match(text) ?? null;
       // In Smart mode, only an exact local match bypasses the monitor. Fuzzy and cross-language
       // candidates must be reviewed by Smart processing before they can execute.
       const executeImmediately =
         match !== null && (this.#state.processingMode !== 'smart' || match.kind === 'exact');
       if (executeImmediately) {
+        // Do not wait for speculative readiness before executing an exact local command.
         this.#outcomes.discardSmartSession();
         this.#outcomes.setVoiceCommand(match.command);
         this.#dispatch({ type: 'voice-command-matched', transcript: text, command: match.command });
       } else {
+        await smartPreparation;
         this.#dispatch({
           type: 'transcribed',
           text,

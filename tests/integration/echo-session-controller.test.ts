@@ -865,6 +865,45 @@ describe('EchoSessionController integration', () => {
     expect(process).toHaveBeenCalledWith('locally transcribed', expect.any(AbortSignal));
   });
 
+  it('starts Smart preparation while arming and never processes before submission', async () => {
+    const ready = deferred<undefined>();
+    const prepareForListening = vi.fn(() => ready.promise);
+    const prepare = vi.fn(() => Promise.resolve());
+    const process = vi.fn(() =>
+      Promise.resolve({ text: 'prepared cleanup', screenshotFilename: null }),
+    );
+    const test = fixture({
+      smartProcessor: {
+        beginSession: () => ({
+          providerId: 'pi',
+          modelId: 'anthropic/claude-test',
+          prepareForListening,
+          prepare,
+          process,
+          commitScreenshot: vi.fn(),
+          cleanup: vi.fn(),
+        }),
+      },
+    });
+    await test.controller.updateProfile('general', { processingMode: 'smart' });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(prepareForListening).toHaveBeenCalledOnce());
+    expect(test.controller.snapshot.phase).toBe('arming');
+    expect(process).not.toHaveBeenCalled();
+
+    ready.resolve(undefined);
+    await settle();
+    expect(process).not.toHaveBeenCalled();
+    test.frame();
+    test.notify(key('enter'));
+
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(prepareForListening).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(process).toHaveBeenCalledOnce();
+  });
+
   it('keeps a selected custom Smart profile immutable when that profile is deleted', async () => {
     const promptsUsed: (string | null | undefined)[] = [];
     const beginSession = vi.fn<
@@ -980,6 +1019,7 @@ describe('EchoSessionController integration', () => {
       createdAt: 1,
       updatedAt: 1,
     };
+    const prepareForListening = vi.fn(() => new Promise<undefined>(() => undefined));
     const prepare = vi.fn(() => Promise.resolve());
     const process = vi.fn(() => Promise.resolve({ text: 'unused', screenshotFilename: null }));
     const cleanup = vi.fn();
@@ -987,8 +1027,9 @@ describe('EchoSessionController integration', () => {
       commands: { match: () => ({ command, kind: 'exact', score: 1 }) },
       smartProcessor: {
         beginSession: () => ({
-          providerId: 'openai',
-          modelId: 'gpt-4.1',
+          providerId: 'pi',
+          modelId: 'anthropic/claude-test',
+          prepareForListening,
           prepare,
           process,
           commitScreenshot: vi.fn(),
@@ -1002,12 +1043,13 @@ describe('EchoSessionController integration', () => {
     test.frame();
     test.notify(key('enter'));
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(prepareForListening).toHaveBeenCalledOnce();
     expect(prepare).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
     expect(process).not.toHaveBeenCalled();
   });
 
-  it('cancels parallel submit-time Smart preparation and transcription, then discards context', async () => {
+  it('cancels listening-time Smart preparation and transcription, then discards context', async () => {
     const cleanup = vi.fn();
     const prepare = vi.fn(
       (signal: AbortSignal) =>
@@ -1037,6 +1079,7 @@ describe('EchoSessionController integration', () => {
     test.frame();
     test.notify(key('enter'));
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.spies.transcribe).toHaveBeenCalledOnce());
     expect(test.spies.setSessionCapture).toHaveBeenLastCalledWith('cancel-only');
     test.notify(key('escape'));
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('cancelled'));

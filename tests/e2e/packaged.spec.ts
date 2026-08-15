@@ -660,7 +660,7 @@ test('packaged Windows discovers authentic AppData npm Pi under a stale PATH', a
     });
     expect(evidence.status).toMatchObject({
       state: 'ready',
-      version: '0.81.1',
+      version: '0.84.2',
       source: 'appdata-npm',
     });
     expect(evidence.models).toEqual([

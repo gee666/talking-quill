@@ -89,7 +89,7 @@ jobs:
           else
             app_path="release/mac/Talking Quill.app"
           fi
-          zip_path="release/Talking-Quill-0.0.2-mac-${{ matrix.arch }}-test.zip"
+          zip_path="release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
           shasum -a 256 "$zip_path" > "$zip_path.sha256"
 
@@ -97,7 +97,7 @@ jobs:
         with:
           name: Talking-Quill-mac-${{ matrix.arch }}-test
           path: |
-            release/Talking-Quill-0.0.2-mac-${{ matrix.arch }}-test.zip
-            release/Talking-Quill-0.0.2-mac-${{ matrix.arch }}-test.zip.sha256
+            release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip
+            release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip.sha256
           if-no-files-found: error
           retention-days: 14

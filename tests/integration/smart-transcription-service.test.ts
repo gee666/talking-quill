@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS, type Settings } from '../../app/src/shared/schemas/se
 import type { SettingsStore } from '../../app/src/main/persistence/settings-store';
 import type { ProviderConfigService } from '../../app/src/main/providers/provider-config-service';
 import type { ProviderService } from '../../app/src/main/providers/provider-service';
+import type { PreparedCompletionLease } from '../../app/src/main/providers/contracts';
 import type { ScreenshotService } from '../../app/src/main/screenshot/screenshot-service';
 import type { ProviderCompletionRequest } from '../../app/src/shared/schemas/providers';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
@@ -22,6 +23,8 @@ function createHarness(
     screenshotsDirectory?: string;
     manualVision?: boolean;
     providerManagedModel?: boolean;
+    pi?: boolean;
+    prepareCompletion?: () => Promise<PreparedCompletionLease | null>;
     voiceCommands?: Settings['voiceCommands'];
     preflightCapability?: 'supported' | 'unsupported' | 'unknown';
     settingsUpdateGate?: Promise<void>;
@@ -31,25 +34,29 @@ function createHarness(
     };
   } = {},
 ) {
-  const providerId = options.providerManagedModel
-    ? ('textgenwebui' as const)
-    : options.manualVision
-      ? ('generic-openai' as const)
-      : ('openai' as const);
-  const config = options.providerManagedModel
-    ? {
-        providerId,
-        baseUrl: 'http://127.0.0.1:5000/v1',
-        maxOutputTokens: 9_999,
-      }
-    : options.manualVision
+  const providerId = options.pi
+    ? ('pi' as const)
+    : options.providerManagedModel
+      ? ('textgenwebui' as const)
+      : options.manualVision
+        ? ('generic-openai' as const)
+        : ('openai' as const);
+  const config = options.pi
+    ? { providerId, modelId: 'anthropic/claude-test', thinking: 'off' as const }
+    : options.providerManagedModel
       ? {
           providerId,
-          baseUrl: 'http://127.0.0.1:8080/v1',
-          modelId: 'private-model',
+          baseUrl: 'http://127.0.0.1:5000/v1',
           maxOutputTokens: 9_999,
         }
-      : { providerId, modelId: 'gpt-4.1', maxOutputTokens: 9_999 };
+      : options.manualVision
+        ? {
+            providerId,
+            baseUrl: 'http://127.0.0.1:8080/v1',
+            modelId: 'private-model',
+            maxOutputTokens: 9_999,
+          }
+        : { providerId, modelId: 'gpt-4.1', maxOutputTokens: 9_999 };
   let settings: Settings = {
     ...structuredClone(DEFAULT_SETTINGS),
     smartProcessing: {
@@ -57,18 +64,20 @@ function createHarness(
       selectedProviderId: providerId,
       providers: {
         ...structuredClone(DEFAULT_SETTINGS.smartProcessing.providers),
-        [providerId]: options.providerManagedModel
-          ? {
-              baseUrl: 'http://127.0.0.1:5000/v1',
-              maxOutputTokens: 9_999,
-            }
-          : options.manualVision
+        [providerId]: options.pi
+          ? { modelId: 'anthropic/claude-test', thinking: 'off' as const }
+          : options.providerManagedModel
             ? {
-                baseUrl: 'http://127.0.0.1:8080/v1',
-                modelId: 'private-model',
+                baseUrl: 'http://127.0.0.1:5000/v1',
                 maxOutputTokens: 9_999,
               }
-            : { modelId: 'gpt-4.1', maxOutputTokens: 9_999 },
+            : options.manualVision
+              ? {
+                  baseUrl: 'http://127.0.0.1:8080/v1',
+                  modelId: 'private-model',
+                  maxOutputTokens: 9_999,
+                }
+              : { modelId: 'gpt-4.1', maxOutputTokens: 9_999 },
       },
       onScreenAwarenessEnabled: options.osa ?? false,
     },
@@ -135,6 +144,7 @@ function createHarness(
       });
     },
   );
+  const prepareCompletion = vi.fn(() => options.prepareCompletion?.() ?? Promise.resolve(null));
   const capture = vi.fn(() =>
     Promise.resolve({
       image: { mimeType: 'image/jpeg' as const, base64: VALID_JPEG_BASE64 },
@@ -171,6 +181,7 @@ function createHarness(
           options.preflightCapability ??
             (options.manualVision ? ('unknown' as const) : ('supported' as const)),
         ),
+      prepareCompletion,
       cleanTranscript,
     } as unknown as ProviderService,
     screenshots: {
@@ -200,6 +211,7 @@ function createHarness(
     service,
     capturedRequests,
     cleanTranscript,
+    prepareCompletion,
     capture,
     update,
     invalidateConfig,
@@ -221,6 +233,139 @@ describe('SmartTranscriptionService', () => {
       maxOutputTokens: 9_999,
     });
     expect(capturedRequests[0]?.input).toContain('Untrusted transcript JSON:\n"raw words"');
+  });
+
+  it('prepares Pi before submission and consumes the lease with the unchanged request once', async () => {
+    const complete = vi.fn<PreparedCompletionLease['complete']>(() =>
+      Promise.resolve('prepared result'),
+    );
+    const requestClose = vi.fn();
+    const test = createHarness({
+      pi: true,
+      prepareCompletion: () =>
+        Promise.resolve({ complete, requestClose, closed: Promise.resolve() }),
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+
+    await session.prepareForListening?.(signal);
+    expect(test.prepareCompletion).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+
+    await expect(session.process('raw words', signal)).resolves.toMatchObject({
+      text: 'prepared result',
+    });
+    expect(complete).toHaveBeenCalledOnce();
+    expect(test.cleanTranscript).not.toHaveBeenCalled();
+    const preparedRequest = complete.mock.calls[0]?.[0];
+    expect(preparedRequest).toMatchObject({
+      modelId: 'anthropic/claude-test',
+      temperature: 0.2,
+    });
+    expect(preparedRequest?.input).toContain('Untrusted transcript JSON:\n"raw words"');
+  });
+
+  it('uses the frozen ordinary Pi path once only for safely fallback-eligible preparation failure', async () => {
+    const test = createHarness({
+      pi: true,
+      output: 'print fallback',
+      prepareCompletion: () =>
+        Promise.reject(new ProviderError('UNAVAILABLE', { fallbackEligible: true })),
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+
+    await session.prepare(signal);
+    await expect(session.process('raw words', signal)).resolves.toMatchObject({
+      text: 'print fallback',
+    });
+    expect(test.prepareCompletion).toHaveBeenCalledOnce();
+    expect(test.cleanTranscript).toHaveBeenCalledOnce();
+  });
+
+  it('falls back once when prepared completion is explicitly pre-prompt eligible', async () => {
+    const complete = vi.fn(() =>
+      Promise.reject(new ProviderError('UNAVAILABLE', { fallbackEligible: true })),
+    );
+    const test = createHarness({
+      pi: true,
+      output: 'safe fallback',
+      prepareCompletion: () =>
+        Promise.resolve({ complete, requestClose: vi.fn(), closed: Promise.resolve() }),
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+
+    await session.prepareForListening?.(signal);
+    await expect(session.process('raw words', signal)).resolves.toMatchObject({
+      text: 'safe fallback',
+    });
+    expect(complete).toHaveBeenCalledOnce();
+    expect(test.cleanTranscript).toHaveBeenCalledOnce();
+  });
+
+  it('never duplicates a possibly committed prepared completion', async () => {
+    const complete = vi.fn(() => Promise.reject(new ProviderError('REMOTE_FAILURE')));
+    const test = createHarness({
+      pi: true,
+      prepareCompletion: () =>
+        Promise.resolve({ complete, requestClose: vi.fn(), closed: Promise.resolve() }),
+    });
+    const session = test.service.beginSession();
+    const signal = new AbortController().signal;
+
+    await session.prepare(signal);
+    await expect(session.process('raw words', signal)).rejects.toMatchObject({
+      code: 'REMOTE_FAILURE',
+      fallbackEligible: false,
+    });
+    expect(complete).toHaveBeenCalledOnce();
+    expect(test.cleanTranscript).not.toHaveBeenCalled();
+  });
+
+  it('synchronously closes an unused Pi lease on stale configuration', async () => {
+    const requestClose = vi.fn();
+    const test = createHarness({
+      pi: true,
+      prepareCompletion: () =>
+        Promise.resolve({
+          complete: vi.fn(() => Promise.resolve('unused')),
+          requestClose,
+          closed: new Promise<void>(() => undefined),
+        }),
+    });
+    const session = test.service.beginSession();
+    await session.prepareForListening?.(new AbortController().signal);
+
+    test.invalidateConfig();
+
+    expect(requestClose).toHaveBeenCalledOnce();
+    expect(requestClose).toHaveBeenCalledWith('stale-config');
+    await expect(session.process('raw words', new AbortController().signal)).rejects.toMatchObject({
+      code: 'STALE_CONFIG',
+    });
+    expect(test.cleanTranscript).not.toHaveBeenCalled();
+  });
+
+  it('synchronously closes an unused prepared lease on cancellation without awaiting retirement', async () => {
+    const requestClose = vi.fn();
+    const test = createHarness({
+      pi: true,
+      prepareCompletion: () =>
+        Promise.resolve({
+          complete: vi.fn(() => Promise.resolve('unused')),
+          requestClose,
+          closed: new Promise<void>(() => undefined),
+        }),
+    });
+    const session = test.service.beginSession();
+    await session.prepareForListening?.(new AbortController().signal);
+
+    session.cleanup();
+
+    expect(requestClose).toHaveBeenCalledOnce();
+    expect(requestClose).toHaveBeenCalledWith('unused');
+    expect(test.subscriptionCounts()).toEqual({ revision: 0, settings: 0 });
   });
 
   it('lets Smart processing canonicalize an entire translated command and returns the command', async () => {

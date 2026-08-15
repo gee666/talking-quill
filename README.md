@@ -77,7 +77,7 @@ A quick press is good for a sentence or short note. Hold the final shortcut key 
 Every recording is transcribed locally with Whisper. Audio is not sent to an AI provider.
 
 - **Raw** inserts the local transcript without sending it to a Smart provider.
-- **Smart** sends the transcript—and only the optional context you have enabled—to your chosen provider so it can remove filler words, fix punctuation, organize ideas, follow a custom instruction, or translate the text.
+- **Smart** sends the transcript—and only the optional context you have enabled—to your chosen provider so it can remove filler words, fix punctuation, organize ideas, follow a custom instruction, or translate the text. With Pi selected, Talking Quill may start the configured Pi process and extensions while you are listening to reduce submission latency, but it does not send the transcript until you submit the dictation.
 
 If Smart processing fails, Talking Quill falls back to the Raw transcript instead of losing what you said.
 
@@ -128,7 +128,7 @@ You can change the widget size, sounds, theme, launch-at-login behavior, and whe
 
 - Speech recognition happens on your computer.
 - Raw dictation does not send the transcript to a Smart provider.
-- Smart dictation sends the transcript and the Smart context you enabled to the provider you selected.
+- Smart dictation sends the transcript and the Smart context you enabled to the provider you selected only after submission. With Pi, the configured Pi process and extensions may start while you are listening, before any transcript is sent.
 - Audio is not sent to that provider.
 - On-Screen Awareness is optional and off by default.
 - History, screenshot retention, and diagnostic logging can all be controlled separately.

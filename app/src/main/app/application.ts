@@ -77,7 +77,8 @@ import { WindowManager } from './window-manager';
 import { WidgetCaptureExclusion } from './widget-capture-exclusion';
 import { WindowRoleRegistry } from './window-role-registry';
 
-const LIFECYCLE_TIMEOUT_MS = 5_000;
+// Leave Pi RPC's 5.75 second retirement envelope intact after earlier producer drains.
+const LIFECYCLE_TIMEOUT_MS = 15_000;
 const RESET_ACKNOWLEDGEMENT_TIMEOUT_MS = 1_000;
 type ApplicationLifecycle = 'new' | 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
 
@@ -210,7 +211,10 @@ export class TalkingQuillApplication {
       });
       const { configs: providerConfigs, piInstallation, providers } = providerRuntime;
       this.#providers = providers;
-      cleanup.add('provider-service', () => providers.dispose());
+      cleanup.add('provider-service', async () => {
+        providers.dispose();
+        await providers.drain();
+      });
       const providerMutations = providerRuntime.createMutations();
       this.#providerMutations = providerMutations;
       cleanup.add('provider-mutations', async () => {
@@ -742,8 +746,8 @@ export class TalkingQuillApplication {
     this.#providerMutations?.stopAccepting();
     this.#providerOperations?.dispose();
     this.#updateOperations?.dispose();
-    this.#providers?.dispose();
     this.#echo?.abort('shutdown');
+    this.#providers?.dispose();
   }
 
   #createDrainSteps(excludedIpcChannels: readonly InvokeChannel[] = []): readonly LifecycleStep[] {
@@ -753,6 +757,7 @@ export class TalkingQuillApplication {
         tray: this.#tray,
         providerMutations: this.#providerMutations,
         echo: this.#echo,
+        providers: this.#providers,
         recording: this.#recording,
         models: this.#models,
         whisper: this.#whisper,

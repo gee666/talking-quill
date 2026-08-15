@@ -411,22 +411,22 @@ test('authentic opt-in npm Pi is auto-discovered and shown through the source Se
     const { main } = await rendererPages(application);
     await expect
       .poll(() => main.evaluate(() => window.talkingQuill.providers.piInstallationStatus()))
-      .toMatchObject({ state: 'ready', version: '0.81.1' });
+      .toMatchObject({ state: 'ready', version: '0.84.2' });
     await main.getByRole('button', { name: 'Settings' }).click();
     await main.getByRole('button', { name: 'Smart processing' }).click();
     await main.getByRole('button', { name: /Ollama.*Run LLMs locally/i }).click();
     await main.getByRole('searchbox', { name: 'Search providers' }).fill('Pi');
     await main.locator('#pi[role="option"]').click();
-    await expect(main.getByText(/Pi 0\.81\.1 — ready/i)).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByText(/Pi 0\.84\.2 — ready/i)).toBeVisible({ timeout: 30_000 });
     await main.getByRole('textbox', { name: 'Pi installation path' }).fill(prefix);
     await main.getByRole('button', { name: 'Save path' }).click();
     await expect
       .poll(() => main.evaluate(() => window.talkingQuill.providers.piInstallationStatus()), {
         timeout: 30_000,
       })
-      .toMatchObject({ state: 'ready', mode: 'configured', version: '0.81.1' });
+      .toMatchObject({ state: 'ready', mode: 'configured', version: '0.84.2' });
     await main.getByRole('button', { name: 'Auto-detect' }).click();
-    await expect(main.getByText(/Pi 0\.81\.1 — ready/i)).toBeVisible({ timeout: 30_000 });
+    await expect(main.getByText(/Pi 0\.84\.2 — ready/i)).toBeVisible({ timeout: 30_000 });
   } finally {
     await application.close().catch(() => undefined);
   }

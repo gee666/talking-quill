@@ -17,6 +17,20 @@ export interface ProviderInvocationConfig {
   readonly refreshModels?: boolean;
 }
 
+export type PreparedCompletionCloseReason = string;
+
+/** Opaque provider-owned capability for exactly one prepared completion. */
+export interface PreparedProviderCompletion {
+  complete(request: ProviderCompletionRequest, signal: AbortSignal): Promise<string>;
+  /** Starts retirement. Implementations must make repeated calls harmless. */
+  requestClose(reason: PreparedCompletionCloseReason): void;
+  /** Settles only after every provider-owned resource has retired. */
+  readonly closed: Promise<void>;
+}
+
+/** The application-facing lease has the same deliberately opaque surface. */
+export type PreparedCompletionLease = PreparedProviderCompletion;
+
 export interface SmartProvider {
   readonly id: ProviderId;
   readonly credentialPolicy: ProviderCredentialPolicy;
@@ -40,6 +54,10 @@ export interface SmartProvider {
     request: ProviderCompletionRequest,
     signal: AbortSignal,
   ): Promise<string>;
+  readonly prepareCompletion?: (
+    invocation: ProviderInvocationConfig,
+    signal: AbortSignal,
+  ) => Promise<PreparedProviderCompletion | null>;
   classifyDestination(
     invocation: ProviderInvocationConfig,
     signal: AbortSignal,

@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PiProvider } from '../../app/src/main/providers/pi';
+import { PiRpcTimingStage } from '../../app/src/main/providers/pi-rpc-operation';
 import { startMockProviderServer, type MockProviderServer } from '../helpers/mock-provider-server';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
@@ -75,7 +76,14 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
             baseUrl: `${server.origin}/v1`,
             api: 'openai-completions',
             apiKey: 'synthetic-local-only-key',
-            models: [{ id: 'mock-model', contextWindow: 8192, maxTokens: 128 }],
+            models: [
+              {
+                id: 'mock-model',
+                reasoning: true,
+                contextWindow: 8192,
+                maxTokens: 128,
+              },
+            ],
           },
         },
       }),
@@ -213,6 +221,64 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
       expect(JSON.stringify(request.body)).toContain('GLOBAL_APPEND_SYSTEM_EVIDENCE');
     }
   }, 90_000);
+
+  it('completes one real Pi 0.84.2 RPC operation with its native agent_end shape', async () => {
+    const stages: PiRpcTimingStage[] = [];
+    const provider = new PiProvider({
+      environment: {
+        ...process.env,
+        PATH: `${prefix}${delimiter}${process.env.PATH ?? ''}`,
+        PI_CODING_AGENT_DIR: agent,
+        NO_COLOR: '1',
+      },
+      platform: process.platform,
+      configuredPath: () => wrapper,
+      workingDirectory: root,
+      onRpcTiming: (stage) => stages.push(stage),
+    });
+    const prepared = await provider.prepareCompletion(
+      {
+        config: {
+          providerId: 'pi',
+          modelId: 'talking-quill-local/mock-model',
+          thinking: 'high',
+          piExtensionSources: [extensionSource, 'npm:talking-quill-explicit-extension'],
+        },
+        credential: null,
+      },
+      AbortSignal.timeout(30_000),
+    );
+    if (prepared === null) throw new Error('expected real prepared Pi completion');
+
+    await expect(
+      prepared.complete({ input: 'REAL_RPC_PROMPT' }, AbortSignal.timeout(30_000)),
+    ).resolves.toBe('LOCAL_NONBILLABLE_OK');
+    await prepared.closed;
+    expect(stages).toEqual(
+      expect.arrayContaining([
+        PiRpcTimingStage.ProcessSpawned,
+        PiRpcTimingStage.Ready,
+        PiRpcTimingStage.PromptWritten,
+        PiRpcTimingStage.PromptAccepted,
+        PiRpcTimingStage.AgentSettled,
+        PiRpcTimingStage.Retired,
+      ]),
+    );
+    const log = await readFile(argsLog, 'utf8');
+    const canonicalNpmPackageRoot = await realpath(npmPackageRoot);
+    const localArgument = process.platform === 'win32' ? `"${extensionSource}"` : extensionSource;
+    const npmArgument =
+      process.platform === 'win32' && /\s/u.test(canonicalNpmPackageRoot)
+        ? `"${canonicalNpmPackageRoot}"`
+        : canonicalNpmPackageRoot;
+    expect(log).toContain(
+      `--mode rpc --provider talking-quill-local --model mock-model --thinking high --no-tools --no-extensions --no-session --no-context-files --no-approve --no-skills --no-prompt-templates --no-themes --offline -e ${localArgument} -e ${npmArgument}`,
+    );
+    expect(log).not.toContain('npm:talking-quill-explicit-extension');
+    expect(
+      server.requests.some(({ body }) => JSON.stringify(body).includes('REAL_RPC_PROMPT')),
+    ).toBe(true);
+  }, 60_000);
 
   it('cancels a real Pi command blocked on the localhost provider', async () => {
     const provider = new PiProvider({

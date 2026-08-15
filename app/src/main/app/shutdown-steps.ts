@@ -34,6 +34,7 @@ export interface ApplicationDrainTargets {
   readonly tray: AsyncDrainTarget | null;
   readonly providerMutations: AsyncDrainTarget | null;
   readonly echo: ShutdownTarget | null;
+  readonly providers: AsyncDrainTarget | null;
   readonly recording: ShutdownTarget | null;
   readonly models: ShutdownTarget | null;
   readonly whisper: CloseTarget | null;
@@ -54,6 +55,7 @@ export function createApplicationDrainSteps(
     { name: 'tray-actions', run: () => targets.tray?.drain() },
     { name: 'provider-mutations', run: () => targets.providerMutations?.drain() },
     { name: 'echo-session', run: () => targets.echo?.shutdown() },
+    { name: 'provider-service', run: () => targets.providers?.drain() },
     { name: 'recording', run: () => targets.recording?.shutdown() },
     { name: 'models', run: () => targets.models?.shutdown() },
     { name: 'whisper-worker', run: () => targets.whisper?.close() },

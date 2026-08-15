@@ -22,6 +22,10 @@
         "src/renderer/capture/capture.worklet.ts"
       ],
       "project": ["*.{ts,cjs}", "src/**/*.{ts,tsx}"],
+      "ignore": [
+        "src/main/providers/pi-rpc-operation.ts",
+        "src/main/providers/pi-rpc-transport.ts"
+      ],
       "ignoreDependencies": ["@huggingface/transformers", "onnxruntime-common", "onnxruntime-node"]
     }
   },
