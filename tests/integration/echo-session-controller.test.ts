@@ -231,6 +231,7 @@ function fixture(
   const showWidget = vi.fn(() => true);
   const showMain = vi.fn();
   const windows = {
+    prepareWidgetForActivation: vi.fn(() => true),
     showWidget,
     hideWidget: vi.fn(),
     showMain,

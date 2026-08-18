@@ -211,9 +211,16 @@ export class EchoCapturePipeline {
   async startCapture(): Promise<void> {
     const owner = this.#requireActiveOwner();
     if (!isCapturePhase(this.#getState().phase)) return;
-    // The widget renderer is preloaded. Show its truthful arming state before any device, model,
-    // or helper round trip so the global shortcut always receives immediate visual feedback.
-    if (!this.#windows.showWidget(this.#getWidgetSize(), null)) {
+    // A transparent widget can retain a stale Windows compositor surface after long idle or a
+    // lock/display-power transition even though Electron still reports the window as alive.
+    // Refresh that surface before acknowledging activation.
+    const widgetPreparation = this.#windows.prepareWidgetForActivation();
+    const widgetReady =
+      typeof widgetPreparation === 'boolean' ? widgetPreparation : await widgetPreparation;
+    if (!this.#isActive(owner)) return;
+    // Show its truthful arming state before any device, model, or helper round trip so the global
+    // shortcut always receives immediate visual feedback.
+    if (!widgetReady || !this.#windows.showWidget(this.#getWidgetSize(), null)) {
       this.#windows.showMain();
       throw new Error('Dictation could not start because its status widget is unavailable.');
     }

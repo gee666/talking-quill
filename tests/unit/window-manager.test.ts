@@ -36,6 +36,7 @@ const electron = vi.hoisted(() => {
     readonly id = nextId++;
     send = vi.fn();
     setWindowOpenHandler = vi.fn();
+    invalidate = vi.fn();
     isDestroyed = () => false;
   }
 
@@ -56,6 +57,8 @@ const electron = vi.hoisted(() => {
     readonly setContentBounds = vi.fn();
     readonly setFocusable = vi.fn();
     readonly setIgnoreMouseEvents = vi.fn();
+    readonly setAlwaysOnTop = vi.fn();
+    readonly moveTop = vi.fn();
     readonly showInactive = vi.fn(() => {
       this.visible = true;
     });
@@ -171,6 +174,58 @@ function widgetWindows() {
 }
 
 describe('WindowManager renderer recovery', () => {
+  it('reasserts topmost presentation and invalidates the transparent widget surface', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const widget = widgetWindows()[0];
+
+    expect(manager.showWidget('default', null)).toBe(true);
+
+    expect(widget?.setAlwaysOnTop).toHaveBeenCalledWith(true);
+    expect(widget?.showInactive).toHaveBeenCalledOnce();
+    expect(widget?.moveTop).toHaveBeenCalledOnce();
+    expect(widget?.webContents.invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('recreates a widget before activation after it has been hidden for a long time', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = widgetWindows()[0];
+    manager.showWidget('default', null);
+    manager.hideWidget();
+
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1_000);
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
+
+    expect(first?.destroyed).toBe(true);
+    expect(widgetWindows()).toHaveLength(2);
+  });
+
+  it('marks a failed native show for replacement on the next activation', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = widgetWindows()[0];
+    first?.showInactive.mockImplementationOnce(() => undefined);
+
+    expect(manager.showWidget('default', null)).toBe(false);
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
+
+    expect(first?.destroyed).toBe(true);
+    expect(widgetWindows()).toHaveLength(2);
+  });
+
+  it('recreates a widget marked stale by a power transition before activation', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = widgetWindows()[0];
+
+    manager.markWidgetPresentationStale();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
+
+    expect(first?.destroyed).toBe(true);
+    expect(widgetWindows()).toHaveLength(2);
+  });
+
   it('cancels pending recovery when quitting begins', async () => {
     const manager = createManager();
     await manager.createAll();

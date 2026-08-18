@@ -381,6 +381,19 @@ export class TalkingQuillApplication {
       });
       this.#windows = windows;
       cleanup.add('windows', () => windows.destroyAll());
+      // Electron/Windows may keep a transparent BrowserWindow logically alive while its DWM
+      // surface is lost across lock or display sleep. Recreate it lazily on the next activation.
+      const markWidgetPresentationStale = (): void => windows.markWidgetPresentationStale();
+      powerMonitor.on('suspend', markWidgetPresentationStale);
+      powerMonitor.on('lock-screen', markWidgetPresentationStale);
+      powerMonitor.on('resume', markWidgetPresentationStale);
+      powerMonitor.on('unlock-screen', markWidgetPresentationStale);
+      cleanup.add('widget-power-revalidation', () => {
+        powerMonitor.removeListener('suspend', markWidgetPresentationStale);
+        powerMonitor.removeListener('lock-screen', markWidgetPresentationStale);
+        powerMonitor.removeListener('resume', markWidgetPresentationStale);
+        powerMonitor.removeListener('unlock-screen', markWidgetPresentationStale);
+      });
       windowTarget = windows;
       const widgetCaptureExclusion = new WidgetCaptureExclusion({
         windows,
