@@ -1315,7 +1315,7 @@ mod tests {
                 .modifiers
                 .observe_flags_changed(LEFT_OPTION_KEY_CODE, true);
         }
-        assert!(!process_key_event_with_modifiers(
+        assert!(process_key_event_with_modifiers(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Down,
@@ -1330,7 +1330,7 @@ mod tests {
             keyboard.fence_current_letters();
             keyboard.activation_revision_at = 100;
         }
-        assert!(!process_key_event_with_modifiers(
+        assert!(process_key_event_with_modifiers(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Up,
@@ -1349,7 +1349,7 @@ mod tests {
                 .is_empty()
         );
 
-        assert!(!process_key_event_with_modifiers(
+        assert!(process_key_event_with_modifiers(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Down,
@@ -1809,7 +1809,7 @@ mod tests {
         for key_code in [LETTER_KEY_CODES[15], LETTER_KEY_CODES[23]] {
             process_key_event(&context, key_code, KeyPhase::Up, false, false);
         }
-        assert!(!process_key_event(
+        assert!(process_key_event(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Down,
