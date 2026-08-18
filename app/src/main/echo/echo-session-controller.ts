@@ -831,7 +831,7 @@ export class EchoSessionController {
         this.#scheduleTerminalReset();
         return;
       }
-      this.#windows.hideWidget();
+      this.#windows.removeWidget();
       this.#dispatch({ type: 'reset' });
     }, ECHO_TERMINAL_DISPLAY_MS);
     this.#resetTimer.unref();

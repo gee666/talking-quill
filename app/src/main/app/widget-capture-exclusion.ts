@@ -7,9 +7,9 @@ export interface WidgetVisibilityLease {
 
 interface WidgetWindowTarget {
   acquireWidgetVisibilityLease(): WidgetVisibilityLease | null;
-  hideWidget(preserveInteraction?: boolean): void;
+  excludeWidgetFromCapture(): void;
   restoreWidgetVisibility(
-    lease: WidgetVisibilityLease,
+    lease: WidgetVisibilityLease | null,
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'],
   ): boolean;
@@ -37,16 +37,19 @@ export class WidgetCaptureExclusion {
     if (excluded) {
       if (this.#exclusions === 0) {
         this.#restoreLease = this.#windows.acquireWidgetVisibilityLease();
-        this.#windows.hideWidget(true);
+        this.#windows.excludeWidgetFromCapture();
       }
       this.#exclusions += 1;
       return;
     }
-    this.#exclusions = Math.max(0, this.#exclusions - 1);
+    if (this.#exclusions === 0) return;
+    this.#exclusions -= 1;
     const lease = this.#restoreLease;
-    if (this.#exclusions > 0 || lease === null) return;
+    if (this.#exclusions > 0) return;
     this.#restoreLease = null;
-    const front = await this.#getFrontApp().catch(() => null);
+    // A widget may have been created while a capture that began without one was in flight.
+    // Releasing a null lease lets WindowManager show that newly desired widget without moving it.
+    const front = lease === null ? null : await this.#getFrontApp().catch(() => null);
     this.#windows.restoreWidgetVisibility(
       lease,
       this.#getWidgetSize(),

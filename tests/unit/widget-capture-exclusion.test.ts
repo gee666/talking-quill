@@ -8,7 +8,7 @@ describe('widget capture exclusion', () => {
     const lease = { generation: 1 };
     const windows = {
       acquireWidgetVisibilityLease: vi.fn(() => (visible ? lease : null)),
-      hideWidget: vi.fn(() => {
+      excludeWidgetFromCapture: vi.fn(() => {
         visible = false;
       }),
       restoreWidgetVisibility: vi.fn(() => {
@@ -34,7 +34,7 @@ describe('widget capture exclusion', () => {
     size = 'huge';
     await exclusion.setExcluded(false);
 
-    expect(windows.hideWidget).toHaveBeenCalledTimes(1);
+    expect(windows.excludeWidgetFromCapture).toHaveBeenCalledTimes(1);
     expect(getFrontApp).not.toHaveBeenCalled();
     expect(windows.restoreWidgetVisibility).not.toHaveBeenCalled();
 
@@ -54,7 +54,7 @@ describe('widget capture exclusion', () => {
   it('leaves an initially hidden widget hidden', async () => {
     const windows = {
       acquireWidgetVisibilityLease: vi.fn(() => null),
-      hideWidget: vi.fn(),
+      excludeWidgetFromCapture: vi.fn(),
       restoreWidgetVisibility: vi.fn(),
     };
     const getFrontApp = vi.fn(() => Promise.reject(new Error('helper unavailable')));
@@ -67,16 +67,16 @@ describe('widget capture exclusion', () => {
     await exclusion.setExcluded(true);
     await exclusion.setExcluded(false);
 
-    expect(windows.hideWidget).toHaveBeenCalledTimes(1);
+    expect(windows.excludeWidgetFromCapture).toHaveBeenCalledTimes(1);
     expect(getFrontApp).not.toHaveBeenCalled();
-    expect(windows.restoreWidgetVisibility).not.toHaveBeenCalled();
+    expect(windows.restoreWidgetVisibility).toHaveBeenCalledWith(null, 'default', null);
   });
 
   it('restores without target bounds when front-app lookup fails', async () => {
     const lease = { generation: 1 };
     const windows = {
       acquireWidgetVisibilityLease: vi.fn(() => lease),
-      hideWidget: vi.fn(),
+      excludeWidgetFromCapture: vi.fn(),
       restoreWidgetVisibility: vi.fn(),
     };
     const exclusion = new WidgetCaptureExclusion({
@@ -91,7 +91,7 @@ describe('widget capture exclusion', () => {
     expect(windows.restoreWidgetVisibility).toHaveBeenCalledWith(lease, 'large', null);
   });
 
-  it('does not restore after a terminal hide invalidates the visibility lease', async () => {
+  it('does not restore after terminal removal invalidates the visibility lease', async () => {
     let generation = 1;
     let visibilityDesired = true;
     let visible = true;
@@ -109,9 +109,11 @@ describe('widget capture exclusion', () => {
     });
     const windows = {
       acquireWidgetVisibilityLease: vi.fn(() => (visibilityDesired ? { generation } : null)),
-      hideWidget: vi.fn((preserveInteraction = false) => {
+      excludeWidgetFromCapture: vi.fn(() => {
         visible = false;
-        if (preserveInteraction) return;
+      }),
+      removeWidget: vi.fn(() => {
+        visible = false;
         visibilityDesired = false;
         generation += 1;
       }),
@@ -132,7 +134,7 @@ describe('widget capture exclusion', () => {
     const restoration = exclusion.setExcluded(false);
     await Promise.resolve();
     expect(getFrontApp).toHaveBeenCalledOnce();
-    windows.hideWidget(false);
+    windows.removeWidget();
     resolveFrontApp({
       processName: 'target',
       windowTitle: 'Target',

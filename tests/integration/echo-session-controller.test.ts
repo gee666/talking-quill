@@ -231,9 +231,9 @@ function fixture(
   const showWidget = vi.fn(() => true);
   const showMain = vi.fn();
   const windows = {
-    prepareWidgetForActivation: vi.fn(() => true),
+    createWidgetForActivation: vi.fn(() => true),
     showWidget,
-    hideWidget: vi.fn(),
+    removeWidget: vi.fn(),
     showMain,
   } as unknown as WindowManager;
   const events = { send: vi.fn() } as unknown as IpcEventEmitter;

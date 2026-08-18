@@ -211,10 +211,9 @@ export class EchoCapturePipeline {
   async startCapture(): Promise<void> {
     const owner = this.#requireActiveOwner();
     if (!isCapturePhase(this.#getState().phase)) return;
-    // A transparent widget can retain a stale Windows compositor surface after long idle or a
-    // lock/display-power transition even though Electron still reports the window as alive.
-    // Refresh that surface before acknowledging activation.
-    const widgetPreparation = this.#windows.prepareWidgetForActivation();
+    // Create the short-lived widget before acknowledging activation. It is removed when the
+    // session ends, so each shortcut gets a new native window and compositor surface.
+    const widgetPreparation = this.#windows.createWidgetForActivation();
     const widgetReady =
       typeof widgetPreparation === 'boolean' ? widgetPreparation : await widgetPreparation;
     if (!this.#isActive(owner)) return;

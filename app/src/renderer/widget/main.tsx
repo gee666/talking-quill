@@ -34,8 +34,8 @@ export function WidgetShell() {
     height: window.innerHeight,
   }));
   const setInteractive = useCallback((next: boolean) => {
-    // Main may independently reset native hit testing when hiding/restoring the widget, so each
-    // forwarded pointer observation must resynchronize rather than relying on renderer-only state.
+    // Main may temporarily remove the widget from screen capture, so each forwarded pointer
+    // observation resynchronizes native hit testing instead of relying on renderer-only state.
     void window.talkingQuillWidget.setInteractive(next);
   }, []);
   useEffect(() => {

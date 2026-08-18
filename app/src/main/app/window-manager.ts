@@ -40,8 +40,8 @@ export class WindowManager {
   readonly #pendingRendererLoads = new Map<BrowserWindow, () => void>();
   #desiredWidgetVisibility: DesiredWidgetVisibility | null = null;
   #widgetVisibilityGeneration = 0;
-  #widgetTemporarilyHidden = false;
-  #widgetRefresh: Promise<boolean> | null = null;
+  #widgetExcludedFromCapture = false;
+  #widgetCreation: Promise<boolean> | null = null;
   #pendingMainClose: Promise<void> | null = null;
   #quitting = false;
 
@@ -58,8 +58,7 @@ export class WindowManager {
   }
 
   async createAll(): Promise<void> {
-    // The widget is intentionally not preloaded. Each activation gets a fresh native window and
-    // Chromium compositor surface so Windows cannot reuse a stale long-hidden transparent HWND.
+    // The widget is intentionally not preloaded. It is created only for an active session.
     await Promise.all([this.#createAndLoad('main'), this.#createAndLoad('capture')]);
   }
 
@@ -77,14 +76,16 @@ export class WindowManager {
     await this.#coordinateMainClose(main);
   }
 
-  /** Creates a fresh renderer and native transparent window for every activation. */
-  prepareWidgetForActivation(): Promise<boolean> {
-    if (this.#widgetRefresh !== null) return this.#widgetRefresh;
-    const refresh = this.#refreshWidget().finally(() => {
-      if (this.#widgetRefresh === refresh) this.#widgetRefresh = null;
+  /** Creates the renderer and native transparent window for this activation. */
+  createWidgetForActivation(): Promise<boolean> {
+    const widget = this.#windows.get('widget');
+    if (widget !== undefined && !widget.isDestroyed()) return Promise.resolve(true);
+    if (this.#widgetCreation !== null) return this.#widgetCreation;
+    const creation = this.#createWidget().finally(() => {
+      if (this.#widgetCreation === creation) this.#widgetCreation = null;
     });
-    this.#widgetRefresh = refresh;
-    return refresh;
+    this.#widgetCreation = creation;
+    return creation;
   }
 
   showWidget(
@@ -101,7 +102,7 @@ export class WindowManager {
     const visible = widget !== undefined && !widget.isDestroyed() && widget.isVisible();
     // A renderer recovery gap, including a not-yet-loaded replacement, must not make screenshot
     // exclusion forget that an active session expects the widget to become visible.
-    return visible || (this.#desiredWidgetVisibility !== null && !this.#widgetTemporarilyHidden);
+    return visible || (this.#desiredWidgetVisibility !== null && !this.#widgetExcludedFromCapture);
   }
 
   acquireWidgetVisibilityLease(): WidgetVisibilityLease | null {
@@ -111,35 +112,40 @@ export class WindowManager {
   }
 
   restoreWidgetVisibility(
-    lease: WidgetVisibilityLease,
+    lease: WidgetVisibilityLease | null,
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'],
   ): boolean {
     if (
-      lease.generation !== this.#widgetVisibilityGeneration ||
+      (lease !== null && lease.generation !== this.#widgetVisibilityGeneration) ||
       this.#desiredWidgetVisibility === null
     ) {
       return false;
     }
-    this.#setDesiredWidgetVisibility(size, targetBounds);
+    if (lease !== null) {
+      this.#desiredWidgetVisibility = {
+        size,
+        targetBounds: targetBounds === null ? null : { ...targetBounds },
+      };
+    }
+    this.#widgetExcludedFromCapture = false;
     return this.#showDesiredWidget();
   }
 
-  hideWidget(preserveInteraction = false): void {
-    if (preserveInteraction) this.#widgetTemporarilyHidden = true;
-    else {
-      this.#widgetVisibilityGeneration += 1;
-      this.#desiredWidgetVisibility = null;
-      this.#widgetTemporarilyHidden = false;
-    }
+  excludeWidgetFromCapture(): void {
+    this.#widgetExcludedFromCapture = true;
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
       widget.setFocusable(false);
-      if (!preserveInteraction) {
-        widget.setIgnoreMouseEvents(true, { forward: true });
-      }
       widget.hide();
     }
+  }
+
+  removeWidget(): void {
+    this.#widgetVisibilityGeneration += 1;
+    this.#desiredWidgetVisibility = null;
+    this.#widgetExcludedFromCapture = false;
+    this.#destroyWidgetWindow();
   }
 
   setWidgetInteractive(webContentsId: number, interactive: boolean): void {
@@ -193,19 +199,23 @@ export class WindowManager {
     return false;
   }
 
-  async #refreshWidget(): Promise<boolean> {
+  async #createWidget(): Promise<boolean> {
     if (this.#quitting) return false;
-    const previous = this.#windows.get('widget');
-    if (previous !== undefined) {
-      this.#pendingRendererLoads.get(previous)?.();
+    this.#destroyWidgetWindow();
+    return this.#createAndLoad('widget');
+  }
+
+  #destroyWidgetWindow(): void {
+    const widget = this.#windows.get('widget');
+    if (widget !== undefined) {
+      this.#pendingRendererLoads.get(widget)?.();
       this.#windows.delete('widget');
-      this.#roles.unregister(previous.webContents.id);
-      if (!previous.isDestroyed()) previous.destroy();
+      this.#roles.unregister(widget.webContents.id);
+      if (!widget.isDestroyed()) widget.destroy();
     }
     this.#clearRoleTimer(this.#recoveryTimers, 'widget');
     this.#clearRoleTimer(this.#stabilityTimers, 'widget');
     this.#recoveryAttempts.delete('widget');
-    return this.#createAndLoad('widget');
   }
 
   #loadRenderer(
@@ -247,7 +257,6 @@ export class WindowManager {
       size,
       targetBounds: targetBounds === null ? null : { ...targetBounds },
     };
-    this.#widgetTemporarilyHidden = false;
   }
 
   #restoreDesiredWidgetAfterLoad(role: WindowRole, window: BrowserWindow): void {
@@ -255,7 +264,7 @@ export class WindowManager {
       role === 'widget' &&
       !this.#quitting &&
       this.#windows.get(role) === window &&
-      !this.#widgetTemporarilyHidden
+      !this.#widgetExcludedFromCapture
     ) {
       this.#showDesiredWidget();
     }
@@ -265,6 +274,7 @@ export class WindowManager {
     const desired = this.#desiredWidgetVisibility;
     const widget = this.#windows.get('widget');
     if (desired === null || widget === undefined || widget.isDestroyed()) return false;
+    if (this.#widgetExcludedFromCapture) return true;
     const displayBounds =
       desired.targetBounds !== null && process.platform === 'win32'
         ? physicalBoundsToDip(desired.targetBounds, (point) => screen.screenToDipPoint(point))
@@ -305,7 +315,7 @@ export class WindowManager {
         webviewTag: false,
         devTools: this.#loader.allowsDevTools,
         partition: role === 'capture' ? CAPTURE_PARTITION : UI_PARTITION,
-        // The hidden widget must be ready to paint immediately after long system idle.
+        // Keep the active widget responsive while the user's foreground app has focus.
         backgroundThrottling: role === 'main',
       },
     };
