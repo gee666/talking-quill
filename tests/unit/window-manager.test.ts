@@ -177,6 +177,8 @@ describe('WindowManager renderer recovery', () => {
   it('reasserts topmost presentation and invalidates the transparent widget surface', async () => {
     const manager = createManager();
     await manager.createAll();
+    expect(widgetWindows()).toHaveLength(0);
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const widget = widgetWindows()[0];
 
     expect(manager.showWidget('default', null)).toBe(true);
@@ -187,14 +189,14 @@ describe('WindowManager renderer recovery', () => {
     expect(widget?.webContents.invalidate).toHaveBeenCalledOnce();
   });
 
-  it('recreates a widget before activation after it has been hidden for a long time', async () => {
+  it('recreates the widget for every activation', async () => {
     const manager = createManager();
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const first = widgetWindows()[0];
     manager.showWidget('default', null);
     manager.hideWidget();
 
-    await vi.advanceTimersByTimeAsync(30 * 60 * 1_000);
     expect(await manager.prepareWidgetForActivation()).toBe(true);
 
     expect(first?.destroyed).toBe(true);
@@ -204,22 +206,11 @@ describe('WindowManager renderer recovery', () => {
   it('marks a failed native show for replacement on the next activation', async () => {
     const manager = createManager();
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const first = widgetWindows()[0];
     first?.showInactive.mockImplementationOnce(() => undefined);
 
     expect(manager.showWidget('default', null)).toBe(false);
-    expect(await manager.prepareWidgetForActivation()).toBe(true);
-
-    expect(first?.destroyed).toBe(true);
-    expect(widgetWindows()).toHaveLength(2);
-  });
-
-  it('recreates a widget marked stale by a power transition before activation', async () => {
-    const manager = createManager();
-    await manager.createAll();
-    const first = widgetWindows()[0];
-
-    manager.markWidgetPresentationStale();
     expect(await manager.prepareWidgetForActivation()).toBe(true);
 
     expect(first?.destroyed).toBe(true);
@@ -241,12 +232,13 @@ describe('WindowManager renderer recovery', () => {
 
     expect(mainWindows()).toHaveLength(1);
     await manager.createAll();
-    expect(electron.BrowserWindow.instances).toHaveLength(3);
+    expect(electron.BrowserWindow.instances).toHaveLength(2);
   });
 
   it('recovers a renderer crash before its first did-finish-load event', async () => {
     const manager = createManager();
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const first = widgetWindows()[0];
 
     first?.webContents.emit('render-process-gone');
@@ -259,6 +251,7 @@ describe('WindowManager renderer recovery', () => {
   it('restores desired widget visibility after replacing its renderer', async () => {
     const manager = createManager();
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const first = widgetWindows()[0];
     first?.webContents.emit('did-finish-load');
     expect(manager.showWidget('large', { x: 10, y: 20, width: 800, height: 600 })).toBe(true);
@@ -289,6 +282,7 @@ describe('WindowManager renderer recovery', () => {
     });
     const manager = createManager();
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const widget = widgetWindows()[0];
     manager.showWidget('default', null);
     const exclusion = new WidgetCaptureExclusion({
@@ -322,6 +316,7 @@ describe('WindowManager renderer recovery', () => {
     });
     const manager = createManager(vi.fn(), load);
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
     const first = widgetWindows()[0];
     first?.webContents.emit('did-finish-load');
     manager.showWidget('default', null);
@@ -362,6 +357,7 @@ describe('WindowManager renderer recovery', () => {
     });
     const manager = createManager(requestQuit, load);
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
 
     widgetWindows()[0]?.webContents.emit('render-process-gone');
     await vi.advanceTimersByTimeAsync(250);
@@ -381,6 +377,7 @@ describe('WindowManager renderer recovery', () => {
     });
     const manager = createManager(requestQuit, load);
     await manager.createAll();
+    expect(await manager.prepareWidgetForActivation()).toBe(true);
 
     widgetWindows()[0]?.webContents.emit('render-process-gone');
     await vi.advanceTimersByTimeAsync(250);

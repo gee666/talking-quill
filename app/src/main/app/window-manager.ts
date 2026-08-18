@@ -21,10 +21,6 @@ export interface WindowManagerCallbacks {
 const MAX_RENDERER_RECOVERY_ATTEMPTS = 2;
 const RENDERER_RECOVERY_BACKOFF_MS = 250;
 const RENDERER_STABILITY_WINDOW_MS = 30_000;
-// Chromium and the Windows compositor can leave a long-hidden transparent window alive but
-// without a presentable surface. Refresh it before the next activation rather than trusting
-// BrowserWindow.isVisible(), which only reflects the native visibility flag.
-export const WIDGET_IDLE_REFRESH_MS = 30 * 60 * 1_000;
 export const RENDERER_LOAD_TIMEOUT_MS = 10_000;
 
 interface DesiredWidgetVisibility {
@@ -45,9 +41,6 @@ export class WindowManager {
   #desiredWidgetVisibility: DesiredWidgetVisibility | null = null;
   #widgetVisibilityGeneration = 0;
   #widgetTemporarilyHidden = false;
-  #widgetHiddenSince: number | null = Date.now();
-  #widgetPresentationStale = false;
-  #widgetPresentationEpoch = 0;
   #widgetRefresh: Promise<boolean> | null = null;
   #pendingMainClose: Promise<void> | null = null;
   #quitting = false;
@@ -65,11 +58,9 @@ export class WindowManager {
   }
 
   async createAll(): Promise<void> {
-    await Promise.all([
-      this.#createAndLoad('main'),
-      this.#createAndLoad('widget'),
-      this.#createAndLoad('capture'),
-    ]);
+    // The widget is intentionally not preloaded. Each activation gets a fresh native window and
+    // Chromium compositor surface so Windows cannot reuse a stale long-hidden transparent HWND.
+    await Promise.all([this.#createAndLoad('main'), this.#createAndLoad('capture')]);
   }
 
   getWebContents(): readonly WebContents[] {
@@ -86,31 +77,14 @@ export class WindowManager {
     await this.#coordinateMainClose(main);
   }
 
-  /**
-   * Recreates a widget that has crossed a power/lock boundary or spent a long time hidden.
-   * A new BrowserWindow also gives Windows a new transparent compositor surface and HWND.
-   */
-  prepareWidgetForActivation(): boolean | Promise<boolean> {
-    const widget = this.#windows.get('widget');
-    const needsRefresh =
-      widget === undefined ||
-      widget.isDestroyed() ||
-      this.#widgetPresentationStale ||
-      (this.#widgetHiddenSince !== null &&
-        Date.now() - this.#widgetHiddenSince >= WIDGET_IDLE_REFRESH_MS);
-    if (!needsRefresh) return true;
+  /** Creates a fresh renderer and native transparent window for every activation. */
+  prepareWidgetForActivation(): Promise<boolean> {
     if (this.#widgetRefresh !== null) return this.#widgetRefresh;
-
     const refresh = this.#refreshWidget().finally(() => {
       if (this.#widgetRefresh === refresh) this.#widgetRefresh = null;
     });
     this.#widgetRefresh = refresh;
     return refresh;
-  }
-
-  markWidgetPresentationStale(): void {
-    this.#widgetPresentationEpoch += 1;
-    this.#widgetPresentationStale = true;
   }
 
   showWidget(
@@ -157,7 +131,6 @@ export class WindowManager {
       this.#widgetVisibilityGeneration += 1;
       this.#desiredWidgetVisibility = null;
       this.#widgetTemporarilyHidden = false;
-      this.#widgetHiddenSince = Date.now();
     }
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
@@ -222,7 +195,6 @@ export class WindowManager {
 
   async #refreshWidget(): Promise<boolean> {
     if (this.#quitting) return false;
-    const refreshEpoch = this.#widgetPresentationEpoch;
     const previous = this.#windows.get('widget');
     if (previous !== undefined) {
       this.#pendingRendererLoads.get(previous)?.();
@@ -233,12 +205,7 @@ export class WindowManager {
     this.#clearRoleTimer(this.#recoveryTimers, 'widget');
     this.#clearRoleTimer(this.#stabilityTimers, 'widget');
     this.#recoveryAttempts.delete('widget');
-    const loaded = await this.#createAndLoad('widget');
-    // Do not erase a newer lock/suspend/unresponsive signal that arrived while loading.
-    if (loaded && this.#widgetPresentationEpoch === refreshEpoch) {
-      this.#widgetPresentationStale = false;
-    }
-    return loaded;
+    return this.#createAndLoad('widget');
   }
 
   #loadRenderer(
@@ -313,12 +280,9 @@ export class WindowManager {
     widget.showInactive();
     widget.moveTop();
     widget.webContents.invalidate();
-    const visible = widget.isVisible();
-    if (visible) this.#widgetHiddenSince = null;
-    else this.markWidgetPresentationStale();
     // Preserve renderer-selected hit testing across screenshot-only hide/show cycles so a
     // stationary pointer can still click Stop or Cancel.
-    return visible;
+    return widget.isVisible();
   }
 
   #create(role: WindowRole): BrowserWindow {
@@ -440,9 +404,7 @@ export class WindowManager {
     });
     window.webContents.on('render-process-gone', () => this.#recover(role, window));
     window.on('unresponsive', () => {
-      if (role === 'widget' && this.#windows.get(role) === window) {
-        this.markWidgetPresentationStale();
-      }
+      if (role === 'widget') this.#recover(role, window);
     });
   }
 
