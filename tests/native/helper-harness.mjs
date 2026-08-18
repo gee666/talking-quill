@@ -130,8 +130,8 @@ async function runInteractive() {
     });
     console.log(
       windows
-        ? 'For 20 seconds, focus the editor and perform Alt+X, Alt+X+P, Alt+X+Q, Alt+X+M, and Alt+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; final triggers must not.'
-        : 'For 20 seconds, focus the editor and perform Option+X, Option+X+P, Option+X+Q, Option+X+M, and Option+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. X/modifiers may leak; final triggers must not.',
+        ? 'For 20 seconds, focus the editor and perform Alt+X, Alt+X+P, Alt+X+Q, Alt+X+M, and Alt+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Alt may reach the editor, but every configured shortcut letter (including X) must be absent.'
+        : 'For 20 seconds, focus the editor and perform Option+X, Option+X+P, Option+X+Q, Option+X+M, and Option+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Modifier events may remain native, but every configured shortcut letter must be absent.',
     );
     await delay(20_000);
     await request('activation.configure', { enabled: false, bindings: [] });

@@ -1974,7 +1974,7 @@ mod tests {
             KeyPhase::Up,
         );
 
-        assert!(!record(
+        assert!(record(
             &context,
             0x58,
             PhysicalKey::Letter(ActivationKey::X),
@@ -2086,7 +2086,7 @@ mod tests {
         ] {
             record(&context, virtual_key, physical, KeyPhase::Up);
         }
-        assert!(!record(
+        assert!(record(
             &context,
             0x58,
             PhysicalKey::Letter(ActivationKey::X),
@@ -2101,10 +2101,10 @@ mod tests {
     }
 
     #[test]
-    fn alt_x_p_passes_prefix_and_modifiers_but_swallows_trigger_sequence() {
+    fn alt_x_p_passes_modifiers_but_swallows_every_shortcut_letter() {
         let (context, outbound, _terminal) = test_context(4);
         assert!(!modifier(&context, VK_LMENU, KeyPhase::Down));
-        assert!(!record(
+        assert!(record(
             &context,
             0x58,
             PhysicalKey::Letter(ActivationKey::X),
@@ -2155,7 +2155,7 @@ mod tests {
         // Config, prefix, and modifier changes cannot alter the accepted up.
         apply_config(&context, ActivationConfig::default());
         assert!(!modifier(&context, VK_LMENU, KeyPhase::Up));
-        assert!(!record(
+        assert!(record(
             &context,
             0x58,
             PhysicalKey::Letter(ActivationKey::X),
@@ -2174,6 +2174,51 @@ mod tests {
                 phase: EventPhase::Up,
             }
         );
+    }
+
+    #[test]
+    fn wrong_suffix_passes_while_native_prefix_repeats_and_up_remain_swallowed() {
+        let (context, outbound, _terminal) = test_context(4);
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Down));
+        assert!(record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+        assert!(record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Down,
+        ));
+
+        assert!(!record(
+            &context,
+            0x51,
+            PhysicalKey::Letter(ActivationKey::Q),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x51,
+            PhysicalKey::Letter(ActivationKey::Q),
+            KeyPhase::Down,
+        ));
+        assert!(!record(
+            &context,
+            0x51,
+            PhysicalKey::Letter(ActivationKey::Q),
+            KeyPhase::Up,
+        ));
+        assert!(record(
+            &context,
+            0x58,
+            PhysicalKey::Letter(ActivationKey::X),
+            KeyPhase::Up,
+        ));
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Up));
+        assert!(outbound.try_recv().is_err());
     }
 
     #[test]
@@ -2319,16 +2364,16 @@ mod tests {
     }
 
     #[test]
-    fn outbound_failure_passes_current_trigger_and_every_later_record() {
+    fn outbound_failure_after_captured_prefix_keeps_letters_swallowed_and_balanced() {
         let (context, _outbound, terminal) = test_context(0);
-        modifier(&context, VK_LMENU, KeyPhase::Down);
-        assert!(!record(
+        assert!(!modifier(&context, VK_LMENU, KeyPhase::Down));
+        assert!(record(
             &context,
             0x58,
             PhysicalKey::Letter(ActivationKey::X),
             KeyPhase::Down,
         ));
-        assert!(!record(
+        assert!(record(
             &context,
             0x50,
             PhysicalKey::Letter(ActivationKey::P),
@@ -2339,18 +2384,20 @@ mod tests {
             TerminalReason::OutboundQueueUnavailable
         );
         assert!(!context.gate.is_open());
-        assert!(!record(
+        assert!(record(
             &context,
             0x50,
             PhysicalKey::Letter(ActivationKey::P),
             KeyPhase::Down,
         ));
-        assert!(!record(
-            &context,
-            0x50,
-            PhysicalKey::Letter(ActivationKey::P),
-            KeyPhase::Up,
-        ));
+        for (virtual_key, key) in [(0x50, ActivationKey::P), (0x58, ActivationKey::X)] {
+            assert!(record(
+                &context,
+                virtual_key,
+                PhysicalKey::Letter(key),
+                KeyPhase::Up,
+            ));
+        }
     }
 
     #[test]

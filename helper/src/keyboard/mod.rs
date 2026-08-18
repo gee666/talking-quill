@@ -499,6 +499,15 @@ impl ActivationBindings {
     }
 
     #[must_use]
+    pub(crate) fn has_prefix(self, modifiers: ModifierMask, keys: &[ActivationKey]) -> bool {
+        !keys.is_empty()
+            && self.iter().any(|candidate| {
+                candidate.shortcut.modifier_mask() == modifiers
+                    && candidate.shortcut.keys().starts_with(keys)
+            })
+    }
+
+    #[must_use]
     pub(crate) fn has_longer_prefix(self, binding: ActivationBinding) -> bool {
         self.iter().any(|candidate| {
             candidate.shortcut.modifiers == binding.shortcut.modifiers

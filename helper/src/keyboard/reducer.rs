@@ -69,24 +69,27 @@ impl Default for HeldLetters {
 /// Pure keyboard state used by native callbacks and platform-neutral tests.
 ///
 /// Fresh A-Z downs are retained in physical order while the keys remain held.
-/// Prefix letters always pass through. A fresh final-key down is accepted only
-/// when the exact four-modifier mask and complete ordered held-key sequence
-/// equal one configured shortcut. The canonical one-key General prefix remains
-/// pending while a longer built-in chord can complete and emits one atomic
-/// completion on release. After successful down delivery for every unambiguous
-/// chord, only that trigger's down/repeats/up are swallowed; its up emits the
-/// accepted shortcut snapshot even if modifiers, prefixes, or configuration
-/// changed meanwhile.
+/// Letters that form a configured shortcut prefix are captured from their first
+/// down through their matching up so the foreground application never receives
+/// a partial activation chord. A fresh final-key down is accepted only when the
+/// exact four-modifier mask and complete ordered held-key sequence equal one
+/// configured shortcut. The canonical one-key General prefix remains pending
+/// while a longer built-in chord can complete and emits one atomic completion
+/// on release. Accepted shortcuts retain their snapshot even if modifiers,
+/// prefixes, or configuration change before every captured key is released.
 ///
 /// A callback first calls [`KeyboardReducer::plan`], attempts optional
-/// nonblocking delivery, and then calls [`KeyboardReducer::apply`]. Failed
-/// initial delivery is fail-open. Escape/Enter session capture retains its
-/// independent down/up behavior.
+/// nonblocking delivery, and then calls [`KeyboardReducer::apply`]. A failed
+/// single-key activation is fail-open. After a prefix has already been captured,
+/// a failed final-key delivery remains swallowed and balanced so no partial
+/// shortcut reaches the foreground application. Escape/Enter session capture
+/// retains its independent down/up behavior.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardReducer {
     active_activation: Option<ActiveActivation>,
     pending_activation: Option<PendingActivation>,
     held_letters: HeldLetters,
+    captured_activation_letters: u32,
     modifiers: ModifierMask,
     activation_sequence_modifiers: Option<ModifierMask>,
     activation_sequence_fenced: bool,
@@ -224,8 +227,9 @@ impl KeyboardReducer {
     }
 
     /// Applies a planned transition and returns whether the native event must
-    /// be swallowed. A failed initial down passes through. A matching up for an
-    /// already delivered down remains swallowed even if its delivery fails.
+    /// be swallowed. A failed single-key activation passes through; a failed
+    /// final key after a captured prefix remains swallowed. Matching ups for
+    /// swallowed downs remain swallowed even if callback delivery fails.
     pub fn apply(&mut self, plan: DecisionPlan, delivered: bool) -> bool {
         if plan.event.is_none() || delivered {
             *self = plan.delivered_state;
@@ -281,6 +285,7 @@ impl KeyboardReducer {
     #[must_use]
     pub fn has_captured_sequence(&self) -> bool {
         self.active_activation.is_some()
+            || self.captured_activation_letters != 0
             || self.escape == SequenceState::Suppressed
             || self.enter == SequenceState::Suppressed
     }
@@ -291,9 +296,11 @@ impl KeyboardReducer {
     #[must_use]
     pub fn is_capturing(&self, key: PhysicalKey) -> bool {
         match key {
-            PhysicalKey::Letter(letter) => self
-                .active_activation
-                .is_some_and(|active| active.trigger == letter),
+            PhysicalKey::Letter(letter) => {
+                self.active_activation
+                    .is_some_and(|active| active.trigger == letter)
+                    || self.is_activation_letter_captured(letter)
+            }
             PhysicalKey::Escape => self.escape == SequenceState::Suppressed,
             PhysicalKey::Enter => self.enter == SequenceState::Suppressed,
             PhysicalKey::Other => false,
@@ -316,6 +323,7 @@ impl KeyboardReducer {
 
                 let mut next = self.clone();
                 next.active_activation = None;
+                next.release_activation_letter(key);
                 next.held_letters.release(key);
                 next.reset_activation_sequence_if_released();
                 return DecisionPlan {
@@ -340,8 +348,10 @@ impl KeyboardReducer {
                 else {
                     return self.pass_letter(input, key);
                 };
+                let captured = self.is_activation_letter_captured(key);
                 let mut next = self.clone();
                 next.pending_activation = None;
+                next.release_activation_letter(key);
                 next.held_letters.release(key);
                 next.reset_activation_sequence_if_released();
                 DecisionPlan {
@@ -351,12 +361,14 @@ impl KeyboardReducer {
                         binding: pending.binding,
                         held_ms: observed_at_ms.saturating_sub(pending.started_at_ms),
                     }),
-                    // The pending prefix down passed through, so its up must also pass through.
-                    swallow_if_delivered: false,
-                    swallow_if_failed: false,
+                    // Balance the captured pending-prefix down even if completion delivery fails.
+                    swallow_if_delivered: captured,
+                    swallow_if_failed: captured,
                 }
             }
-            KeyPhase::Down if input.repeat => DecisionPlan::unchanged(self, false),
+            KeyPhase::Down if input.repeat => {
+                DecisionPlan::unchanged(self, self.is_activation_letter_captured(key))
+            }
             KeyPhase::Down => {
                 let mut next = self.clone();
                 let begins_sequence = next.held_letters.as_slice().is_empty();
@@ -369,12 +381,19 @@ impl KeyboardReducer {
                         next.activation_sequence_fenced = true;
                     }
                 }
-                let accepted = (!next.activation_sequence_fenced && activation_enabled)
+                let sequence_is_prefix = !next.activation_sequence_fenced
+                    && activation_enabled
+                    && bindings.has_prefix(input.modifiers, next.held_letters.as_slice());
+                let accepted = sequence_is_prefix
                     .then(|| bindings.find_exact(input.modifiers, next.held_letters.as_slice()));
                 let Some(binding) = accepted
                     .flatten()
                     .filter(|binding| binding.shortcut().trigger() == key)
                 else {
+                    if sequence_is_prefix {
+                        next.capture_activation_letter(key);
+                        return DecisionPlan::same(next, true);
+                    }
                     if next.pending_activation.is_some() {
                         next.pending_activation = None;
                         next.activation_sequence_fenced = true;
@@ -387,42 +406,53 @@ impl KeyboardReducer {
                         binding,
                         started_at_ms: observed_at_ms,
                     });
-                    return DecisionPlan::same(next, false);
+                    next.capture_activation_letter(key);
+                    return DecisionPlan::same(next, true);
                 }
 
                 next.pending_activation = None;
+                let had_captured_prefix = next.captured_activation_letters != 0;
                 let mut delivered = next.clone();
+                delivered.capture_activation_letter(key);
                 delivered.active_activation = Some(ActiveActivation {
                     binding,
                     trigger: key,
                 });
+                let mut failed = next;
+                if had_captured_prefix {
+                    failed.capture_activation_letter(key);
+                }
                 DecisionPlan {
                     delivered_state: delivered,
-                    failed_state: next,
+                    failed_state: failed,
                     event: Some(HelperEvent::Activation {
                         binding,
                         phase: EventPhase::Down,
                     }),
                     swallow_if_delivered: true,
-                    swallow_if_failed: false,
+                    // Once a prefix down was captured, keep a failed trigger balanced and prevent
+                    // a partial shortcut from reaching the foreground application.
+                    swallow_if_failed: had_captured_prefix,
                 }
             }
         }
     }
 
     fn pass_letter(&self, input: KeyInput, key: ActivationKey) -> DecisionPlan {
+        let captured = self.is_activation_letter_captured(key);
         let mut next = self.clone();
         match input.phase {
             KeyPhase::Down if !input.repeat => {
                 next.held_letters.push_fresh(key);
             }
             KeyPhase::Up => {
+                next.release_activation_letter(key);
                 next.held_letters.release(key);
                 next.reset_activation_sequence_if_released();
             }
             KeyPhase::Down => {}
         }
-        DecisionPlan::same(next, false)
+        DecisionPlan::same(next, captured)
     }
 
     fn plan_control(
@@ -483,6 +513,18 @@ impl KeyboardReducer {
                 }
             }
         }
+    }
+
+    fn is_activation_letter_captured(&self, key: ActivationKey) -> bool {
+        self.captured_activation_letters & (1_u32 << u32::from(key.index())) != 0
+    }
+
+    fn capture_activation_letter(&mut self, key: ActivationKey) {
+        self.captured_activation_letters |= 1_u32 << u32::from(key.index());
+    }
+
+    fn release_activation_letter(&mut self, key: ActivationKey) {
+        self.captured_activation_letters &= !(1_u32 << u32::from(key.index()));
     }
 
     fn reset_activation_sequence_if_released(&mut self) {

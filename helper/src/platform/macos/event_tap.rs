@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn outbound_failure_passes_trigger_and_closes_the_callback_gate() {
+    fn outbound_failure_after_captured_prefix_keeps_letters_balanced() {
         let (context, _outbound, _commands) = test_context_with_capacity(0);
         context
             .keyboard
@@ -1525,14 +1525,14 @@ mod tests {
             .unwrap()
             .modifiers
             .observe_flags_changed(LEFT_OPTION_KEY_CODE, true);
-        assert!(!process_key_event(
+        assert!(process_key_event(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Down,
             false,
             false,
         ));
-        assert!(!process_key_event(
+        assert!(process_key_event(
             &context,
             LETTER_KEY_CODES[15],
             KeyPhase::Down,
@@ -1540,9 +1540,16 @@ mod tests {
             false,
         ));
         assert!(!context.gate.is_open());
-        assert!(!process_key_event(
+        assert!(process_key_event(
             &context,
             LETTER_KEY_CODES[15],
+            KeyPhase::Up,
+            false,
+            false,
+        ));
+        assert!(process_key_event(
+            &context,
+            LETTER_KEY_CODES[23],
             KeyPhase::Up,
             false,
             false,
@@ -1827,7 +1834,7 @@ mod tests {
                 .modifiers
                 .observe_flags_changed(LEFT_OPTION_KEY_CODE, true);
         }
-        assert!(!process_key_event(
+        assert!(process_key_event(
             &context,
             LETTER_KEY_CODES[23],
             KeyPhase::Down,
@@ -1864,6 +1871,13 @@ mod tests {
                 phase: EventPhase::Up,
             }
         );
+        assert!(process_key_event(
+            &context,
+            LETTER_KEY_CODES[23],
+            KeyPhase::Up,
+            false,
+            false,
+        ));
 
         let (context, outbound, _commands) = test_context();
         {

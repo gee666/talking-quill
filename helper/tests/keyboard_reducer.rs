@@ -122,7 +122,7 @@ fn step_mode_at(
 }
 
 #[test]
-fn translate_to_english_binding_keeps_its_exact_full_chord_ownership() {
+fn translate_to_english_binding_swallows_its_prefix_and_owns_its_exact_full_chord() {
     let alt = modifiers(false, true, false, false);
     let family = [
         shortcut(alt, &[ActivationKey::X]),
@@ -143,7 +143,7 @@ fn translate_to_english_binding_keeps_its_exact_full_chord_ownership() {
             false,
             true,
         ),
-        (None, false)
+        (None, true)
     );
     assert_eq!(
         step(
@@ -187,7 +187,13 @@ fn canonical_general_prefix_completes_on_release_with_physical_hold_duration() {
             true,
             100,
         ),
-        (None, false)
+        (None, true)
+    );
+    let mut repeat = letter(ActivationKey::X, KeyPhase::Down, alt);
+    repeat.repeat = true;
+    assert_eq!(
+        step_at(&mut reducer, configured, repeat, true, false, true, 400),
+        (None, true),
     );
     assert_eq!(
         step_at(
@@ -204,13 +210,13 @@ fn canonical_general_prefix_completes_on_release_with_physical_hold_duration() {
                 binding,
                 held_ms: 625,
             }),
-            false,
+            true,
         )
     );
 }
 
 #[test]
-fn canonical_prompt_has_an_unambiguous_single_suffix() {
+fn canonical_prompt_swallows_its_unambiguous_prefix_and_suffix() {
     let alt = modifiers(false, true, false, false);
     let prompt = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
     let configured = bindings(&[
@@ -232,7 +238,7 @@ fn canonical_prompt_has_an_unambiguous_single_suffix() {
             false,
             true,
         ),
-        (None, false)
+        (None, true)
     );
     assert_eq!(
         step(
@@ -254,7 +260,7 @@ fn canonical_prompt_has_an_unambiguous_single_suffix() {
 }
 
 #[test]
-fn canonical_general_prefix_survives_modifier_release_before_x_release() {
+fn captured_general_prefix_survives_modifier_release_before_x_release() {
     let alt = modifiers(false, true, false, false);
     let general = shortcut(alt, &[ActivationKey::X]);
     let configured = bindings(&[
@@ -276,7 +282,7 @@ fn canonical_general_prefix_survives_modifier_release_before_x_release() {
             true,
             100,
         ),
-        (None, false)
+        (None, true)
     );
     reducer.observe_modifiers(ModifierMask::default());
     assert_eq!(
@@ -294,7 +300,7 @@ fn canonical_general_prefix_survives_modifier_release_before_x_release() {
                 binding,
                 held_ms: 200,
             }),
-            false,
+            true,
         )
     );
 }
@@ -326,7 +332,7 @@ fn canonical_general_prefix_is_cancelled_when_a_modifier_is_added() {
                 true,
                 100,
             ),
-            (None, false),
+            (None, true),
         );
         reducer.observe_modifiers(added);
         assert_eq!(
@@ -339,7 +345,7 @@ fn canonical_general_prefix_is_cancelled_when_a_modifier_is_added() {
                 true,
                 300,
             ),
-            (None, false),
+            (None, true),
         );
     }
 }
@@ -366,7 +372,7 @@ fn canonical_general_prefix_is_cancelled_when_alt_is_readded() {
             true,
             100,
         ),
-        (None, false),
+        (None, true),
     );
     reducer.observe_modifiers(ModifierMask::default());
     reducer.observe_modifiers(alt);
@@ -380,12 +386,13 @@ fn canonical_general_prefix_is_cancelled_when_alt_is_readded() {
             true,
             300,
         ),
-        (None, false),
+        (None, true),
     );
 }
 
 #[test]
-fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequence() {
+fn alt_x_p_records_physical_order_and_swallows_every_shortcut_letter() {
+    // Modifier events remain pass-through in the native hook; reducer coverage starts at X.
     let alt = modifiers(false, true, false, false);
     let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
     let configured = bindings(&[accepted]);
@@ -400,7 +407,7 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
             false,
             true,
         ),
-        (None, false)
+        (None, true)
     );
     assert_eq!(reducer.held_letters(), &[ActivationKey::X]);
 
@@ -429,7 +436,7 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
         (None, true)
     );
 
-    // Prefix release passes and cannot alter the accepted shortcut snapshot.
+    // Captured prefix release stays swallowed and cannot alter the accepted snapshot.
     assert_eq!(
         step(
             &mut reducer,
@@ -439,7 +446,7 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
             false,
             true,
         ),
-        (None, false)
+        (None, true)
     );
     assert_eq!(reducer.held_letters(), &[ActivationKey::P]);
 
@@ -460,6 +467,72 @@ fn alt_x_p_records_physical_order_passes_prefix_and_captures_only_trigger_sequen
             }),
             true,
         )
+    );
+    assert!(reducer.held_letters().is_empty());
+}
+
+#[test]
+fn wrong_unconfigured_suffix_passes_while_captured_prefix_remains_balanced() {
+    let alt = modifiers(false, true, false, false);
+    let configured = bindings(&[shortcut(alt, &[ActivationKey::X, ActivationKey::P])]);
+    let mut reducer = KeyboardReducer::default();
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, true),
+    );
+    let mut x_repeat = letter(ActivationKey::X, KeyPhase::Down, alt);
+    x_repeat.repeat = true;
+    assert_eq!(
+        step(&mut reducer, x_repeat, configured, true, false, true),
+        (None, true),
+    );
+
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::Q, KeyPhase::Down, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    let mut q_repeat = letter(ActivationKey::Q, KeyPhase::Down, alt);
+    q_repeat.repeat = true;
+    assert_eq!(
+        step(&mut reducer, q_repeat, configured, true, false, true),
+        (None, false),
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::Q, KeyPhase::Up, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, false),
+    );
+    assert_eq!(
+        step(
+            &mut reducer,
+            letter(ActivationKey::X, KeyPhase::Up, alt),
+            configured,
+            true,
+            false,
+            true,
+        ),
+        (None, true),
     );
     assert!(reducer.held_letters().is_empty());
 }
@@ -584,7 +657,7 @@ fn fresh_down_after_releasing_an_extra_key_can_complete_the_exact_chord() {
 }
 
 #[test]
-fn repeats_never_add_keys_or_trigger_but_accepted_trigger_repeats_are_swallowed() {
+fn repeats_never_add_keys_or_trigger_but_captured_letter_repeats_are_swallowed() {
     let alt = modifiers(false, true, false, false);
     let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
     let configured = bindings(&[accepted]);
@@ -599,7 +672,7 @@ fn repeats_never_add_keys_or_trigger_but_accepted_trigger_repeats_are_swallowed(
     assert!(reducer.held_letters().is_empty());
 
     assert!(
-        !step(
+        step(
             &mut reducer,
             letter(ActivationKey::X, KeyPhase::Down, alt),
             configured,
@@ -645,7 +718,7 @@ fn configuration_change_after_down_uses_the_exact_accepted_snapshot_on_up() {
     let mut reducer = KeyboardReducer::default();
 
     assert!(
-        !step(
+        step(
             &mut reducer,
             letter(ActivationKey::A, KeyPhase::Down, alt),
             original_bindings,
@@ -687,14 +760,14 @@ fn configuration_change_after_down_uses_the_exact_accepted_snapshot_on_up() {
 }
 
 #[test]
-fn failed_activation_down_delivery_fails_open_for_trigger_repeats_and_up() {
+fn failed_final_callback_after_captured_prefix_keeps_all_letters_swallowed_and_balanced() {
     let alt = modifiers(false, true, false, false);
     let accepted = shortcut(alt, &[ActivationKey::X, ActivationKey::P]);
     let configured = bindings(&[accepted]);
     let mut reducer = KeyboardReducer::default();
 
     assert!(
-        !step(
+        step(
             &mut reducer,
             letter(ActivationKey::X, KeyPhase::Down, alt),
             configured,
@@ -718,26 +791,29 @@ fn failed_activation_down_delivery_fails_open_for_trigger_repeats_and_up() {
                 binding: test_binding(0, accepted),
                 phase: EventPhase::Down,
             }),
-            false,
+            true,
         )
     );
     let mut repeat = letter(ActivationKey::P, KeyPhase::Down, alt);
     repeat.repeat = true;
     assert_eq!(
         step(&mut reducer, repeat, configured, true, false, true),
-        (None, false)
+        (None, true)
     );
-    assert_eq!(
-        step(
-            &mut reducer,
-            letter(ActivationKey::P, KeyPhase::Up, ModifierMask::default()),
-            configured,
-            true,
-            false,
-            true,
-        ),
-        (None, false)
-    );
+    for key in [ActivationKey::P, ActivationKey::X] {
+        assert_eq!(
+            step(
+                &mut reducer,
+                letter(key, KeyPhase::Up, ModifierMask::default()),
+                configured,
+                true,
+                false,
+                true,
+            ),
+            (None, true),
+            "release {key:?}",
+        );
+    }
 }
 
 #[test]
@@ -749,7 +825,7 @@ fn duplicate_nonrepeat_down_never_retries_or_activates_a_different_trigger() {
     for duplicate in [ActivationKey::X, ActivationKey::P] {
         let mut reducer = KeyboardReducer::default();
         assert!(
-            !step(
+            step(
                 &mut reducer,
                 letter(ActivationKey::X, KeyPhase::Down, alt),
                 configured,
@@ -759,9 +835,9 @@ fn duplicate_nonrepeat_down_never_retries_or_activates_a_different_trigger() {
             )
             .1
         );
-        // Failed trigger delivery intentionally retains the physical held state.
+        // A failed final callback retains captured ownership and physical held state.
         assert!(
-            !step(
+            step(
                 &mut reducer,
                 letter(ActivationKey::P, KeyPhase::Down, alt),
                 configured,
@@ -890,7 +966,7 @@ fn accepted_activation_retains_profile_and_shortcut_across_reassignment() {
             false,
             true,
         ),
-        (None, false),
+        (None, true),
     );
     assert_eq!(
         step(
@@ -974,7 +1050,7 @@ fn modifier_sequence_must_be_nonempty_and_unchanged_until_all_letters_release() 
     }
 
     assert!(
-        !step(
+        step(
             &mut reducer,
             letter(ActivationKey::X, KeyPhase::Down, alt),
             configured,
@@ -1009,7 +1085,7 @@ fn modifier_sequence_must_be_nonempty_and_unchanged_until_all_letters_release() 
     }
 
     assert!(
-        !step(
+        step(
             &mut reducer,
             letter(ActivationKey::X, KeyPhase::Down, alt),
             configured,

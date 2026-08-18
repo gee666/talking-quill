@@ -119,11 +119,11 @@
 //! While initialized and capture is enabled as appropriate, the helper may
 //! emit these ID-less JSON-RPC notifications. Platform-neutral reduction uses
 //! exact four-modifier equality and the complete ordered held-letter sequence.
-//! Prefix letters and modifiers pass through (and may therefore leak into the
-//! foreground application). An ambiguous canonical built-in prefix passes both
-//! down and up and resolves as one complete event; otherwise only an accepted
-//! final trigger down, its repeats, and its matching up are swallowed. Session
-//! key capture is independent of activation configuration/modifiers. A mode
+//! Modifiers pass through, while every letter in a configured activation prefix
+//! is swallowed from down through matching up so partial shortcut commands do
+//! not leak into the foreground application. An ambiguous canonical built-in
+//! prefix resolves as one complete event on release. Session key capture is
+//! independent of activation configuration/modifiers. A mode
 //! change affects only fresh downs; repeats and matching ups retain ownership
 //! so every swallowed down remains balanced.
 //!
