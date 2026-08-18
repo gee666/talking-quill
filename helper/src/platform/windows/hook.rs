@@ -361,6 +361,7 @@ struct CallbackKeyboard {
     captured_enter_source: Option<EnterSource>,
     altgr_active: bool,
     modifiers_fenced: bool,
+    suppress_alt_up: bool,
 }
 
 struct CallbackContext {
@@ -1026,6 +1027,7 @@ fn process_hook_record_at(
         return false;
     }
 
+    let alt_modifier = matches!(virtual_key, VK_LMENU | VK_RMENU | VK_MENU);
     let right_alt =
         virtual_key == VK_RMENU || (virtual_key == VK_MENU && scan_code == 0x38 && extended);
     if right_alt && phase == KeyPhase::Down {
@@ -1038,17 +1040,24 @@ fn process_hook_record_at(
         keyboard.altgr_active = false;
     }
 
+    let alt_was_down = keyboard.modifiers.mask().alt();
     if keyboard
         .modifiers
         .observe(virtual_key, scan_code, extended, phase)
     {
+        let suppress = alt_modifier && phase == KeyPhase::Up && keyboard.suppress_alt_up;
+        if suppress || (alt_modifier && phase == KeyPhase::Down && !alt_was_down) {
+            keyboard.suppress_alt_up = false;
+        }
         let modifiers = keyboard.modifiers.mask();
         if keyboard.modifiers_fenced && modifiers == ModifierMask::default() {
             keyboard.modifiers_fenced = false;
         }
         keyboard.reducer.observe_modifiers(modifiers);
-        // Modifier prefixes intentionally leak through to the foreground app.
-        return false;
+        // Letter capture would otherwise leave a bare Alt press in the foreground application,
+        // which focuses menus on Alt-up. Consume that balancing up only after this Alt cycle has
+        // owned at least one shortcut letter.
+        return suppress;
     }
     let key = map_scan_code(scan_code, extended);
     if key == PhysicalKey::Other {
@@ -1140,6 +1149,9 @@ fn process_hook_record_at(
         );
     }
     let swallowed = keyboard.reducer.apply(plan, delivered);
+    if swallowed && keyboard.modifiers.mask().alt() {
+        keyboard.suppress_alt_up = true;
+    }
     if let PhysicalKey::Letter(letter) = key
         && phase == KeyPhase::Up
     {
@@ -2154,7 +2166,7 @@ mod tests {
 
         // Config, prefix, and modifier changes cannot alter the accepted up.
         apply_config(&context, ActivationConfig::default());
-        assert!(!modifier(&context, VK_LMENU, KeyPhase::Up));
+        assert!(modifier(&context, VK_LMENU, KeyPhase::Up));
         assert!(record(
             &context,
             0x58,
@@ -2217,7 +2229,7 @@ mod tests {
             PhysicalKey::Letter(ActivationKey::X),
             KeyPhase::Up,
         ));
-        assert!(!modifier(&context, VK_LMENU, KeyPhase::Up));
+        assert!(modifier(&context, VK_LMENU, KeyPhase::Up));
         assert!(outbound.try_recv().is_err());
     }
 
