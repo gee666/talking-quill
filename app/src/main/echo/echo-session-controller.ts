@@ -348,6 +348,14 @@ export class EchoSessionController {
     return this.#profiles.resetProfile(id);
   }
 
+  replaceProfiles(profiles: readonly DictationProfile[]): Promise<Settings> {
+    return this.#profiles.replaceProfiles(profiles);
+  }
+
+  get dictationProfiles(): readonly DictationProfile[] {
+    return this.#settings.get().dictationProfiles;
+  }
+
   shutdown(): Promise<void> {
     if (this.#shutdownOperation !== null) return this.#shutdownOperation;
     let resolveShutdown!: () => void;

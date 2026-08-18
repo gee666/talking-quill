@@ -22,6 +22,7 @@ import {
 } from '../../../shared/schemas/shortcut';
 import { Button, Card, Input, Select, Status, TextArea } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
+import { publicErrorMessage } from '../public-error';
 import { KeyboardShortcutInput } from './KeyboardShortcutInput';
 
 export function DictationProfilesSection({
@@ -37,6 +38,7 @@ export function DictationProfilesSection({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
   const [creating, setCreating] = useState(false);
   const [recoveryRevisions, setRecoveryRevisions] = useState<Readonly<Record<string, number>>>({});
   const mutate = async (
@@ -132,7 +134,66 @@ export function DictationProfilesSection({
           </Button>
         </div>
       )}
+      <div className="provider-actions">
+        <Button
+          variant="secondary"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            setMessage('');
+            try {
+              const result = await window.talkingQuill.profiles.importFile();
+              setCreating(false);
+              setMessage(
+                result.status === 'cancelled'
+                  ? 'Import cancelled.'
+                  : `Imported ${String(result.count)} dictation profiles.`,
+              );
+            } catch (transferError: unknown) {
+              setError(
+                publicErrorMessage(
+                  transferError,
+                  'Those dictation profiles couldn’t be imported. Check that every shortcut is valid and unique.',
+                ),
+              );
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Import profiles
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            setMessage('');
+            try {
+              const result = await window.talkingQuill.profiles.exportFile();
+              setMessage(
+                result.status === 'cancelled'
+                  ? 'Export cancelled.'
+                  : `Exported ${String(result.count)} dictation profiles.`,
+              );
+            } catch (transferError: unknown) {
+              setError(
+                publicErrorMessage(transferError, 'Those dictation profiles couldn’t be exported.'),
+              );
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Export profiles
+        </Button>
+      </div>
       {error === null ? null : <Status tone="error">{error}</Status>}
+      <p className="operation-message" role="status" aria-live="polite">
+        {message}
+      </p>
     </Card>
   );
 }

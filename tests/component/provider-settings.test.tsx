@@ -177,6 +177,8 @@ const api: MainApi = {
     update: () => Promise.resolve(settings),
     delete: () => Promise.resolve(settings),
     reset: () => Promise.resolve(settings),
+    importFile: () => Promise.resolve({ status: 'cancelled' }),
+    exportFile: () => Promise.resolve({ status: 'cancelled' }),
   },
   data: {
     resetAll: () => Promise.resolve(),
@@ -213,6 +215,8 @@ const api: MainApi = {
     update: () => Promise.reject(new Error('not used')),
     delete: () => Promise.resolve(false),
     preview: () => Promise.resolve(null),
+    importFile: () => Promise.resolve({ status: 'cancelled' }),
+    exportFile: () => Promise.resolve({ status: 'cancelled' }),
   },
   vocabulary: {
     list: () => Promise.resolve([]),

@@ -41,6 +41,8 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
   'profile:update': { id: 'general', patch: { name: 'General fixture' } },
   'profile:delete': { id: ID },
   'profile:reset': { id: 'prompt' },
+  'profile:import-file': {},
+  'profile:export-file': {},
   'data:reset-all': { confirmation: 'RESET TALKING QUILL' },
   'data:reset-renderer-ack': {
     acknowledgementToken: '00000000-0000-4000-8000-000000000013',
@@ -94,6 +96,8 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
   'commands:update': { id: ID, patch: { snippet: 'updated fixture snippet' } },
   'commands:delete': { id: ID },
   'commands:preview': { transcript: 'fixture transcript' },
+  'commands:import-file': {},
+  'commands:export-file': {},
   'vocabulary:list': {},
   'vocabulary:create': { value: 'fixture phrase' },
   'vocabulary:update': { id: ID, value: 'updated fixture phrase' },

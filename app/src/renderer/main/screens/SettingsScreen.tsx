@@ -91,7 +91,7 @@ export function SettingsScreen({
     {
       title: 'Dictation profiles',
       keywords:
-        'Dictation profiles shortcuts shortcut chord binding keyboard Ctrl Control Alt Option Shift Win Command General Prompt Markdown Translate English custom add create delete raw smart processing what happens to your words type it exactly clean it up extra instructions prompt reset formatting',
+        'Dictation profiles shortcuts shortcut chord binding keyboard Ctrl Control Alt Option Shift Win Command General Prompt Markdown Translate English custom add create delete backup restore JSON raw smart processing what happens to your words type it exactly clean it up extra instructions prompt reset formatting',
       node: (
         <DictationProfilesSection
           settings={settings}
@@ -145,7 +145,7 @@ export function SettingsScreen({
     {
       title: 'Voice Commands',
       keywords:
-        'Voice Commands command trigger phrase snippet shortcut for text say my address create edit delete match preview',
+        'Voice Commands command trigger phrase snippet shortcut for text say my address create edit delete import export backup restore JSON match preview',
       node: <VoiceCommandsSection commands={settings.voiceCommands} heading={null} />,
     },
     {

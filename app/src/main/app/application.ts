@@ -51,6 +51,7 @@ import { createElectronUpdateBackend } from '../info/electron-update-backend';
 import { SystemInfoService } from '../info/system-info-service';
 import { NoticesService } from '../info/notices-service';
 import { DataLifecycleService } from '../data/data-lifecycle-service';
+import { SettingsTransferFileService } from '../data/settings-transfer-file-service';
 import { createNativeOwnedTreeRemoval } from '../data/native-owned-tree-removal';
 import { prepareResetSafely } from '../data/reset-preparation';
 import { DiagnosticLogger } from '../security/diagnostic-logger';
@@ -491,6 +492,7 @@ export class TalkingQuillApplication {
       this.#ownRuntimeDisposer(cleanup, 'tray-settings', removeTraySettings);
 
       const packagedMediaReady = sourceHarness.createPackagedMediaReady(task6Composition);
+      const settingsTransferFiles = new SettingsTransferFileService(commands, echo);
 
       const ipc = registerIpcTransport(
         this.#roles,
@@ -514,6 +516,7 @@ export class TalkingQuillApplication {
           commands,
           vocabulary,
           vocabularyFiles,
+          settingsTransferFiles,
           welcome,
           updates,
           updateOperations,

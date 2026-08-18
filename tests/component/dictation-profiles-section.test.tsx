@@ -79,6 +79,8 @@ function profileApi(overrides: Partial<MainApi['profiles']> = {}): MainApi['prof
     update: vi.fn(),
     delete: vi.fn(),
     reset: vi.fn(),
+    importFile: vi.fn(() => Promise.resolve({ status: 'cancelled' as const })),
+    exportFile: vi.fn(() => Promise.resolve({ status: 'cancelled' as const })),
     ...overrides,
   };
 }

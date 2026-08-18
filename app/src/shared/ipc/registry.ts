@@ -67,6 +67,7 @@ import {
   VisionVerificationSchema,
 } from '../schemas/providers';
 import { PublicSettingsPatchSchema, SettingsSchema } from '../schemas/settings';
+import { SettingsTransferResultSchema } from '../schemas/settings-transfer';
 import {
   BuiltInDictationProfileIdSchema,
   CustomDictationProfileIdSchema,
@@ -241,6 +242,16 @@ export const invokeRegistry = Object.freeze({
     roles: ['main'] as const,
     request: z.object({ id: BuiltInDictationProfileIdSchema }).strict(),
     response: SettingsSchema,
+  }),
+  'profile:import-file': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: SettingsTransferResultSchema,
+  }),
+  'profile:export-file': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: SettingsTransferResultSchema,
   }),
   'data:reset-all': defineInvoke({
     roles: ['main'] as const,
@@ -525,6 +536,16 @@ export const invokeRegistry = Object.freeze({
     roles: ['main'] as const,
     request: z.object({ transcript: z.string().max(10_000) }).strict(),
     response: VoiceCommandMatchSchema.nullable(),
+  }),
+  'commands:import-file': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: SettingsTransferResultSchema,
+  }),
+  'commands:export-file': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: SettingsTransferResultSchema,
   }),
   'vocabulary:list': defineInvoke({
     roles: ['main'] as const,

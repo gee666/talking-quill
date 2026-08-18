@@ -49,6 +49,7 @@ import type {
   VoiceCommandUpdate,
 } from '../schemas/commands';
 import type { VocabularyEntry, VocabularyFileResult } from '../schemas/vocabulary';
+import type { SettingsTransferResult } from '../schemas/settings-transfer';
 
 export interface BootstrapData {
   readonly appVersion: string;
@@ -100,6 +101,8 @@ export interface MainApi {
     update(id: DictationProfileId, patch: DictationProfilePatch): Promise<Settings>;
     delete(id: CustomDictationProfileId): Promise<Settings>;
     reset(id: BuiltInDictationProfileId): Promise<Settings>;
+    importFile(): Promise<SettingsTransferResult>;
+    exportFile(): Promise<SettingsTransferResult>;
   };
   readonly data: {
     resetAll(confirmation: 'RESET TALKING QUILL'): Promise<void>;
@@ -131,6 +134,8 @@ export interface MainApi {
     update(id: string, patch: VoiceCommandUpdate): Promise<VoiceCommand>;
     delete(id: string): Promise<boolean>;
     preview(transcript: string): Promise<VoiceCommandMatch | null>;
+    importFile(): Promise<SettingsTransferResult>;
+    exportFile(): Promise<SettingsTransferResult>;
   };
   readonly vocabulary: {
     list(): Promise<readonly VocabularyEntry[]>;

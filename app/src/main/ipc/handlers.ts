@@ -7,6 +7,7 @@ import type { HistoryService } from '../history/history-service';
 import type { VoiceCommandStore } from '../commands/voice-command-store';
 import type { VocabularyStore } from '../vocabulary/vocabulary-store';
 import type { VocabularyFileService } from '../vocabulary/file-service';
+import type { SettingsTransferFileService } from '../data/settings-transfer-file-service';
 import type {
   ProviderConfigService,
   ProviderMutationService,
@@ -45,6 +46,7 @@ export interface HandlerDependencies {
   readonly commands: VoiceCommandStore;
   readonly vocabulary: VocabularyStore;
   readonly vocabularyFiles: VocabularyFileService;
+  readonly settingsTransferFiles: SettingsTransferFileService;
   readonly welcome: WelcomeService;
   readonly updates: UpdateService;
   readonly updateOperations: UpdateOperationCoordinator;
@@ -142,6 +144,18 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       serializeSettingsMutation(() => dependencies.echo.deleteProfile(id)),
     'profile:reset': ({ id }) =>
       serializeSettingsMutation(() => dependencies.echo.resetProfile(id)),
+    'profile:import-file': (_request, context) => {
+      const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
+      if (owner === null) throw new Error('Dictation profile dialog owner is unavailable');
+      return serializeSettingsMutation(() =>
+        dependencies.settingsTransferFiles.importDictationProfiles(owner),
+      );
+    },
+    'profile:export-file': (_request, context) => {
+      const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
+      if (owner === null) throw new Error('Dictation profile dialog owner is unavailable');
+      return dependencies.settingsTransferFiles.exportDictationProfiles(owner);
+    },
     'provider:catalog': () => ({ providers: [...dependencies.providers.catalog()] }),
     'provider:pi-installation-status': () => dependencies.piInstallation.status(),
     'provider:pi-installation-save': ({ path }) => dependencies.piInstallation.save(path),
@@ -259,6 +273,16 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
     'commands:update': ({ id, patch }) => dependencies.commands.update(id, patch),
     'commands:delete': async ({ id }) => ({ deleted: await dependencies.commands.delete(id) }),
     'commands:preview': ({ transcript }) => dependencies.commands.match(transcript),
+    'commands:import-file': (_request, context) => {
+      const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
+      if (owner === null) throw new Error('Voice command dialog owner is unavailable');
+      return dependencies.settingsTransferFiles.importVoiceCommands(owner);
+    },
+    'commands:export-file': (_request, context) => {
+      const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
+      if (owner === null) throw new Error('Voice command dialog owner is unavailable');
+      return dependencies.settingsTransferFiles.exportVoiceCommands(owner);
+    },
     'vocabulary:list': () => [...dependencies.vocabulary.list()],
     'vocabulary:create': ({ value }) => dependencies.vocabulary.create(value),
     'vocabulary:update': ({ id, value }) => dependencies.vocabulary.update(id, value),

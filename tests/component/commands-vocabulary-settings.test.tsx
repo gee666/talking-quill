@@ -38,6 +38,8 @@ function installApi() {
         update: () => Promise.resolve(command),
         delete: deleteCommand,
         preview,
+        importFile: () => Promise.resolve({ status: 'imported' as const, count: 2 }),
+        exportFile: () => Promise.resolve({ status: 'exported' as const, count: 1 }),
       },
       vocabulary: {
         list: () => Promise.resolve([entry]),

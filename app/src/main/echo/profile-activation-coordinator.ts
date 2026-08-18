@@ -154,6 +154,10 @@ export class ProfileActivationCoordinator {
     });
   }
 
+  replaceProfiles(input: readonly DictationProfile[]): Promise<Settings> {
+    return this.#serializeTransaction(() => this.#replaceProfiles(input));
+  }
+
   async #replaceProfiles(input: readonly DictationProfile[]): Promise<Settings> {
     const profiles = DictationProfileListSchema.parse(input);
     const current = this.#settings.get();

@@ -52,6 +52,8 @@ const api: MainApi = {
     update: (id, patch) => invoke('profile:update', { id, patch }),
     delete: (id) => invoke('profile:delete', { id }),
     reset: (id) => invoke('profile:reset', { id }),
+    importFile: () => invoke('profile:import-file', {}),
+    exportFile: () => invoke('profile:export-file', {}),
   },
   data: {
     resetAll: async (confirmation) => {
@@ -102,6 +104,8 @@ const api: MainApi = {
     update: (id, patch) => invoke('commands:update', { id, patch }),
     delete: async (id) => (await invoke('commands:delete', { id })).deleted,
     preview: (transcript) => invoke('commands:preview', { transcript }),
+    importFile: () => invoke('commands:import-file', {}),
+    exportFile: () => invoke('commands:export-file', {}),
   },
   vocabulary: {
     list: () => invoke('vocabulary:list', {}),

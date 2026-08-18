@@ -75,6 +75,17 @@ export class VoiceCommandStore {
     });
   }
 
+  replace(input: readonly VoiceCommand[]): Promise<readonly VoiceCommand[]> {
+    return this.#mutate(async () => {
+      const commands = VoiceCommandListSchema.parse(input);
+      for (const [index, command] of commands.entries()) {
+        this.#assertAvailable(command.trigger, commands.slice(0, index));
+      }
+      await this.#settings.update({ voiceCommands: commands });
+      return this.list();
+    });
+  }
+
   #assertAvailable(trigger: string, commands: readonly VoiceCommand[], excludedId?: string): void {
     const conflict = findTriggerConflict(trigger, commands, excludedId);
     if (conflict !== null)

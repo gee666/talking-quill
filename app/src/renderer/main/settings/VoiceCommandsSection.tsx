@@ -124,6 +124,55 @@ export function VoiceCommandsSection({
             )}
           </div>
         </form>
+        <div className="provider-actions">
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setMessage('');
+              try {
+                const result = await window.talkingQuill.commands.importFile();
+                setMessage(
+                  result.status === 'cancelled'
+                    ? 'Import cancelled.'
+                    : `Imported ${String(result.count)} voice commands.`,
+                );
+              } catch (error: unknown) {
+                setMessage(publicErrorMessage(error, 'Those voice commands couldn’t be imported.'));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Import voice commands
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setMessage('');
+              try {
+                const result = await window.talkingQuill.commands.exportFile();
+                setMessage(
+                  result.status === 'cancelled'
+                    ? 'Export cancelled.'
+                    : `Exported ${String(result.count)} voice commands.`,
+                );
+              } catch (error: unknown) {
+                setMessage(publicErrorMessage(error, 'Those voice commands couldn’t be exported.'));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Export voice commands
+          </Button>
+          <span className="body-copy">
+            {commands.length} {commands.length === 1 ? 'command' : 'commands'}
+          </span>
+        </div>
         {commands.length === 0 ? (
           <EmptyState
             title="No voice commands yet"
