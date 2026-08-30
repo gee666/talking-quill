@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { validateWindowsInstallerUiEvidence } from '../../scripts/windows-installer-ui-evidence.mjs';
+import {
+  validateWindowsInstallerUiEvidence,
+  WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE,
+} from '../../scripts/windows-installer-ui-evidence.mjs';
 import { createWindowsInstallerUiSmokePlan } from '../../scripts/run-windows-installer-ui-smoke.mjs';
 
 const expected = {
@@ -52,7 +55,7 @@ function evidence() {
       method: 'WM_COMMAND/IDCANCEL',
       graceful: true,
       forcedCleanup: false,
-      exitCode: 0,
+      exitCode: WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE,
     },
     activeProcessesAfterTeardown: [],
     noDurableInstallMutation: true,
@@ -96,6 +99,18 @@ describe('mandatory Windows installer UI smoke evidence', () => {
     ['sampling gap', { monitoring: { ...evidence().monitoring, maximumSampleGapMs: 51 } }],
     ['forced cleanup', { cancellation: { ...evidence().cancellation, forcedCleanup: true } }],
     ['missing graceful exit', { cancellation: { ...evidence().cancellation, graceful: false } }],
+    [
+      'generic nonzero cancellation exit',
+      { cancellation: { ...evidence().cancellation, exitCode: 1 } },
+    ],
+    [
+      'protected bootstrap rejection exit',
+      { cancellation: { ...evidence().cancellation, exitCode: 78 } },
+    ],
+    [
+      'protected bootstrap launch exit',
+      { cancellation: { ...evidence().cancellation, exitCode: 79 } },
+    ],
     ['protected leaf residue', { protectedBootstrapBaselineRestored: false }],
   ])('rejects %s', (_label, patch) => {
     expect(() => validateWindowsInstallerUiEvidence({ ...evidence(), ...patch }, expected)).toThrow(

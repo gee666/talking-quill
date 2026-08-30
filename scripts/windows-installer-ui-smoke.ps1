@@ -11,6 +11,11 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'The disposable installer UI smoke gate must run elevated.'
 }
+$nativeArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$expectedNativeArchitecture = if ($Architecture -ceq 'arm64') { 'Arm64' } else { 'X64' }
+if ($nativeArchitecture -cne $expectedNativeArchitecture) {
+    throw "Installer UI smoke requires native $Architecture Windows, found $nativeArchitecture."
+}
 $root = [IO.Path]::GetFullPath((Get-Location).Path)
 $tmp = [IO.Path]::GetFullPath((Join-Path $root 'tmp')) + [IO.Path]::DirectorySeparatorChar
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path

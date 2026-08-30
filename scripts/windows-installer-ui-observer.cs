@@ -27,6 +27,7 @@ internal static class WindowsInstallerUiObserver
     private const uint EventObjectShow = 0x8002;
     private const uint WineventOutOfContext = 0;
     private const int SampleIntervalMs = 5;
+    private const int ExpectedCancellationExitCode = 0;
 
     private static readonly object Sync = new object();
     private static readonly ConcurrentQueue<string> MutationEvents = new ConcurrentQueue<string>();
@@ -266,7 +267,7 @@ internal static class WindowsInstallerUiObserver
             long maxGapMs = maxSampleGapTicks * 1000 / Stopwatch.Frequency;
             bool pass = beforeHash == afterHash && ObserverErrors.IsEmpty && ConsoleEvents.IsEmpty && MutationEvents.IsEmpty &&
                 finalLeaves.SetEquals(baselineProtectedLeaves) && finalRegistry == baselineRegistry && finalFiles == baselineFiles &&
-                maxGapMs <= 50 && graceful && !forcedCleanup && !AnyTrackedProcessAlive();
+                maxGapMs <= 50 && graceful && exitCode == ExpectedCancellationExitCode && !forcedCleanup && !AnyTrackedProcessAlive();
             WriteEvidence(evidencePath, args, before.Length, beforeHash, afterHash, subsystem, maxGapMs, graceful, forcedCleanup, exitCode, pass);
             return pass ? 0 : Fail("Installer UI evidence did not satisfy the release gate");
         }

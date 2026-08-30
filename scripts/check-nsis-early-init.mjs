@@ -53,6 +53,16 @@ if (
     'Protected ShellExecute bootstrap must propagate exact exit codes and authenticate validation completion',
   );
 }
+const abortFunction = source.slice(
+  source.indexOf('Function TalkingQuillOnUserAbort'),
+  source.indexOf('FunctionEnd', source.indexOf('Function TalkingQuillOnUserAbort')),
+);
+if (
+  !source.includes('!define MUI_CUSTOMFUNCTION_ABORT TalkingQuillOnUserAbort') ||
+  !abortFunction.includes('SetErrorLevel 0')
+) {
+  throw new Error('Graceful interactive NSIS cancellation must return exact exit code 0');
+}
 if (/-Command[^\r\n]*"\s+"\$[R0-9]/u.test(source)) {
   throw new Error(
     'Protected bootstrap must not append runtime arguments after PowerShell -Command',
@@ -102,9 +112,40 @@ try {
     }
     await requireGuiSubsystem(outputPath, `${mode} NSIS outer`);
   }
+  const cancellationInstaller = join(workDirectory, 'nsis-cancellation-exit-check.exe');
+  const cancellationScript = join(workDirectory, 'nsis-cancellation-exit-check.nsi');
+  const cancellationLicense = join(workDirectory, 'nsis-cancellation-license.txt');
+  await Promise.all([
+    writeFile(cancellationLicense, 'Talking Quill cancellation runtime fixture.\n', 'utf8'),
+    writeFile(
+      cancellationScript,
+      cancellationCompileScript({
+        outputPath: cancellationInstaller,
+        licensePath: cancellationLicense,
+        projectDirectory: fixtureProjectDirectory,
+      }),
+      'utf8',
+    ),
+  ]);
+  requireSuccess(
+    spawnSync(
+      makensis.path,
+      [...makeNsisArguments.filter((argument) => argument !== '-WX'), cancellationScript],
+      {
+        cwd: appBuilderRoot,
+        encoding: 'utf8',
+        env: { ...process.env, ...(makensis.env ?? {}) },
+        timeout: 60_000,
+        windowsHide: true,
+      },
+    ),
+    'NSIS interactive cancellation fixture compilation',
+  );
+  await requireGuiSubsystem(cancellationInstaller, 'NSIS interactive cancellation fixture');
   if (process.platform === 'win32') {
     windowsJobSupervisor = await buildWindowsJobSupervisor(workDirectory);
     await testWindowsJobSupervisor(workDirectory);
+    await testNsisCancellationExit(workDirectory, cancellationInstaller);
     await testStaleCleanupRefusals(workDirectory);
     const startingResidue = await snapshotProtectedBootstrapResidue();
     console.log(
@@ -148,6 +189,113 @@ async function requireGuiSubsystem(path, label) {
   ) {
     throw new Error(`${label} must retain the Windows GUI subsystem`);
   }
+}
+
+function cancellationCompileScript({ outputPath, licensePath, projectDirectory }) {
+  return `Unicode true
+Name "Talking Quill cancellation exit check"
+OutFile "${nsisPath(outputPath)}"
+RequestExecutionLevel user
+!define APP_GUID "early-init-check"
+!define UNINSTALL_APP_KEY "early-init-check"
+!define APP_FILENAME "Talking Quill"
+!define PROJECT_DIR "${nsisPath(projectDirectory)}"
+!define TALKING_QUILL_INSTALL_ISOLATED_VALIDATION_BUILD
+!include "MUI2.nsh"
+!include "${nsisPath(installerInclude)}"
+!insertmacro MUI_PAGE_LICENSE "${nsisPath(licensePath)}"
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+Section
+  SetErrorLevel 91
+SectionEnd
+`;
+}
+
+async function testNsisCancellationExit(workDirectory, installer) {
+  const sourcePath = join(workDirectory, 'NsisCancellationController.cs');
+  const controller = join(workDirectory, 'nsis-cancellation-controller.exe');
+  await writeFile(sourcePath, nsisCancellationControllerSource(), 'utf8');
+  requireSuccess(
+    spawnSync(windowsCSharpCompiler(), ['/nologo', `/out:${controller}`, sourcePath], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      windowsHide: true,
+    }),
+    'NSIS cancellation controller compilation',
+  );
+  requireStatus(
+    spawnSync(controller, [installer], { encoding: 'utf8', timeout: 30_000, windowsHide: true }),
+    0,
+    'compiled NSIS graceful interactive cancellation',
+  );
+}
+
+function nsisCancellationControllerSource() {
+  return `using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+internal static class NsisCancellationController
+{
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr data);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int maximum);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    private const uint WmCommand = 0x0111;
+    private const int IdCancel = 2;
+    private const int IdYes = 6;
+
+    public static int Main(string[] args)
+    {
+        if (args.Length != 1) return 126;
+        using (Process process = Process.Start(new ProcessStartInfo(args[0]) { UseShellExecute = false }))
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+            IntPtr main = IntPtr.Zero;
+            while (DateTime.UtcNow < deadline && !process.HasExited)
+            {
+                foreach (IntPtr window in Windows(process.Id))
+                {
+                    string cls = WindowClass(window);
+                    if (cls != "#32770") continue;
+                    if (main == IntPtr.Zero) { main = window; PostMessage(main, WmCommand, new IntPtr(IdCancel), IntPtr.Zero); }
+                    else if (window != main) PostMessage(window, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
+                }
+                if (process.WaitForExit(10)) return process.ExitCode;
+                Thread.Sleep(10);
+            }
+            if (!process.HasExited) process.Kill();
+            return 124;
+        }
+    }
+
+    private static List<IntPtr> Windows(int processId)
+    {
+        var windows = new List<IntPtr>();
+        EnumWindows(delegate(IntPtr window, IntPtr data)
+        {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner == processId && IsWindowVisible(window)) windows.Add(window);
+            return true;
+        }, IntPtr.Zero);
+        return windows;
+    }
+
+    private static string WindowClass(IntPtr window)
+    {
+        var text = new StringBuilder(256);
+        GetClassName(window, text, text.Capacity);
+        return text.ToString();
+    }
+}`;
 }
 
 async function buildWindowsJobSupervisor(workDirectory) {

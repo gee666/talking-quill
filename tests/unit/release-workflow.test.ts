@@ -33,12 +33,14 @@ describe('Windows native release workflow', () => {
     expect(validate).toContain('pnpm security:gate');
   });
   it('builds architecture-specific x64 and ARM64 NSIS candidates', () => {
-    const packageJob = section('package', 'lifecycle');
+    const packageJob = section('package', 'smoke');
     expect(packageJob).toContain('package_script: package:win');
     expect(packageJob).toContain('package_script: package:win:arm64');
     expect(packageJob).toContain('TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}');
     expect(workflow).not.toContain('predecessor_manifest');
-    expect(workflow).toContain('runner: windows-11-arm');
+    const smokeJob = section('smoke', 'lifecycle');
+    expect(smokeJob).toContain('runner: windows-latest');
+    expect(smokeJob).toContain('runner: windows-11-arm');
     expect(workflow).toContain('predecessor_x64_gateway_sha256');
     expect(workflow).toContain('predecessor_arm64_gateway_sha256');
     expect(workflow).toContain('predecessor_x64_update_public_key_sha256');
@@ -68,22 +70,24 @@ describe('Windows native release workflow', () => {
   });
 
   it('stages and uploads the bound installer before lifecycle and assembly', () => {
-    const packageJob = section('package', 'lifecycle');
+    const packageJob = section('package', 'smoke');
+    const smokeJob = section('smoke', 'lifecycle');
     const cleanTree = packageJob.indexOf('git status --porcelain --untracked-files=normal');
     const dependencyInstall = packageJob.indexOf('pnpm install --frozen-lockfile');
     expect(cleanTree).toBeGreaterThan(-1);
     expect(dependencyInstall).toBeGreaterThan(cleanTree);
     const packageCommand = packageJob.indexOf('package:win');
-    const smokeCommand = packageJob.indexOf('run-windows-installer-ui-smoke.mjs');
+    const smokeCommand = smokeJob.indexOf('run-windows-installer-ui-smoke.mjs');
     const stageCommand = packageJob.indexOf('stage-unsigned-release.mjs win ${{ matrix.arch }}');
     const assembleCommand = packageJob.indexOf('node scripts/assemble-release.mjs');
     const immediateUpload = packageJob.indexOf(
-      'name: Upload exact NSIS candidate and mandatory GUI smoke evidence',
+      'name: Upload provenance-bound exact NSIS smoke input',
     );
     expect(packageCommand).toBeGreaterThan(-1);
-    expect(smokeCommand).toBeGreaterThan(packageCommand);
-    expect(stageCommand).toBeGreaterThan(smokeCommand);
+    expect(packageJob).not.toContain('run-windows-installer-ui-smoke.mjs');
+    expect(stageCommand).toBeGreaterThan(packageCommand);
     expect(assembleCommand).toBeGreaterThan(stageCommand);
+    expect(smokeCommand).toBeGreaterThan(-1);
     expect(immediateUpload).toBeGreaterThan(assembleCommand);
     expect(packageJob).toContain('tmp/release-upload/latest-${{ matrix.arch }}.yml');
     expect(packageJob).toContain('tmp/release-upload/release-identity-win-${{ matrix.arch }}.json');
@@ -91,13 +95,21 @@ describe('Windows native release workflow', () => {
     expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
     expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
     expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
-    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-candidate');
-    expect(packageJob).toContain('tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json');
+    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(packageJob).not.toContain('tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json');
+    expect(smokeJob).toContain('needs: [validate, package]');
+    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
+    expect(smokeJob).toContain('windows-installer-ui-evidence.mjs');
+    expect(smokeJob.indexOf('actions/download-artifact')).toBeLessThan(smokeCommand);
+    expect(smokeCommand).toBeLessThan(smokeJob.indexOf('actions/upload-artifact'));
     const lifecycle = section('lifecycle', 'assemble');
     expect(lifecycle).toContain(
       'windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked',
     );
-    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-nsis-candidate');
+    expect(lifecycle).toContain('needs: [validate, package, smoke]');
+    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
     const evidenceValidation = lifecycle.indexOf('windows-installer-ui-evidence.mjs');
     const predecessorInstall = lifecycle.indexOf('Start-Process -FilePath $predecessor');
     expect(evidenceValidation).toBeGreaterThan(-1);
@@ -108,8 +120,11 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('--mode installed --root');
     expect(lifecycle).toContain('Uninstall Talking Quill.exe');
     const assemble = section('assemble');
-    expect(assemble).toContain('windows-x64-exact-nsis-candidate');
-    expect(assemble).toContain('windows-arm64-exact-nsis-candidate');
+    expect(assemble).toContain('needs: [validate, package, smoke, lifecycle]');
+    expect(assemble).toContain('windows-x64-exact-nsis-input');
+    expect(assemble).toContain('windows-arm64-exact-nsis-input');
+    expect(assemble).toContain('windows-x64-native-ui-smoke-evidence');
+    expect(assemble).toContain('windows-arm64-native-ui-smoke-evidence');
     expect(assemble.match(/windows-installer-ui-evidence\.mjs/gu)).toHaveLength(1);
     expect(assemble).toContain('windows-installer-ui-smoke-$arch.json release-artifacts/');
     expect(publishWorkflow).toContain('windows-installer-ui-evidence.mjs');

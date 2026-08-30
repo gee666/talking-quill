@@ -101,6 +101,11 @@ describe('Windows protected bootstrap generator', () => {
       ),
     );
     expect(protectedMacro).not.toMatch(/\bExecWait\b/u);
+    expect(installer).toMatch(
+      /Function TalkingQuillOnUserAbort[\s\S]*SetErrorLevel 0[\s\S]*FunctionEnd/u,
+    );
+    expect(smoke).toContain('RuntimeInformation]::OSArchitecture');
+    expect(smoke).toContain('requires native $Architecture Windows');
     expect(smoke).toContain('/target:winexe');
     expect(smoke).toContain('windows-installer-ui-observer.cs');
     expect(observer).toContain('SampleIntervalMs = 5');
@@ -112,6 +117,8 @@ describe('Windows protected bootstrap generator', () => {
     expect(observer).toContain('Path.GetTempPath()');
     expect(observer).toContain('ConsoleWindowClass');
     expect(observer).toContain('WM_COMMAND/IDCANCEL');
+    expect(observer).toContain('ExpectedCancellationExitCode = 0');
+    expect(observer).toContain('exitCode == ExpectedCancellationExitCode');
     expect(observer).toContain('activeProcessesAfterTeardown');
     expect(observer).toContain('noDurableInstallMutation');
     expect(observer).not.toContain('cancelledBeforeMutation');
@@ -145,6 +152,9 @@ describe('Windows protected bootstrap generator', () => {
     expect(cleanup).toContain('EnvironmentReferences');
     expect(cleanup).toContain('Get-CandidateValidation $Candidate.Path');
     expect(cleanup).toContain("throw 'leaf timestamps or content changed'");
+    expect(harness).toContain('compiled NSIS graceful interactive cancellation');
+    expect(harness).toContain('MUI_CUSTOMFUNCTION_ABORT TalkingQuillOnUserAbort');
+    expect(harness).toContain('SetErrorLevel 0');
     expect(harness).toContain('assertProtectedBootstrapResidueUnchanged');
     expect(harness).toContain('removeHarnessReparseLeaf');
     expect(harness).toContain('for (let cycle = 1; cycle <= 3; cycle++)');

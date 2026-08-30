@@ -273,8 +273,10 @@ FunctionEnd
 
 Function TalkingQuillOnUserAbort
   ; The install section has no cancellable page before the barrier. Once armed,
-  ; a cancellation cannot exit until rollback succeeds.
+  ; a cancellation cannot exit until rollback succeeds. A completed interactive
+  ; cancellation has one public success status; bootstrap failures remain 78/79.
   Call TalkingQuillRollbackUntilRestored
+  SetErrorLevel 0
 FunctionEnd
 
 Function .onInstFailed

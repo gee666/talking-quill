@@ -6,6 +6,7 @@ import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
 
 const HEX_40 = /^[0-9a-f]{40}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
+export const WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE = 0;
 
 export function validateWindowsInstallerUiEvidence(value, expected) {
   const monitoring = value?.monitoring;
@@ -52,7 +53,7 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
     cancellation?.method !== 'WM_COMMAND/IDCANCEL' ||
     cancellation.graceful !== true ||
     cancellation.forcedCleanup !== false ||
-    !Number.isSafeInteger(cancellation.exitCode) ||
+    cancellation.exitCode !== WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE ||
     !Array.isArray(value.activeProcessesAfterTeardown) ||
     value.activeProcessesAfterTeardown.length !== 0 ||
     value.noDurableInstallMutation !== true ||

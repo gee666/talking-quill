@@ -1,3 +1,4 @@
+export const WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE: 0;
 export interface WindowsInstallerUiEvidenceExpectation {
   readonly installer: string;
   readonly architecture: 'x64' | 'arm64';
