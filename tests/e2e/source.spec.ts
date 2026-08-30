@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -11,6 +11,7 @@ import {
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
+import { createChildProcessExitAdapter, waitForChildExit } from './child-process-exit';
 import { rendererIsolation, rendererPages, resetProfile } from './helpers';
 
 const electronModule: unknown = createRequire(resolve('package.json'))('electron');
@@ -26,26 +27,6 @@ async function launch(profile: string, egressProof = false, environment: NodeJS.
       ...(egressProof ? { TALKING_QUILL_EGRESS_PROOF: '1' } : {}),
       ...environment,
     },
-  });
-}
-
-async function waitForChildExit(child: ChildProcess, label: string): Promise<void> {
-  await new Promise<void>((resolveExit, reject) => {
-    const complete = (error?: Error) => {
-      clearTimeout(timer);
-      child.removeListener('exit', onExit);
-      child.removeListener('error', onError);
-      if (error === undefined) resolveExit();
-      else reject(error);
-    };
-    const onExit = () => complete();
-    const onError = (error: Error) => complete(error);
-    const timer = setTimeout(() => {
-      child.kill();
-      complete(new Error(`${label} did not exit within 10 seconds`));
-    }, 10_000);
-    child.once('exit', onExit);
-    child.once('error', onError);
   });
 }
 
@@ -314,7 +295,7 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
       env: { ...process.env, NODE_ENV: 'test' },
     },
   );
-  await waitForChildExit(secondInstance, 'Second source instance');
+  await waitForChildExit(createChildProcessExitAdapter(secondInstance), 'Second source instance');
   await expect
     .poll(() =>
       application.evaluate(({ BrowserWindow }) =>
