@@ -17,6 +17,7 @@
         "after-pack-macos-owner.cjs",
         "after-sign.cjs",
         "src/main/index.ts",
+        "src/main/entries/*.ts",
         "src/preload/*.ts",
         "src/workers/**/*.ts",
         "src/renderer/**/main.tsx",

@@ -189,7 +189,7 @@ export class EchoSessionController {
             beginPhysicalObservation,
             samplePhysicalObservation,
             endPhysicalObservation,
-            onObservationAccepted: () => this.#helper.recordPhysicalObservationAccepted?.(),
+            onObservationAccepted: () => this.#helper.recordObservationAccepted?.(),
           }),
     });
     this.#capture = new EchoCapturePipeline({

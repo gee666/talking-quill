@@ -58,4 +58,11 @@ module.exports = async function afterPackMacosOwner(context) {
   await writeFile(join(contents, 'Info.plist'), template.replaceAll('${VERSION}', version), {
     mode: 0o644,
   });
+  if ((process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical') === 'canonical') {
+    await hardenElectron.scanCanonicalRuntime(context, join(app, 'Contents', 'MacOS', product), [
+      ownerTarget,
+      bridgeTarget,
+      denialAddon,
+    ]);
+  }
 };

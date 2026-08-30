@@ -9,10 +9,11 @@ import {
   type HelperClientOptions,
 } from '../../app/src/main/helper/helper-client';
 import { encodeHelperFrame, HelperFrameDecoder } from '../../app/src/main/helper/framing';
-import type {
-  ActivationBinding,
-  HelperNotification,
-  HelperRuntimeObservability,
+import {
+  HelperFrontAppSchema,
+  type ActivationBinding,
+  type HelperNotification,
+  type HelperRuntimeObservability,
 } from '../../app/src/shared/helper/protocol';
 import {
   shortcutFromLegacyActivation as legacyShortcut,
@@ -584,93 +585,27 @@ describe('supervised native HelperClient', () => {
     expect(client.readiness).toMatchObject({ status: 'stopped', reason: 'shutdown' });
   });
 
-  it('requests and validates acceptance endpoint observability only on demand', async () => {
+  it('validates an extension response with its entry-owned schema', async () => {
     const controlled = createControlledClient({ platform: 'win32' });
     await controlled.client.start();
-    expect(
-      controlled.requests.some((request) => request.method === 'acceptance.endpoint_observability'),
-    ).toBe(false);
-
-    const pending = controlled.client.getAcceptanceEndpointObservability();
+    const pending = controlled.client.requestExtension(
+      'extension.status',
+      HelperFrontAppSchema,
+      3_000,
+    );
     await waitFor(() =>
-      controlled.requests.some((request) => request.method === 'acceptance.endpoint_observability'),
+      controlled.requests.some((request) => request.method === 'extension.status'),
     );
     const request = controlled.requests.find(
-      (candidate) => candidate.method === 'acceptance.endpoint_observability',
+      (candidate) => candidate.method === 'extension.status',
     );
     expect(request?.params).toEqual({});
     controlled.emitResult(request?.id ?? 0, {
-      endpointVersion: 2,
-      peerAuthenticated: true,
-      releaseBuildDigest: '22'.repeat(32),
-      manifestSha256: '33'.repeat(32),
-      gateway: {
-        processId: 41,
-        creationMarker: '133700000000000001',
-        integrityRid: 8192,
-        sessionId: 3,
-        userSidHash: '11'.repeat(32),
-      },
-      owner: {
-        processId: 42,
-        creationMarker: '133700000000000002',
-        integrityRid: 8192,
-        sessionId: 3,
-        userSidHash: '11'.repeat(32),
-      },
+      processName: 'fixture-app',
+      windowTitle: 'Fixture target',
+      windowBounds: null,
     });
-    await expect(pending).resolves.toMatchObject({
-      peerAuthenticated: true,
-      endpointVersion: 2,
-    });
-  });
-
-  it('dispatches the fixed acceptance lease-renewal pause with no duration parameter', async () => {
-    const controlled = createControlledClient({ platform: 'win32' });
-    await controlled.client.start();
-    expect(
-      controlled.requests.some((request) => request.method === 'acceptance.pause_lease_renewal'),
-    ).toBe(false);
-
-    const pending = controlled.client.pauseAcceptanceLeaseRenewal();
-    await waitFor(() =>
-      controlled.requests.some((request) => request.method === 'acceptance.pause_lease_renewal'),
-    );
-    const request = controlled.requests.find(
-      (candidate) => candidate.method === 'acceptance.pause_lease_renewal',
-    );
-    expect(request?.params).toEqual({});
-    const owner = {
-      starts: 1,
-      cleanExits: 0,
-      abnormalExits: 0,
-      singletonCollisions: 0,
-      authAttempts: 1,
-      authFailures: { crossUser: 0, wrongSession: 0, codeIdentity: 0, mac: 0, protocol: 0 },
-      leaseAcquired: 1,
-      leaseRenewed: 7,
-      leaseExpired: 2,
-      leaseDisconnected: 0,
-      leaseReleasedNeutral: 0,
-      leaseReleasedDraining: 0,
-      drainDurationMsTotal: 0,
-      drainDurationMsMax: 0,
-      maintenancePostponed: 0,
-      handoffSucceeded: 0,
-      handoffFailed: 0,
-      degraded: 0,
-      hookRecoveries: 0,
-    };
-    controlled.emitResult(request?.id ?? 0, {
-      pauseDurationMs: 6_500,
-      beforeTimestampMs: 1_700_000_000_000,
-      afterTimestampMs: 1_700_000_006_500,
-      before: owner,
-      after: { ...owner, leaseExpired: 3 },
-    });
-    await expect(pending).resolves.toMatchObject({
-      pauseDurationMs: 6_500,
-    });
+    await expect(pending).resolves.toMatchObject({ processName: 'fixture-app' });
   });
 
   it.each([

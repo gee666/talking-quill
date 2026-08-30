@@ -7,7 +7,7 @@ import {
   AcceptanceRunRequestPayloadSchema,
   AcceptanceRunRequestSchema,
   type AcceptanceRunRequestPayload,
-} from '../../shared/schemas/acceptance-authorization';
+} from './authorization-schema';
 
 const MAX_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_ACCEPTANCE_REQUEST_LIFETIME_MS = 80 * 60 * 1_000;

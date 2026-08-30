@@ -6,15 +6,13 @@ import {
 import { dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { StringDecoder } from 'node:string_decoder';
-import { z } from 'zod';
+import { z, type ZodType } from 'zod';
 import {
   HELPER_PROTOCOL_VERSION,
   HelperDiagnosticIdentitySchema,
   HelperRuntimeObservabilitySchema,
   HelperTerminalObservabilityRecordSchema,
   type ActivationBinding,
-  type HelperAcceptanceEndpointObservability,
-  type HelperAcceptancePauseLeaseRenewalResult,
   type HelperActivationContext,
   type HelperFrontApp,
   type HelperInitializeResult,
@@ -51,7 +49,6 @@ export function activationCaptureRollbackEnabled(environment: NodeJS.ProcessEnv)
 // authenticated private handshake before it accepts Electron RPC work.
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 3_000;
-const ACCEPTANCE_LEASE_RENEWAL_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 // Both native adapters own one 1.5-second drain deadline. The host waits a
 // comfortably larger platform envelope before best-effort termination.
@@ -516,40 +513,17 @@ export class HelperClient {
     return operation;
   }
 
-  getAcceptanceEndpointObservability(): Promise<HelperAcceptanceEndpointObservability> {
-    if (this.#options.platform !== 'win32') {
-      return Promise.reject(
-        new HelperClientError(
-          'not-running',
-          'Acceptance endpoint observability is unavailable on this platform',
-        ),
-      );
-    }
-    return this.request('acceptance.endpoint_observability', {});
-  }
-
-  pauseAcceptanceLeaseRenewal(): Promise<HelperAcceptancePauseLeaseRenewalResult> {
+  requestExtension(method: string, resultSchema: ZodType, timeoutMs: number): Promise<unknown> {
     const session = this.#rpcSession;
-    if (
-      this.#options.platform !== 'win32' ||
-      session === null ||
-      !this.#ordinaryRequestsAvailable()
-    ) {
-      return Promise.reject(
-        new HelperClientError('not-running', 'Acceptance lease-renewal pause is unavailable'),
-      );
+    if (session === null || !this.#ordinaryRequestsAvailable() || !this.#desiredRunning) {
+      return Promise.reject(new HelperClientError('not-running', 'Native helper is terminating'));
     }
-    return this.#rpcChannel.request(
-      session,
-      'acceptance.pause_lease_renewal',
-      {},
-      {
-        timeoutMs: ACCEPTANCE_LEASE_RENEWAL_TIMEOUT_MS,
-        timeoutReason: 'request-timeout',
-        allowDraining: false,
-        supervision: false,
-      },
-    );
+    return this.#rpcChannel.requestExtension(session, method, resultSchema, {
+      timeoutMs,
+      timeoutReason: 'request-timeout',
+      allowDraining: false,
+      supervision: false,
+    });
   }
 
   async getRuntimeObservability(): Promise<HelperRuntimeObservability> {
@@ -566,8 +540,7 @@ export class HelperClient {
     return enriched;
   }
 
-  /** Records only successful non-activating physical-observation acceptance. */
-  recordPhysicalObservationAccepted(): void {
+  recordObservationAccepted(): void {
     this.#physicalObservationsAccepted = saturatingSafeIncrement(
       this.#physicalObservationsAccepted,
     );

@@ -231,7 +231,7 @@ function launch(arguments_) {
     {
       stdio: 'ignore',
       windowsHide: true,
-      env: { ...process.env, CI: 'true', TALKING_QUILL_PACKAGED_TEST: '1' },
+      env: process.env,
     },
   );
 }

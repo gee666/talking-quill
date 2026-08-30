@@ -1,5 +1,3 @@
-declare const __TALKING_QUILL_ACCEPTANCE_BUILD__: boolean;
-
 import { chmod, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -369,12 +367,9 @@ export class DiagnosticLogger {
     return this.#enabled;
   }
 
-  async probeAcceptanceWriteFailure(): Promise<boolean> {
-    if (!__TALKING_QUILL_ACCEPTANCE_BUILD__) {
-      throw new Error('Diagnostic acceptance probe is unavailable in this build');
-    }
+  async verifyWriteFailureContainment(): Promise<boolean> {
     try {
-      await this.#enqueue(() => Promise.reject(new Error('acceptance-injected-write-failure')));
+      await this.#enqueue(() => Promise.reject(new Error('injected-write-failure')));
       return false;
     } catch {
       return true;

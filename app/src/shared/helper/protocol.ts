@@ -318,7 +318,7 @@ const EffectOutcomeCountersSchema = z
     failed: AggregateCounterSchema,
   })
   .strict();
-const HelperOwnerObservabilitySchema = z
+export const HelperOwnerObservabilitySchema = z
   .object({
     starts: AggregateCounterSchema,
     cleanExits: AggregateCounterSchema,
@@ -453,75 +453,6 @@ export const HelperRuntimeObservabilitySchema = z
     }
   });
 
-const HelperAcceptanceEndpointPeerFactsSchema = z
-  .object({
-    processId: z.number().int().positive().max(0xffff_ffff),
-    creationMarker: z.string().regex(/^[1-9][0-9]{0,19}$/u),
-    integrityRid: z.number().int().min(0).max(0xffff_ffff),
-    sessionId: z.number().int().min(0).max(0xffff_ffff),
-    userSidHash: z.string().regex(/^[0-9a-f]{64}$/u),
-  })
-  .strict();
-export const HelperAcceptanceEndpointObservabilitySchema = z
-  .object({
-    endpointVersion: z.literal(2),
-    peerAuthenticated: z.literal(true),
-    releaseBuildDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-    manifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
-    gateway: HelperAcceptanceEndpointPeerFactsSchema,
-    owner: HelperAcceptanceEndpointPeerFactsSchema,
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.gateway.sessionId !== value.owner.sessionId) {
-      context.addIssue({
-        code: 'custom',
-        path: ['owner', 'sessionId'],
-        message: 'Authenticated endpoint peers must share a Windows session',
-      });
-    }
-    if (value.gateway.userSidHash !== value.owner.userSidHash) {
-      context.addIssue({
-        code: 'custom',
-        path: ['owner', 'userSidHash'],
-        message: 'Authenticated endpoint peers must share a redacted user identity',
-      });
-    }
-  });
-
-export const HelperAcceptancePauseLeaseRenewalResultSchema = z
-  .object({
-    pauseDurationMs: z.literal(6_500),
-    beforeTimestampMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    afterTimestampMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    before: HelperOwnerObservabilitySchema,
-    after: HelperOwnerObservabilitySchema,
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.afterTimestampMs - value.beforeTimestampMs < value.pauseDurationMs) {
-      context.addIssue({
-        code: 'custom',
-        path: ['afterTimestampMs'],
-        message: 'Lease-renewal acceptance pause did not span the fixed duration',
-      });
-    }
-    if (value.after.leaseExpired !== value.before.leaseExpired + 1) {
-      context.addIssue({
-        code: 'custom',
-        path: ['after', 'leaseExpired'],
-        message: 'Lease-renewal acceptance pause must prove exactly one expiry',
-      });
-    }
-    if (value.after.leaseRenewed !== value.before.leaseRenewed) {
-      context.addIssue({
-        code: 'custom',
-        path: ['after', 'leaseRenewed'],
-        message: 'Lease renewal changed during the acceptance pause',
-      });
-    }
-  });
-
 export const HelperTerminalObservabilityRecordSchema = z
   .object({
     event: z.literal('helper.runtime.terminal'),
@@ -597,8 +528,6 @@ export const helperParamsSchemas = Object.freeze({
   'front_app.get': emptySchema,
   'permissions.get': emptySchema,
   'runtime.observability': emptySchema,
-  'acceptance.endpoint_observability': emptySchema,
-  'acceptance.pause_lease_renewal': emptySchema,
   ping: emptySchema,
   'diagnostic.ack': HelperDiagnosticAckParamsSchema,
   'owner.prepare_maintenance': HelperPrepareMaintenanceParamsSchema,
@@ -613,8 +542,6 @@ export const helperResultSchemas = Object.freeze({
   'front_app.get': HelperFrontAppSchema,
   'permissions.get': HelperPermissionsSchema,
   'runtime.observability': HelperRuntimeObservabilitySchema,
-  'acceptance.endpoint_observability': HelperAcceptanceEndpointObservabilitySchema,
-  'acceptance.pause_lease_renewal': HelperAcceptancePauseLeaseRenewalResultSchema,
   ping: pingResultSchema,
   'diagnostic.ack': z.object({ acknowledged: z.boolean() }).strict(),
   'owner.prepare_maintenance': HelperPrepareMaintenanceResultSchema,
@@ -639,12 +566,6 @@ export type HelperInitializeResult = z.infer<typeof HelperInitializeResultSchema
 export type HelperKeyboardOwnerSnapshot = z.infer<typeof HelperKeyboardOwnerSnapshotSchema>;
 export type HelperPrepareMaintenanceParams = z.infer<typeof HelperPrepareMaintenanceParamsSchema>;
 export type HelperRuntimeObservability = z.infer<typeof HelperRuntimeObservabilitySchema>;
-export type HelperAcceptanceEndpointObservability = z.infer<
-  typeof HelperAcceptanceEndpointObservabilitySchema
->;
-export type HelperAcceptancePauseLeaseRenewalResult = z.infer<
-  typeof HelperAcceptancePauseLeaseRenewalResultSchema
->;
 export type HelperTerminalObservabilityRecord = z.infer<
   typeof HelperTerminalObservabilityRecordSchema
 >;

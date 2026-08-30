@@ -6,9 +6,18 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const ACCEPTANCE_BUILD_ENV = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
+const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
+if (!['canonical', 'installed-acceptance'].includes(packageVariant)) {
+  throw new Error(`Production packaging rejects package variant: ${packageVariant}`);
+}
+const acceptanceVariant = packageVariant === 'installed-acceptance';
+if (acceptanceVariant && process.env[ACCEPTANCE_BUILD_ENV] !== '1') {
+  throw new Error('Installed-acceptance packaging requires its native helper feature');
+}
 const forbiddenEnvironment = Object.keys(process.env).filter(
   (name) =>
-    (name === ACCEPTANCE_BUILD_ENV || /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name)) &&
+    ((!acceptanceVariant && (name === ACCEPTANCE_BUILD_ENV || /ACCEPTANCE/u.test(name))) ||
+      /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name)) &&
     process.env[name] !== '' &&
     process.env[name] !== '0',
 );
@@ -71,7 +80,8 @@ function run(script, args) {
     env: Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
-          name !== ACCEPTANCE_BUILD_ENV && !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name),
+          (acceptanceVariant || name !== ACCEPTANCE_BUILD_ENV) &&
+          !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name),
       ),
     ),
   });

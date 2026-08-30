@@ -12,16 +12,34 @@ const harnessEnvironment = [
 
 export default defineConfig(({ mode }) => {
   const production = mode === 'production';
-  const acceptanceBuild = production && process.env.TALKING_QUILL_ACCEPTANCE_BUILD === '1';
+  const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
+  if (!['canonical', 'installed-acceptance', 'packaged-test'].includes(packageVariant)) {
+    throw new Error(`Unknown package variant: ${packageVariant}`);
+  }
+  if (!production && packageVariant === 'installed-acceptance') {
+    throw new Error('Installed acceptance requires a production-mode build');
+  }
+  if (production && packageVariant === 'packaged-test') {
+    throw new Error('Packaged-test entry requires test build mode');
+  }
+  const acceptanceBuild = production && packageVariant === 'installed-acceptance';
+  const packagedTestBuild = packageVariant === 'packaged-test';
   const acceptanceManifestPublicKey =
     process.env.TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL ?? '';
   if (acceptanceBuild && !/^[A-Za-z0-9_-]+$/u.test(acceptanceManifestPublicKey)) {
     throw new Error('Acceptance builds require a pinned P-256 manifest public key');
   }
   if (!acceptanceBuild && acceptanceManifestPublicKey.length > 0) {
-    throw new Error('Acceptance authorization material requires an acceptance build');
+    throw new Error('Acceptance authorization material requires the installed-acceptance variant');
   }
-  if (production) {
+  const mainEntry = acceptanceBuild
+    ? 'src/main/entries/windows-installed-acceptance.ts'
+    : packagedTestBuild
+      ? 'src/main/entries/packaged-test.ts'
+      : production
+        ? 'src/main/index.ts'
+        : 'src/main/entries/development.ts';
+  if (production && !packagedTestBuild) {
     const poisoned = harnessEnvironment.filter((name) => process.env[name] === '1');
     if (poisoned.length > 0) {
       throw new Error(`Production build rejects test harnesses: ${poisoned.join(', ')}`);
@@ -34,7 +52,6 @@ export default defineConfig(({ mode }) => {
     main: {
       define: {
         __TALKING_QUILL_SOURCE_REVISION__: JSON.stringify(sourceRevision),
-        __TALKING_QUILL_ACCEPTANCE_BUILD__: JSON.stringify(acceptanceBuild),
         __TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL__: JSON.stringify(
           acceptanceManifestPublicKey,
         ),
@@ -55,7 +72,7 @@ export default defineConfig(({ mode }) => {
         externalizeDeps: { exclude: ['electron-updater', 'zod', 'write-file-atomic'] },
         rollupOptions: {
           input: {
-            index: resolve(__dirname, 'src/main/index.ts'),
+            index: resolve(__dirname, mainEntry),
           },
         },
       },

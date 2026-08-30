@@ -10,11 +10,11 @@ import {
   canonicalAcceptanceJson,
   consumeInstalledAcceptanceNonce,
   encodeCanonicalAcceptanceEnvelope,
-} from '../../app/src/main/security/acceptance-authorization';
+} from '../../app/src/main/acceptance/authorization';
 import type {
   AcceptanceBuildManifestPayload,
   AcceptanceRunRequestPayload,
-} from '../../app/src/shared/schemas/acceptance-authorization';
+} from '../../app/src/main/acceptance/authorization-schema';
 
 const NOW = 1_800_000_000_000;
 const SOURCE_REVISION = '0123456789ab';

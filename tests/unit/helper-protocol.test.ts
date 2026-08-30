@@ -8,8 +8,6 @@ import {
 import {
   HELPER_MAX_FRAME_BYTES,
   HELPER_MAX_INSERTION_UTF8_BYTES,
-  HelperAcceptanceEndpointObservabilitySchema,
-  HelperAcceptancePauseLeaseRenewalResultSchema,
   HelperKeyboardOwnerSnapshotSchema,
   HelperNotificationSchema,
   HelperRequestIdSchema,
@@ -36,27 +34,6 @@ const activationContext = { activationGeneration: 1, targetToken: null } as cons
 const pasteParams = {
   ...activationContext,
   expectedClipboardSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-} as const;
-const ownerObservability = {
-  starts: 1,
-  cleanExits: 0,
-  abnormalExits: 0,
-  singletonCollisions: 0,
-  authAttempts: 1,
-  authFailures: { crossUser: 0, wrongSession: 0, codeIdentity: 0, mac: 0, protocol: 0 },
-  leaseAcquired: 1,
-  leaseRenewed: 7,
-  leaseExpired: 2,
-  leaseDisconnected: 0,
-  leaseReleasedNeutral: 0,
-  leaseReleasedDraining: 0,
-  drainDurationMsTotal: 0,
-  drainDurationMsMax: 0,
-  maintenancePostponed: 0,
-  handoffSucceeded: 0,
-  handoffFailed: 0,
-  degraded: 0,
-  hookRecoveries: 0,
 } as const;
 const ownerSnapshot = {
   model: 'out_of_process',
@@ -113,78 +90,6 @@ describe('native helper framing', () => {
 });
 
 describe('native helper JSON-RPC schemas', () => {
-  it('accepts only redacted authenticated V2 Windows endpoint facts', () => {
-    const observation = {
-      endpointVersion: 2,
-      peerAuthenticated: true,
-      releaseBuildDigest: '22'.repeat(32),
-      manifestSha256: '33'.repeat(32),
-      gateway: {
-        processId: 41,
-        creationMarker: '133700000000000001',
-        integrityRid: 8192,
-        sessionId: 3,
-        userSidHash: '11'.repeat(32),
-      },
-      owner: {
-        processId: 42,
-        creationMarker: '133700000000000002',
-        integrityRid: 8192,
-        sessionId: 3,
-        userSidHash: '11'.repeat(32),
-      },
-    } as const;
-    expect(HelperAcceptanceEndpointObservabilitySchema.parse(observation)).toEqual(observation);
-    expect(
-      HelperAcceptanceEndpointObservabilitySchema.safeParse({
-        ...observation,
-        userSid: 'S-1-5-21-secret',
-      }).success,
-    ).toBe(false);
-    expect(
-      HelperAcceptanceEndpointObservabilitySchema.safeParse({
-        ...observation,
-        peerAuthenticated: false,
-      }).success,
-    ).toBe(false);
-    expect(
-      helperParamsSchemas['acceptance.endpoint_observability'].safeParse({ extra: true }).success,
-    ).toBe(false);
-  });
-
-  it('requires the fixed 6500ms lease pause and exactly one expiry', () => {
-    const result = {
-      pauseDurationMs: 6_500,
-      beforeTimestampMs: 1_700_000_000_000,
-      afterTimestampMs: 1_700_000_006_500,
-      before: ownerObservability,
-      after: { ...ownerObservability, leaseExpired: 3 },
-    } as const;
-    expect(HelperAcceptancePauseLeaseRenewalResultSchema.safeParse(result).success).toBe(true);
-    expect(
-      HelperAcceptancePauseLeaseRenewalResultSchema.safeParse({
-        ...result,
-        pauseDurationMs: 100,
-      }).success,
-    ).toBe(false);
-    expect(
-      HelperAcceptancePauseLeaseRenewalResultSchema.safeParse({
-        ...result,
-        after: { ...result.after, leaseExpired: 4 },
-      }).success,
-    ).toBe(false);
-    expect(
-      HelperAcceptancePauseLeaseRenewalResultSchema.safeParse({
-        ...result,
-        after: { ...result.after, leaseRenewed: 8 },
-      }).success,
-    ).toBe(false);
-    expect(
-      helperParamsSchemas['acceptance.pause_lease_renewal'].safeParse({ durationMs: 6_500 })
-        .success,
-    ).toBe(false);
-  });
-
   it('requires protocol v10 and rejects v9 without changing shortcut grammar', () => {
     expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 10 }).success).toBe(true);
     expect(helperParamsSchemas.initialize.safeParse({ protocolVersion: 9 }).success).toBe(false);
@@ -325,8 +230,6 @@ describe('native helper JSON-RPC schemas', () => {
       'front_app.get',
       'permissions.get',
       'runtime.observability',
-      'acceptance.endpoint_observability',
-      'acceptance.pause_lease_renewal',
       'ping',
       'diagnostic.ack',
       'owner.prepare_maintenance',

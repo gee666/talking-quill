@@ -2,13 +2,103 @@ import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { isDeepStrictEqual } from 'node:util';
 import { resolve } from 'node:path';
+import { z } from 'zod';
+import { HelperOwnerObservabilitySchema } from '../../shared/helper/protocol';
 import type { DictationProfile } from '../../shared/schemas/dictation-profiles';
-import type { AcceptanceRunRequestPayload } from '../../shared/schemas/acceptance-authorization';
 import type { HelperClient } from '../helper';
 import {
   furthestObservationBoundary,
   hasCompleteDedicatedTraversal,
 } from '../echo/activation-test-controller';
+import type { AcceptanceRunRequestPayload } from './authorization-schema';
+
+const EndpointPeerSchema = z
+  .object({
+    processId: z.number().int().positive().max(0xffff_ffff),
+    creationMarker: z.string().regex(/^[1-9][0-9]{0,19}$/u),
+    integrityRid: z.number().int().min(0).max(0xffff_ffff),
+    sessionId: z.number().int().min(0).max(0xffff_ffff),
+    userSidHash: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict();
+export const EndpointObservabilitySchema = z
+  .object({
+    endpointVersion: z.literal(2),
+    peerAuthenticated: z.literal(true),
+    releaseBuildDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    manifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    gateway: EndpointPeerSchema,
+    owner: EndpointPeerSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.gateway.sessionId !== value.owner.sessionId) {
+      context.addIssue({
+        code: 'custom',
+        path: ['owner', 'sessionId'],
+        message: 'Authenticated endpoint peers must share a Windows session',
+      });
+    }
+    if (value.gateway.userSidHash !== value.owner.userSidHash) {
+      context.addIssue({
+        code: 'custom',
+        path: ['owner', 'userSidHash'],
+        message: 'Authenticated endpoint peers must share a redacted user identity',
+      });
+    }
+  });
+export const PauseLeaseRenewalSchema = z
+  .object({
+    pauseDurationMs: z.literal(6_500),
+    beforeTimestampMs: z.number().int().nonnegative(),
+    afterTimestampMs: z.number().int().nonnegative(),
+    before: HelperOwnerObservabilitySchema,
+    after: HelperOwnerObservabilitySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.afterTimestampMs - value.beforeTimestampMs < value.pauseDurationMs) {
+      context.addIssue({
+        code: 'custom',
+        path: ['afterTimestampMs'],
+        message: 'Lease-renewal pause did not span the fixed duration',
+      });
+    }
+    if (value.after.leaseExpired !== value.before.leaseExpired + 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['after', 'leaseExpired'],
+        message: 'Lease-renewal pause must prove exactly one expiry',
+      });
+    }
+    if (value.after.leaseRenewed !== value.before.leaseRenewed) {
+      context.addIssue({
+        code: 'custom',
+        path: ['after', 'leaseRenewed'],
+        message: 'Lease renewal changed during the pause',
+      });
+    }
+  });
+
+async function endpointObservability(helper: HelperClient) {
+  return EndpointObservabilitySchema.parse(
+    await helper.requestExtension(
+      'acceptance.endpoint_observability',
+      EndpointObservabilitySchema,
+      3_000,
+    ),
+  );
+}
+
+async function pauseLeaseRenewal(helper: HelperClient) {
+  return PauseLeaseRenewalSchema.parse(
+    await helper.requestExtension(
+      'acceptance.pause_lease_renewal',
+      PauseLeaseRenewalSchema,
+      10_000,
+    ),
+  );
+}
 
 export interface InstalledObservationRequest {
   readonly command: AcceptanceRunRequestPayload['command'];
@@ -105,7 +195,7 @@ async function runReadinessObservation(
     if (request.command === 'lease-expiry-arm') {
       stage = 'acceptance-lease-renewal-pause';
       const transactionBefore = (await helper.getRuntimeObservability()).transactions;
-      const leaseExpiry = await helper.pauseAcceptanceLeaseRenewal();
+      const leaseExpiry = await pauseLeaseRenewal(helper);
       const runtimeAfter = await helper.getRuntimeObservability();
       const transactionAfter = runtimeAfter.transactions;
       const transactionDelta =
@@ -154,7 +244,7 @@ async function runReadinessObservation(
 
     if (request.command === 'endpoint-peer') {
       stage = 'acceptance-endpoint-observability';
-      const endpoint = await helper.getAcceptanceEndpointObservability();
+      const endpoint = await endpointObservability(helper);
       await writePipe(request.pipeName, {
         version: 1,
         result: 'passed',
@@ -216,9 +306,7 @@ async function runReadinessObservation(
       const ownerInstanceId = observability.keyboardOwner.instanceId;
       const leaseEpoch = observability.keyboardOwner.leaseEpoch;
       const initialAcceptanceEndpoint =
-        request.command === 'heartbeat-120s'
-          ? await helper.getAcceptanceEndpointObservability()
-          : null;
+        request.command === 'heartbeat-120s' ? await endpointObservability(helper) : null;
       const renewalsBefore = observability.owner.leaseRenewed;
       const expiriesBefore = observability.owner.leaseExpired;
       stage = 'owner-timed-heartbeat-permissions';
@@ -243,9 +331,7 @@ async function runReadinessObservation(
         await helper.ping();
         observability = await helper.getRuntimeObservability();
         const sampledEndpoint =
-          request.command === 'heartbeat-120s'
-            ? await helper.getAcceptanceEndpointObservability()
-            : null;
+          request.command === 'heartbeat-120s' ? await endpointObservability(helper) : null;
         samples.push({
           sampledAt: new Date().toISOString(),
           ready: observability.keyboardOwner.state === 'leased_enabled',
@@ -383,9 +469,7 @@ async function runPhysicalObservation(
       ) {
         throw new Error('Native activation state was invalid at the automation arm fence');
       }
-      const endpointBefore = lifecycleArm
-        ? await helper.getAcceptanceEndpointObservability()
-        : null;
+      const endpointBefore = lifecycleArm ? await endpointObservability(helper) : null;
       await writePipe(request.automationArmedPipe, {
         version: 1,
         phase: 'armed',
@@ -407,7 +491,7 @@ async function runPhysicalObservation(
         while (Date.now() < deadline) {
           await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 250));
           try {
-            const endpointAfter = await helper.getAcceptanceEndpointObservability();
+            const endpointAfter = await endpointObservability(helper);
             const owner = await helper.getRuntimeObservability();
             if (
               endpointAfter.gateway.processId !== endpointBefore.gateway.processId &&
@@ -493,7 +577,7 @@ async function runPhysicalObservation(
           failureStage = 'application-widget-path';
           widgetVisible = await context.showValidationWidget();
         }
-        if (!traversalPassed) helper.recordPhysicalObservationAccepted();
+        if (!traversalPassed) helper.recordObservationAccepted();
         traversalPassed = true;
         if (request.automationValidation) break;
       }

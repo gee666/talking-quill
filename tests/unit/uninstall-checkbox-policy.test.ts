@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 describe('Windows uninstall checkbox policy', () => {
   it('fails closed when elevation does not transfer an exact target', async () => {
-    const source = await readFile('app/src/main/index.ts', 'utf8');
+    const source = await readFile('app/src/main/bootstrap.ts', 'utf8');
     expect(source).toContain("throw new Error('Uninstall reset target transfer is unavailable')");
     expect(source).not.toMatch(/uninstallResetTargetArgument === undefined\s*\? app\.getPath/u);
     expect(source).toContain('allowedBase: dirname(dirname(dirname(resetTarget)))');

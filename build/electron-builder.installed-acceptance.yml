@@ -1,0 +1,6 @@
+extends: ../build/electron-builder.unsigned.yml
+appId: com.talkingquill.installed-acceptance
+productName: Talking Quill
+directories:
+  output: ../tmp/installed-acceptance-build
+artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}

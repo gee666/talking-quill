@@ -3,6 +3,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+if (process.env.TALKING_QUILL_PACKAGE_VARIANT === 'packaged-test') {
+  throw new Error('Production build rejects the packaged-test variant');
+}
 rmSync(resolve(root, 'app/out'), { recursive: true, force: true });
 const poisoned = Object.keys(process.env).filter(
   (name) =>

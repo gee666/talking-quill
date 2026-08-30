@@ -28,7 +28,7 @@ export type EchoHelperPort = Pick<
       | 'beginPhysicalObservation'
       | 'samplePhysicalObservation'
       | 'endPhysicalObservation'
-      | 'recordPhysicalObservationAccepted'
+      | 'recordObservationAccepted'
     >
   > & {
     configureActivation(enabled: boolean, bindings: readonly ActivationBinding[]): Promise<unknown>;

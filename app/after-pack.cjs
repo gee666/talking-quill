@@ -2,8 +2,11 @@ const { existsSync, readdirSync, rmSync } = require('node:fs');
 const { chmod, lstat, readFile, writeFile } = require('node:fs/promises');
 const { createHash, createPrivateKey, sign } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const { join } = require('node:path');
+const { extname, join } = require('node:path');
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
+const {
+  assertNoForbiddenProductionMarkers,
+} = require('../scripts/forbidden-production-markers.cjs');
 
 module.exports = async function hardenElectron(context) {
   console.log('  • verifying bundled native helper');
@@ -47,8 +50,43 @@ module.exports = async function hardenElectron(context) {
     [FuseV1Options.OnlyLoadAppFromAsar]: true,
   });
 
+  if ((process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical') === 'canonical') {
+    await scanCanonicalRuntime(context, executable);
+  }
   await writeWindowsAcceptanceManifest(context, executable);
 };
+
+async function scanCanonicalRuntime(context, executable, additionalPaths = []) {
+  const resources = join(
+    context.appOutDir,
+    context.electronPlatformName === 'darwin'
+      ? `${context.packager.appInfo.productFilename}.app/Contents/Resources`
+      : 'resources',
+  );
+  const paths = [executable, join(resources, 'app.asar'), ...additionalPaths];
+  for (const root of [join(resources, 'helper'), join(resources, 'app.asar.unpacked')]) {
+    await collectNativeFiles(root, paths);
+  }
+  for (const path of paths) {
+    assertNoForbiddenProductionMarkers(path, await readFile(path));
+  }
+}
+
+module.exports.scanCanonicalRuntime = scanCanonicalRuntime;
+
+async function collectNativeFiles(directory, paths) {
+  if (!existsSync(directory)) return;
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) await collectNativeFiles(path, paths);
+    else if (
+      entry.isFile() &&
+      ['.dll', '.dylib', '.exe', '.node', ''].includes(extname(entry.name))
+    ) {
+      paths.push(path);
+    }
+  }
+}
 
 async function writeWindowsAcceptanceManifest(context, executable) {
   const resources = join(context.appOutDir, 'resources');

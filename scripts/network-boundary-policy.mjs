@@ -60,7 +60,7 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     reason: 'Uses the child-process type for bounded stdio RPC and never creates a process.',
     tokens: Object.freeze(['node:child_process']),
   }),
-  'app/src/main/app/installed-observation.ts': Object.freeze({
+  'app/src/main/acceptance/installed-observation.ts': Object.freeze({
     category: 'local-diagnostic-pipe-only',
     reason:
       'Uses one caller-supplied, strictly validated local named pipe for packaged installed-observation responses; no network endpoint is accepted.',

@@ -13,6 +13,7 @@ rmSync(output, { recursive: true, force: true });
 const buildEnvironment = {
   ...process.env,
   TALKING_QUILL_TASK6_TEST_HARNESS: '1',
+  TALKING_QUILL_PACKAGE_VARIANT: 'packaged-test',
   // This isolated, non-release package still exercises the canonical metadata writer.
   // Give it a visibly synthetic same-architecture predecessor rather than weakening that gate.
   TALKING_QUILL_PREDECESSOR_VERSION: '0.0.4',

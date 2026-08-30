@@ -169,7 +169,7 @@ describe('macOS R8-M installed owner', () => {
 
   it('runs Electron ACL denial as an in-process SecItem operation', async () => {
     const [entrypoint, packHook, addon] = await Promise.all([
-      readFile('app/src/main/index.ts', 'utf8'),
+      readFile('app/src/main/bootstrap.ts', 'utf8'),
       readFile('app/after-pack-macos-owner.cjs', 'utf8'),
       readFile('build/macos-keychain-denial-addon.c', 'utf8'),
     ]);

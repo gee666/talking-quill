@@ -3,26 +3,21 @@ import { describe, expect, it } from 'vitest';
 import { classifyWindowsLoginStartArguments } from '../../app/src/main/app/launch-at-login-service';
 
 describe('installed observation routing', () => {
-  it('observes the helper owned by the normally started application', () => {
+  it('keeps installed observation code behind the noncanonical entry', () => {
     const index = readFileSync('app/src/main/index.ts', 'utf8');
+    const bootstrap = readFileSync('app/src/main/bootstrap.ts', 'utf8');
     const application = readFileSync('app/src/main/app/application.ts', 'utf8');
-    expect(index).toContain('application = new TalkingQuillApplication({ windowsLoginStart })');
-    expect(index).toContain('await application.start()');
-    expect(index).toContain('await application.runInstalledObservation({');
-    expect(index).toMatch(/finally\s*\{\s*await application\.stop\(\)/u);
-    expect(index).not.toContain('process.exit(0)');
-    expect(index).not.toContain('new HelperClient');
-    expect(index).not.toContain('--talking-quill-diagnostic-capability=');
-    expect(index).not.toContain('installedDiagnosticCapability');
-    expect(application).not.toContain('installedObservationHelper()');
-    expect(application).toContain('runInstalledObservation(request: InstalledObservationRequest)');
-    expect(application).toContain('await runInstalledObservation(this.#helper, request, {');
-    expect(application).toContain('profiles: this.#settings.get().dictationProfiles');
-    expect(application).toContain('persistentWindowRolesReady: windows.hasPersistentWindowRoles()');
-    expect(application).toContain('windows.createWidgetForActivation()');
-    expect(application).toContain('windows.showWidget(');
-    expect(application).toContain('hideValidationWidget: () => windows.removeWidget()');
-    const observation = readFileSync('app/src/main/app/installed-observation.ts', 'utf8');
+    const entry = readFileSync('app/src/main/entries/windows-installed-acceptance.ts', 'utf8');
+    const observation = readFileSync('app/src/main/acceptance/installed-observation.ts', 'utf8');
+    for (const canonical of [index, bootstrap, application]) {
+      expect(canonical).not.toContain('authorizeInstalledAcceptance');
+      expect(canonical).not.toContain('runInstalledObservation');
+      expect(canonical).not.toContain('--talking-quill-installed-readiness-pipe=');
+    }
+    expect(index).toBe("import { startMain } from './bootstrap';\n\nstartMain();\n");
+    expect(entry).toContain('authorizeInstalledAcceptance({');
+    expect(entry).toMatch(/runInstalledObservation\(\s*context\.helper/u);
+    expect(entry).toContain('stopAfterExtension: true');
     expect(observation).not.toContain('new BrowserWindow');
     expect(observation).toContain('context.showValidationWidget()');
     expect(observation).toContain("failureStage = 'user-data-root'");

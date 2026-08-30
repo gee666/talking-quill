@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { z, type ZodType } from 'zod';
 import {
   HelperNotificationSchema,
   HelperRpcResponseSchema,
@@ -38,7 +39,8 @@ type ActivationNotification = Extract<HelperNotification, { method: 'activation.
 type PairedActivationParams = Extract<ActivationNotification['params'], { phase: 'down' | 'up' }>;
 
 interface PendingRequest {
-  readonly method: HelperMethod;
+  readonly method: string;
+  readonly resultSchema: ZodType;
   readonly activationConfiguration: HelperParams<'activation.configure'> | null;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
@@ -172,6 +174,33 @@ export class HelperRpcChannel {
     params: HelperParams<Method>,
     options: HelperRpcRequestOptions,
   ): Promise<HelperResult<Method>> {
+    return this.#request(
+      session,
+      method,
+      params,
+      helperParamsSchemas[method],
+      helperResultSchemas[method],
+      options,
+    ) as Promise<HelperResult<Method>>;
+  }
+
+  requestExtension(
+    session: HelperRpcSession,
+    method: string,
+    resultSchema: ZodType,
+    options: HelperRpcRequestOptions,
+  ): Promise<unknown> {
+    return this.#request(session, method, {}, z.object({}).strict(), resultSchema, options);
+  }
+
+  #request(
+    session: HelperRpcSession,
+    method: string,
+    params: unknown,
+    paramsSchema: ZodType,
+    resultSchema: ZodType,
+    options: HelperRpcRequestOptions,
+  ): Promise<unknown> {
     if (options.signal?.aborted === true) {
       return Promise.reject(new DOMException('Native helper request cancelled', 'AbortError'));
     }
@@ -198,9 +227,9 @@ export class HelperRpcChannel {
     }
 
     const id = this.#takeRequestId();
-    const validParams = helperParamsSchemas[method].parse(params);
+    const validParams = paramsSchema.parse(params);
     const frame = encodeHelperFrame({ jsonrpc: '2.0', id, method, params: validParams });
-    return new Promise<HelperResult<Method>>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const abort = (): void => {
         if (this.#session !== session) return;
         const pending = this.#pending.get(id);
@@ -219,6 +248,7 @@ export class HelperRpcChannel {
       options.signal?.addEventListener('abort', abort, { once: true });
       this.#pending.set(id, {
         method,
+        resultSchema,
         activationConfiguration:
           method === 'activation.configure'
             ? helperParamsSchemas['activation.configure'].parse(validParams)
@@ -229,7 +259,7 @@ export class HelperRpcChannel {
         timeoutReason: options.timeoutReason,
         timer: null,
         dispatched: false,
-        resolve: (result) => resolve(result as HelperResult<Method>),
+        resolve,
         reject,
         removeAbort: () => options.signal?.removeEventListener('abort', abort),
         onPasteCommitted: options.onPasteCommitted,
@@ -428,7 +458,7 @@ export class HelperRpcChannel {
         this.#pumpWrites(session);
         return;
       }
-      const result = helperResultSchemas[pending.method].safeParse(response.data.result);
+      const result = pending.resultSchema.safeParse(response.data.result);
       if (!result.success) {
         this.#rejectMalformedDispatchedResponse(
           response.data.id,

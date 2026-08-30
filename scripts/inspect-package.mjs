@@ -48,13 +48,22 @@ import {
 } from './release-package-metadata.mjs';
 
 const require = createRequire(import.meta.url);
+const {
+  FORBIDDEN_MARKER_OVERLAP_BYTES,
+  assertNoForbiddenProductionMarkers,
+} = require('./forbidden-production-markers.cjs');
 const invocationDirectory = process.cwd();
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const packageArgument = process.argv
   .slice(2)
   .find((argument) => argument !== '--' && !argument.startsWith('--'));
 const macosOwnerPackage = process.argv.includes('--macos-owner');
-const windowsInstalledAcceptance = process.env.TALKING_QUILL_ACCEPTANCE_BUILD === '1';
+const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
+if (!['canonical', 'installed-acceptance', 'packaged-test'].includes(packageVariant)) {
+  throw new Error(`Unknown package inspection variant: ${packageVariant}`);
+}
+const canonicalPackage = packageVariant === 'canonical';
+const windowsInstalledAcceptance = packageVariant === 'installed-acceptance';
 const strictArtifactInspection =
   process.argv.includes('--strict') || process.env.TALKING_QUILL_PACKAGE_INSPECTION_STRICT === '1';
 const artifactRequirementArgument = process.argv.find((argument) =>
@@ -117,6 +126,7 @@ for (const entry of asarEntries) {
   const stat = statFile(asarPath, entry.replaceAll('/', sep), false);
   if (stat.files !== undefined || stat.unpacked === true) continue;
   const bytes = extractFile(asarPath, entry.replaceAll('/', sep));
+  if (canonicalPackage) assertNoForbiddenProductionMarkers(`app.asar/${entry}`, bytes);
   validateSecretContent(entry, bytes.toString('latin1'));
   if (isTextRuntimePath(entry)) {
     const source = bytes.toString('utf8');
@@ -394,8 +404,14 @@ async function scanPhysicalContent(path, packagePath, textual) {
   for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) {
     const combined = Buffer.concat([overlap, chunk]);
     validateSecretContent(packagePath, combined.toString('latin1'));
+    if (canonicalPackage) assertNoForbiddenProductionMarkers(packagePath, combined);
     if (textual) validateRuntimeContent(packagePath, combined.toString('utf8'));
-    overlap = combined.subarray(Math.max(0, combined.length - SECRET_SCAN_OVERLAP_BYTES));
+    overlap = combined.subarray(
+      Math.max(
+        0,
+        combined.length - Math.max(SECRET_SCAN_OVERLAP_BYTES, FORBIDDEN_MARKER_OVERLAP_BYTES),
+      ),
+    );
   }
 }
 
@@ -632,11 +648,12 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
     if (entry.length > 0 && 'link' in metadata) {
       throw new Error(`Extracted final artifact contains an ASAR link: ${entry}`);
     }
+    const bytes = extractFile(extractedAsar, entry.replaceAll('/', sep));
+    if (canonicalPackage) {
+      assertNoForbiddenProductionMarkers(`extracted app.asar/${entry}`, bytes);
+    }
     if (isTextRuntimePath(entry)) {
-      validateRuntimeContent(
-        entry,
-        extractFile(extractedAsar, entry.replaceAll('/', sep)).toString('utf8'),
-      );
+      validateRuntimeContent(entry, bytes.toString('utf8'));
     }
   }
 }

@@ -109,8 +109,6 @@ async function measureRun(run) {
       Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'appdata'),
     ),
     APPDATA: appData,
-    CI: 'true',
-    TALKING_QUILL_PACKAGED_TEST: '1',
   };
   let child = null;
   let browser = null;
@@ -119,18 +117,11 @@ async function measureRun(run) {
   try {
     const startedAt = performance.now();
     const debuggingPort = await freePort();
-    child = spawn(
-      executable,
-      [
-        `--remote-debugging-port=${String(debuggingPort)}`,
-        `--talking-quill-user-data=${applicationProfile}`,
-      ],
-      {
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      },
-    );
+    child = spawn(executable, [`--remote-debugging-port=${String(debuggingPort)}`], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
     ownedPids.add(child.pid);
     for (const stream of [child.stdout, child.stderr]) {
       stream.on('data', (chunk) => {

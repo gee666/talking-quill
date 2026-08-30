@@ -88,17 +88,48 @@ import { TrayController } from './tray-controller';
 import { WindowManager } from './window-manager';
 import { WidgetCaptureExclusion } from './widget-capture-exclusion';
 import { WindowRoleRegistry } from './window-role-registry';
-import { runInstalledObservation, type InstalledObservationRequest } from './installed-observation';
-
 // Leave Pi RPC's 5.75 second retirement envelope intact after earlier producer drains.
 const LIFECYCLE_TIMEOUT_MS = 15_000;
 const RESET_ACKNOWLEDGEMENT_TIMEOUT_MS = 1_000;
 type ApplicationLifecycle = 'new' | 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
 
+export interface ApplicationRuntimeContext {
+  readonly helper: HelperClient;
+  readonly profiles: ReturnType<SettingsStore['get']>['dictationProfiles'];
+  readonly persistentWindowRolesReady: boolean;
+  readonly userDataRoot: string;
+  readonly showWidget: () => Promise<boolean>;
+  readonly hideWidget: () => void;
+  readonly windowsLoginStart: boolean;
+  readonly mainWindowVisible: boolean;
+  readonly waitForSecondaryLoginStart: (timeoutMs: number) => Promise<boolean>;
+  readonly verifyDiagnosticWriteContainment: () => Promise<{
+    readonly enabled: boolean;
+    readonly contained: boolean;
+  }>;
+}
+
+export interface ApplicationRuntimeExtension {
+  readonly run: (context: ApplicationRuntimeContext) => Promise<void>;
+  readonly onSecondaryLoginStart?: () => void;
+}
+
+export interface TalkingQuillApplicationOptions {
+  readonly windowsLoginStart?: boolean;
+  readonly extension?: ApplicationRuntimeExtension;
+  readonly packagedEgressProof?: boolean;
+  readonly interactiveAppData?: string;
+  readonly interactiveHome?: string;
+}
+
 export class TalkingQuillApplication {
   readonly #roles = new WindowRoleRegistry();
   readonly #startupAbort = new AbortController();
   readonly #windowsLoginStart: boolean;
+  readonly #extension: ApplicationRuntimeExtension | null;
+  readonly #packagedEgressProof: boolean;
+  readonly #interactiveAppData: string | undefined;
+  readonly #interactiveHome: string | undefined;
   readonly #runtimeDisposers: (() => void)[] = [];
   #dataLifecycle: DataLifecycleService | null = null;
   #diagnostics: DiagnosticLogger | null = null;
@@ -133,11 +164,15 @@ export class TalkingQuillApplication {
   #updateInstallRequested = false;
   #showMainWhenReady = false;
   #applicationActivationSequence = 0;
-  #acceptanceLoginStartObserved = false;
-  readonly #acceptanceLoginWaiters = new Set<() => void>();
+  #secondaryLoginStartObserved = false;
+  readonly #secondaryLoginWaiters = new Set<() => void>();
 
-  constructor(options: { readonly windowsLoginStart?: boolean } = {}) {
+  constructor(options: TalkingQuillApplicationOptions = {}) {
     this.#windowsLoginStart = options.windowsLoginStart === true;
+    this.#extension = options.extension ?? null;
+    this.#packagedEgressProof = options.packagedEgressProof === true;
+    this.#interactiveAppData = options.interactiveAppData;
+    this.#interactiveHome = options.interactiveHome;
   }
 
   start(): Promise<void> {
@@ -148,53 +183,56 @@ export class TalkingQuillApplication {
     return this.#startPromise;
   }
 
-  handleAcceptanceLoginStart(): void {
-    this.#acceptanceLoginStartObserved = true;
-    for (const waiter of this.#acceptanceLoginWaiters) waiter();
-    this.#acceptanceLoginWaiters.clear();
+  handleSecondaryLoginStart(): void {
+    this.#secondaryLoginStartObserved = true;
+    this.#extension?.onSecondaryLoginStart?.();
+    for (const waiter of this.#secondaryLoginWaiters) waiter();
+    this.#secondaryLoginWaiters.clear();
   }
 
-  async #waitForAcceptanceLoginStart(timeoutMs: number): Promise<boolean> {
-    if (this.#acceptanceLoginStartObserved) return true;
+  async #waitForSecondaryLoginStart(timeoutMs: number): Promise<boolean> {
+    if (this.#secondaryLoginStartObserved) return true;
     return new Promise((resolveWait) => {
       const complete = () => {
         clearTimeout(timer);
-        this.#acceptanceLoginWaiters.delete(complete);
+        this.#secondaryLoginWaiters.delete(complete);
         resolveWait(true);
       };
       const timer = setTimeout(() => {
-        this.#acceptanceLoginWaiters.delete(complete);
+        this.#secondaryLoginWaiters.delete(complete);
         resolveWait(false);
       }, timeoutMs);
-      this.#acceptanceLoginWaiters.add(complete);
+      this.#secondaryLoginWaiters.add(complete);
     });
   }
 
-  async runInstalledObservation(request: InstalledObservationRequest): Promise<void> {
+  async runExtension(): Promise<void> {
+    if (this.#extension === null) return;
     if (
       this.#lifecycle !== 'running' ||
       this.#helper === null ||
       this.#settings === null ||
       this.#windows === null
     ) {
-      throw new Error('Application-owned installed observation is not ready');
+      throw new Error('Application runtime extension is not ready');
     }
     const windows = this.#windows;
-    await runInstalledObservation(this.#helper, request, {
+    await this.#extension.run({
+      helper: this.#helper,
       profiles: this.#settings.get().dictationProfiles,
       persistentWindowRolesReady: windows.hasPersistentWindowRoles(),
       userDataRoot: app.getPath('userData'),
-      showValidationWidget: async () => {
+      showWidget: async () => {
         if (!(await windows.createWidgetForActivation())) return false;
         return windows.showWidget(this.#settings?.get().app.widgetSize ?? 'default');
       },
-      hideValidationWidget: () => windows.removeWidget(),
+      hideWidget: () => windows.removeWidget(),
       windowsLoginStart: this.#windowsLoginStart,
       mainWindowVisible: windows.isMainVisible(),
-      waitForIgnoredLoginStart: (timeoutMs) => this.#waitForAcceptanceLoginStart(timeoutMs),
-      probeDiagnostics: async () => ({
+      waitForSecondaryLoginStart: (timeoutMs) => this.#waitForSecondaryLoginStart(timeoutMs),
+      verifyDiagnosticWriteContainment: async () => ({
         enabled: this.#diagnostics?.enabled === true,
-        injectedFailureContained: (await this.#diagnostics?.probeAcceptanceWriteFailure()) === true,
+        contained: (await this.#diagnostics?.verifyWriteFailureContainment()) === true,
       }),
     });
   }
@@ -248,7 +286,7 @@ export class TalkingQuillApplication {
       ensureAppDirectories(paths);
       const observeEgress = createEgressProofObserver(
         join(paths.temporary, 'egress-proof.jsonl'),
-        egressProofRuntimeEnabled(),
+        egressProofRuntimeEnabled(this.#packagedEgressProof),
       );
       this.#assertStartupActive();
 
@@ -306,9 +344,12 @@ export class TalkingQuillApplication {
         workingDirectory: paths.root,
         observeEgress,
         platform: process.platform,
-        environment: process.env,
-        appData: app.getPath('appData'),
-        home: app.getPath('home'),
+        ...(process.platform !== 'win32'
+          ? {}
+          : { interactiveAppData: this.#interactiveAppData ?? app.getPath('appData') }),
+        ...(process.platform !== 'win32'
+          ? {}
+          : { interactiveHome: this.#interactiveHome ?? app.getPath('home') }),
         ...(resolvePiCli === undefined ? {} : { resolvePiCli }),
       });
       const { configs: providerConfigs, piInstallation, providers } = providerRuntime;
@@ -1198,12 +1239,7 @@ function validInstalledMacosOwner(resourcesPath: string, helperExecutable: strin
   }
 }
 
-function egressProofRuntimeEnabled(): boolean {
+function egressProofRuntimeEnabled(packagedProof: boolean): boolean {
   if (process.env.TALKING_QUILL_EGRESS_PROOF !== '1') return false;
-  if (!app.isPackaged) return process.env.NODE_ENV === 'test';
-  return (
-    process.env.CI === 'true' &&
-    process.env.TALKING_QUILL_PACKAGED_TEST === '1' &&
-    process.argv.some((argument) => argument.startsWith('--remote-debugging-port='))
-  );
+  return app.isPackaged ? packagedProof : process.env.NODE_ENV === 'test';
 }

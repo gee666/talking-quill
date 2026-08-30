@@ -61,7 +61,11 @@ describe('package orchestration', () => {
 
   it('keeps acceptance packages noncanonical and strips authorization from canonical builds', () => {
     const acceptance = createPackagePlan('win-installed-acceptance');
-    expect(acceptance).toMatchObject({ architecture: 'x64', acceptance: true });
+    expect(acceptance).toMatchObject({
+      command: 'package:win:installed-acceptance',
+      architecture: 'x64',
+      acceptance: true,
+    });
     expect(CANONICAL_PACKAGE_TARGETS).not.toContain('win-installed-acceptance');
     expect(
       createProductionEnvironment(acceptance, {
@@ -70,14 +74,16 @@ describe('package orchestration', () => {
     ).toMatchObject({
       TALKING_QUILL_ACCEPTANCE_BUILD: '1',
       TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
+      TALKING_QUILL_PACKAGE_VARIANT: 'installed-acceptance',
       TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
     });
-    expect(
-      createProductionEnvironment(createPackagePlan('win'), {
-        TALKING_QUILL_ACCEPTANCE_BUILD: '1',
-        TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
-      }),
-    ).not.toHaveProperty('TALKING_QUILL_ACCEPTANCE_BUILD');
+    const canonical = createProductionEnvironment(createPackagePlan('win'), {
+      TALKING_QUILL_ACCEPTANCE_BUILD: '1',
+      TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
+    });
+    expect(canonical).toMatchObject({ TALKING_QUILL_PACKAGE_VARIANT: 'canonical' });
+    expect(canonical).not.toHaveProperty('TALKING_QUILL_ACCEPTANCE_BUILD');
+    expect(canonical).not.toHaveProperty('TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM');
   });
 
   it.each(['mac-owner-x64', 'mac-owner-arm64'] as const)(

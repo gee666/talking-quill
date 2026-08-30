@@ -42,14 +42,14 @@ const PACKAGE_TARGETS = Object.freeze({
     architecture: 'arm64',
   }),
   'win-installed-acceptance': Object.freeze({
-    command: 'package:win',
+    command: 'package:win:installed-acceptance',
     artifactRequirement: 'nsis',
     platform: 'win',
     architecture: 'x64',
     acceptance: true,
   }),
   'win-arm64-installed-acceptance': Object.freeze({
-    command: 'package:win:arm64:unsigned',
+    command: 'package:win:arm64:installed-acceptance',
     artifactRequirement: 'nsis',
     platform: 'win',
     architecture: 'arm64',
@@ -139,6 +139,7 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: plan.artifactRequirement,
       TALKING_QUILL_PACKAGE_TARGET: plan.platform,
       TALKING_QUILL_PACKAGE_ARCH: plan.architecture,
+      TALKING_QUILL_PACKAGE_VARIANT: acceptance ? 'installed-acceptance' : 'canonical',
       TALKING_QUILL_PACKAGE_MODE:
         sourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1' ? 'fresh' : plan.mode,
       ...(acceptance
