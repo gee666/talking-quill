@@ -68,6 +68,7 @@ import {
 } from '../schemas/providers';
 import { PublicSettingsPatchSchema, SettingsSchema } from '../schemas/settings';
 import { SettingsTransferResultSchema } from '../schemas/settings-transfer';
+import { ShortcutCaptureLeaseIdSchema } from '../schemas/shortcut-capture';
 import {
   BuiltInDictationProfileIdSchema,
   CustomDictationProfileIdSchema,
@@ -179,6 +180,11 @@ export const invokeRegistry = Object.freeze({
     request: emptyRequest,
     response: z.object({ text: ThirdPartyNoticesSchema }).strict(),
   }),
+  'info:export-diagnostics': defineInvoke({
+    roles: ['main'] as const,
+    request: emptyRequest,
+    response: z.object({ status: z.enum(['cancelled', 'exported']) }).strict(),
+  }),
   'activation-test:start': defineInvoke({
     roles: ['main'] as const,
     request: emptyRequest,
@@ -192,11 +198,11 @@ export const invokeRegistry = Object.freeze({
   'shortcut-capture:start': defineInvoke({
     roles: ['main'] as const,
     request: emptyRequest,
-    response: acknowledgement,
+    response: z.object({ leaseId: ShortcutCaptureLeaseIdSchema }).strict(),
   }),
   'shortcut-capture:stop': defineInvoke({
     roles: ['main'] as const,
-    request: emptyRequest,
+    request: z.object({ leaseId: ShortcutCaptureLeaseIdSchema }).strict(),
     response: acknowledgement,
   }),
   'app:set-enabled': defineInvoke({
@@ -671,6 +677,8 @@ export type InvokeResponse<Channel extends InvokeChannel> = z.infer<
 export type EventPayload<Channel extends EventChannel> = z.infer<
   (typeof eventRegistry)[Channel]['payload']
 >;
+export type PortTransferRole<Channel extends PortTransferChannel> =
+  (typeof portTransferRegistry)[Channel]['roles'][number];
 export type PortTransferDescriptor<Channel extends PortTransferChannel> = z.infer<
   (typeof portTransferRegistry)[Channel]['descriptor']
 >;

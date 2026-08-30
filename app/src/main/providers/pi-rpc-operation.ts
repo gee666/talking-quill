@@ -19,7 +19,8 @@ import {
   type PiRpcOutboundCommand,
 } from './pi-rpc-transport';
 
-export const PI_RPC_PROTOCOL_VERSION = '0.84.2';
+export const PI_RPC_PROTOCOL_VERSION = '0.84.3';
+export const PI_RPC_SUPPORTED_VERSIONS = Object.freeze(['0.84.2', '0.84.3'] as const);
 export const PI_RPC_REQUIRED_SAFETY_FLAGS = Object.freeze([
   '--no-tools',
   '--no-extensions',
@@ -954,7 +955,7 @@ export function assertRpcCompatibility(
   identity: Pick<PiCliIdentity, 'packageVersion' | 'safetyFlags'>,
 ): void {
   if (
-    identity.packageVersion !== PI_RPC_PROTOCOL_VERSION ||
+    !PI_RPC_SUPPORTED_VERSIONS.some((version) => version === identity.packageVersion) ||
     identity.safetyFlags.length !== PI_RPC_REQUIRED_SAFETY_FLAGS.length ||
     !identity.safetyFlags.every((flag, index) => flag === PI_RPC_REQUIRED_SAFETY_FLAGS[index])
   ) {

@@ -103,7 +103,9 @@ function phaseHeading(session: EchoSessionSnapshot): string {
     case 'restoringClipboard':
       return 'Finishing';
     case 'completed':
-      return session.completion === 'copied' ? 'Copied' : 'Done';
+      if (session.completion === 'copied') return 'Copied';
+      if (session.completion === 'indeterminate') return 'Check target';
+      return 'Done';
     case 'cancelled':
       return 'Cancelled';
     case 'error':

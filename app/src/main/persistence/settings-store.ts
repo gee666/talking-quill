@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_SETTINGS,
   SETTINGS_SCHEMA_VERSION,
@@ -8,10 +9,21 @@ import {
 } from '../../shared/schemas/settings';
 import { GENERAL_PROFILE_ID } from '../../shared/schemas/dictation-profiles';
 import { preserveInvalidFile, readUtf8File, writeJsonAtomic } from './atomic-json';
+import { LegacySettingsV27Schema } from './settings-migrations/legacy-settings-v27';
+import { migrateSettingsV27 } from './settings-migrations/transforms';
 
 export type SettingsMigration = (input: Readonly<Record<string, unknown>>) => unknown;
 export type SettingsMigrations = Readonly<Record<number, SettingsMigration>>;
 export type SettingsListener = (settings: Settings) => void;
+
+type PersistedSettingsVersion = 27 | typeof SETTINGS_SCHEMA_VERSION;
+
+const V28_PERSISTENCE_FENCE = 28;
+
+interface PersistedSettingsSelection {
+  readonly settings: unknown;
+  readonly version: PersistedSettingsVersion;
+}
 
 export interface SettingsStoreIo {
   readonly read: (path: string) => Promise<string | null>;
@@ -63,6 +75,7 @@ export class SettingsStore {
   readonly #pendingWrites = new Set<Promise<Settings>>();
   readonly #unflushedFailures: unknown[] = [];
   #settings: Settings = structuredClone(DEFAULT_SETTINGS);
+  #persistedVersion: PersistedSettingsVersion = 27;
   #writeQueue: Promise<void> = Promise.resolve();
   #diagnostic: SettingsDiagnostic | null = null;
 
@@ -108,18 +121,24 @@ export class SettingsStore {
     try {
       migrated = this.#migrate(parsed);
     } catch {
-      await this.#recoverCorruptSettings('migration', source);
+      await this.#recoverCorruptSettings('migration', source, persistedVersionFence(sourceVersion));
       return;
     }
 
     const validated = SettingsSchema.safeParse(migrated);
     if (!validated.success) {
-      await this.#recoverCorruptSettings('schema', source);
+      await this.#recoverCorruptSettings('schema', source, persistedVersionFence(sourceVersion));
       return;
     }
 
     this.#settings = validated.data;
-    if (migrated !== parsed) await this.#persistInitial(this.#settings);
+    this.#persistedVersion = persistedVersionFence(sourceVersion);
+    const persisted = this.#selectPersistedSettings(this.#settings, this.#persistedVersion);
+    if (!isDeepStrictEqual(persisted.settings, parsed)) {
+      await this.#persistInitial(this.#settings);
+    } else {
+      this.#persistedVersion = persisted.version;
+    }
   }
 
   get(): Settings {
@@ -139,16 +158,19 @@ export class SettingsStore {
     const update = this.#writeQueue.then(async () => {
       throwIfUpdateAborted(signal);
       const previous = this.#settings;
+      const previousPersistedVersion = this.#persistedVersion;
       const next = SettingsSchema.parse(mergeSettings(previous, validatedPatch));
+      const persisted = this.#selectPersistedSettings(next, previousPersistedVersion);
       try {
-        await this.#io.write(this.#path, next);
+        await this.#io.write(this.#path, persisted.settings);
       } catch (error: unknown) {
         this.#setIoDiagnostic('write');
         throw error;
       }
       if (signal?.aborted === true) {
         try {
-          await this.#io.write(this.#path, previous);
+          const rollback = this.#selectPersistedSettings(previous, previousPersistedVersion);
+          await this.#io.write(this.#path, rollback.settings);
         } catch (error: unknown) {
           this.#setIoDiagnostic('write');
           throw error;
@@ -158,6 +180,7 @@ export class SettingsStore {
       }
       this.#clearIoDiagnostic();
       this.#settings = next;
+      this.#persistedVersion = persisted.version;
       const snapshot = this.get();
       for (const listener of this.#listeners) {
         try {
@@ -207,8 +230,10 @@ export class SettingsStore {
   }
 
   async #persistInitial(settings: Settings): Promise<void> {
+    const persisted = this.#selectPersistedSettings(settings, this.#persistedVersion);
     try {
-      await this.#io.write(this.#path, settings);
+      await this.#io.write(this.#path, persisted.settings);
+      this.#persistedVersion = persisted.version;
       this.#clearIoDiagnostic();
     } catch (error: unknown) {
       this.#setIoDiagnostic('write');
@@ -216,9 +241,24 @@ export class SettingsStore {
     }
   }
 
+  #selectPersistedSettings(
+    settings: Settings,
+    minimumVersion: PersistedSettingsVersion,
+  ): PersistedSettingsSelection {
+    if (minimumVersion === 27) {
+      const compatible = LegacySettingsV27Schema.safeParse({
+        ...structuredClone(settings),
+        schemaVersion: 27,
+      });
+      if (compatible.success) return { settings: compatible.data, version: 27 };
+    }
+    return { settings, version: SETTINGS_SCHEMA_VERSION };
+  }
+
   async #recoverCorruptSettings(
     reason: 'parse' | 'schema' | 'migration',
     source: string,
+    persistedVersion: PersistedSettingsVersion = 27,
   ): Promise<void> {
     let preservedAt: string | null;
     try {
@@ -234,6 +274,7 @@ export class SettingsStore {
       preservedAt,
     });
     this.#settings = structuredClone(DEFAULT_SETTINGS);
+    this.#persistedVersion = persistedVersion;
     await this.#persistInitial(this.#settings);
   }
 
@@ -250,7 +291,8 @@ export class SettingsStore {
     let current: unknown = input;
     let version: unknown = readSchemaVersion(input);
     while (typeof version === 'number' && version < SETTINGS_SCHEMA_VERSION) {
-      const migration = this.#migrations[version];
+      const migration =
+        this.#migrations[version] ?? (version === 27 ? migrateSettingsV27 : undefined);
       if (migration === undefined) throw new Error('Unsupported settings version');
       const previousVersion = version;
       current = migration(current as Readonly<Record<string, unknown>>);
@@ -279,6 +321,15 @@ function isAbortError(error: unknown): boolean {
 function readSchemaVersion(input: unknown): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined;
   return (input as Readonly<Record<string, unknown>>).schemaVersion;
+}
+
+function persistedVersionFence(sourceVersion: unknown): PersistedSettingsVersion {
+  // The discriminator uses JSON.parse number semantics; only an exact safe-integer value fences v27.
+  return typeof sourceVersion === 'number' &&
+    Number.isSafeInteger(sourceVersion) &&
+    sourceVersion >= V28_PERSISTENCE_FENCE
+    ? SETTINGS_SCHEMA_VERSION
+    : 27;
 }
 
 export function mergeSettings(current: Settings, patch: SettingsPatch): Settings {

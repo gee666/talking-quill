@@ -21,7 +21,7 @@ const RESET_ACKNOWLEDGEMENT_TOKEN = '00000000-0000-4000-8000-000000000013';
 
 describe('typed IPC registry', () => {
   it('requires strict request and response schemas for every channel', () => {
-    expect(Object.keys(invokeRegistry)).toHaveLength(79);
+    expect(Object.keys(invokeRegistry)).toHaveLength(80);
     for (const [channel, contract] of Object.entries(invokeRegistry)) {
       expect(contract.roles.length, channel).toBeGreaterThan(0);
       expect(contract.request.safeParse({ unknown: true }).success, channel).toBe(false);

@@ -8,12 +8,22 @@ const packageFile = appRequire.resolve('better-sqlite3/package.json');
 const packageRoot = dirname(packageFile);
 const packageRequire = createRequire(packageFile);
 
-rmSync(join(packageRoot, 'build'), {
-  recursive: true,
-  force: true,
-  maxRetries: 5,
-  retryDelay: 100,
-});
+try {
+  rmSync(join(packageRoot, 'build'), {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 250,
+  });
+} catch (error) {
+  if (error?.code === 'EPERM' || error?.code === 'EBUSY' || error?.code === 'EACCES') {
+    throw new Error(
+      'better-sqlite3 is still loaded by a process; source E2E Electron cleanup did not complete',
+      { cause: error },
+    );
+  }
+  throw error;
+}
 
 const prebuildInstall = packageRequire.resolve('prebuild-install/bin.js');
 let result = spawnSync(process.execPath, [prebuildInstall], {

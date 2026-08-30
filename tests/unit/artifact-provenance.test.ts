@@ -11,7 +11,17 @@ import {
 
 const root = resolve('tmp', 'artifact-provenance-fixtures');
 const packageRoot = resolve(root, 'release', 'win-unpacked');
-const artifact = resolve(root, 'release', 'Talking-Quill-0.0.4-win-x64.exe');
+const sourceVersion = (
+  JSON.parse(await readFile(resolve('package.json'), 'utf8')) as {
+    version: string;
+  }
+).version;
+const appSourceVersion = (
+  JSON.parse(await readFile(resolve('app', 'package.json'), 'utf8')) as {
+    version: string;
+  }
+).version;
+const artifact = resolve(root, 'release', `Talking-Quill-${sourceVersion}-win-x64.exe`);
 
 beforeEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -29,7 +39,7 @@ afterEach(async () => {
 
 async function writeManifest() {
   return writeArtifactProvenanceManifest({
-    version: '0.0.4',
+    version: sourceVersion,
     platform: 'win',
     arch: 'x64',
     packageRoot,
@@ -37,13 +47,22 @@ async function writeManifest() {
   });
 }
 
-describe('canonical artifact provenance manifest', () => {
-  it('binds the canonical package inventory and final artifact bytes for upload', async () => {
+describe('canonical artifact provenance manifest', { timeout: 15_000 }, () => {
+  it('binds the source identity, isolated package inventory, and final artifact bytes for upload', async () => {
+    expect(sourceVersion).toMatch(/^\d+\.\d+\.\d+$/u);
+    expect(appSourceVersion).toBe(sourceVersion);
+
     const manifest = await writeManifest();
     await expect(verifyArtifactProvenanceManifest()).resolves.toEqual(manifest);
+    expect(manifest.package).toEqual({
+      version: sourceVersion,
+      platform: 'win',
+      arch: 'x64',
+      root: 'tmp/artifact-provenance-fixtures/release/win-unpacked',
+    });
     expect(artifactUploadPaths(manifest)).toEqual([
       'tmp/artifact-provenance-fixtures/release/win-unpacked/**',
-      'tmp/artifact-provenance-fixtures/release/Talking-Quill-0.0.4-win-x64.exe',
+      `tmp/artifact-provenance-fixtures/release/Talking-Quill-${sourceVersion}-win-x64.exe`,
       'artifact-provenance.json',
     ]);
     const persisted = await readFile(artifactProvenanceManifestPath, 'utf8');

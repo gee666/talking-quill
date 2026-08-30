@@ -2,7 +2,7 @@ use std::{
     io::{Cursor, Read},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -17,16 +17,19 @@ use serde_json::{Value, json};
 use talking_quill_helper::{
     CriticalDelivery, RunError,
     framing::{MAX_FRAME_BYTES, read_frame, write_frame},
-    keyboard::{
-        ActivationBinding, ActivationBindings, ActivationKey, EventPhase, HelperEvent, ProfileId,
-        SessionCaptureMode, SessionKey, Shortcut, ShortcutModifiers,
-    },
-    platform::{
-        CallbackGate, FrontApp, HookStatus, PasteFailure, PasteResult, PermissionState,
-        Permissions, Platform, PlatformError, TerminalReason, TerminalSignal,
+    gateway::{
+        ActivationCaptureGate, CallbackGate, CancellationReasonCounters, FrontApp, GatewayBackend,
+        HookStatus, PasteFailure, PasteResult, PermissionState, Permissions, PlatformError,
+        PlatformShutdown, TerminalReason, TerminalSignal, TransactionCounters,
+        TransactionObservabilitySnapshot,
     },
     protocol::{INBOUND_METHODS, Outbound, Server, encode_outbound, parse_request},
-    run_framed_stream,
+    run_framed_stream, run_framed_stream_started,
+};
+use talking_quill_keyboard_core::{
+    ActivationBinding, ActivationBindings, ActivationContext, ActivationGeneration, ActivationKey,
+    EventPhase, KeyboardEvent, NativeTargetToken, ProfileId, SessionCaptureMode, SessionKey,
+    Shortcut, ShortcutModifiers,
 };
 
 struct FakeState {
@@ -34,12 +37,20 @@ struct FakeState {
     activation_bindings: Mutex<ActivationBindings>,
     activation_enabled: Mutex<bool>,
     capture_mode: Mutex<SessionCaptureMode>,
+    paste_context: Mutex<Option<ActivationContext>>,
+    paste_failure: Mutex<Option<PasteFailure>>,
     calls: Mutex<Vec<&'static str>>,
     emit_shutdown_event: AtomicBool,
     gate_was_closed_on_shutdown: AtomicBool,
     oversized_front_app: AtomicBool,
     fail_activation_config: AtomicBool,
+    activation_platform_error: Mutex<Option<PlatformError>>,
     terminal_on_shutdown: AtomicBool,
+    terminal_on_paste: AtomicBool,
+    terminal: Mutex<Option<Arc<TerminalSignal>>>,
+    shutdown_complete: AtomicBool,
+    shutdown_event_count: AtomicUsize,
+    shutdown_draining: AtomicBool,
 }
 
 impl Default for FakeState {
@@ -49,12 +60,20 @@ impl Default for FakeState {
             activation_bindings: Mutex::new(ActivationBindings::default()),
             activation_enabled: Mutex::new(false),
             capture_mode: Mutex::new(SessionCaptureMode::Off),
+            paste_context: Mutex::new(None),
+            paste_failure: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             emit_shutdown_event: AtomicBool::new(false),
             gate_was_closed_on_shutdown: AtomicBool::new(false),
             oversized_front_app: AtomicBool::new(false),
             fail_activation_config: AtomicBool::new(false),
+            activation_platform_error: Mutex::new(None),
             terminal_on_shutdown: AtomicBool::new(false),
+            terminal_on_paste: AtomicBool::new(false),
+            terminal: Mutex::new(None),
+            shutdown_complete: AtomicBool::new(false),
+            shutdown_event_count: AtomicUsize::new(0),
+            shutdown_draining: AtomicBool::new(false),
         }
     }
 }
@@ -70,6 +89,52 @@ struct BlockingAfterData {
     release: Receiver<()>,
 }
 
+struct PhasedInput {
+    first: Cursor<Vec<u8>>,
+    second: Cursor<Vec<u8>>,
+    release: Receiver<()>,
+    released: bool,
+}
+
+struct DelayedWriter {
+    output: Arc<Mutex<Vec<u8>>>,
+    entered: crossbeam_channel::Sender<()>,
+    release: Receiver<()>,
+    blocked: bool,
+}
+
+static SATURATED_SHUTDOWN_SIGNAL: Mutex<Option<std::sync::mpsc::Sender<usize>>> = Mutex::new(None);
+
+impl Read for PhasedInput {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.first.read(buffer)?;
+        if read != 0 {
+            return Ok(read);
+        }
+        if !self.released {
+            let _ = self.release.recv();
+            self.released = true;
+        }
+        self.second.read(buffer)
+    }
+}
+
+impl std::io::Write for DelayedWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if !self.blocked {
+            self.blocked = true;
+            let _ = self.entered.try_send(());
+            let _ = self.release.recv();
+        }
+        self.output.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Read for BlockingAfterData {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.data.read(buffer)?;
@@ -81,28 +146,83 @@ impl Read for BlockingAfterData {
     }
 }
 
-struct FakePlatform {
+struct FakeGatewayBackend {
     state: Arc<FakeState>,
     outbound: Option<crossbeam_channel::Sender<Outbound>>,
     gate: Option<Arc<CallbackGate>>,
 }
 
-impl Platform for FakePlatform {
+impl GatewayBackend for FakeGatewayBackend {
     fn start(
-        _outbound: crossbeam_channel::Sender<Outbound>,
-        _gate: Arc<CallbackGate>,
-        _terminal: Arc<TerminalSignal>,
+        outbound: crossbeam_channel::Sender<Outbound>,
+        gate: Arc<CallbackGate>,
+        terminal: Arc<TerminalSignal>,
+        _capture_gate: ActivationCaptureGate,
     ) -> Result<Self, PlatformError> {
+        let state = Arc::new(FakeState::default());
+        *state.terminal.lock().unwrap() = Some(terminal);
+        state.shutdown_event_count.store(256, Ordering::Release);
         Ok(Self {
-            state: Arc::new(FakeState::default()),
-            outbound: None,
-            gate: None,
+            state,
+            outbound: Some(outbound),
+            gate: Some(gate),
         })
+    }
+
+    #[cfg(feature = "windows-installed-acceptance")]
+    fn acceptance_endpoint_observability(
+        &self,
+    ) -> Option<talking_quill_helper::gateway::AcceptanceEndpointObservability> {
+        let peer = |process_id: u32, creation_marker: &str| {
+            talking_quill_helper::gateway::AcceptanceEndpointPeerFacts {
+                process_id,
+                creation_marker: creation_marker.into(),
+                integrity_rid: 8192,
+                session_id: 3,
+                user_sid_hash: "11".repeat(32),
+            }
+        };
+        Some(
+            talking_quill_helper::gateway::AcceptanceEndpointObservability {
+                endpoint_version: 2,
+                peer_authenticated: true,
+                release_build_digest: "22".repeat(32),
+                manifest_sha256: "33".repeat(32),
+                gateway: peer(41, "133700000000000001"),
+                owner: peer(42, "133700000000000002"),
+            },
+        )
+    }
+
+    #[cfg(feature = "windows-installed-acceptance")]
+    fn acceptance_pause_lease_renewal(
+        &self,
+    ) -> Result<talking_quill_helper::gateway::AcceptancePauseLeaseRenewalResult, PlatformError>
+    {
+        let before = talking_quill_helper::gateway::OwnerObservabilitySnapshot {
+            lease_renewed: 7,
+            lease_expired: 2,
+            ..Default::default()
+        };
+        let after = talking_quill_helper::gateway::OwnerObservabilitySnapshot {
+            lease_renewed: 7,
+            lease_expired: 3,
+            ..Default::default()
+        };
+        Ok(
+            talking_quill_helper::gateway::AcceptancePauseLeaseRenewalResult {
+                pause_duration_ms: 6_500,
+                before_timestamp_ms: 1_700_000_000_000,
+                after_timestamp_ms: 1_700_000_006_500,
+                before,
+                after,
+            },
+        )
     }
 
     fn hook_status(&self) -> HookStatus {
         self.state.record("hook_status");
-        HookStatus::Ready
+        HookStatus::InstalledUnobserved
     }
 
     fn protocol_initialized(&self) {
@@ -115,6 +235,9 @@ impl Platform for FakePlatform {
         bindings: ActivationBindings,
     ) -> Result<(), PlatformError> {
         self.state.record("configure_activation");
+        if let Some(error) = *self.state.activation_platform_error.lock().unwrap() {
+            return Err(error);
+        }
         if self.state.fail_activation_config.load(Ordering::Acquire) {
             return Err(PlatformError::NativeFailure);
         }
@@ -137,10 +260,21 @@ impl Platform for FakePlatform {
 
     fn inject_paste(&self) -> PasteResult {
         self.state.record("inject_paste");
-        PasteResult {
-            submitted: true,
-            reason: None,
+        if self.state.terminal_on_paste.load(Ordering::Acquire)
+            && let Some(terminal) = self.state.terminal.lock().unwrap().as_ref()
+        {
+            terminal.trigger(TerminalReason::InputInjectionUnavailable);
         }
+        let reason = *self.state.paste_failure.lock().unwrap();
+        PasteResult {
+            submitted: reason.is_none(),
+            reason,
+        }
+    }
+
+    fn inject_paste_for_activation(&self, context: ActivationContext) -> PasteResult {
+        *self.state.paste_context.lock().unwrap() = Some(context);
+        self.inject_paste()
     }
 
     fn front_app(&self) -> Result<FrontApp, PlatformError> {
@@ -169,42 +303,124 @@ impl Platform for FakePlatform {
         }
     }
 
-    fn shutdown(&mut self) -> Option<TerminalReason> {
+    fn transaction_observability(&self) -> TransactionObservabilitySnapshot {
+        let shutdown = u64::from(self.state.shutdown_complete.load(Ordering::Acquire));
+        TransactionObservabilitySnapshot {
+            transactions: TransactionCounters {
+                cancelled: shutdown,
+                cancellation_reasons: CancellationReasonCounters {
+                    shutdown,
+                    ..CancellationReasonCounters::default()
+                },
+                ..TransactionCounters::default()
+            },
+            ..TransactionObservabilitySnapshot::default()
+        }
+    }
+
+    fn shutdown_owner_disposition(
+        &self,
+    ) -> talking_quill_helper::gateway::ShutdownOwnerDisposition {
+        if self.state.shutdown_draining.load(Ordering::Acquire) {
+            talking_quill_helper::gateway::ShutdownOwnerDisposition::Draining
+        } else {
+            talking_quill_helper::gateway::ShutdownOwnerDisposition::Neutral
+        }
+    }
+
+    fn shutdown(&mut self) -> PlatformShutdown {
         self.state.record("shutdown");
+        self.state.shutdown_complete.store(true, Ordering::Release);
+        *self.state.capture_mode.lock().unwrap() = SessionCaptureMode::Off;
         if let Some(gate) = &self.gate {
             self.state
                 .gate_was_closed_on_shutdown
                 .store(!gate.is_open(), Ordering::Release);
         }
-        if self.state.emit_shutdown_event.load(Ordering::Acquire)
-            && let Some(outbound) = &self.outbound
-        {
-            let _ = outbound.try_send(Outbound::Event(HelperEvent::Activation {
-                binding: ActivationBinding::new(
-                    ProfileId::GENERAL,
-                    Shortcut::new(
-                        ShortcutModifiers {
-                            ctrl: false,
-                            alt: true,
-                            shift: false,
-                            meta: false,
-                        },
-                        &[ActivationKey::Z],
-                    )
-                    .unwrap(),
-                ),
-                phase: EventPhase::Up,
-            }));
+        let event_count = self.state.shutdown_event_count.load(Ordering::Acquire);
+        let mut emitted = 0_usize;
+        if let Some(outbound) = &self.outbound {
+            for index in 0..event_count {
+                if outbound
+                    .try_send(Outbound::Event(KeyboardEvent::Activation {
+                        binding: ActivationBinding::new(
+                            ProfileId::GENERAL,
+                            Shortcut::new(
+                                ShortcutModifiers {
+                                    ctrl: false,
+                                    alt: true,
+                                    shift: false,
+                                    meta: false,
+                                },
+                                &[ActivationKey::Z],
+                            )
+                            .unwrap(),
+                        ),
+                        context: activation_context(index as u64 + 1),
+                        phase: EventPhase::Up,
+                    }))
+                    .is_ok()
+                {
+                    emitted += 1;
+                }
+            }
+            if event_count == 0 && self.state.emit_shutdown_event.load(Ordering::Acquire) {
+                let _ = outbound.try_send(Outbound::Event(KeyboardEvent::Activation {
+                    binding: ActivationBinding::new(
+                        ProfileId::GENERAL,
+                        Shortcut::new(
+                            ShortcutModifiers {
+                                ctrl: false,
+                                alt: true,
+                                shift: false,
+                                meta: false,
+                            },
+                            &[ActivationKey::Z],
+                        )
+                        .unwrap(),
+                    ),
+                    context: activation_context(1),
+                    phase: EventPhase::Up,
+                }));
+            }
         }
-        self.state
-            .terminal_on_shutdown
-            .load(Ordering::Acquire)
-            .then_some(TerminalReason::OwnerThreadUnresponsive)
+        if event_count != 0
+            && let Some(signal) = SATURATED_SHUTDOWN_SIGNAL.lock().unwrap().take()
+        {
+            let _ = signal.send(emitted);
+        }
+        let unresponsive = self.state.terminal_on_shutdown.load(Ordering::Acquire);
+        PlatformShutdown {
+            terminal_reason: unresponsive.then_some(TerminalReason::OwnerThreadUnresponsive),
+            observability_quiescent: !unresponsive,
+        }
     }
 }
 
 fn setup_observable() -> (
-    Server<FakePlatform>,
+    Server<FakeGatewayBackend>,
+    Receiver<Outbound>,
+    Arc<FakeState>,
+    Arc<CallbackGate>,
+) {
+    setup_observable_with_activation_gate(ActivationCaptureGate::open_for_test_harness())
+}
+
+fn setup_observable_with_activation_gate(
+    activation_capture_gate: ActivationCaptureGate,
+) -> (
+    Server<FakeGatewayBackend>,
+    Receiver<Outbound>,
+    Arc<FakeState>,
+    Arc<CallbackGate>,
+) {
+    setup_observable_with_optional_gate(Some(activation_capture_gate))
+}
+
+fn setup_observable_with_optional_gate(
+    activation_capture_gate: Option<ActivationCaptureGate>,
+) -> (
+    Server<FakeGatewayBackend>,
     Receiver<Outbound>,
     Arc<FakeState>,
     Arc<CallbackGate>,
@@ -213,8 +429,10 @@ fn setup_observable() -> (
     let state = Arc::new(FakeState::default());
     let (terminal_tx, _terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
+    *state.terminal.lock().unwrap() = Some(Arc::clone(&terminal));
     let (sender, receiver) = bounded(32);
     let (critical_sender, critical_receiver) = bounded::<CriticalDelivery>(1);
+    let (final_sender, final_receiver) = bounded(1);
     let relay = sender.clone();
     thread::spawn(move || {
         while let Ok(delivery) = critical_receiver.recv() {
@@ -228,33 +446,48 @@ fn setup_observable() -> (
             }
         }
     });
-    (
-        Server::new(
-            FakePlatform {
-                state: Arc::clone(&state),
-                outbound: Some(sender.clone()),
-                gate: Some(Arc::clone(&gate)),
-            },
+    let final_relay = sender.clone();
+    thread::spawn(move || {
+        if let Ok(response) = final_receiver.recv() {
+            let _ = final_relay.send(response);
+        }
+    });
+    let platform = FakeGatewayBackend {
+        state: Arc::clone(&state),
+        outbound: Some(sender.clone()),
+        gate: Some(Arc::clone(&gate)),
+    };
+    let server = match activation_capture_gate {
+        Some(activation_capture_gate) => Server::new_with_activation_capture_gate(
+            platform,
             sender,
             critical_sender,
+            final_sender,
+            Arc::clone(&gate),
+            terminal,
+            activation_capture_gate,
+        ),
+        None => Server::new(
+            platform,
+            sender,
+            critical_sender,
+            final_sender,
             Arc::clone(&gate),
             terminal,
         ),
-        receiver,
-        state,
-        gate,
-    )
+    };
+    (server, receiver, state, gate)
 }
 
-fn fake_platform() -> FakePlatform {
-    FakePlatform {
+fn fake_platform() -> FakeGatewayBackend {
+    FakeGatewayBackend {
         state: Arc::new(FakeState::default()),
         outbound: None,
         gate: None,
     }
 }
 
-fn setup() -> (Server<FakePlatform>, Receiver<Outbound>) {
+fn setup() -> (Server<FakeGatewayBackend>, Receiver<Outbound>) {
     let (server, receiver, _state, _gate) = setup_observable();
     (server, receiver)
 }
@@ -324,6 +557,21 @@ fn alt_binding(profile_id: &str, key: &str, shift: bool) -> Value {
     binding_value(profile_id, alt_shortcut(key, shift))
 }
 
+fn activation_context(generation: u64) -> ActivationContext {
+    ActivationContext::target_unavailable(ActivationGeneration::new(generation).unwrap())
+}
+
+const EXPECTED_CLIPBOARD_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+fn paste_params() -> Value {
+    json!({
+        "activationGeneration": 1,
+        "targetToken": "opaque-target",
+        "expectedClipboardSha256": EXPECTED_CLIPBOARD_SHA256,
+    })
+}
+
 fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
     Shortcut::new(
         ShortcutModifiers {
@@ -337,10 +585,10 @@ fn alt_shortcut_model(key: ActivationKey, shift: bool) -> Shortcut {
     .unwrap()
 }
 
-fn initialize(server: &mut Server<FakePlatform>, receiver: &Receiver<Outbound>) {
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
+fn initialize(server: &mut Server<FakeGatewayBackend>, receiver: &Receiver<Outbound>) {
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 10}),)));
     let response = receive(receiver);
-    assert_eq!(response["result"]["protocolVersion"], 7);
+    assert_eq!(response["result"]["protocolVersion"], 10);
     assert!(response["result"].get("defaultActivationKey").is_none());
 }
 
@@ -351,7 +599,7 @@ fn assert_error(receiver: &Receiver<Outbound>, code: i64, id: Value) {
     assert!(response.get("result").is_none(), "{response}");
 }
 
-fn setup_for_method(method: &str) -> (Server<FakePlatform>, Receiver<Outbound>) {
+fn setup_for_method(method: &str) -> (Server<FakeGatewayBackend>, Receiver<Outbound>) {
     let (mut server, receiver) = setup();
     if method != "initialize" {
         initialize(&mut server, &receiver);
@@ -361,23 +609,120 @@ fn setup_for_method(method: &str) -> (Server<FakePlatform>, Receiver<Outbound>) 
 
 #[test]
 fn inbound_allowlist_is_exact() {
+    let mut expected = vec![
+        "initialize",
+        "activation.configure",
+        "session.set_capture",
+        "paste.inject",
+        "front_app.get",
+        "permissions.get",
+        "runtime.observability",
+    ];
+    #[cfg(feature = "windows-installed-acceptance")]
+    expected.extend([
+        "acceptance.endpoint_observability",
+        "acceptance.pause_lease_renewal",
+    ]);
+    expected.extend([
+        "ping",
+        "owner.prepare_maintenance",
+        "diagnostic.ack",
+        "shutdown",
+    ]);
+    assert_eq!(INBOUND_METHODS, expected.as_slice());
+}
+
+#[cfg(not(feature = "windows-installed-acceptance"))]
+#[test]
+fn acceptance_methods_are_method_not_found_without_feature() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+    for (id, method) in [
+        (2, "acceptance.endpoint_observability"),
+        (3, "acceptance.pause_lease_renewal"),
+    ] {
+        assert!(server.handle_payload(&request(id, method, json!({}))));
+        assert_error(&receiver, -32_601, json!(id));
+    }
+}
+
+#[cfg(feature = "windows-installed-acceptance")]
+#[test]
+fn acceptance_endpoint_observability_returns_only_redacted_authenticated_kernel_facts() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+    assert!(server.handle_payload(&request(2, "acceptance.endpoint_observability", json!({}),)));
+    let response = receive(&receiver);
     assert_eq!(
-        INBOUND_METHODS,
-        [
-            "initialize",
-            "activation.configure",
-            "session.set_capture",
-            "paste.inject",
-            "front_app.get",
-            "permissions.get",
-            "ping",
-            "shutdown",
-        ]
+        response["result"],
+        json!({
+            "endpointVersion": 2,
+            "peerAuthenticated": true,
+            "releaseBuildDigest": "22".repeat(32),
+            "manifestSha256": "33".repeat(32),
+            "gateway": {
+                "processId": 41,
+                "creationMarker": "133700000000000001",
+                "integrityRid": 8192,
+                "sessionId": 3,
+                "userSidHash": "11".repeat(32),
+            },
+            "owner": {
+                "processId": 42,
+                "creationMarker": "133700000000000002",
+                "integrityRid": 8192,
+                "sessionId": 3,
+                "userSidHash": "11".repeat(32),
+            },
+        })
     );
+    let result = response["result"].as_object().unwrap();
+    for forbidden in [
+        "userSid",
+        "logonSid",
+        "userSidDigest",
+        "logonSidDigest",
+        "logonSidHash",
+        "credentialBindingDigest",
+        "peerBindingId",
+        "endpointBindingId",
+    ] {
+        assert!(!result.contains_key(forbidden));
+    }
+
+    assert!(server.handle_payload(&request(
+        3,
+        "acceptance.endpoint_observability",
+        json!({"extra": true}),
+    )));
+    assert_error(&receiver, -32_602, json!(3));
+}
+
+#[cfg(feature = "windows-installed-acceptance")]
+#[test]
+fn acceptance_pause_lease_renewal_has_a_fixed_proven_expiry_result() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+    assert!(server.handle_payload(&request(2, "acceptance.pause_lease_renewal", json!({}),)));
+    let result = receive(&receiver)["result"].clone();
+    assert_eq!(result["pauseDurationMs"], 6_500);
+    assert_eq!(result["afterTimestampMs"], 1_700_000_006_500_u64);
+    assert_eq!(result["before"]["leaseRenewed"], 7);
+    assert_eq!(result["after"]["leaseRenewed"], 7);
+    assert_eq!(result["before"]["leaseExpired"], 2);
+    assert_eq!(result["after"]["leaseExpired"], 3);
+    assert!(result.get("finalState").is_none());
+
+    assert!(server.handle_payload(&request(
+        3,
+        "acceptance.pause_lease_renewal",
+        json!({"durationMs": 1}),
+    )));
+    assert_error(&receiver, -32_602, json!(3));
 }
 
 #[test]
-fn initialization_must_be_first_exactly_once_and_exactly_version_seven() {
+fn initialization_must_be_first_exactly_once_and_exactly_version_ten() {
     let (mut server, receiver, state, gate) = setup_observable();
     assert!(!gate.is_open());
 
@@ -397,7 +742,7 @@ fn initialization_must_be_first_exactly_once_and_exactly_version_seven() {
     assert_error(&receiver, -32_602, json!(2));
     assert!(!gate.is_open());
 
-    assert!(server.handle_payload(&request(3, "initialize", json!({"protocolVersion": 1}),)));
+    assert!(server.handle_payload(&request(3, "initialize", json!({"protocolVersion": 7}),)));
     assert_error(&receiver, -32_001, json!(3));
     assert!(!gate.is_open());
 
@@ -432,7 +777,7 @@ fn initialization_must_be_first_exactly_once_and_exactly_version_seven() {
     assert!(!server.handle_payload(&request(6, "shutdown", json!({}))));
     assert_eq!(
         receive(&receiver),
-        json!({"jsonrpc": "2.0", "id": 6, "result": {}})
+        json!({"jsonrpc": "2.0", "id": 6, "result": {"ownerDisposition":"neutral"}})
     );
     assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off,);
     assert!(!gate.is_open());
@@ -453,13 +798,111 @@ fn successful_paste_commit_disables_session_capture_before_responding() {
         SessionCaptureMode::CancelOnly,
     );
 
-    assert!(server.handle_payload(&request(3, "paste.inject", json!({}))));
+    assert!(server.handle_payload(&request(
+        3,
+        "paste.inject",
+        json!({
+            "activationGeneration": 17,
+            "targetToken": "opaque-target",
+            "expectedClipboardSha256": EXPECTED_CLIPBOARD_SHA256,
+        }),
+    )));
     let committed = receive(&receiver);
     assert_eq!(committed["method"], "paste.committed");
     assert_eq!(committed["params"]["requestId"], 3);
     let response = receive(&receiver);
     assert_eq!(response["result"]["submitted"], true);
     assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off,);
+    let context = state.paste_context.lock().unwrap().unwrap();
+    assert_eq!(context.activation_generation().get(), 17);
+    assert_eq!(context.target_token().unwrap().as_str(), "opaque-target");
+}
+
+#[test]
+fn submitted_paste_keeps_reserved_commit_then_success_when_cleanup_terminalizes() {
+    let (mut server, receiver, state, gate) = setup_observable();
+    initialize(&mut server, &receiver);
+    state.terminal_on_paste.store(true, Ordering::Release);
+
+    let _ = server.handle_payload(&request(
+        3,
+        "paste.inject",
+        json!({
+            "activationGeneration": 17,
+            "targetToken": "opaque-target",
+            "expectedClipboardSha256": EXPECTED_CLIPBOARD_SHA256,
+        }),
+    ));
+
+    let committed = receive(&receiver);
+    assert_eq!(committed["method"], "paste.committed");
+    assert_eq!(committed["params"]["requestId"], 3);
+    let response = receive(&receiver);
+    assert_eq!(response["id"], 3);
+    assert_eq!(response["result"]["submitted"], true);
+    assert!(receiver.try_recv().is_err());
+    assert!(!gate.is_open());
+    assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off);
+    assert_eq!(
+        state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == "set_session_capture")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn protocol_v10_preserves_its_exact_legacy_paste_refusal_enum() {
+    for (reason, wire) in [
+        (PasteFailure::PermissionDenied, "permission_denied"),
+        (PasteFailure::ConflictingModifiers, "conflicting_modifiers"),
+        (PasteFailure::SecureInput, "secure_input"),
+        (PasteFailure::OsRejected, "os_rejected"),
+        (PasteFailure::Unavailable, "unavailable"),
+        (PasteFailure::Indeterminate, "indeterminate"),
+    ] {
+        let (mut server, receiver, state, _gate) = setup_observable();
+        initialize(&mut server, &receiver);
+        *state.paste_failure.lock().unwrap() = Some(reason);
+        assert!(server.handle_payload(&request(
+            3,
+            "paste.inject",
+            json!({
+                "activationGeneration": 1,
+                "targetToken": null,
+                "expectedClipboardSha256": EXPECTED_CLIPBOARD_SHA256,
+            }),
+        )));
+        let response = receive(&receiver);
+        assert_eq!(response["result"]["submitted"], false);
+        assert_eq!(response["result"]["reason"], wire);
+    }
+}
+
+#[test]
+fn nullable_activation_target_is_proxied_for_owner_clipboard_only_policy() {
+    let (mut server, receiver, state, _gate) = setup_observable();
+    initialize(&mut server, &receiver);
+
+    assert!(server.handle_payload(&request(
+        3,
+        "paste.inject",
+        json!({
+            "activationGeneration": 1,
+            "targetToken": null,
+            "expectedClipboardSha256": EXPECTED_CLIPBOARD_SHA256,
+        }),
+    )));
+
+    assert_eq!(receive(&receiver)["method"], "paste.committed");
+    let response = receive(&receiver);
+    assert_eq!(response["result"], json!({"submitted": true}));
+    assert!(state.calls.lock().unwrap().contains(&"inject_paste"));
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]
@@ -468,14 +911,14 @@ fn string_request_ids_are_echoed_by_responses_and_paste_commit_notifications() {
     assert!(server.handle_payload(&request_with_id(
         json!("initialize-id"),
         "initialize",
-        json!({"protocolVersion": 7}),
+        json!({"protocolVersion": 10}),
     )));
     assert_eq!(receive(&receiver)["id"], "initialize-id");
 
     assert!(server.handle_payload(&request_with_id(
         json!("paste-id"),
         "paste.inject",
-        json!({}),
+        paste_params(),
     )));
     let committed = receive(&receiver);
     assert_eq!(committed["params"]["requestId"], "paste-id");
@@ -526,6 +969,128 @@ fn activation_stays_disabled_until_exact_configuration_enables_it() {
 }
 
 #[test]
+fn default_server_constructor_is_permanently_safe_disabled() {
+    let (mut server, receiver, state, _gate) = setup_observable_with_optional_gate(None);
+    initialize(&mut server, &receiver);
+
+    assert!(server.handle_payload(&request(
+        2,
+        "activation.configure",
+        json!({"enabled": true, "bindings": [alt_binding("general", "B", false)]}),
+    )));
+    assert_eq!(receive(&receiver)["result"]["enabled"], false);
+    assert!(!*state.activation_enabled.lock().unwrap());
+}
+
+#[test]
+fn closed_keyboard_gate_filters_activation_and_session_capture_truthfully() {
+    let closed = ActivationCaptureGate::closed_for_test_harness(true, false);
+    let (mut server, receiver, state, _gate) = setup_observable_with_activation_gate(closed);
+    initialize(&mut server, &receiver);
+
+    assert!(server.handle_payload(&request(
+        2,
+        "activation.configure",
+        json!({"enabled": true, "bindings": [alt_binding("general", "B", false)]}),
+    )));
+    assert_eq!(
+        receive(&receiver)["result"],
+        json!({"enabled": false, "bindings": [alt_binding("general", "B", false)]})
+    );
+    assert!(!*state.activation_enabled.lock().unwrap());
+    assert_eq!(*state.activation.lock().unwrap(), ActivationKey::B);
+
+    assert!(server.handle_payload(&request(
+        3,
+        "session.set_capture",
+        json!({"mode": "cancel-only"}),
+    )));
+    assert_eq!(receive(&receiver)["result"], json!({"mode": "off"}));
+    assert_eq!(*state.capture_mode.lock().unwrap(), SessionCaptureMode::Off);
+
+    assert!(server.handle_payload(&request(4, "runtime.observability", json!({}))));
+    let response = receive(&receiver);
+    assert_eq!(
+        response["result"]["keyboardCapture"]["runtimeRollbackActive"],
+        true
+    );
+    assert_eq!(
+        response["result"]["keyboardCapture"]["developmentDisabled"],
+        false
+    );
+    assert_eq!(
+        response["result"]["keyboardCapture"]["activationEnableRequestsBlocked"],
+        1
+    );
+    assert_eq!(
+        response["result"]["keyboardCapture"]["sessionCaptureRequestsBlocked"],
+        1
+    );
+    assert_eq!(response["result"]["transactions"]["journalHighWater"], 0);
+    let encoded = response.to_string();
+    assert!(!encoded.contains("opaque-target"));
+    assert!(!encoded.contains("profileId"));
+    assert!(!encoded.contains("shortcut"));
+}
+
+#[test]
+fn aggregate_observability_counts_paste_outcomes_without_target_tokens() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+
+    assert!(server.handle_payload(&request(2, "paste.inject", paste_params())));
+    assert_eq!(receive(&receiver)["method"], "paste.committed");
+    let _ = receive(&receiver);
+    assert!(server.handle_payload(&request(3, "runtime.observability", json!({}))));
+    let before_fallback = receive(&receiver)["result"].clone();
+    let wait_total = before_fallback["paste"]["nativeWaitDurationMsTotal"]
+        .as_u64()
+        .unwrap();
+    let wait_max = before_fallback["paste"]["nativeWaitDurationMsMax"]
+        .as_u64()
+        .unwrap();
+    assert!(wait_max <= wait_total);
+
+    let mut missing_target = paste_params();
+    missing_target["targetToken"] = Value::Null;
+    assert!(server.handle_payload(&request(4, "paste.inject", missing_target)));
+    assert_eq!(receive(&receiver)["method"], "paste.committed");
+    let _ = receive(&receiver);
+
+    assert!(server.handle_payload(&request(5, "runtime.observability", json!({}))));
+    let result = receive(&receiver)["result"].clone();
+    assert_eq!(result["paste"]["attempted"], 2);
+    assert_eq!(result["paste"]["submitted"], 2);
+    assert_eq!(result["paste"]["targetValidationFallback"], 0);
+    assert_eq!(result["paste"]["failures"]["unavailable"], 0);
+    assert_eq!(result["paste"]["nativeWaitDurationMsTotal"], wait_total);
+    assert_eq!(result["paste"]["nativeWaitDurationMsMax"], wait_max);
+    let encoded = result.to_string();
+    assert!(!encoded.contains("opaque-target"));
+    assert!(!encoded.contains(EXPECTED_CLIPBOARD_SHA256));
+}
+
+#[test]
+fn terminal_observability_publication_is_exactly_once() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+
+    let observability = server
+        .take_terminal_observability()
+        .expect("authoritative terminal snapshot");
+    assert!(server.take_terminal_observability().is_none());
+    assert_eq!(observability["transactions"]["cancelled"], 1);
+    assert_eq!(
+        observability["transactions"]["cancellationReasons"]["shutdown"],
+        1
+    );
+    let encoded = observability.to_string();
+    assert!(!encoded.contains("targetToken"));
+    assert!(!encoded.contains("shortcut"));
+    assert!(!encoded.contains("clipboard"));
+}
+
+#[test]
 fn activation_configuration_failure_is_native_error_and_retains_previous_state() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
@@ -545,6 +1110,25 @@ fn activation_configuration_failure_is_native_error_and_retains_previous_state()
     assert_error(&receiver, -32_003, json!(3));
     assert!(*state.activation_enabled.lock().unwrap());
     assert_eq!(*state.activation.lock().unwrap(), ActivationKey::A);
+}
+
+#[test]
+fn protocol_v10_front_app_retains_strict_predecessor_metadata_contract() {
+    let (mut server, receiver, _state, _gate) = setup_observable();
+    initialize(&mut server, &receiver);
+
+    assert!(server.handle_payload(&request(8, "front_app.get", json!({}))));
+    let response = receive(&receiver);
+    assert_eq!(
+        response["result"],
+        json!({
+            "processName": "target.exe",
+            "windowTitle": "Document",
+            "windowBounds": null
+        })
+    );
+    assert!(response["result"].get("available").is_none());
+    assert!(response["result"].get("applicationToken").is_none());
 }
 
 #[test]
@@ -576,9 +1160,74 @@ fn shutdown_response_is_enqueued_after_gate_close_and_hook_quiescence() {
     let shutdown_response = receive(&receiver);
     assert_eq!(
         shutdown_response,
-        json!({"jsonrpc": "2.0", "id": 2, "result": {}})
+        json!({"jsonrpc": "2.0", "id": 2, "result": {"ownerDisposition":"neutral"}})
     );
     assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn saturated_writer_drains_256_callbacks_then_writes_exactly_one_final_response() {
+    let mut first = Vec::new();
+    write_frame(
+        &mut first,
+        &request(1, "initialize", json!({"protocolVersion": 10})),
+    )
+    .unwrap();
+    let mut second = Vec::new();
+    write_frame(&mut second, &request(2, "shutdown", json!({}))).unwrap();
+
+    let (input_release_tx, input_release_rx) = bounded(1);
+    let (writer_entered_tx, writer_entered_rx) = bounded(1);
+    let (writer_release_tx, writer_release_rx) = bounded(1);
+    let (saturated_tx, saturated_rx) = std::sync::mpsc::channel();
+    *SATURATED_SHUTDOWN_SIGNAL.lock().unwrap() = Some(saturated_tx);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&output);
+    let runner = thread::spawn(move || {
+        run_framed_stream_started::<FakeGatewayBackend, _, _>(
+            PhasedInput {
+                first: Cursor::new(first),
+                second: Cursor::new(second),
+                release: input_release_rx,
+                released: false,
+            },
+            DelayedWriter {
+                output: captured,
+                entered: writer_entered_tx,
+                release: writer_release_rx,
+                blocked: false,
+            },
+        )
+    });
+
+    writer_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("production writer is delayed on the initialize frame");
+    input_release_tx.send(()).unwrap();
+    assert_eq!(
+        saturated_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        256,
+        "all admitted callback frames fit the complete ordinary capacity",
+    );
+    writer_release_tx.send(()).unwrap();
+    runner.join().unwrap().unwrap();
+
+    let bytes = output.lock().unwrap().clone();
+    let mut framed = Cursor::new(bytes);
+    let mut messages = Vec::new();
+    while let Some(payload) = read_frame(&mut framed).unwrap() {
+        messages.push(serde_json::from_slice::<Value>(&payload).unwrap());
+    }
+    assert_eq!(messages.len(), 258);
+    assert_eq!(messages[0]["id"], 1);
+    for (index, message) in messages[1..257].iter().enumerate() {
+        assert_eq!(message["method"], "activation.event");
+        assert_eq!(message["params"]["activationGeneration"], index as u64 + 1,);
+    }
+    assert_eq!(
+        messages[257],
+        json!({"jsonrpc": "2.0", "id": 2, "result": {"ownerDisposition":"neutral"}})
+    );
 }
 
 #[test]
@@ -590,13 +1239,17 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
     assert!(!server.handle_payload(&request(2, "shutdown", json!({}))));
     assert!(!gate.is_open());
     assert!(receiver.try_recv().is_err());
+    assert!(
+        server.take_terminal_observability().is_none(),
+        "an unproved owner stop cannot produce an authoritative final snapshot"
+    );
 
     let eof_state = Arc::new(FakeState::default());
     eof_state
         .terminal_on_shutdown
         .store(true, Ordering::Release);
     let result = run_framed_stream(
-        FakePlatform {
+        FakeGatewayBackend {
             state: eof_state,
             outbound: None,
             gate: None,
@@ -614,7 +1267,7 @@ fn platform_shutdown_terminal_failure_suppresses_success_and_survives_clean_eof(
 fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncation() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 7})),
+        request(1, "initialize", json!({"protocolVersion": 10})),
         request(2, "ping", json!({})),
         request(3, "shutdown", json!({})),
     ] {
@@ -629,19 +1282,21 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
         .into_iter()
         .map(|payload| serde_json::from_slice(&payload).unwrap())
         .collect();
+    let response_ids = responses
+        .iter()
+        .map(|value| value["id"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(response_ids, [Some(1), Some(2), Some(3)]);
     assert_eq!(
-        responses
-            .iter()
-            .map(|value| value["id"].as_u64())
-            .collect::<Vec<_>>(),
-        [Some(1), Some(2), Some(3)]
+        responses.last().and_then(|value| value["id"].as_u64()),
+        Some(3)
     );
     assert!(read_frame(&mut output).unwrap().is_none());
 
     let mut eof_input = Vec::new();
     write_frame(
         &mut eof_input,
-        &request(1, "initialize", json!({"protocolVersion": 7})),
+        &request(1, "initialize", json!({"protocolVersion": 10})),
     )
     .unwrap();
     let mut eof_output = Vec::new();
@@ -659,7 +1314,7 @@ fn in_memory_runner_exercises_multiple_framed_requests_shutdown_eof_and_truncati
 fn framed_runner_does_not_wait_for_eof_after_shutdown() {
     let mut input = Vec::new();
     for payload in [
-        request(1, "initialize", json!({"protocolVersion": 7})),
+        request(1, "initialize", json!({"protocolVersion": 10})),
         request(2, "shutdown", json!({})),
     ] {
         write_frame(&mut input, &payload).unwrap();
@@ -688,6 +1343,7 @@ fn full_ordinary_queue_cannot_drop_a_reserved_paste_delivery() {
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(256);
     let (critical_tx, critical_rx) = bounded::<CriticalDelivery>(1);
+    let (final_tx, _final_rx) = bounded(1);
     let (delivered_tx, delivered_rx) = bounded(1);
     thread::spawn(move || {
         while let Ok(delivery) = critical_rx.recv() {
@@ -700,30 +1356,32 @@ fn full_ordinary_queue_cannot_drop_a_reserved_paste_delivery() {
         }
     });
     let mut server = Server::new(
-        FakePlatform {
+        FakeGatewayBackend {
             state: Arc::clone(&state),
             outbound: None,
             gate: None,
         },
         outbound_tx.clone(),
         critical_tx,
+        final_tx,
         gate,
         terminal,
     );
     initialize(&mut server, &outbound_rx);
     for _ in 0..256 {
         outbound_tx
-            .send(Outbound::Event(HelperEvent::Activation {
+            .send(Outbound::Event(KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
                     alt_shortcut_model(ActivationKey::A, false),
                 ),
+                context: activation_context(1),
                 phase: EventPhase::Down,
             }))
             .unwrap();
     }
 
-    assert!(server.handle_payload(&request(257, "paste.inject", json!({}))));
+    assert!(server.handle_payload(&request(257, "paste.inject", paste_params())));
     assert_eq!(outbound_rx.len(), 256);
     assert!(state.calls.lock().unwrap().contains(&"inject_paste"));
     let delivered = delivered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -745,20 +1403,22 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(2);
     let (critical_tx, _critical_rx) = bounded(1);
+    let (final_tx, _final_rx) = bounded(1);
     let mut server = Server::new(
-        FakePlatform {
+        FakeGatewayBackend {
             state: Arc::clone(&state),
             outbound: None,
             gate: None,
         },
         outbound_tx,
         critical_tx,
+        final_tx,
         gate,
         terminal,
     );
     initialize(&mut server, &outbound_rx);
 
-    assert!(!server.handle_payload(&request(2, "paste.inject", json!({}))));
+    assert!(!server.handle_payload(&request(2, "paste.inject", paste_params())));
     assert!(!state.calls.lock().unwrap().contains(&"inject_paste"));
     assert_eq!(
         terminal_rx.try_recv(),
@@ -768,22 +1428,57 @@ fn unavailable_writer_acquisition_rejects_before_native_paste_dispatch() {
 
 #[test]
 fn full_framed_coordinator_dispatches_every_registered_method_in_sequence() {
-    let calls = [
-        (1, "initialize", json!({"protocolVersion": 7})),
+    #[allow(unused_mut)]
+    let mut calls = vec![
+        (1, "initialize", json!({"protocolVersion": 10})),
         (
             2,
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         (3, "session.set_capture", json!({"mode": "recording"})),
-        (4, "paste.inject", json!({})),
+        (4, "paste.inject", paste_params()),
         (5, "front_app.get", json!({})),
         (6, "permissions.get", json!({})),
-        (7, "ping", json!({})),
-        (8, "shutdown", json!({})),
+        (7, "runtime.observability", json!({})),
+        (8, "ping", json!({})),
+        (
+            9,
+            "owner.prepare_maintenance",
+            json!({"operation":"uninstall","transactionId":"tx","sourceBuildId":"source"}),
+        ),
+        (
+            10,
+            "diagnostic.ack",
+            json!({
+                "journalId": "00".repeat(32),
+                "journalNonce": "11".repeat(32),
+                "dimensions": {
+                    "category": "disconnected",
+                    "operation": "lease.renew",
+                    "correlationStatus": "pending",
+                    "healthRefresh": "not_attempted",
+                    "transportStatus": "eof",
+                    "ownerProcessState": "running"
+                },
+                "count": "1"
+            }),
+        ),
+        (11, "shutdown", json!({})),
     ];
+    #[cfg(feature = "windows-installed-acceptance")]
+    {
+        for (id, _, _) in &mut calls[7..] {
+            *id += 2;
+        }
+        calls.insert(7, (8, "acceptance.endpoint_observability", json!({})));
+        calls.insert(8, (9, "acceptance.pause_lease_renewal", json!({})));
+    }
     assert_eq!(
-        calls.each_ref().map(|(_, method, _)| *method),
+        calls
+            .iter()
+            .map(|(_, method, _)| *method)
+            .collect::<Vec<_>>(),
         INBOUND_METHODS
     );
     let mut framed = Vec::new();
@@ -825,10 +1520,11 @@ fn every_allowed_method_dispatches_after_initialization() {
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         (3, "session.set_capture", json!({"mode": "cancel-only"})),
-        (4, "paste.inject", json!({})),
+        (4, "paste.inject", paste_params()),
         (5, "front_app.get", json!({})),
         (6, "permissions.get", json!({})),
-        (7, "ping", json!({})),
+        (7, "runtime.observability", json!({})),
+        (8, "ping", json!({})),
     ] {
         assert!(server.handle_payload(&request(id, method, params)));
         if method == "paste.inject" {
@@ -841,8 +1537,8 @@ fn every_allowed_method_dispatches_after_initialization() {
         assert!(response.get("result").is_some(), "{method}: {response}");
     }
 
-    assert!(!server.handle_payload(&request(8, "shutdown", json!({}))));
-    assert_eq!(receive(&receiver)["id"], 8);
+    assert!(!server.handle_payload(&request(9, "shutdown", json!({}))));
+    assert_eq!(receive(&receiver)["id"], 9);
 }
 
 #[test]
@@ -1045,6 +1741,40 @@ fn typed_params_reject_missing_wrong_and_duplicate_fields() {
             "session.set_capture",
             r#"{"mode":"recording","mode":"off"}"#,
         ),
+        ("paste.inject", "{}"),
+        ("paste.inject", r#"{"activationGeneration":1}"#),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":0,"targetToken":null}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":9007199254740992,"targetToken":null}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":""}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":false}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":null,"targetToken":null}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":null,"expectedClipboardSha256":"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":null,"expectedClipboardSha256":"e3b0"}"#,
+        ),
+        (
+            "paste.inject",
+            r#"{"activationGeneration":1,"targetToken":null,"expectedClipboardSha256":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}"#,
+        ),
     ];
 
     for (method, params) in cases {
@@ -1068,11 +1798,13 @@ fn secure_input_paste_failure_has_stable_wire_value() {
 
 #[test]
 fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
-    let activation = Outbound::Event(HelperEvent::Activation {
+    let activation = Outbound::Event(KeyboardEvent::Activation {
         binding: ActivationBinding::new(
             ProfileId::PROMPT,
             alt_shortcut_model(ActivationKey::Z, true),
         ),
+        context: activation_context(7)
+            .with_target_token(NativeTargetToken::new("opaque-native-target").unwrap()),
         phase: EventPhase::Down,
     });
     let activation: Value = serde_json::from_slice(&encode_outbound(&activation).unwrap()).unwrap();
@@ -1085,16 +1817,29 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
                 "phase": "down",
                 "profileId": "prompt",
                 "shortcut": alt_shortcut("Z", true),
+                "activationGeneration": 7,
+                "targetToken": "opaque-native-target",
             },
         })
     );
 
-    let complete = Outbound::Event(HelperEvent::ActivationComplete {
+    let complete_profile = profile_id(2);
+    let complete = Outbound::Event(KeyboardEvent::ActivationComplete {
         binding: ActivationBinding::new(
-            ProfileId::GENERAL,
-            alt_shortcut_model(ActivationKey::X, false),
+            ProfileId::new(&complete_profile).unwrap(),
+            Shortcut::new(
+                ShortcutModifiers {
+                    ctrl: true,
+                    alt: false,
+                    shift: false,
+                    meta: false,
+                },
+                &[ActivationKey::A],
+            )
+            .unwrap(),
         ),
-        held_ms: 599,
+        context: activation_context(8),
+        held_ms: 0,
     });
     let complete: Value = serde_json::from_slice(&encode_outbound(&complete).unwrap()).unwrap();
     assert_eq!(
@@ -1104,14 +1849,28 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
             "method": "activation.event",
             "params": {
                 "phase": "complete",
-                "profileId": "general",
-                "shortcut": alt_shortcut("X", false),
-                "heldMs": 599,
+                "profileId": complete_profile,
+                "shortcut": shortcut_value(&["A"], true, false, false, false),
+                "activationGeneration": 8,
+                "targetToken": null,
+                "heldMs": 0,
             },
         })
     );
 
-    let session = Outbound::Event(HelperEvent::SessionKey {
+    let observation: Value =
+        serde_json::from_slice(&encode_outbound(&Outbound::RegisteredObservation(9)).unwrap())
+            .unwrap();
+    assert_eq!(
+        observation,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "registered_input.observed",
+            "params": {"generation": 9},
+        })
+    );
+
+    let session = Outbound::Event(KeyboardEvent::SessionKey {
         key: SessionKey::Escape,
         phase: EventPhase::Up,
     });
@@ -1129,7 +1888,7 @@ fn outbound_keyboard_notifications_have_fixed_methods_and_params() {
 #[test]
 fn valid_notifications_are_never_executed_or_answered() {
     let (mut server, receiver, state, gate) = setup_observable();
-    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 7}),)));
+    assert!(server.handle_payload(&notification("initialize", json!({"protocolVersion": 10}),)));
     assert!(receiver.try_recv().is_err());
     assert!(!gate.is_open());
 
@@ -1137,15 +1896,16 @@ fn valid_notifications_are_never_executed_or_answered() {
     state.calls.lock().unwrap().clear();
 
     for (method, params) in [
-        ("initialize", json!({"protocolVersion": 7})),
+        ("initialize", json!({"protocolVersion": 10})),
         (
             "activation.configure",
             json!({"enabled": true, "bindings": [alt_binding("general", "Z", false)]}),
         ),
         ("session.set_capture", json!({"mode": "recording"})),
-        ("paste.inject", json!({})),
+        ("paste.inject", paste_params()),
         ("front_app.get", json!({})),
         ("permissions.get", json!({})),
+        ("runtime.observability", json!({})),
         ("ping", json!({})),
         ("shutdown", json!({})),
         ("unknown.notification", json!({})),
@@ -1171,20 +1931,22 @@ fn initialization_response_disconnect_is_terminal_and_gate_stays_closed() {
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(1);
     let (critical_tx, _critical_rx) = bounded(1);
+    let (final_tx, _final_rx) = bounded(1);
     drop(outbound_rx);
     let mut server = Server::new(
-        FakePlatform {
+        FakeGatewayBackend {
             state: Arc::new(FakeState::default()),
             outbound: Some(outbound_tx.clone()),
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
         critical_tx,
+        final_tx,
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
 
-    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
+    assert!(!server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 10}),)));
     assert!(!gate.is_open());
     assert_eq!(
         terminal.reason(),
@@ -1203,18 +1965,20 @@ fn invalid_params_error_disconnect_propagates_terminal_failure() {
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(2);
     let (critical_tx, _critical_rx) = bounded(1);
+    let (final_tx, _final_rx) = bounded(1);
     let mut server = Server::new(
-        FakePlatform {
+        FakeGatewayBackend {
             state: Arc::new(FakeState::default()),
             outbound: Some(outbound_tx.clone()),
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
         critical_tx,
+        final_tx,
         Arc::clone(&gate),
         Arc::clone(&terminal),
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 10}),)));
     let _ = outbound_rx.recv().unwrap();
     assert!(gate.is_open());
     drop(outbound_rx);
@@ -1238,18 +2002,20 @@ fn full_response_queue_is_terminal_instead_of_blocking_server() {
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, _outbound_rx) = bounded(1);
     let (critical_tx, _critical_rx) = bounded(1);
+    let (final_tx, _final_rx) = bounded(1);
     let mut server = Server::new(
-        FakePlatform {
+        FakeGatewayBackend {
             state: Arc::new(FakeState::default()),
             outbound: Some(outbound_tx.clone()),
             gate: Some(Arc::clone(&gate)),
         },
         outbound_tx,
         critical_tx,
+        final_tx,
         Arc::clone(&gate),
         terminal,
     );
-    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 7}),)));
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 10}),)));
     assert!(gate.is_open());
 
     assert!(!server.handle_payload(&request(2, "ping", json!({}))));
@@ -1324,7 +2090,7 @@ proptest! {
 }
 
 #[test]
-fn protocol_v7_configures_ordered_chords_and_preserves_every_wire_field() {
+fn protocol_v10_configures_ordered_chords_and_preserves_every_wire_field() {
     let (mut server, receiver, state, _gate) = setup_observable();
     initialize(&mut server, &receiver);
     let values = json!({
@@ -1357,7 +2123,7 @@ fn protocol_v7_configures_ordered_chords_and_preserves_every_wire_field() {
 }
 
 #[test]
-fn protocol_v7_enforces_binding_count_enablement_key_and_conflict_rules() {
+fn protocol_v10_enforces_binding_count_enablement_key_and_ownership_rules() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
 
@@ -1383,6 +2149,21 @@ fn protocol_v7_enforces_binding_count_enablement_key_and_conflict_rules() {
         receive(&receiver)["result"],
         json!({"enabled": false, "bindings": []})
     );
+
+    let shared_prefixes = json!({
+        "enabled": true,
+        "bindings": [
+            binding_value(&profile_id(2), shortcut_value(&["A"], false, true, false, false)),
+            binding_value(&profile_id(3), shortcut_value(&["A", "B"], false, true, false, false)),
+            binding_value(&profile_id(4), shortcut_value(&["X", "Y"], false, true, false, false))
+        ]
+    });
+    assert!(server.handle_payload(&request(
+        92,
+        "activation.configure",
+        shared_prefixes.clone(),
+    )));
+    assert_eq!(receive(&receiver)["result"], shared_prefixes);
 
     let fourteen: Vec<_> = (0..14)
         .map(|index| {
@@ -1425,7 +2206,7 @@ fn protocol_v7_enforces_binding_count_enablement_key_and_conflict_rules() {
 }
 
 #[test]
-fn protocol_v7_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_shape() {
+fn protocol_v10_preserves_arbitrary_modifiers_and_rejects_legacy_shape() {
     let (mut server, receiver) = setup();
     initialize(&mut server, &receiver);
     let values = json!({
@@ -1451,4 +2232,104 @@ fn protocol_v7_allows_prefixes_when_modifier_masks_differ_and_rejects_legacy_sha
         json!({"enabled": true, "bindings": [{"key": "Z", "shift": false}]}),
     )));
     assert_error(&receiver, -32_602, json!(202));
+}
+
+#[test]
+fn protocol_v10_owner_shape_is_strict_and_v8_is_maintenance_only_predecessor_not_electron_compatible()
+ {
+    let (mut server, receiver) = setup();
+    assert!(server.handle_payload(&request(1, "initialize", json!({"protocolVersion": 8}))));
+    assert_error(&receiver, -32_001, json!(1));
+    assert!(server.handle_payload(&request(2, "initialize", json!({"protocolVersion": 10}))));
+    let initialized = receive(&receiver);
+    assert_eq!(initialized["result"]["protocolVersion"], 10);
+    assert_eq!(
+        initialized["result"]["keyboardOwner"],
+        json!({
+            "model": "out_of_process",
+            "protocolVersion": 1,
+            "state": "unavailable",
+            "instanceId": "",
+            "buildId": "",
+            "leaseEpoch": null,
+            "authenticated": false,
+        })
+    );
+    assert!(server.handle_payload(&request(3, "ping", json!({}))));
+    let ping = receive(&receiver);
+    assert_eq!(
+        ping["result"]["keyboardOwner"],
+        initialized["result"]["keyboardOwner"]
+    );
+}
+
+#[test]
+fn protocol_v10_maintenance_schema_is_adversarially_strict_and_truthful_when_owner_is_absent() {
+    let (mut server, receiver) = setup();
+    initialize(&mut server, &receiver);
+    let invalid = [
+        json!({}),
+        json!({"operation":"uninstall","transactionId":"tx","sourceBuildId":"source","extra":true}),
+        json!({"operation":"uninstall","transactionId":"tx","sourceBuildId":"source","targetBuildId":"target"}),
+        json!({"operation":"update","transactionId":"tx","sourceBuildId":"source"}),
+        json!({"operation":"update","transactionId":"tx","sourceBuildId":"source","targetBuildId":"target","targetOwnerSha256":"AA"}),
+        json!({"operation":"other","transactionId":"tx","sourceBuildId":"source"}),
+    ];
+    for (index, params) in invalid.into_iter().enumerate() {
+        assert!(server.handle_payload(&request(
+            20 + index as u64,
+            "owner.prepare_maintenance",
+            params
+        )));
+        assert_error(&receiver, -32_602, json!(20 + index as u64));
+    }
+    assert!(server.handle_payload(&request(
+        40,
+        "owner.prepare_maintenance",
+        json!({
+            "operation":"update",
+            "transactionId":"tx",
+            "sourceBuildId":"source",
+            "targetBuildId":"target",
+            "targetOwnerSha256":"00".repeat(32),
+        })
+    )));
+    assert_error(&receiver, -32_003, json!(40));
+}
+
+#[test]
+fn owner_failures_keep_actionable_stable_rpc_distinctions() {
+    let cases = [
+        (PlatformError::OwnerAuthentication, -32_005),
+        (PlatformError::OwnerIncompatible, -32_006),
+        (PlatformError::OwnerBusy, -32_007),
+        (PlatformError::OwnerSingletonCollision, -32_012),
+        (PlatformError::OwnerDraining, -32_008),
+        (PlatformError::OwnerRollback, -32_009),
+        (PlatformError::OwnerSecurityFault, -32_010),
+        (PlatformError::Indeterminate, -32_011),
+    ];
+    for (index, (error, code)) in cases.into_iter().enumerate() {
+        let (mut server, receiver, state, _) = setup_observable();
+        initialize(&mut server, &receiver);
+        *state.activation_platform_error.lock().unwrap() = Some(error);
+        assert!(server.handle_payload(&request(
+            50 + index as u64,
+            "activation.configure",
+            json!({"enabled": true, "bindings": [alt_binding("general", "B", false)]}),
+        )));
+        assert_error(&receiver, code, json!(50 + index as u64));
+    }
+}
+
+#[test]
+fn shutdown_reports_owner_draining_without_claiming_neutrality() {
+    let (mut server, receiver, state, _) = setup_observable();
+    initialize(&mut server, &receiver);
+    state.shutdown_draining.store(true, Ordering::Release);
+    assert!(!server.handle_payload(&request(70, "shutdown", json!({}))));
+    assert_eq!(
+        receive(&receiver)["result"],
+        json!({"ownerDisposition":"draining"})
+    );
 }

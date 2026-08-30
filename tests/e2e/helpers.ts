@@ -24,24 +24,64 @@ export async function resetFreshProfile(name: string): Promise<string> {
 }
 
 export async function rendererPages(application: ElectronApplication) {
-  await application.firstWindow();
+  // Do not wait on firstWindow(): all persistent windows may already exist before Playwright
+  // subscribes. Renderer readiness also keeps test-driver calls behind application initialization.
   const deadline = Date.now() + 10_000;
+  let consecutiveReadyObservations = 0;
   while (Date.now() < deadline) {
     const pages = application.windows();
     const main = pages.find((page) => page.url().includes('/main/index.html'));
-    const widget = pages.find((page) => page.url().includes('/widget/index.html'));
     const capture = pages.find((page) => page.url().includes('/capture/index.html'));
-    if (main !== undefined && widget !== undefined && capture !== undefined) {
-      return { main, widget, capture } as const;
+    const widget = pages.find((page) => page.url().includes('/widget/index.html'));
+    if (main !== undefined && capture !== undefined && widget !== undefined) {
+      const [captureReady, widgetReady] = await Promise.all([
+        capture
+          .evaluate(() => document.documentElement.dataset.ready === 'true')
+          .catch(() => false),
+        widget
+          .evaluate(() => document.querySelector('#root')?.hasChildNodes() === true)
+          .catch(() => false),
+      ]);
+      if (captureReady && widgetReady) {
+        consecutiveReadyObservations += 1;
+        if (consecutiveReadyObservations >= 2) return { main, capture } as const;
+      } else consecutiveReadyObservations = 0;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
   throw new Error(
-    `Expected all window roles; received ${application
+    `Expected persistent main, capture, and widget window roles; received ${application
       .windows()
       .map((page) => page.url())
       .join(', ')}`,
   );
+}
+
+/** Returns the persistent widget renderer used by the production session lifecycle. */
+export async function widgetPage(application: ElectronApplication): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const widget = application
+      .windows()
+      .find((page) => !page.isClosed() && page.url().includes('/widget/index.html'));
+    if (widget !== undefined) return widget;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(
+    `Expected an active-session widget; received ${application
+      .windows()
+      .map((page) => page.url())
+      .join(', ')}`,
+  );
+}
+
+export async function widgetIsVisible(application: ElectronApplication): Promise<boolean> {
+  return application.evaluate(({ BrowserWindow }) => {
+    const widget = BrowserWindow.getAllWindows().find(
+      (window) => window.getTitle() === 'Talking Quill Widget',
+    );
+    return widget?.isVisible() ?? false;
+  });
 }
 
 export async function rendererIsolation(page: Page) {

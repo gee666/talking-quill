@@ -14,6 +14,8 @@
       "entry": [
         "electron.vite.config.ts",
         "after-pack.cjs",
+        "after-pack-macos-owner.cjs",
+        "after-sign.cjs",
         "src/main/index.ts",
         "src/preload/*.ts",
         "src/workers/**/*.ts",
@@ -26,7 +28,12 @@
         "src/main/providers/pi-rpc-operation.ts",
         "src/main/providers/pi-rpc-transport.ts"
       ],
-      "ignoreDependencies": ["@huggingface/transformers", "onnxruntime-common", "onnxruntime-node"]
+      "ignoreDependencies": [
+        "@huggingface/transformers",
+        "@types/semver",
+        "onnxruntime-common",
+        "onnxruntime-node"
+      ]
     }
   },
   "include": ["files", "dependencies", "unlisted", "binaries"]

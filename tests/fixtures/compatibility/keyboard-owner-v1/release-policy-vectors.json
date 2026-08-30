@@ -1,0 +1,413 @@
+{
+  "fixtureVersion": 1,
+  "vectors": [
+    {
+      "id": "windows-x64-no-predecessor",
+      "manifestId": "release-a-win-x64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "x64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0101010101010101010101010101010101010101010101010101010101010101",
+        "gatewaySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "ownerSha256": "1212121212121212121212121212121212121212121212121212121212121212",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001010102000000010101010101010101010101010101010101010101010101010101010101010111111111111111111111111111111111111111111111111111111111111111111212121212121212121212121212121212121212121212121212121212121212aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "dd822d693852412f9cae9d0b417a784c21cb51de4614154f61ef9c8d94dd12c7"
+    },
+    {
+      "id": "windows-x64-one-predecessor",
+      "manifestId": "release-b-win-x64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "x64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0202020202020202020202020202020202020202020202020202020202020202",
+        "gatewaySha256": "2121212121212121212121212121212121212121212121212121212121212121",
+        "ownerSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": {
+          "releaseBuildDigest": "0101010101010101010101010101010101010101010101010101010101010101",
+          "gatewaySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "ownerSha256": "1212121212121212121212121212121212121212121212121212121212121212",
+          "platform": "windows",
+          "architecture": "x64"
+        }
+      },
+      "expectedHex": "54514b4f504f4c310001010102010000020202020202020202020202020202020202020202020202020202020202020221212121212121212121212121212121212121212121212121212121212121212222222222222222222222222222222222222222222222222222222222222222aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010101010101010101010101010101010101010101010101010101010101010101111111111111111111111111111111111111111111111111111111111111111112121212121212121212121212121212121212121212121212121212121212120101000000000000",
+      "expectedSha256": "37a54d427a2c312a22af738543af4f3684c0e5b7c9ef6e23a9a615fb3f384b25"
+    },
+    {
+      "id": "windows-x64-safe-disabled",
+      "manifestId": "release-a-win-x64-safe",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "x64",
+        "ownerMode": "safe_disabled",
+        "releaseBuildDigest": "0303030303030303030303030303030303030303030303030303030303030303",
+        "gatewaySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "ownerSha256": "1414141414141414141414141414141414141414141414141414141414141414",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001010101000000030303030303030303030303030303030303030303030303030303030303030311111111111111111111111111111111111111111111111111111111111111111414141414141414141414141414141414141414141414141414141414141414aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "a0147c8fd9bf99c7a63b2e703f6cf8990d5a6f6528dcce59e5aacaf0e2d71e93"
+    },
+    {
+      "id": "windows-arm64-no-predecessor",
+      "manifestId": "release-a-win-arm64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "arm64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0404040404040404040404040404040404040404040404040404040404040404",
+        "gatewaySha256": "4141414141414141414141414141414141414141414141414141414141414141",
+        "ownerSha256": "4242424242424242424242424242424242424242424242424242424242424242",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001010202000000040404040404040404040404040404040404040404040404040404040404040441414141414141414141414141414141414141414141414141414141414141414242424242424242424242424242424242424242424242424242424242424242aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "6ceae715c97da2fe93a527d512daf0e0a65f1512ba14e2eb1ed9b0b23694dbed"
+    },
+    {
+      "id": "windows-arm64-one-predecessor",
+      "manifestId": "release-b-win-arm64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "arm64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0505050505050505050505050505050505050505050505050505050505050505",
+        "gatewaySha256": "5151515151515151515151515151515151515151515151515151515151515151",
+        "ownerSha256": "5252525252525252525252525252525252525252525252525252525252525252",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": {
+          "releaseBuildDigest": "0404040404040404040404040404040404040404040404040404040404040404",
+          "gatewaySha256": "4141414141414141414141414141414141414141414141414141414141414141",
+          "ownerSha256": "4242424242424242424242424242424242424242424242424242424242424242",
+          "platform": "windows",
+          "architecture": "arm64"
+        }
+      },
+      "expectedHex": "54514b4f504f4c310001010202010000050505050505050505050505050505050505050505050505050505050505050551515151515151515151515151515151515151515151515151515151515151515252525252525252525252525252525252525252525252525252525252525252aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010404040404040404040404040404040404040404040404040404040404040404414141414141414141414141414141414141414141414141414141414141414142424242424242424242424242424242424242424242424242424242424242420102000000000000",
+      "expectedSha256": "e9955720abaaec139247d4ec89ad1636e29c56e7378fa2c20312fb7ac81c3414"
+    },
+    {
+      "id": "windows-arm64-safe-disabled",
+      "manifestId": "release-a-win-arm64-safe",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "windows",
+        "architecture": "arm64",
+        "ownerMode": "safe_disabled",
+        "releaseBuildDigest": "0606060606060606060606060606060606060606060606060606060606060606",
+        "gatewaySha256": "4141414141414141414141414141414141414141414141414141414141414141",
+        "ownerSha256": "4343434343434343434343434343434343434343434343434343434343434343",
+        "gatewaySignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ownerSignerPolicyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001010201000000060606060606060606060606060606060606060606060606060606060606060641414141414141414141414141414141414141414141414141414141414141414343434343434343434343434343434343434343434343434343434343434343aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "c49128476557fb8f7b0f82f29498c2c288d21da6004c4a52fad42f2d96f23aa6"
+    },
+    {
+      "id": "macos-x64-no-predecessor",
+      "manifestId": "release-a-mac-x64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "x64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0707070707070707070707070707070707070707070707070707070707070707",
+        "gatewaySha256": "6363636363636363636363636363636363636363636363636363636363636363",
+        "ownerSha256": "6464646464646464646464646464646464646464646464646464646464646464",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001020102000000070707070707070707070707070707070707070707070707070707070707070763636363636363636363636363636363636363636363636363636363636363636464646464646464646464646464646464646464646464646464646464646464bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "49e5537e84bd05cde2f95935d3d7b38585db42a9bc9d223a8125b81232abbc29"
+    },
+    {
+      "id": "macos-x64-one-predecessor",
+      "manifestId": "release-b-mac-x64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "x64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0808080808080808080808080808080808080808080808080808080808080808",
+        "gatewaySha256": "7373737373737373737373737373737373737373737373737373737373737373",
+        "ownerSha256": "7474747474747474747474747474747474747474747474747474747474747474",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": {
+          "releaseBuildDigest": "0707070707070707070707070707070707070707070707070707070707070707",
+          "gatewaySha256": "6363636363636363636363636363636363636363636363636363636363636363",
+          "ownerSha256": "6464646464646464646464646464646464646464646464646464646464646464",
+          "platform": "macos",
+          "architecture": "x64"
+        }
+      },
+      "expectedHex": "54514b4f504f4c310001020102010000080808080808080808080808080808080808080808080808080808080808080873737373737373737373737373737373737373737373737373737373737373737474747474747474747474747474747474747474747474747474747474747474bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010707070707070707070707070707070707070707070707070707070707070707636363636363636363636363636363636363636363636363636363636363636364646464646464646464646464646464646464646464646464646464646464640201000000000000",
+      "expectedSha256": "240ed2aa0b97e9e185c4e65d19b46adee2264ab891b2e5af3ae197d26bb13d26"
+    },
+    {
+      "id": "macos-x64-safe-disabled",
+      "manifestId": "release-a-mac-x64-safe",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "x64",
+        "ownerMode": "safe_disabled",
+        "releaseBuildDigest": "0909090909090909090909090909090909090909090909090909090909090909",
+        "gatewaySha256": "6363636363636363636363636363636363636363636363636363636363636363",
+        "ownerSha256": "6565656565656565656565656565656565656565656565656565656565656565",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c310001020101000000090909090909090909090909090909090909090909090909090909090909090963636363636363636363636363636363636363636363636363636363636363636565656565656565656565656565656565656565656565656565656565656565bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "25f2d5918246c483466d3ee3b80df3826af190eb6644974a16c5c3550cdbb6ac"
+    },
+    {
+      "id": "macos-arm64-no-predecessor",
+      "manifestId": "release-a-mac-arm64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "arm64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "gatewaySha256": "8383838383838383838383838383838383838383838383838383838383838383",
+        "ownerSha256": "8484848484848484848484848484848484848484848484848484848484848484",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c3100010202020000000a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a83838383838383838383838383838383838383838383838383838383838383838484848484848484848484848484848484848484848484848484848484848484bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "a2012a5622c87be76103b193f7d7a10be5e721601ab56d8dbded0d70a7a4470f"
+    },
+    {
+      "id": "macos-arm64-one-predecessor",
+      "manifestId": "release-b-mac-arm64-enabled",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "arm64",
+        "ownerMode": "enabled_candidate",
+        "releaseBuildDigest": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "gatewaySha256": "9393939393939393939393939393939393939393939393939393939393939393",
+        "ownerSha256": "9494949494949494949494949494949494949494949494949494949494949494",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": {
+          "releaseBuildDigest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "gatewaySha256": "8383838383838383838383838383838383838383838383838383838383838383",
+          "ownerSha256": "8484848484848484848484848484848484848484848484848484848484848484",
+          "platform": "macos",
+          "architecture": "arm64"
+        }
+      },
+      "expectedHex": "54514b4f504f4c3100010202020100000b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b93939393939393939393939393939393939393939393939393939393939393939494949494949494949494949494949494949494949494949494949494949494bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a838383838383838383838383838383838383838383838383838383838383838384848484848484848484848484848484848484848484848484848484848484840202000000000000",
+      "expectedSha256": "ecf2a087bbdae017f6a588611a06cb68009580226eedb754df74e66d6200b13e"
+    },
+    {
+      "id": "macos-arm64-safe-disabled",
+      "manifestId": "release-a-mac-arm64-safe",
+      "fields": {
+        "formatVersion": 1,
+        "platform": "macos",
+        "architecture": "arm64",
+        "ownerMode": "safe_disabled",
+        "releaseBuildDigest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "gatewaySha256": "8383838383838383838383838383838383838383838383838383838383838383",
+        "ownerSha256": "8585858585858585858585858585858585858585858585858585858585858585",
+        "gatewaySignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSignerPolicyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gatewayProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "ownerProtocol": {
+          "major": 1,
+          "minor": 0,
+          "compatibilityEpoch": 1,
+          "supportedFeatureBits": "0x0000000000000001",
+          "requiredFeatureBits": "0x0000000000000001"
+        },
+        "predecessor": null
+      },
+      "expectedHex": "54514b4f504f4c3100010202010000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c83838383838383838383838383838383838383838383838383838383838383838585858585858585858585858585858585858585858585858585858585858585bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0001000000000001000000000000000100000000000000010001000000000001000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expectedSha256": "f9604c5092d70ece6a9bc51badf655a65f5d45dc02c62b4d03ff69dfe1ccace8"
+    }
+  ]
+}

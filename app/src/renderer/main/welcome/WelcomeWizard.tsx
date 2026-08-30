@@ -2,7 +2,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import logoDark from '../../../../assets/logo-dark.png';
 import logoLight from '../../../../assets/logo-light.png';
-import { ECHO_HOLD_THRESHOLD_MS } from '../../../shared/constants/echo-session';
 import type { AppState } from '../../../shared/schemas/app-state';
 import {
   BUILT_IN_DICTATION_PROFILE_METADATA,
@@ -14,7 +13,7 @@ import { Button, Card, Status, useTheme } from '../../design';
 import { RecordingSection } from '../settings/RecordingSection';
 import { TranscriptionLanguageSetting } from '../settings/TranscriptionModelSection';
 import { ModelSetup } from '../setup/ModelSetup';
-import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
+import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 import { publicErrorMessage } from '../public-error';
 
 const SmartProcessingSection = lazy(async () => {
@@ -281,8 +280,7 @@ export function WelcomeWizard({
             {BUILT_IN_DICTATION_PROFILE_METADATA.map(({ id, defaultProfile }) => (
               <li key={id}>
                 <strong>{defaultProfile.name}</strong>:{' '}
-                {formatKeyboardShortcutWithTrigger(defaultProfile.shortcut, platform)} — Smart
-                processing
+                {formatKeyboardShortcut(defaultProfile.shortcut, platform)} · Smart processing
               </li>
             ))}
           </ul>
@@ -290,22 +288,6 @@ export function WelcomeWizard({
             These are the shortcuts Talking Quill starts with. If you have already changed one, your
             version is kept.
           </p>
-          <h3 className="subhead">How to dictate</h3>
-          <ul>
-            <li>
-              <strong>Quick note:</strong> press your shortcut and let go of the last key straight
-              away.{' '}
-              {settings.recording.autoSubmitOnSilence
-                ? 'Press Enter when you are done, or use automatic finishing after a pause.'
-                : 'Press Enter or repeat your shortcut when you are done.'}
-            </li>
-            <li>
-              <strong>Longer note:</strong> hold that last key for more than{' '}
-              {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses until
-              you press Enter, use the shortcut again, or click Stop.
-            </li>
-            <li>Press Escape before insertion to cancel recording or processing.</li>
-          </ul>
           <p>Shortcuts can be changed anytime in Settings under Dictation profiles.</p>
           <Status
             tone={state.modelReady && state.helper.status === 'ready' ? 'success' : 'warning'}

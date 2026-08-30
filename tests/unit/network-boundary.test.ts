@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   APPROVED_NETWORK_BOUNDARIES,
+  childProcessImportMembers,
   detectNetworkTokens,
   verifyNetworkBoundary,
 } from '../../scripts/network-boundary-policy.mjs';
@@ -25,7 +26,7 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
 
   it('keeps every production networking primitive in the reviewed closed inventory', async () => {
     const inventory = await verifyNetworkBoundary();
-    expect(inventory).toHaveLength(11);
+    expect(inventory).toHaveLength(16);
     expect(Object.keys(APPROVED_NETWORK_BOUNDARIES)).toEqual(
       expect.arrayContaining([
         'app/src/main/providers/json-transport.ts',
@@ -35,6 +36,10 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
         'app/src/main/providers/pi-process-runtime.ts',
         'app/src/main/providers/pi-rpc-operation.ts',
         'app/src/main/providers/pi-rpc-transport.ts',
+        'app/src/main/app/application.ts',
+        'app/src/main/app/windows-uninstall-target.ts',
+        'app/src/main/info/electron-update-backend.ts',
+        'app/src/main/info/macos-owner-update-coordinator.ts',
       ]),
     );
     for (const [path, approval] of Object.entries(APPROVED_NETWORK_BOUNDARIES)) {
@@ -168,6 +173,34 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
     ).toEqual(['fetch-call']);
     expect(detectNetworkTokens(`const fetch = () => 'local value'; fetch();`)).toEqual([]);
   }, 30_000);
+
+  it('keeps lifecycle child-process imports and purposes in an exact closed inventory', async () => {
+    const expected = {
+      'app/src/main/app/application.ts': ['execFileSync'],
+      'app/src/main/info/electron-update-backend.ts': ['spawn'],
+      'app/src/main/info/macos-owner-update-coordinator.ts': ['execFile', 'spawn'],
+    } as const;
+    for (const [path, members] of Object.entries(expected)) {
+      const source = await readFile(resolve(path), 'utf8');
+      expect(childProcessImportMembers(source, path)).toEqual(members);
+      const approval = APPROVED_NETWORK_BOUNDARIES[path];
+      if (approval === undefined) throw new Error(`Missing reviewed boundary: ${path}`);
+      expect(approval.reason).toMatch(/lifecycle|maintenance|updater/iu);
+    }
+    const application = await readFile('app/src/main/app/application.ts', 'utf8');
+    expect(application.match(/execFileSync\(/gu)).toHaveLength(2);
+    expect(application).toContain("['--macos-owner-resume-cleanup']");
+    expect(application).toContain("['--macos-owner-validate-install']");
+    const coordinator = await readFile(
+      'app/src/main/info/macos-owner-update-coordinator.ts',
+      'utf8',
+    );
+    expect(coordinator).toContain("execFileAsync('/usr/bin/ditto'");
+    expect(coordinator).toContain("['--macos-owner-finalize', ...arguments_]");
+    const updater = await readFile('app/src/main/info/electron-update-backend.ts', 'utf8');
+    expect(updater.match(/\bspawn\(/gu)).toHaveLength(1);
+    expect(updater).toContain('spawn(executable, arguments_');
+  });
 
   it('scans TypeScript module extensions instead of silently omitting them', async () => {
     await writeFile(resolve(temporary, 'unapproved-boundary.mts'), "import 'node:dgram';\n");

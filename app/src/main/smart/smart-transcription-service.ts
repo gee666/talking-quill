@@ -59,7 +59,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
   readonly #settings: SettingsStore;
   readonly #configs: ProviderConfigService;
   readonly #providers: ProviderService;
-  readonly #screenshots: ScreenshotService;
+  readonly #screenshots: Pick<ScreenshotService, 'capture' | 'permissionStatus'>;
   readonly #helper: Pick<HelperClient, 'getFrontApp'>;
   readonly #screenshotsDirectory: string;
   readonly #retainScreenshot: (
@@ -81,7 +81,7 @@ export class SmartTranscriptionService implements SmartTranscriptProcessor {
     readonly settings: SettingsStore;
     readonly configs: ProviderConfigService;
     readonly providers: ProviderService;
-    readonly screenshots: ScreenshotService;
+    readonly screenshots: Pick<ScreenshotService, 'capture' | 'permissionStatus'>;
     readonly helper: Pick<HelperClient, 'getFrontApp'>;
     readonly screenshotsDirectory: string;
     readonly retainScreenshot?: (

@@ -2,6 +2,8 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SETTINGS_MIGRATIONS } from '../../app/src/main/persistence/settings-migrations';
+import { LegacySettingsV27Schema } from '../../app/src/main/persistence/settings-migrations/legacy-settings-v27';
+import { defaultDictationProfiles as legacyDefaultDictationProfiles } from '../../app/src/main/persistence/settings-migrations/legacy-shortcut-contract';
 import { ProviderConfigService } from '../../app/src/main/providers/provider-config-service';
 import {
   SettingsStore,
@@ -15,7 +17,6 @@ import {
   SettingsPatchSchema,
   SettingsSchema,
 } from '../../app/src/shared/schemas/settings';
-import { defaultDictationProfiles } from '../../app/src/shared/schemas/dictation-profiles';
 import {
   shortcutFromLegacyActivation,
   shortcutTrigger,
@@ -76,6 +77,16 @@ async function testPath() {
   return join(directory, 'settings.json');
 }
 
+async function expectPersistedSettings(path: string, runtime: unknown): Promise<void> {
+  const compatible =
+    typeof runtime === 'object' && runtime !== null && !Array.isArray(runtime)
+      ? LegacySettingsV27Schema.safeParse({ ...runtime, schemaVersion: 27 })
+      : { success: false as const };
+  expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(
+    compatible.success ? compatible.data : runtime,
+  );
+}
+
 function legacySettingsBase() {
   return {
     ...structuredClone(DEFAULT_SETTINGS),
@@ -134,7 +145,15 @@ function migrateV19ToCurrent(legacy: ReturnType<typeof legacyV19Settings>) {
   if (typeof v26 !== 'object' || v26 === null) {
     throw new Error('V25 migration did not emit settings');
   }
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(v26 as Readonly<Record<string, unknown>>));
+  const v27 = SETTINGS_MIGRATIONS[26]?.(v26 as Readonly<Record<string, unknown>>);
+  if (typeof v27 !== 'object' || v27 === null) {
+    throw new Error('V26 migration did not emit settings');
+  }
+  const v28 = SETTINGS_MIGRATIONS[27]?.(v27 as Readonly<Record<string, unknown>>);
+  if (typeof v28 !== 'object' || v28 === null) {
+    throw new Error('V27 migration did not emit settings');
+  }
+  return SettingsSchema.parse(v28);
 }
 
 function validSettings(
@@ -199,6 +218,28 @@ describe('SettingsStore', () => {
     },
   );
 
+  it('preserves every persisted shortcut value byte-for-byte during current-schema startup', async () => {
+    const path = await testPath();
+    const persisted = structuredClone(DEFAULT_SETTINGS);
+    persisted.dictationProfiles = persisted.dictationProfiles.map((profile, index) => ({
+      ...profile,
+      shortcut: {
+        modifiers: { ctrl: true, alt: index % 2 === 0, shift: index % 2 === 1, meta: false },
+        keys: [String.fromCharCode(65 + index) as (typeof profile.shortcut.keys)[number]],
+      },
+    }));
+    const source = `${JSON.stringify(persisted, null, 2)}\n`;
+    await writeFile(path, source, 'utf8');
+
+    const store = new SettingsStore(path, { migrations: SETTINGS_MIGRATIONS });
+    await store.initialize();
+
+    expect(store.get().dictationProfiles.map(({ shortcut }) => shortcut)).toEqual(
+      persisted.dictationProfiles.map(({ shortcut }) => shortcut),
+    );
+    expect(await readFile(path, 'utf8')).toBe(source);
+  });
+
   it('loads and persists an incomplete v19 final step as the new final step 5', async () => {
     const path = await testPath();
     const legacy = legacyV19Settings();
@@ -213,7 +254,7 @@ describe('SettingsStore', () => {
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       welcome: { completedAt: null, lastStep: 5 },
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it('normalizes completed v19 Welcome progress to final step 5', () => {
@@ -247,10 +288,11 @@ describe('SettingsStore', () => {
       language: 'ru',
     });
     expect(migrated.welcome.modelEvidence).toBeNull();
-    const expectedProfiles = defaultDictationProfiles();
-    const expectedGeneral = expectedProfiles.find(({ id }) => id === 'general');
-    if (expectedGeneral === undefined) throw new Error('Expected General profile is missing');
-    expectedGeneral.shortcut = shortcutFromLegacyActivation('Z', false);
+    const expectedProfiles = legacyDefaultDictationProfiles().map((profile) =>
+      profile.id === 'general'
+        ? { ...profile, shortcut: shortcutFromLegacyActivation('Z', false) }
+        : profile,
+    );
     expect(migrated.dictationProfiles).toEqual(expectedProfiles);
   });
 
@@ -376,7 +418,7 @@ describe('SettingsStore', () => {
       preferredMicrophoneId: 'studio-mic',
       silencePreset: 'relaxed',
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(restarted.get());
+    await expectPersistedSettings(path, restarted.get());
   });
 
   it('sanitizes parse corruption and recovers without retaining plaintext canaries', async () => {
@@ -434,7 +476,7 @@ describe('SettingsStore', () => {
       ...structuredClone(DEFAULT_SETTINGS),
       app: { ...structuredClone(DEFAULT_SETTINGS.app), enabled: false, closeToTray: true },
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it.each([7, 8, 9] as const)(
@@ -961,7 +1003,7 @@ describe('SettingsStore', () => {
       ...structuredClone(DEFAULT_SETTINGS),
       app: { ...structuredClone(DEFAULT_SETTINGS.app), enabled: false, closeToTray: false },
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it.each([
@@ -1122,7 +1164,7 @@ describe('SettingsStore', () => {
         visionOverrides: [],
       },
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it('preserves an explicit Bedrock region while migrating v3 settings', async () => {
@@ -1256,7 +1298,7 @@ describe('SettingsStore', () => {
       ...legacy.smartProcessing.providers.bedrock,
       region: legacy.smartProcessing.providers.bedrock.region ?? 'us-west-2',
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(migrated);
+    await expectPersistedSettings(path, migrated);
   });
 
   it.each([
@@ -1325,7 +1367,7 @@ describe('SettingsStore', () => {
       voiceCommands: [],
       customVocabulary: [],
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it('migrates v5 settings to the current schema with all defaults and empty credential epochs', async () => {
@@ -1359,7 +1401,7 @@ describe('SettingsStore', () => {
         credentialEpochs: {},
       },
     });
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.get());
+    await expectPersistedSettings(path, store.get());
   });
 
   it('migrates v6 settings to v8 with privacy defaults without changing provider state', async () => {
@@ -1374,7 +1416,7 @@ describe('SettingsStore', () => {
     await store.initialize();
 
     expect(store.get()).toEqual(DEFAULT_SETTINGS);
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(DEFAULT_SETTINGS);
+    await expectPersistedSettings(path, DEFAULT_SETTINGS);
   });
 
   it.each([
@@ -1505,7 +1547,7 @@ describe('SettingsStore', () => {
         customVocabulary: shape === 'task7' ? [] : [vocabulary],
         smartProcessing: legacy.smartProcessing,
       });
-      expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(migrated);
+      await expectPersistedSettings(path, migrated);
     },
   );
 

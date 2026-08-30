@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { ECHO_TERMINAL_DISPLAY_MS } from '../../shared/constants/echo-session';
-import type { ActivationBinding, HelperNotification } from '../../shared/helper/protocol';
+import type {
+  ActivationBinding,
+  HelperActivationContext,
+  HelperNotification,
+} from '../../shared/helper/protocol';
 import type { ActivationTestState } from '../../shared/schemas/activation-test';
 import type { VoiceCommandMatch } from '../../shared/schemas/commands';
 import {
@@ -18,6 +22,10 @@ import {
 import type { HelperReadiness } from '../../shared/schemas/helper-readiness';
 import type { WhisperModelId } from '../../shared/schemas/model-manifest';
 import type { PublicSettingsPatch, Settings } from '../../shared/schemas/settings';
+import {
+  ShortcutCaptureLeaseIdSchema,
+  type ShortcutCaptureLeaseId,
+} from '../../shared/schemas/shortcut-capture';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 import type { WindowManager } from '../app/window-manager';
 import { CaptureClientError } from '../audio/capture-window-client';
@@ -66,6 +74,7 @@ const INSERTION_CONTROLLER_TIMEOUT_MS = 5_000;
 
 export class EchoSessionController {
   readonly #settings: SettingsStore;
+  readonly #platform: 'win32' | 'darwin';
   readonly #helper: EchoHelperPort;
   readonly #captureReconciler: HelperCaptureReconciler;
   readonly #capture: EchoCapturePipeline;
@@ -83,7 +92,15 @@ export class EchoSessionController {
   readonly #removeHelperNotifications: () => void;
   readonly #removeHelperReadiness: () => void;
   readonly #removeSettings: () => void;
-  readonly #shortcutCaptureOwners = new Map<number, () => void>();
+  readonly #shortcutCaptureLeases = new Map<
+    ShortcutCaptureLeaseId,
+    {
+      readonly ownerWebContentsId: number;
+      removeOnInvalidated: () => void;
+      releaseStarted: boolean;
+      releaseOperation: Promise<void> | null;
+    }
+  >();
   #state: EchoSessionState = IDLE_ECHO_SESSION;
   #abort: AbortController | null = null;
   #effectTail: Promise<void> = Promise.resolve();
@@ -92,8 +109,10 @@ export class EchoSessionController {
   #teardownInFlight: Promise<void> | null = null;
   #sessionSettings: Readonly<Settings> | null = null;
   #sessionProfile: Readonly<DictationProfile> | null = null;
-  #activeBinding: Readonly<ActivationBinding> | null = null;
+  #activeActivation: Readonly<ActivationBinding & HelperActivationContext> | null = null;
   #pendingOperationalError: string | null = null;
+  #operationalWidgetGeneration = 0;
+  #initialized = false;
   #shutdownOperation: Promise<void> | null = null;
   #smartPreparation: {
     readonly sessionId: string;
@@ -105,6 +124,7 @@ export class EchoSessionController {
 
   constructor(options: {
     readonly settings: SettingsStore;
+    readonly platform: 'win32' | 'darwin';
     readonly recording: EchoRecordingPort;
     readonly whisper: EchoWhisperPort;
     readonly helper: EchoHelperPort;
@@ -122,6 +142,7 @@ export class EchoSessionController {
     ) => Promise<EchoModelUseGrant>;
   }) {
     this.#settings = options.settings;
+    this.#platform = options.platform;
     this.#appPreferences = this.#settings.get().app;
     this.#helper = options.helper;
     this.#insertion = options.insertion;
@@ -142,17 +163,34 @@ export class EchoSessionController {
       isModelReady: this.#isModelReady,
       onSyncFailure: () =>
         this.#reportOperationalFailure(
-          'Keyboard shortcuts could not be enabled. Restart Talking Quill or reinstall the app.',
+          'Keyboard shortcuts could not be enabled. Talking Quill will retry automatically.',
         ),
+      onSyncSuccess: () => {
+        this.#pendingOperationalError = null;
+      },
     });
     this.#outcomes = new SessionOutcomeWriter({
       history: options.history ?? null,
       smart: options.smartProcessor ?? null,
     });
+    const beginPhysicalObservation = this.#helper.beginPhysicalObservation?.bind(this.#helper);
+    const samplePhysicalObservation = this.#helper.samplePhysicalObservation?.bind(this.#helper);
+    const endPhysicalObservation = this.#helper.endPhysicalObservation?.bind(this.#helper);
     this.#activationTest = new ActivationTestController({
       publish: (state) => this.#publishActivationTest(state),
       requestCaptureOff: () =>
         this.#captureReconciler.requestBestEffort('off', this.#capture.generation),
+      physicalObservationUnavailable: this.#platform !== 'win32',
+      ...(beginPhysicalObservation === undefined ||
+      samplePhysicalObservation === undefined ||
+      endPhysicalObservation === undefined
+        ? {}
+        : {
+            beginPhysicalObservation,
+            samplePhysicalObservation,
+            endPhysicalObservation,
+            onObservationAccepted: () => this.#helper.recordPhysicalObservationAccepted?.(),
+          }),
     });
     this.#capture = new EchoCapturePipeline({
       recording: options.recording,
@@ -172,19 +210,21 @@ export class EchoSessionController {
     );
     this.#removeHelperReadiness = this.#helper.subscribeReadiness((readiness) => {
       if (readiness.status === 'ready') {
-        this.#profiles.requestSync();
-        this.#captureReconciler.requestBestEffort(
-          helperCaptureModeForPhase(this.#state.phase),
-          this.#capture.generation,
-        );
-      } else {
-        this.#captureReconciler.markAppliedUnknown();
-        this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
-        if (this.#activationTest.state.active) this.#activationTest.stop();
-        const message = helperReadinessError(readiness);
-        if (message !== null) this.#reportOperationalFailure(message);
-        else if (this.#state.phase !== 'idle') this.abort('target-lost');
+        if (this.#initialized) {
+          this.#profiles.requestSync();
+          this.#captureReconciler.requestBestEffort(
+            helperCaptureModeForPhase(this.#state.phase),
+            this.#capture.generation,
+          );
+        }
+        return;
       }
+      this.#captureReconciler.markAppliedUnknown();
+      this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
+      if (this.#activationTest.state.active) this.#activationTest.stop();
+      const message = helperReadinessError(readiness, this.#platform);
+      if (message !== null) this.#reportOperationalFailure(message);
+      else if (this.#state.phase !== 'idle') this.abort('target-lost');
     });
     this.#removeSettings = this.#settings.subscribe((next) => {
       this.#appPreferences = next.app;
@@ -230,9 +270,18 @@ export class EchoSessionController {
     return () => this.#listeners.delete(listener);
   }
 
-  initialize(): void {
-    this.#profiles.requestSync();
-    const message = helperReadinessError(this.#helper.readiness);
+  async initialize(): Promise<void> {
+    this.#initialized = true;
+    if (this.#helper.readiness.status === 'ready') {
+      try {
+        await this.#profiles.synchronize();
+      } catch {
+        // Keep startup usable while retaining one retry request. The profile coordinator reports
+        // the operational failure and reopens native activation only after a successful retry.
+        this.#profiles.requestSync();
+      }
+    } else this.#profiles.requestSync();
+    const message = helperReadinessError(this.#helper.readiness, this.#platform);
     if (message !== null) this.#reportOperationalFailure(message);
     else this.#publish();
   }
@@ -258,29 +307,87 @@ export class EchoSessionController {
   async startShortcutCapture(
     ownerWebContentsId: number,
     onDestroyed: (listener: () => void) => () => void,
-  ): Promise<void> {
+  ): Promise<ShortcutCaptureLeaseId> {
     if (this.#state.phase !== 'idle' || this.#activationTest.state.active) {
       throw new Error('Shortcut capture is unavailable during an active session or shortcut test');
     }
-    if (this.#shortcutCaptureOwners.has(ownerWebContentsId)) return;
-    const removeOnInvalidated = onDestroyed(() => {
-      void this.#releaseShortcutCaptureOwner(ownerWebContentsId).catch(() => undefined);
-    });
-    this.#shortcutCaptureOwners.set(ownerWebContentsId, removeOnInvalidated);
-    await this.#profiles.beginShortcutCapture(ownerWebContentsId);
-  }
-
-  async stopShortcutCapture(ownerWebContentsId: number): Promise<void> {
-    await this.#releaseShortcutCaptureOwner(ownerWebContentsId);
-  }
-
-  async #releaseShortcutCaptureOwner(ownerWebContentsId: number): Promise<void> {
-    const removeOnInvalidated = this.#shortcutCaptureOwners.get(ownerWebContentsId);
-    if (removeOnInvalidated !== undefined) {
-      this.#shortcutCaptureOwners.delete(ownerWebContentsId);
-      removeOnInvalidated();
+    const leaseId = ShortcutCaptureLeaseIdSchema.parse(randomUUID());
+    const lease = {
+      ownerWebContentsId,
+      removeOnInvalidated: (): void => undefined,
+      releaseStarted: false,
+      releaseOperation: null as Promise<void> | null,
+    };
+    this.#shortcutCaptureLeases.set(leaseId, lease);
+    try {
+      lease.removeOnInvalidated = onDestroyed(() => {
+        void this.#releaseShortcutCaptureLease(ownerWebContentsId, leaseId).catch(() => {
+          // No renderer remains to retry this capability. The coordinator retains its
+          // authoritative background sync request, so only the local tombstone can be dropped.
+          this.#shortcutCaptureLeases.delete(leaseId);
+        });
+      });
+    } catch (error: unknown) {
+      this.#shortcutCaptureLeases.delete(leaseId);
+      throw error;
     }
-    await this.#profiles.endShortcutCapture(ownerWebContentsId);
+    // A lifecycle adapter may invalidate synchronously while registering the listener. Never arm
+    // an unowned lease after that invalidation won the race.
+    if (this.#shortcutCaptureLeases.get(leaseId) !== lease || lease.releaseStarted) {
+      if (!lease.releaseStarted) lease.removeOnInvalidated();
+      throw new Error('Shortcut capture owner is unavailable');
+    }
+    try {
+      await this.#profiles.beginShortcutCapture(leaseId);
+      return leaseId;
+    } catch (error: unknown) {
+      // A rejected start cannot return its capability to the renderer. Revoke it here and restore
+      // the authoritative activation state rather than waiting for a later renderer lifecycle.
+      await this.#releaseShortcutCaptureLease(ownerWebContentsId, leaseId).catch(() => undefined);
+      this.#shortcutCaptureLeases.delete(leaseId);
+      throw error;
+    }
+  }
+
+  async stopShortcutCapture(
+    ownerWebContentsId: number,
+    leaseId: ShortcutCaptureLeaseId,
+  ): Promise<void> {
+    await this.#releaseShortcutCaptureLease(ownerWebContentsId, leaseId);
+  }
+
+  async #releaseShortcutCaptureLease(
+    ownerWebContentsId: number,
+    leaseId: ShortcutCaptureLeaseId,
+  ): Promise<void> {
+    const lease = this.#shortcutCaptureLeases.get(leaseId);
+    if (lease?.ownerWebContentsId !== ownerWebContentsId) return;
+    if (lease.releaseOperation !== null) return lease.releaseOperation;
+    const operation = (async () => {
+      if (!lease.releaseStarted) {
+        lease.releaseStarted = true;
+        await this.#profiles.endShortcutCapture(leaseId);
+      } else {
+        await this.#profiles.retryShortcutCaptureRestoration();
+      }
+      try {
+        lease.removeOnInvalidated();
+      } catch {
+        // Listener disposal cannot outrank restored authoritative activation.
+      }
+      this.#shortcutCaptureLeases.delete(leaseId);
+    })();
+    lease.releaseOperation = operation;
+    try {
+      await operation;
+    } finally {
+      if (
+        this.#shortcutCaptureLeases.get(leaseId) === lease &&
+        lease.releaseOperation === operation
+      ) {
+        lease.releaseOperation = null;
+      }
+    }
   }
 
   acceptHelperNotification(notification: HelperNotification): void {
@@ -370,8 +477,8 @@ export class EchoSessionController {
     this.#captureReconciler.beginShutdown();
     this.#abort?.abort();
     this.#activationTest.stop();
-    for (const removeOnDestroyed of this.#shortcutCaptureOwners.values()) removeOnDestroyed();
-    this.#shortcutCaptureOwners.clear();
+    for (const lease of this.#shortcutCaptureLeases.values()) lease.removeOnInvalidated();
+    this.#shortcutCaptureLeases.clear();
     this.#clearResetTimer();
     this.#dispatch({ type: 'abort', reason: 'shutdown' });
     void (async () => {
@@ -392,12 +499,21 @@ export class EchoSessionController {
   #onHelperNotification(notification: HelperNotification): void {
     if (
       this.#disposed ||
+      !this.#initialized ||
       notification.method === 'paste.committed' ||
       notification.method === 'audio.input_devices_changed'
     ) {
       return;
     }
     if (notification.method === 'activation.event') {
+      // HelperClient is the activation-admission authority. This check is defense in depth for
+      // injected ports and prevents an unavailable owner from creating UI or starting capture.
+      if (this.#helper.readiness.status !== 'ready') {
+        if (notification.params.phase !== 'up') {
+          this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
+        }
+        return;
+      }
       const startsActivation = notification.params.phase !== 'up';
       if (startsActivation) {
         // Older helper versions arm session-key capture before publishing activation. Keep this
@@ -420,12 +536,16 @@ export class EchoSessionController {
       if (startsActivation) {
         if (this.#state.phase === 'idle') {
           const settings = this.#settings.get();
-          if (
-            !settings.app.enabled ||
-            !this.#isModelReady() ||
-            this.#helper.readiness.status !== 'ready'
-          ) {
+          const unavailable = activationPrerequisiteError(
+            settings.app.enabled,
+            this.#isModelReady(),
+            this.#helper.readiness,
+            this.#platform,
+          );
+          if (unavailable !== null) {
             this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
+            this.#windows.showMain();
+            this.#reportOperationalFailure(unavailable);
             return;
           }
           const profile = settings.dictationProfiles.find(
@@ -440,15 +560,14 @@ export class EchoSessionController {
           this.#sessionSettings = settings;
           this.#sessionProfile = deepFreezeProfile(profile);
           const now = Date.now();
-          this.#activeBinding =
-            notification.params.phase === 'complete'
-              ? null
-              : freezeActivationBinding(notification.params);
+          this.#activeActivation =
+            notification.params.phase === 'complete' ? null : freezeActivation(notification.params);
           this.#dispatch({
             type: 'shortcut-down',
             sessionId: randomUUID(),
             alternate: profile.shortcut.modifiers.shift,
             processingMode: profile.processingMode,
+            activationContext: freezeActivationContext(notification.params),
             now: notification.params.phase === 'complete' ? now - notification.params.heldMs : now,
           });
           if (notification.params.phase === 'complete') {
@@ -462,10 +581,10 @@ export class EchoSessionController {
             this.#sessionProfile !== null &&
             this.#sessionProfile.id === notification.params.profileId
           ) {
-            this.#activeBinding =
+            this.#activeActivation =
               notification.params.phase === 'complete'
                 ? null
-                : freezeActivationBinding(notification.params);
+                : freezeActivation(notification.params);
             this.#dispatch({ type: 'submit', source: 'shortcut' });
           } else {
             this.#captureReconciler.requestBestEffort(
@@ -482,17 +601,17 @@ export class EchoSessionController {
         }
       } else {
         if (
-          this.#activeBinding === null ||
-          !activationBindingsEqual(this.#activeBinding, notification.params)
+          this.#activeActivation === null ||
+          !activationsEqual(this.#activeActivation, notification.params)
         ) {
           return;
         }
-        this.#activeBinding = null;
+        this.#activeActivation = null;
         this.#dispatch({ type: 'shortcut-up', now: Date.now() });
       }
       return;
     }
-    if (notification.params.phase !== 'down') return;
+    if (notification.method !== 'session.key' || notification.params.phase !== 'down') return;
     if (notification.params.key === 'escape') this.cancel();
     else this.#dispatch({ type: 'submit', source: 'enter' });
   }
@@ -533,7 +652,7 @@ export class EchoSessionController {
 
   #manageSessionTransition(previous: EchoSessionState, next: EchoSessionState): void {
     if (next.phase === 'idle' || isTerminalPhase(next.phase)) {
-      this.#activeBinding = null;
+      this.#activeActivation = null;
       this.#smartPreparation = null;
       if (next.phase !== 'completed') this.#outcomes.discardSmartSession();
     }
@@ -729,15 +848,25 @@ export class EchoSessionController {
       let acceptsCommit = true;
       try {
         const result = await withDeadline(
-          this.#insertion.insert(effect.text, insertionAbort.signal, () => {
-            if (acceptsCommit) this.#dispatch({ type: 'insertion-committed' });
-          }),
+          this.#insertion.insert(
+            effect.text,
+            effect.activationContext,
+            insertionAbort.signal,
+            () => {
+              if (acceptsCommit) this.#dispatch({ type: 'insertion-committed' });
+            },
+          ),
           INSERTION_CONTROLLER_TIMEOUT_MS,
           () => insertionAbort.abort(new Error('Insertion controller deadline exceeded')),
         );
         acceptsCommit = false;
         if (result.cancelled === true) this.#dispatch({ type: 'insertion-cancelled' });
-        else this.#dispatch({ type: 'inserted', copied: result.copied });
+        else
+          this.#dispatch({
+            type: 'inserted',
+            copied: result.copied,
+            ...(result.indeterminate === true ? { indeterminate: true } : {}),
+          });
       } catch {
         acceptsCommit = false;
         if (this.#state.phase === 'restoringClipboard') {
@@ -863,14 +992,24 @@ export class EchoSessionController {
       this.#abort?.abort();
       this.#dispatch({ type: 'fail', message });
     }
-    try {
-      if (!this.#windows.showWidget(this.#appPreferences.widgetSize, null)) {
-        this.#windows.showMain();
-      }
-    } catch {
-      // If the widget renderer itself is unavailable, keep the main window as the visible fallback.
-      this.#windows.showMain();
-    }
+    const widgetGeneration = ++this.#operationalWidgetGeneration;
+    const operationalState = this.#state;
+    const stillCurrent = (): boolean =>
+      !this.#disposed &&
+      widgetGeneration === this.#operationalWidgetGeneration &&
+      this.#state === operationalState &&
+      this.#state.phase === 'error';
+    void Promise.resolve(this.#windows.createWidgetForActivation())
+      .then((created) => {
+        if (!stillCurrent()) return;
+        if (!created || !this.#windows.showWidget(this.#appPreferences.widgetSize, null)) {
+          this.#windows.showMain();
+        }
+      })
+      .catch(() => {
+        // A late renderer failure must not reveal the main window after this error was reset.
+        if (stillCurrent()) this.#windows.showMain();
+      });
   }
 
   #playSound(): void {
@@ -889,18 +1028,35 @@ function deepFreezeProfile(profile: DictationProfile): Readonly<DictationProfile
   return Object.freeze(clone);
 }
 
-function freezeActivationBinding(binding: ActivationBinding): Readonly<ActivationBinding> {
+function freezeActivation(
+  activation: ActivationBinding & HelperActivationContext,
+): Readonly<ActivationBinding & HelperActivationContext> {
   return Object.freeze({
-    profileId: binding.profileId,
-    shortcut: deepFreezeShortcut(binding.shortcut),
+    profileId: activation.profileId,
+    shortcut: deepFreezeShortcut(activation.shortcut),
+    ...freezeActivationContext(activation),
   });
 }
 
-function activationBindingsEqual(
-  left: Readonly<ActivationBinding>,
-  right: ActivationBinding,
+function freezeActivationContext(
+  context: HelperActivationContext,
+): Readonly<HelperActivationContext> {
+  return Object.freeze({
+    activationGeneration: context.activationGeneration,
+    targetToken: context.targetToken,
+  });
+}
+
+function activationsEqual(
+  left: Readonly<ActivationBinding & HelperActivationContext>,
+  right: ActivationBinding & HelperActivationContext,
 ): boolean {
-  return left.profileId === right.profileId && shortcutsEqual(left.shortcut, right.shortcut);
+  return (
+    left.activationGeneration === right.activationGeneration &&
+    left.targetToken === right.targetToken &&
+    left.profileId === right.profileId &&
+    shortcutsEqual(left.shortcut, right.shortcut)
+  );
 }
 
 function piFallbackCategory(providerId: string, error: unknown): PiFallbackCategory | undefined {
@@ -931,12 +1087,59 @@ function publicSessionError(error: unknown): string {
   return 'Dictation could not be completed.';
 }
 
-function helperReadinessError(readiness: HelperReadiness): string | null {
+function activationPrerequisiteError(
+  enabled: boolean,
+  modelReady: boolean,
+  helperReadiness: HelperReadiness,
+  platform: 'win32' | 'darwin',
+): string | null {
+  if (!enabled) return 'Talking Quill is turned off. Turn it on from the Dashboard.';
+  if (!modelReady) {
+    return 'The selected speech model is not available. Open Settings > Speech model and install or repair it.';
+  }
+  return helperReadinessError(helperReadiness, platform);
+}
+
+function helperReadinessError(
+  readiness: HelperReadiness,
+  platform: 'win32' | 'darwin',
+): string | null {
+  const ownerName = platform === 'darwin' ? 'keyboard service' : 'local keyboard owner';
+  if (readiness.reason === 'capture-disabled' || readiness.reason === 'owner-rollback') {
+    return 'Keyboard shortcuts are safely disabled in this build.';
+  }
+  if (readiness.reason === 'owner-auth-failed') {
+    return `The ${ownerName} could not be authenticated. Restart Talking Quill, then reinstall it if the problem continues.`;
+  }
+  if (readiness.reason === 'owner-security-fault') {
+    return `The ${ownerName} failed a security check. Reinstall Talking Quill before using shortcuts.`;
+  }
+  if (readiness.reason === 'owner-draining') {
+    return `Release all shortcut keys while the ${ownerName} finishes safely. Talking Quill will reconnect automatically.`;
+  }
+  if (readiness.reason === 'owner-maintenance') {
+    return 'Keyboard shortcuts are unavailable during the update. They will return automatically when it finishes.';
+  }
+  if (readiness.reason === 'owner-busy') {
+    return `Another Talking Quill controller is using the ${ownerName}. Close it and Talking Quill will try again automatically.`;
+  }
   if (readiness.status === 'permission-required') {
     return 'Keyboard shortcuts need system permission. Open Talking Quill Settings to fix it.';
   }
+  if (
+    readiness.reason === 'owner-missing' ||
+    readiness.reason === 'owner-degraded' ||
+    readiness.reason === 'crash-loop' ||
+    readiness.reason === 'unexpected-exit' ||
+    readiness.reason === 'spawn-failed' ||
+    readiness.reason === 'handshake-timeout' ||
+    readiness.reason === 'request-timeout' ||
+    readiness.reason === 'hook-fault'
+  ) {
+    return `The ${ownerName} is unavailable. Talking Quill will restart it automatically.`;
+  }
   if (readiness.status === 'unavailable' || readiness.status === 'incompatible') {
-    return 'Keyboard shortcuts are unavailable. Restart Talking Quill or reinstall the app.';
+    return `The ${ownerName} needs repair. Reinstall Talking Quill before using shortcuts.`;
   }
   return null;
 }

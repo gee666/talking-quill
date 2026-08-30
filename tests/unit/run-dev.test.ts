@@ -1,10 +1,23 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 
 describe('development command forwarding', () => {
+  it('always stages the feature-free structural gateway', () => {
+    const runDev = readFileSync(resolve(repositoryRoot, 'scripts/run-dev.mjs'), 'utf8');
+    const buildHelper = readFileSync(resolve(repositoryRoot, 'scripts/build-helper.mjs'), 'utf8');
+
+    expect(runDev).toContain("runNode('scripts/build-helper.mjs')");
+    expect(runDev).not.toContain('TALKING_QUILL_TRANSACTIONAL_SHORTCUTS_DEV');
+    expect(buildHelper).not.toContain('transactional-shortcuts-dev');
+    expect(buildHelper).toContain("'-p'");
+    expect(buildHelper).toContain("'talking-quill-helper'");
+    expect(buildHelper).toContain("'--no-default-features'");
+  });
+
   it.skipIf(process.env.NODE_V8_COVERAGE !== undefined)(
     'strips one pnpm separator and prints help without launching Electron',
     () => {

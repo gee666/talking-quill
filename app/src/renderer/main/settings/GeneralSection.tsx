@@ -6,7 +6,7 @@ import {
 import type { DictationProfileId } from '../../../shared/schemas/dictation-profiles';
 import type { PublicSettingsPatch, Settings } from '../../../shared/schemas/settings';
 import { Button, Card, Select, Status, Toggle } from '../../design';
-import { formatKeyboardShortcutWithTrigger } from '../format-keyboard-shortcut';
+import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 
 function activationTestLabel(
   state: ActivationTestState,
@@ -30,6 +30,9 @@ function activationTestLabel(
   if (state.unavailableReason === 'session-active') {
     return 'Finish or cancel the dictation you have running, then try again';
   }
+  if (state.unavailableReason === 'platform-unavailable') {
+    return 'Physical shortcut observation is available on Windows only';
+  }
   if (state.unavailableReason === 'helper-unavailable') {
     return 'Talking Quill is still getting ready to watch your keyboard';
   }
@@ -42,6 +45,10 @@ function activationTestLabel(
       return recognizedActivationLabel('That was quick dictation', state, settings, platform);
     case 'extended':
       return recognizedActivationLabel('That was extended dictation', state, settings, platform);
+    case 'observed':
+      return state.furthestBoundary === null || state.furthestBoundary === undefined
+        ? 'Physical shortcut activity was observed'
+        : `Physical shortcut observed through ${state.furthestBoundary.replaceAll('-', ' ')}`;
     case 'idle':
       return 'Not testing right now';
   }
@@ -57,7 +64,7 @@ function recognizedActivationLabel(
   const profileName =
     settings.dictationProfiles.find((profile) => profile.id === state.profileId)?.name ??
     state.profileId;
-  return `${prefix}: ${profileName}, ${formatKeyboardShortcutWithTrigger(state.shortcut, platform)}`;
+  return `${prefix}: ${profileName}, ${formatKeyboardShortcut(state.shortcut, platform)}`;
 }
 
 export function GeneralSection({
@@ -109,13 +116,12 @@ export function GeneralSection({
       />
       <div className="gesture-test" aria-live="polite">
         <strong>Try your shortcut safely</strong>
-        <span>
-          Press your shortcut and Talking Quill will tell you what it saw. Nothing is recorded and
-          no text is typed — how long you hold the last key decides quick or extended dictation.
-        </span>
+        <span>No audio is recorded and no text is typed.</span>
         <Status
           tone={
-            (gesture.phase === 'quick' || gesture.phase === 'extended') &&
+            (gesture.phase === 'quick' ||
+              gesture.phase === 'extended' ||
+              gesture.phase === 'observed') &&
             (activationTestProfileId === undefined || gesture.profileId === activationTestProfileId)
               ? 'success'
               : gesture.active

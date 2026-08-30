@@ -22,6 +22,10 @@ export function PrivacySection({
   const [resetting, setResetting] = useState(false);
   const [resetAccepted, setResetAccepted] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [diagnosticExport, setDiagnosticExport] = useState<
+    'idle' | 'exporting' | 'exported' | 'error'
+  >('idle');
+  const [logsFolderError, setLogsFolderError] = useState(false);
 
   useEffect(
     () =>
@@ -107,13 +111,57 @@ export function PrivacySection({
           void onSave(
             { privacy: { diagnosticLoggingEnabled: event.currentTarget.checked } },
             event.currentTarget.checked
-              ? 'Diagnostic logging enabled.'
-              : 'Diagnostic logging disabled.',
+              ? 'Detailed diagnostic logging enabled.'
+              : 'Detailed diagnostic logging disabled. Failure codes remain enabled.',
           )
         }
-        label="Write a technical log to help with problems"
-        hint="Off by default. Only technical event names are written — never your words, audio, screenshots or keys."
+        label="Debug logging"
+        hint="Off by default. When off, Talking Quill keeps only one of four helper failure codes: startup unavailable, startup incompatible, runtime unavailable or runtime incompatible. Activation, startup, shutdown, helper lifecycle and owner connection details require debug logging. Logs never contain typed text, keys, audio, transcripts, models, voice commands, tokens or secrets. Up to four 256 KB files are kept."
       />
+      <div className="setting-action">
+        <div>
+          <strong>Diagnostic logs</strong>
+          <p className="body-copy">
+            Open the per-user logs folder or export an allowlisted ZIP with a SHA-256 integrity
+            manifest. The save dialog defaults to Downloads, not Desktop.
+          </p>
+          {diagnosticExport === 'exported' ? (
+            <p role="status">Diagnostic report saved.</p>
+          ) : diagnosticExport === 'error' ? (
+            <p role="alert">The diagnostic report could not be saved.</p>
+          ) : logsFolderError ? (
+            <p role="alert">The logs folder could not be opened.</p>
+          ) : null}
+        </div>
+        <div className="info-actions">
+          <Button
+            variant="secondary"
+            disabled={disabled}
+            onClick={() => {
+              setLogsFolderError(false);
+              void window.talkingQuill.info
+                .openLocation('logs')
+                .catch(() => setLogsFolderError(true));
+            }}
+          >
+            Open logs folder
+          </Button>
+          <Button
+            variant="secondary"
+            busy={diagnosticExport === 'exporting'}
+            disabled={disabled}
+            onClick={() => {
+              setDiagnosticExport('exporting');
+              void window.talkingQuill.info.exportDiagnostics().then(
+                (status) => setDiagnosticExport(status === 'exported' ? 'exported' : 'idle'),
+                () => setDiagnosticExport('error'),
+              );
+            }}
+          >
+            Export diagnostic logs
+          </Button>
+        </div>
+      </div>
       <div className="setting-divider" />
       <div className="setting-action">
         <div>

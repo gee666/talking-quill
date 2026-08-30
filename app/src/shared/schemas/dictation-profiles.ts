@@ -3,7 +3,6 @@ import { ProcessingModeSchema } from './history';
 import {
   ShortcutSchema,
   shortcutIdentity,
-  shortcutsConflict,
   shortcutsEqual,
   type Shortcut,
   type ShortcutKey,
@@ -117,48 +116,25 @@ export function isBuiltInDefaultBinding(id: string, shortcut: Shortcut): boolean
   return metadata !== null && shortcutsEqual(metadata.defaultProfile.shortcut, shortcut);
 }
 
-export function builtInDefaultPrefixConflictAllowed(
-  leftId: string,
-  leftShortcut: Shortcut,
-  rightId: string,
-  rightShortcut: Shortcut,
-): boolean {
-  return (
-    leftId !== rightId &&
-    isBuiltInDefaultBinding(leftId, leftShortcut) &&
-    isBuiltInDefaultBinding(rightId, rightShortcut)
-  );
-}
-
 export function dictationProfileBindingsConflict(
-  leftId: string,
+  _leftId: string,
   leftShortcut: Shortcut,
-  rightId: string,
+  _rightId: string,
   rightShortcut: Shortcut,
 ): boolean {
-  return (
-    shortcutsConflict(leftShortcut, rightShortcut) &&
-    !builtInDefaultPrefixConflictAllowed(leftId, leftShortcut, rightId, rightShortcut)
-  );
+  return shortcutsEqual(leftShortcut, rightShortcut);
 }
 
 export function reservedBindingOwner(shortcut: Shortcut): BuiltInDictationProfileId | null {
-  const exact = RESERVED_DICTATION_BINDINGS.find((binding) =>
-    shortcutsEqual(binding.shortcut, shortcut),
-  );
   return (
-    exact?.ownerId ??
-    RESERVED_DICTATION_BINDINGS.find((binding) => shortcutsConflict(binding.shortcut, shortcut))
-      ?.ownerId ??
-    null
+    RESERVED_DICTATION_BINDINGS.find((binding) => shortcutsEqual(binding.shortcut, shortcut))
+      ?.ownerId ?? null
   );
 }
 
 export function isReservedBindingForProfile(id: string, shortcut: Shortcut): boolean {
-  if (isBuiltInDefaultBinding(id, shortcut)) return false;
-  return RESERVED_DICTATION_BINDINGS.some((binding) =>
-    shortcutsConflict(binding.shortcut, shortcut),
-  );
+  const owner = reservedBindingOwner(shortcut);
+  return owner !== null && owner !== id;
 }
 
 export const DictationProfileSchema = z
@@ -178,7 +154,6 @@ export const DictationProfileListSchema = z
   .superRefine((profiles, context) => {
     const ids = new Set<string>();
     const shortcutIdentities = new Set<string>();
-    const priorProfiles: { readonly id: string; readonly shortcut: Shortcut }[] = [];
     for (const [index, profile] of profiles.entries()) {
       if (ids.has(profile.id)) {
         context.addIssue({
@@ -188,13 +163,9 @@ export const DictationProfileListSchema = z
         });
       }
       ids.add(profile.id);
-      if (isReservedBindingForProfile(profile.id, profile.shortcut)) {
-        context.addIssue({
-          code: 'custom',
-          path: [index, 'shortcut'],
-          message: RESERVED_DICTATION_BINDING_ERROR,
-        });
-      }
+      // Existing customized bindings remain readable even when a later release
+      // adopts their letter as a built-in default. Creation/update policy still
+      // reserves current defaults; persistence rejects only actual duplicates.
       const identity = shortcutIdentity(profile.shortcut);
       if (shortcutIdentities.has(identity)) {
         context.addIssue({
@@ -202,25 +173,8 @@ export const DictationProfileListSchema = z
           path: [index, 'shortcut'],
           message: 'Profile shortcuts must be distinct',
         });
-      } else if (
-        priorProfiles.some((candidate) =>
-          dictationProfileBindingsConflict(
-            candidate.id,
-            candidate.shortcut,
-            profile.id,
-            profile.shortcut,
-          ),
-        )
-      ) {
-        context.addIssue({
-          code: 'custom',
-          path: [index, 'shortcut'],
-          message:
-            'Profile shortcuts with the same modifiers must not prefix one another outside the built-in default family',
-        });
       }
       shortcutIdentities.add(identity);
-      priorProfiles.push(profile);
     }
     for (const id of BUILT_IN_DICTATION_PROFILE_IDS) {
       if (!ids.has(id)) {

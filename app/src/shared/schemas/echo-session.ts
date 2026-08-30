@@ -31,7 +31,7 @@ export const EchoSessionPhaseSchema = z.enum([
   'cancelled',
   'error',
 ]);
-export const EchoCompletionSchema = z.enum(['inserted', 'copied']);
+export const EchoCompletionSchema = z.enum(['inserted', 'copied', 'indeterminate']);
 export const EchoSessionSnapshotSchema = z
   .object({
     sessionId: z.uuid().nullable(),

@@ -19,6 +19,8 @@ import type {
 } from '../../../app/src/main/echo/echo-session-controller';
 
 const CAPTURE_ID = '00000000-0000-4000-8000-000000000066';
+export const DETERMINISTIC_JPEG_BASE64 =
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABAAEADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAYI/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnQCOaRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//Z';
 
 class DeterministicHelper implements EchoHelperPort {
   readonly readiness: HelperReadiness = {
@@ -33,6 +35,10 @@ class DeterministicHelper implements EchoHelperPort {
   };
   readonly #notifications = new Set<(notification: HelperNotification) => void>();
   #captureMode: HelperSessionCaptureMode = 'off';
+
+  get captureMode(): HelperSessionCaptureMode {
+    return this.#captureMode;
+  }
 
   subscribeNotifications(listener: (notification: HelperNotification) => void): () => void {
     this.#notifications.add(listener);
@@ -149,7 +155,12 @@ class DeterministicInsertion implements EchoInsertionPort {
   copied = false;
   calls = 0;
 
-  insert(text: string, signal?: AbortSignal, onCommitted?: () => void) {
+  insert(
+    text: string,
+    _activationContext: Parameters<EchoInsertionPort['insert']>[1],
+    signal?: AbortSignal,
+    onCommitted?: () => void,
+  ) {
     if (signal?.aborted === true) return Promise.reject(new Error('aborted'));
     this.calls += 1;
     this.targetText = text;
@@ -167,6 +178,7 @@ export interface Task6TestDriver {
   setTranscript(text: string): void;
   setCopied(copied: boolean): void;
   setWelcomePrerequisites(ready: boolean): Promise<void>;
+  setOnScreenAwareness(enabled: boolean): Promise<void>;
   snapshot(): unknown;
 }
 
@@ -194,6 +206,8 @@ export function createTask6TestComposition(
           phase: 'complete',
           profileId: 'general',
           shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
+          activationGeneration: 1,
+          targetToken: 'task6-target',
           heldMs,
         },
       }),
@@ -205,6 +219,8 @@ export function createTask6TestComposition(
           phase: 'down',
           profileId: alternate ? 'prompt' : 'general',
           shortcut: (alternate ? DEFAULT_PROMPT_PROFILE : DEFAULT_GENERAL_PROFILE).shortcut,
+          activationGeneration: 1,
+          targetToken: 'task6-target',
         },
       }),
     activationUp: (alternate = false) =>
@@ -215,6 +231,8 @@ export function createTask6TestComposition(
           phase: 'up',
           profileId: alternate ? 'prompt' : 'general',
           shortcut: (alternate ? DEFAULT_PROMPT_PROFILE : DEFAULT_GENERAL_PROFILE).shortcut,
+          activationGeneration: 1,
+          targetToken: 'task6-target',
         },
       }),
     key: (key: 'escape' | 'enter') => helper.emitSessionKey(key),
@@ -232,8 +250,34 @@ export function createTask6TestComposition(
         welcome: { microphoneTested: ready, activationTested: false },
       });
     },
+    setOnScreenAwareness: async (enabled: boolean) => {
+      const current = settings?.get();
+      const generic = current?.smartProcessing.providers['generic-openai'];
+      const baseUrl = generic?.baseUrl;
+      const modelId = generic?.modelId;
+      const epoch = current?.smartProcessing.credentialEpochs['generic-openai'] ?? 0;
+      await settings?.update({
+        smartProcessing: {
+          selectedProviderId: 'generic-openai',
+          onScreenAwarenessEnabled: enabled,
+          ...(enabled && baseUrl !== undefined && modelId != null
+            ? {
+                visionOverrides: [
+                  {
+                    providerId: 'generic-openai',
+                    binding: `${new URL(baseUrl).href.replace(/\/+$/u, '')}/\n${String(epoch)}`,
+                    modelId,
+                    verifiedAt: Date.now(),
+                  },
+                ],
+              }
+            : {}),
+        },
+      });
+    },
     snapshot: () => ({
       session: requireController().snapshot,
+      helper: { captureMode: helper.captureMode },
       recording: {
         starts: recording.starts,
         stops: recording.stops,
@@ -250,6 +294,13 @@ export function createTask6TestComposition(
   return {
     helper,
     recording: realRecording ?? recording,
+    screenshots: {
+      permissionStatus: () => 'granted' as const,
+      capture: () =>
+        Promise.resolve({
+          image: { mimeType: 'image/jpeg' as const, base64: DETERMINISTIC_JPEG_BASE64 },
+        }),
+    },
     whisper,
     insertion,
     welcome,

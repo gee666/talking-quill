@@ -1,11 +1,17 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { delimiter, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 import { HistoryStore } from '../../app/src/main/persistence/history-store';
 import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
+import {
+  inspectExactArtifact,
+  launchExactArtifact,
+  snapshotExactArtifact,
+  verifyExactArtifact,
+  type ExactArtifact,
+} from '../../scripts/exact-artifact-harness.mjs';
 
 const packageRoot = resolve(process.env.TALKING_QUILL_PACKAGE_ROOT ?? 'release/win-unpacked');
 const executable = resolve(
@@ -15,29 +21,27 @@ const executable = resolve(
       ? 'Talking Quill.app/Contents/MacOS/Talking Quill'
       : 'Talking Quill.exe'),
 );
+const packagedArtifactPromise = inspectExactArtifact({
+  root: packageRoot,
+  executable,
+  ...(process.env.TALKING_QUILL_PACKAGE_EXECUTABLE_SHA256 === undefined
+    ? {}
+    : { expectedSha256: process.env.TALKING_QUILL_PACKAGE_EXECUTABLE_SHA256 }),
+  ...(process.env.TALKING_QUILL_PACKAGE_TREE_SHA256 === undefined
+    ? {}
+    : { expectedTreeSha256: process.env.TALKING_QUILL_PACKAGE_TREE_SHA256 }),
+});
 const fakeAudioFile = resolve('tests/fixtures/fake-microphone.wav');
 const retainedThumbnailFixture = resolve('app/assets/provider-logos/mistral.jpeg');
 
 interface PackagedApplication {
+  readonly artifact: ExactArtifact;
   readonly child: ChildProcess;
   readonly browser: Browser;
   readonly main: Page;
-  readonly widget: Page;
+  readonly widget: Page | undefined;
   readonly capture: Page;
   readonly diagnostics: () => string;
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolvePort, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (typeof address === 'object' && address !== null)
-        server.close(() => resolvePort(address.port));
-      else reject(new Error('No debugging port'));
-    });
-  });
 }
 
 async function seedRetainedScreenshotHistory(profile: string): Promise<void> {
@@ -94,13 +98,21 @@ async function launchPackaged(
   interactivePiAppData?: string,
   egressProof = true,
   mediaHarness = false,
+  requireWidgetRenderer = false,
 ): Promise<PackagedApplication> {
-  const port = await freePort();
-  let stage = 'native-spawn';
-  const child = spawn(
-    executable,
+  const devToolsActivePort = resolve(profile, 'DevToolsActivePort');
+  await rm(devToolsActivePort, { force: true });
+  let stage = 'artifact-inspection';
+  const sourceArtifact = await packagedArtifactPromise;
+  const packagedArtifact = await snapshotExactArtifact(
+    sourceArtifact,
+    resolve('tmp/exact-artifact-launches'),
+  );
+  stage = 'native-spawn';
+  const child = await launchExactArtifact(
+    packagedArtifact,
     [
-      `--remote-debugging-port=${String(port)}`,
+      '--remote-debugging-port=0',
       `--talking-quill-user-data=${profile}`,
       '--use-fake-device-for-media-stream',
       `--use-file-for-fake-audio-capture=${fakeAudioFile}`,
@@ -109,8 +121,6 @@ async function launchPackaged(
         : []),
     ],
     {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
       env: {
         ...process.env,
         ELECTRON_RENDERER_URL: 'http://127.0.0.1:9',
@@ -159,42 +169,71 @@ async function launchPackaged(
       `${message} (stage=${stage}, pid=${String(child.pid ?? 'unavailable')})\nProcess tree:\n${processTree}\nNative output:\n${diagnostics || '(none)'}`,
     );
   };
+  const failLaunch = async (message: string, browser?: Browser): Promise<never> => {
+    const error = await failure(message);
+    await browser?.close().catch(() => undefined);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      await waitForExit(child, 5_000).catch(() => undefined);
+    }
+    await verifyExactArtifact(packagedArtifact);
+    throw error;
+  };
   stage = 'debug-endpoint';
-  const endpoint = `http://127.0.0.1:${String(port)}`;
-  const deadline = Date.now() + 20_000;
+  const debugDeadline = Date.now() + 20_000;
   let browser: Browser | null = null;
-  while (Date.now() < deadline && browser === null) {
+  while (Date.now() < debugDeadline && browser === null) {
     await delay(125);
-    browser = await chromium.connectOverCDP(endpoint, { timeout: 500 }).catch(() => null);
+    const port = await readFile(devToolsActivePort, 'utf8')
+      .then((value) => Number(value.split(/\r?\n/u, 1)[0]))
+      .catch(() => Number.NaN);
+    if (Number.isInteger(port) && port > 0 && port <= 65_535) {
+      browser = await chromium
+        .connectOverCDP(`http://127.0.0.1:${String(port)}`, { timeout: 500 })
+        .catch(() => null);
+    }
   }
   if (browser === null) {
-    const error = await failure('Packaged app did not expose a renderer debugging endpoint');
-    child.kill();
-    throw error;
+    return failLaunch('Packaged app did not expose a renderer debugging endpoint');
   }
 
   stage = 'renderer-roles';
+  const rendererDeadline = Date.now() + 20_000;
   let main: Page | undefined;
   let widget: Page | undefined;
   let capture: Page | undefined;
   while (
-    Date.now() < deadline &&
-    (main === undefined || widget === undefined || capture === undefined)
+    Date.now() < rendererDeadline &&
+    (main === undefined || capture === undefined || (requireWidgetRenderer && widget === undefined))
   ) {
     const pages = browser.contexts().flatMap((context) => context.pages());
     main = pages.find((candidate) => candidate.url().includes('/main/index.html'));
     widget = pages.find((candidate) => candidate.url().includes('/widget/index.html'));
     capture = pages.find((candidate) => candidate.url().includes('/capture/index.html'));
-    if (main === undefined || widget === undefined || capture === undefined) await delay(125);
+    if (
+      main === undefined ||
+      capture === undefined ||
+      (requireWidgetRenderer && widget === undefined)
+    )
+      await delay(125);
   }
-  if (main === undefined || widget === undefined || capture === undefined) {
-    const error = await failure('Packaged renderer roles are incomplete');
-    await browser.close();
-    child.kill();
-    throw error;
+  if (
+    main === undefined ||
+    capture === undefined ||
+    (requireWidgetRenderer && widget === undefined)
+  ) {
+    return failLaunch('Packaged renderer roles are incomplete', browser);
   }
   stage = 'ready';
-  return { child, browser, main, widget, capture, diagnostics: () => diagnostics };
+  return {
+    artifact: packagedArtifact,
+    child,
+    browser,
+    main,
+    widget,
+    capture,
+    diagnostics: () => diagnostics,
+  };
 }
 
 async function readProcessTree(pid: number | undefined): Promise<string> {
@@ -318,6 +357,7 @@ async function dispose(application: PackagedApplication | null): Promise<void> {
     application.child.kill();
     await waitForExit(application.child, 5_000).catch(() => undefined);
   }
+  await verifyExactArtifact(application.artifact);
 }
 
 test('packaged fake media traverses capture, session, and widget with reset', async () => {
@@ -328,35 +368,39 @@ test('packaged fake media traverses capture, session, and widget with reset', as
   const profile = resolve('tmp/tests/instrumented-packaged-media-profile');
   await rm(profile, { recursive: true, force: true });
   await mkdir(profile, { recursive: true });
-  const launched = await launchPackaged(profile, undefined, false, true);
+  const launched = await launchPackaged(profile, undefined, false, true, true);
   try {
-    await launched.widget.emulateMedia({ reducedMotion: 'reduce' });
-    const meter = launched.widget.getByRole('meter', { name: 'Microphone level' });
+    const widget = launched.widget;
+    if (widget === undefined)
+      throw new Error('Packaged media activation did not create its widget');
+    await widget.emulateMedia({ reducedMotion: 'reduce' });
+    const meter = widget.getByRole('meter', { name: 'Microphone level' });
     await expect
       .poll(async () => Number(await meter.getAttribute('aria-valuenow')))
       .toBeGreaterThan(0);
-    await launched.widget.screenshot({
+    await widget.screenshot({
       path: resolve('tmp', 'instrumented-packaged-widget.png'),
       animations: 'disabled',
     });
     await expect(meter).toHaveAttribute('aria-valuetext', /percent, (?:speaking|loud)/iu);
     expect(
-      await launched.widget.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches),
+      await widget.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches),
     ).toBe(true);
-    await launched.widget.getByRole('button', { name: 'Cancel dictation' }).click();
+    await widget.getByRole('button', { name: 'Cancel dictation' }).click();
     await expect(meter).toHaveAttribute('aria-valuenow', '0');
     await expect(meter).toHaveAttribute('aria-valuetext', '0 percent, silent');
-    await launched.widget.reload();
-    await expect(launched.widget.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute(
+    await widget.reload();
+    await expect(widget.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute(
       'aria-valuenow',
       '0',
     );
+    await expect(widget.getByText('Ready', { exact: true })).toBeAttached();
   } finally {
     await dispose(launched);
   }
 });
 
-test('real packaged app opens every renderer, isolates Node, and persists a setting', async () => {
+test('real owner-enabled packaged app isolates Node and persists a setting', async () => {
   test.setTimeout(480_000);
   const target = process.env.TALKING_QUILL_PACKAGE_TARGET;
   if (target === 'mac') expect(process.platform).toBe('darwin');
@@ -371,7 +415,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
   await seedRetainedScreenshotHistory(profile);
   let launched: PackagedApplication | null = null;
   try {
-    launched = await launchPackaged(profile);
+    launched = await launchPackaged(profile, undefined, true, false, false);
     const rendererErrors: string[] = [];
     launched.main.on('console', (message) => {
       if (message.type() === 'error') rendererErrors.push(message.text());
@@ -424,9 +468,11 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     const helperReadiness = launched.main
       .locator('.readiness-row')
       .filter({ hasText: 'Typing helper' });
-    await expect(helperReadiness).toContainText(
-      process.platform === 'win32' ? 'Available' : /Available|Needs permission/,
-    );
+    const bootstrapPage = launched.main;
+    await expect
+      .poll(() => bootstrapPage.evaluate(() => window.talkingQuill.app.getBootstrap()))
+      .toMatchObject({ state: { helper: { status: 'ready', reason: null } } });
+    await expect(helperReadiness).toContainText('Available');
     expect(await launched.main.evaluate(() => Reflect.has(window.talkingQuill, 'helper'))).toBe(
       false,
     );
@@ -447,27 +493,32 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
       arbitrary: false,
       rawIpc: 'undefined',
     });
+    const rendererPages = launched.browser.contexts().flatMap((context) => context.pages());
+    const widgetPage = rendererPages.find((page) => page.url().includes('/widget/index.html'));
+    expect(widgetPage).toBeDefined();
+    if (widgetPage === undefined) throw new Error('Preloaded widget renderer is missing');
     expect(
-      await launched.widget.evaluate(() => ({
+      await widgetPage.evaluate(() => ({
         main: Reflect.has(window, 'talkingQuill'),
         widget: Reflect.has(window, 'talkingQuillWidget'),
         capture: Reflect.has(window, 'talkingQuillCapture'),
-        keys: Object.keys(window.talkingQuillWidget),
         frozen: Object.isFrozen(window.talkingQuillWidget),
-        arbitrary: Reflect.has(window.talkingQuillWidget, 'ipc:unknown'),
         rawIpc: typeof Reflect.get(globalThis, 'ipcRenderer'),
+        visibility: document.visibilityState,
       })),
     ).toEqual({
       main: false,
       widget: true,
       capture: false,
-      keys: ['ready', 'stop', 'cancel', 'setInteractive', 'onSessionChanged'],
       frozen: true,
-      arbitrary: false,
       rawIpc: 'undefined',
+      visibility: 'hidden',
     });
+    const capturePage = rendererPages.find((page) => page.url().includes('/capture/index.html'));
+    expect(capturePage).toBeDefined();
+    if (capturePage === undefined) throw new Error('Capture renderer is missing');
     expect(
-      await launched.capture.evaluate(() => ({
+      await capturePage.evaluate(() => ({
         main: Reflect.has(window, 'talkingQuill'),
         widget: Reflect.has(window, 'talkingQuillWidget'),
         capture: Reflect.has(window, 'talkingQuillCapture'),
@@ -485,10 +536,8 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
       arbitrary: false,
       rawIpc: 'undefined',
     });
-    // The hidden session widget reports its idle session state; setup readiness is owned by main.
-    await expect(launched.widget.getByText('Ready', { exact: true }).first()).toBeVisible();
     await expect
-      .poll(() => launched?.capture.evaluate(() => document.documentElement.dataset.ready))
+      .poll(() => capturePage.evaluate(() => document.documentElement.dataset.ready))
       .toBe('true');
     await expect
       .poll(async () => {
@@ -594,9 +643,10 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     await launched.main.getByRole('button', { name: 'Close window' }).click();
     await firstExit;
     await launched.browser.close();
+    await verifyExactArtifact(launched.artifact);
     launched = null;
 
-    launched = await launchPackaged(profile);
+    launched = await launchPackaged(profile, undefined, true, false, false);
     await launched.main.getByRole('button', { name: 'Settings' }).click();
     await launched.main.getByRole('button', { name: 'General' }).click();
     await expect(
@@ -608,6 +658,7 @@ test('real packaged app opens every renderer, isolates Node, and persists a sett
     await launched.main.getByRole('button', { name: 'Close window' }).click();
     await secondExit;
     await launched.browser.close();
+    await verifyExactArtifact(launched.artifact);
     launched = null;
   } finally {
     await dispose(launched);
@@ -660,7 +711,7 @@ test('packaged Windows discovers authentic AppData npm Pi under a stale PATH', a
     });
     expect(evidence.status).toMatchObject({
       state: 'ready',
-      version: '0.84.2',
+      version: '0.84.3',
       source: 'appdata-npm',
     });
     expect(evidence.models).toEqual([

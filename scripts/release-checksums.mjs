@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { validateReleaseManifest } from './release-manifest.mjs';
 
 const args = process.argv.slice(2).filter((argument) => argument !== '--');
 if (args.length > 1) throw new Error('Expected zero or one release artifact directory.');
 const directory = resolve(args[0] ?? 'release-artifacts');
 const outputName = 'SHA256SUMS.txt';
 const manifestName = 'release-manifest.json';
-const manifest = JSON.parse(readFileSync(resolve(directory, manifestName), 'utf8'));
-if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.assets))
-  throw new Error('Release manifest is invalid.');
+const manifest = validateReleaseManifest(
+  JSON.parse(readFileSync(resolve(directory, manifestName), 'utf8')),
+);
 const expected = [...manifest.assets.map((asset) => asset.name), manifestName].sort();
 const names = readdirSync(directory)
   .filter((name) => name !== outputName)

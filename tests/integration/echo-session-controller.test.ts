@@ -54,6 +54,7 @@ import {
   type ShortcutKey,
 } from '../../app/src/shared/schemas/shortcut';
 
+const DEFAULT_ACTIVATION_TARGET = 'activation-target';
 const profileBinding = (profileId: string, shortcut: Shortcut) => ({ profileId, shortcut });
 const builtInBindings = (
   generalShortcut: Shortcut = DEFAULT_GENERAL_PROFILE.shortcut,
@@ -65,6 +66,7 @@ const builtInBindings = (
 function fixture(
   options: {
     readonly insert?: InsertionService['insert'];
+    readonly platform?: 'win32' | 'darwin';
     readonly helperReadiness?: HelperReadiness;
     readonly startDictation?: RecordingService['startDictation'];
     readonly stopDictation?: RecordingService['stopDictation'];
@@ -84,6 +86,8 @@ function fixture(
     readonly settingsUpdateFailure?: (patch: SettingsPatch) => Error | null;
     readonly recording?: Partial<Settings['recording']>;
     readonly historyRecord?: EchoHistoryPort['record'];
+    readonly createWidgetForActivation?: WindowManager['createWidgetForActivation'];
+    readonly deferInitialize?: boolean;
   } = {},
 ) {
   let notification: ((value: HelperNotification) => void) | null = null;
@@ -228,10 +232,11 @@ function fixture(
     options.insert ?? (() => Promise.resolve({ inserted: true, copied: false })),
   );
   const insertion = { insert } as unknown as InsertionService;
+  const createWidgetForActivation = vi.fn(options.createWidgetForActivation ?? (() => true));
   const showWidget = vi.fn(() => true);
   const showMain = vi.fn();
   const windows = {
-    createWidgetForActivation: vi.fn(() => true),
+    createWidgetForActivation,
     showWidget,
     removeWidget: vi.fn(),
     showMain,
@@ -241,6 +246,7 @@ function fixture(
   const historyRecord = vi.fn(options.historyRecord ?? (() => true));
   const controller = new EchoSessionController({
     settings,
+    platform: options.platform ?? 'win32',
     recording,
     whisper,
     helper,
@@ -254,9 +260,11 @@ function fixture(
     ...(options.acquireModelUse === undefined ? {} : { acquireModelUse: options.acquireModelUse }),
     sound,
   });
-  controller.initialize();
+  const initialized =
+    options.deferInitialize === true ? Promise.resolve() : controller.initialize();
   return {
     controller,
+    initialized,
     helper,
     recording,
     whisper,
@@ -274,6 +282,7 @@ function fixture(
       startSession,
       finish,
       cancelStream,
+      createWidgetForActivation,
       showWidget,
       showMain,
       sound,
@@ -297,6 +306,7 @@ function fixture(
       captureCallbackHistory[index]?.onUnexpectedStop('device-unavailable');
     },
     setHelperReadiness(value: HelperReadiness) {
+      (helper as { readiness: HelperReadiness }).readiness = value;
       readinessListener?.(value);
     },
     setPrivacy(patch: Partial<Settings['privacy']>) {
@@ -314,6 +324,8 @@ function activation(
   shift = false,
   keyValue?: ShortcutKey,
   profileId = shift ? 'prompt' : 'general',
+  activationGeneration = 1,
+  targetToken: string | null = DEFAULT_ACTIVATION_TARGET,
 ): HelperNotification {
   const defaultProfile = DEFAULT_SETTINGS.dictationProfiles.find(({ id }) => id === profileId);
   return {
@@ -326,6 +338,8 @@ function activation(
         keyValue === undefined && defaultProfile !== undefined
           ? defaultProfile.shortcut
           : shortcutFromLegacyActivation(keyValue ?? 'Z', shift),
+      activationGeneration,
+      targetToken,
     },
   };
 }
@@ -333,22 +347,33 @@ function activationComplete(
   heldMs: number,
   shortcut: Shortcut = DEFAULT_GENERAL_PROFILE.shortcut,
   profileId = 'general',
+  activationGeneration = 1,
+  targetToken: string | null = DEFAULT_ACTIVATION_TARGET,
 ): HelperNotification {
   return {
     jsonrpc: '2.0',
     method: 'activation.event',
-    params: { phase: 'complete', profileId, shortcut, heldMs },
+    params: {
+      phase: 'complete',
+      profileId,
+      shortcut,
+      activationGeneration,
+      targetToken,
+      heldMs,
+    },
   };
 }
 function chordActivation(
   phase: 'down' | 'up',
   shortcut: Shortcut,
   profileId = 'general',
+  activationGeneration = 1,
+  targetToken: string | null = DEFAULT_ACTIVATION_TARGET,
 ): HelperNotification {
   return {
     jsonrpc: '2.0',
     method: 'activation.event',
-    params: { phase, profileId, shortcut },
+    params: { phase, profileId, shortcut, activationGeneration, targetToken },
   };
 }
 
@@ -467,8 +492,85 @@ describe('EchoSessionController integration', () => {
 
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
     expect(test.controller.snapshot.message).toBe(
-      'Keyboard shortcuts could not be enabled. Restart Talking Quill or reinstall the app.',
+      'Keyboard shortcuts could not be enabled. Talking Quill will retry automatically.',
     );
+    await vi.waitFor(() => expect(test.spies.createWidgetForActivation).toHaveBeenCalledOnce());
+    expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
+    await test.controller.shutdown();
+  });
+
+  it('backs off repeated profile-sync failures and restores activation after success', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const test = fixture({
+      configureActivation: (enabled, bindings) => {
+        attempts += 1;
+        return attempts <= 3
+          ? Promise.reject(new Error('transient profile sync failure'))
+          : Promise.resolve({ enabled, bindings });
+      },
+    });
+
+    await test.initialized;
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'Keyboard shortcuts could not be enabled. Talking Quill will retry automatically.',
+    });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(899);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(101);
+    await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalledTimes(4));
+    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
+
+    test.notify(activation('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    expect(test.controller.snapshot.phase).toBe('arming');
+    await test.controller.shutdown();
+  });
+
+  it('cancels a pending profile-sync retry during shutdown', async () => {
+    vi.useFakeTimers();
+    const test = fixture({
+      configureActivation: () => Promise.reject(new Error('persistent profile sync failure')),
+    });
+    await test.initialized;
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
+
+    await test.controller.shutdown();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [
+      'owner-auth-failed',
+      'The local keyboard owner could not be authenticated. Restart Talking Quill, then reinstall it if the problem continues.',
+    ],
+    [
+      'owner-security-fault',
+      'The local keyboard owner failed a security check. Reinstall Talking Quill before using shortcuts.',
+    ],
+  ] as const)('shows terminal actionable widget text for %s', async (reason, message) => {
+    const test = fixture();
+    await settle();
+    test.setHelperReadiness({
+      status: 'unavailable',
+      reason,
+      helperVersion: '1.0.0',
+      permissions: test.helper.readiness.permissions,
+    });
+
+    expect(test.controller.snapshot).toMatchObject({ phase: 'error', message });
+    await vi.waitFor(() => expect(test.spies.createWidgetForActivation).toHaveBeenCalledOnce());
     expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
     await test.controller.shutdown();
   });
@@ -486,7 +588,32 @@ describe('EchoSessionController integration', () => {
     });
 
     expect(test.controller.snapshot.phase).toBe('error');
+    await vi.waitFor(() => expect(test.spies.createWidgetForActivation).toHaveBeenCalledOnce());
     expect(test.spies.showMain).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a stale operational-widget continuation after the error resets', async () => {
+    vi.useFakeTimers();
+    const widgetReady = deferred<boolean>();
+    const test = fixture({ createWidgetForActivation: () => widgetReady.promise });
+    await test.initialized;
+
+    test.setHelperReadiness({
+      status: 'unavailable',
+      reason: 'hook-fault',
+      helperVersion: '1.0.0',
+      permissions: test.helper.readiness.permissions,
+    });
+    expect(test.controller.snapshot.phase).toBe('error');
+    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
+
+    widgetReady.resolve(true);
+    await widgetReady.promise;
+    await Promise.resolve();
+    expect(test.spies.showWidget).not.toHaveBeenCalled();
+    expect(test.spies.showMain).not.toHaveBeenCalled();
+    await test.controller.shutdown();
   });
 
   it('disables native activation during shortcut capture and restores the latest bindings', async () => {
@@ -501,7 +628,7 @@ describe('EchoSessionController integration', () => {
     await settle();
     test.spies.configureActivation.mockClear();
 
-    await test.controller.startShortcutCapture(7, onDestroyed);
+    const leaseId = await test.controller.startShortcutCapture(7, onDestroyed);
     expect(test.spies.configureActivation).toHaveBeenLastCalledWith(false, builtInBindings());
 
     test.notify(activation('down'));
@@ -517,7 +644,7 @@ describe('EchoSessionController integration', () => {
       expect.arrayContaining([profileBinding('general', shortcutFromLegacyActivation('Q', false))]),
     );
 
-    await test.controller.stopShortcutCapture(7);
+    await test.controller.stopShortcutCapture(7, leaseId);
     expect(test.spies.configureActivation).toHaveBeenLastCalledWith(
       true,
       expect.arrayContaining([profileBinding('general', shortcutFromLegacyActivation('Q', false))]),
@@ -564,30 +691,166 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
   });
 
-  it('retries authoritative activation after shortcut-capture restoration fails', async () => {
+  it('never arms a lease when owner invalidation fires synchronously during registration', async () => {
     const test = fixture();
     await settle();
-    await test.controller.startShortcutCapture(8, () => () => undefined);
     test.spies.configureActivation.mockClear();
-    let failed = false;
+    const removeInvalidation = vi.fn();
+
+    await expect(
+      test.controller.startShortcutCapture(7, (listener) => {
+        listener();
+        return removeInvalidation;
+      }),
+    ).rejects.toThrow('Shortcut capture owner is unavailable');
+
+    await settle();
+    expect(removeInvalidation).toHaveBeenCalledOnce();
+    expect(test.spies.configureActivation).not.toHaveBeenCalled();
+    expect(test.controller.systemWakeRevalidationSafe).toBe(true);
+  });
+
+  it('keeps same-renderer leases independent and ignores stale or foreign stops', async () => {
+    const test = fixture();
+    await settle();
+    const invalidations = new Set<() => void>();
+    const register = (listener: () => void) => {
+      invalidations.add(listener);
+      return () => invalidations.delete(listener);
+    };
+
+    const firstLease = await test.controller.startShortcutCapture(7, register);
+    const secondLease = await test.controller.startShortcutCapture(7, register);
+    expect(firstLease).not.toBe(secondLease);
+    expect(invalidations.size).toBe(2);
+    test.spies.configureActivation.mockClear();
+
+    await test.controller.stopShortcutCapture(99, firstLease);
+    expect(test.spies.configureActivation).not.toHaveBeenCalled();
+
+    await test.controller.stopShortcutCapture(7, firstLease);
+    expect(test.spies.configureActivation).toHaveBeenCalledOnce();
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(false, builtInBindings());
+    expect(invalidations.size).toBe(1);
+
+    await test.controller.stopShortcutCapture(7, firstLease);
+    expect(test.spies.configureActivation).toHaveBeenCalledOnce();
+
+    await test.controller.stopShortcutCapture(7, secondLease);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(2);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
+    expect(invalidations.size).toBe(0);
+  });
+
+  it('restores activation even when lifecycle-listener cleanup throws', async () => {
+    const test = fixture();
+    await settle();
+    const leaseId = await test.controller.startShortcutCapture(7, () => () => {
+      throw new Error('listener cleanup failed');
+    });
+    test.spies.configureActivation.mockClear();
+
+    await expect(test.controller.stopShortcutCapture(7, leaseId)).resolves.toBeUndefined();
+
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
+    expect(test.controller.systemWakeRevalidationSafe).toBe(true);
+  });
+
+  it('revokes a rejected start lease and restores authoritative activation in main', async () => {
+    const test = fixture();
+    await settle();
+    test.spies.configureActivation.mockClear();
+    let failDisable = true;
     test.spies.configureActivation.mockImplementation((enabled, bindings) => {
-      if (enabled && !failed) {
-        failed = true;
+      if (!enabled && failDisable) {
+        failDisable = false;
+        return Promise.reject(new Error('activation suspend failed'));
+      }
+      return Promise.resolve({ enabled, bindings });
+    });
+    const removeInvalidation = vi.fn();
+
+    await expect(test.controller.startShortcutCapture(7, () => removeInvalidation)).rejects.toThrow(
+      'activation suspend failed',
+    );
+
+    await vi.waitFor(() =>
+      expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings()),
+    );
+    expect(removeInvalidation).toHaveBeenCalledOnce();
+  });
+
+  it('retries authoritative activation with the same lease after repeated restoration failures', async () => {
+    const test = fixture();
+    await settle();
+    const leaseId = await test.controller.startShortcutCapture(8, () => () => undefined);
+    test.spies.configureActivation.mockClear();
+    let failuresRemaining = 2;
+    test.spies.configureActivation.mockImplementation((enabled, bindings) => {
+      if (enabled && failuresRemaining > 0) {
+        failuresRemaining -= 1;
         return Promise.reject(new Error('transient registration failure'));
       }
       return Promise.resolve({ enabled, bindings });
     });
 
-    await expect(test.controller.stopShortcutCapture(8)).rejects.toThrow(
+    await expect(test.controller.stopShortcutCapture(8, leaseId)).rejects.toThrow(
       'transient registration failure',
     );
+    await expect(test.controller.stopShortcutCapture(8, leaseId)).resolves.toBeUndefined();
 
-    await vi.waitFor(() => {
+    expect(
+      test.spies.configureActivation.mock.calls.filter(([enabled]) => enabled).length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
+    const reconciliations = test.spies.configureActivation.mock.calls.length;
+    await test.controller.stopShortcutCapture(8, leaseId);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(reconciliations);
+  });
+
+  it('retains owner invalidation until a failed restoration is retried', async () => {
+    const test = fixture();
+    await settle();
+    const invalidation: { current: (() => void) | null } = { current: null };
+    const leaseId = await test.controller.startShortcutCapture(8, (listener) => {
+      let active = true;
+      invalidation.current = () => {
+        if (!active) return;
+        active = false;
+        listener();
+      };
+      return () => {
+        active = false;
+        invalidation.current = null;
+      };
+    });
+    test.spies.configureActivation.mockClear();
+    let failuresRemaining = 2;
+    test.spies.configureActivation.mockImplementation((enabled, bindings) => {
+      if (enabled && failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        return Promise.reject(new Error('transient registration failure'));
+      }
+      return Promise.resolve({ enabled, bindings });
+    });
+
+    await expect(test.controller.stopShortcutCapture(8, leaseId)).rejects.toThrow(
+      'transient registration failure',
+    );
+    await vi.waitFor(() =>
       expect(test.spies.configureActivation.mock.calls.filter(([enabled]) => enabled)).toHaveLength(
         2,
-      );
-    });
+      ),
+    );
+    const invalidateOwner = invalidation.current;
+    if (invalidateOwner === null) throw new Error('Owner invalidation listener is missing');
+    invalidateOwner();
+
+    await vi.waitFor(() => expect(invalidation.current).toBeNull());
     expect(test.spies.configureActivation).toHaveBeenLastCalledWith(true, builtInBindings());
+    const reconciliations = test.spies.configureActivation.mock.calls.length;
+    await test.controller.stopShortcutCapture(8, leaseId);
+    expect(test.spies.configureActivation).toHaveBeenCalledTimes(reconciliations);
   });
 
   it('keeps the processing mirror atomic and resets each built-in to its reserved default', async () => {
@@ -651,15 +914,26 @@ describe('EchoSessionController integration', () => {
     await expect(test.controller.resetProfile(custom.id)).rejects.toThrow(
       'Only built-in profiles can be reset',
     );
+    await expect(
+      test.controller.updateProfile(custom.id, {
+        shortcut: DEFAULT_GENERAL_PROFILE.shortcut,
+      }),
+    ).rejects.toThrow('reserved for their owners');
+    await expect(
+      test.controller.updateProfile('general', {
+        shortcut: DEFAULT_PROMPT_PROFILE.shortcut,
+      }),
+    ).rejects.toThrow('reserved for their owners');
     expect(test.spies.configureActivation).not.toHaveBeenCalled();
 
     const authoritative = await test.controller.updateProfile(custom.id, {
       name: 'Custom profile still present',
     });
     expect(authoritative.dictationProfiles.find(({ id }) => id === 'general')).toBeDefined();
-    expect(authoritative.dictationProfiles.find(({ id }) => id === custom.id)?.name).toBe(
-      'Custom profile still present',
-    );
+    expect(authoritative.dictationProfiles.find(({ id }) => id === custom.id)).toMatchObject({
+      name: 'Custom profile still present',
+      shortcut: custom.shortcut,
+    });
   });
 
   it('serializes complete profile CRUD transactions without losing concurrent updates', async () => {
@@ -998,6 +1272,7 @@ describe('EchoSessionController integration', () => {
     expect(smart.process).not.toHaveBeenCalled();
     expect(test.spies.insert).toHaveBeenCalledWith(
       'inserted snippet',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -1157,6 +1432,7 @@ describe('EchoSessionController integration', () => {
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
     expect(test.spies.insert).toHaveBeenCalledWith(
       command.snippet,
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -1176,7 +1452,7 @@ describe('EchoSessionController integration', () => {
     };
     const test = fixture({
       commands: { match: () => ({ command, kind: 'exact', score: 1 }) },
-      insert: (_text, signal) =>
+      insert: (_text, _activationContext, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener(
             'abort',
@@ -1206,7 +1482,7 @@ describe('EchoSessionController integration', () => {
 
   it('cancels uncommitted insertion from physical Escape', async () => {
     const test = fixture({
-      insert: (_text, signal) =>
+      insert: (_text, _activationContext, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener(
             'abort',
@@ -1239,7 +1515,7 @@ describe('EchoSessionController integration', () => {
     const restoration = deferred<undefined>();
     const test = fixture({
       commands: { match: () => ({ command, kind: 'exact', score: 1 }) },
-      insert: async (_text, _signal, onCommitted) => {
+      insert: async (_text, _activationContext, _signal, onCommitted) => {
         onCommitted?.();
         await restoration.promise;
         return { inserted: true, copied: false };
@@ -1266,7 +1542,7 @@ describe('EchoSessionController integration', () => {
     vi.useFakeTimers();
     const restoration = deferred<undefined>();
     const test = fixture({
-      insert: async (_text, _signal, onCommitted) => {
+      insert: async (_text, _activationContext, _signal, onCommitted) => {
         onCommitted?.();
         await restoration.promise;
         return { inserted: true, copied: false };
@@ -1292,7 +1568,8 @@ describe('EchoSessionController integration', () => {
     await vi.advanceTimersByTimeAsync(1_200);
     expect(test.controller.snapshot).toMatchObject({
       phase: 'error',
-      message: 'Keyboard shortcuts are unavailable. Restart Talking Quill or reinstall the app.',
+      message:
+        'The local keyboard owner is unavailable. Talking Quill will restart it automatically.',
     });
     await test.controller.shutdown();
   });
@@ -1307,7 +1584,7 @@ describe('EchoSessionController integration', () => {
     };
     const test = fixture({
       commands: { match: () => ({ command, kind: 'exact', score: 1 }) },
-      insert: (_text, _signal, onCommitted) => {
+      insert: (_text, _activationContext, _signal, onCommitted) => {
         onCommitted?.();
         return Promise.reject(new Error('clipboard restoration failed'));
       },
@@ -1363,6 +1640,7 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.transcribe).toHaveBeenCalledOnce();
     expect(test.spies.insert).toHaveBeenCalledWith(
       'locally transcribed',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -1461,6 +1739,7 @@ describe('EchoSessionController integration', () => {
     expect(process).toHaveBeenCalledWith('locally transcribed', expect.any(AbortSignal));
     expect(test.spies.insert).toHaveBeenCalledWith(
       'Hello world',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -1548,7 +1827,7 @@ describe('EchoSessionController integration', () => {
     async ({ mode, smart, kind }) => {
       const test = fixture({
         ...(smart === undefined ? {} : { smartProcessor: smart }),
-        insert: (_text, _signal, onCommitted) => {
+        insert: (_text, _activationContext, _signal, onCommitted) => {
           onCommitted?.();
           onCommitted?.();
           return Promise.reject(new Error('clipboard restoration failed'));
@@ -1642,6 +1921,7 @@ describe('EchoSessionController integration', () => {
         return startup.promise;
       },
     });
+    await test.initialized;
 
     test.notify(activation('down'));
     test.notify(key('enter'));
@@ -1672,6 +1952,7 @@ describe('EchoSessionController integration', () => {
         return startup.promise;
       },
     });
+    await test.initialized;
     test.notify(activation('down'));
     test.notify(key('enter'));
     await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
@@ -1724,6 +2005,30 @@ describe('EchoSessionController integration', () => {
     test.controller.cancel();
   });
 
+  it('accepts an arbitrary Shift shared-prefix completion and preserves alternate semantics', async () => {
+    const test = fixture();
+    const general: Shortcut = {
+      modifiers: { ctrl: true, alt: false, shift: true, meta: false },
+      keys: ['G'],
+    };
+    const prompt: Shortcut = { ...general, keys: ['G', 'P'] };
+    await test.controller.updateProfile('general', { shortcut: general });
+    await test.controller.updateProfile('prompt', { shortcut: prompt });
+
+    test.notify(activationComplete(100, general, 'general', 17, 'shift-prefix-target'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('recordingQuick'));
+    expect(test.controller.snapshot).toMatchObject({ alternate: true, dictationMode: 'quick' });
+    test.frame();
+    test.notify(key('enter'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+    expect(test.spies.insert).toHaveBeenCalledWith(
+      'locally transcribed',
+      { activationGeneration: 17, targetToken: 'shift-prefix-target' },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
   it.each([
     [599, 'recordingQuick', 'quick'],
     [600, 'recordingExtended', 'extended'],
@@ -1756,6 +2061,8 @@ describe('EchoSessionController integration', () => {
     test.notify(chordActivation('up', shortcut, 'prompt'));
     expect(test.controller.snapshot.phase).toBe('arming');
     test.notify(chordActivation('up', wrong));
+    test.notify(chordActivation('up', shortcut, 'general', 2));
+    test.notify(chordActivation('up', shortcut, 'general', 1, 'wrong-target'));
     expect(test.controller.snapshot.phase).toBe('arming');
     test.notify(chordActivation('up', shortcut));
     expect(test.controller.snapshot).toMatchObject({
@@ -1785,6 +2092,25 @@ describe('EchoSessionController integration', () => {
     test.notify(chordActivation('down', general, 'general'));
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
     expect(test.spies.transcribe).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the first activation target when a later shortcut stops recording', async () => {
+    const test = fixture();
+    test.notify(activation('down', false, undefined, 'general', 11, 'initial-target'));
+    await settle();
+    test.frame();
+    test.notify(activation('up', false, undefined, 'general', 11, 'initial-target'));
+    expect(test.controller.snapshot.phase).toBe('recordingQuick');
+
+    test.notify(activation('down', false, undefined, 'general', 12, 'stop-target'));
+    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
+
+    expect(test.spies.insert).toHaveBeenCalledWith(
+      'locally transcribed',
+      { activationGeneration: 11, targetToken: 'initial-target' },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
   });
 
   it('submits a frozen-profile recording with its edited shortcut and pairs the edited snapshot', async () => {
@@ -1938,6 +2264,28 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.stopActivationTest(42).phase).toBe('idle');
   });
 
+  it('allows the physical activation test on injected win32', async () => {
+    const test = fixture({ platform: 'win32' });
+
+    expect(test.controller.startActivationTest(42, () => () => undefined)).toMatchObject({
+      active: true,
+      phase: 'waiting',
+      unavailableReason: null,
+    });
+    await test.controller.shutdown();
+  });
+
+  it('rejects the physical activation test on injected darwin', async () => {
+    const test = fixture({ platform: 'darwin' });
+
+    expect(test.controller.startActivationTest(42, () => () => undefined)).toMatchObject({
+      active: false,
+      phase: 'idle',
+      unavailableReason: 'platform-unavailable',
+    });
+    await test.controller.shutdown();
+  });
+
   it.each([
     {
       name: 'helper unavailable',
@@ -1983,6 +2331,7 @@ describe('EchoSessionController integration', () => {
 
   it('stops and releases an active activation test immediately when activation is disabled', async () => {
     const test = fixture();
+    await test.initialized;
     const removeOwner = vi.fn();
     const ownerDestroyed: { current: (() => void) | null } = { current: null };
     test.controller.startActivationTest(42, (listener) => {
@@ -2122,20 +2471,164 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.stopDictation).toHaveBeenCalled();
   });
 
-  it('gates stale activation notifications on current enabled, model, and helper readiness', async () => {
+  it('reports the exact missing prerequisite for stale activation notifications', async () => {
     let modelReady = false;
     const test = fixture({ isModelReady: () => modelReady });
+    await test.initialized;
     test.notify(activation('down'));
-    expect(test.controller.snapshot.phase).toBe('idle');
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message:
+        'The selected speech model is not available. Open Settings > Speech model and install or repair it.',
+    });
     expect(test.spies.startDictation).not.toHaveBeenCalled();
+    expect(test.spies.showMain).toHaveBeenCalled();
+    await test.controller.shutdown();
+
     modelReady = true;
-    await test.controller.updateGeneral({ app: { enabled: false } });
+    const disabled = fixture({ isModelReady: () => modelReady });
+    await disabled.controller.updateGeneral({ app: { enabled: false } });
+    disabled.notify(activation('down'));
+    expect(disabled.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'Talking Quill is turned off. Turn it on from the Dashboard.',
+    });
+    await disabled.controller.shutdown();
+
+    const helperUnavailable = fixture({
+      helperReadiness: {
+        status: 'unavailable',
+        reason: 'owner-missing',
+        helperVersion: '1.0.0',
+        permissions: {
+          accessibility: 'not_applicable',
+          inputMonitoring: 'not_applicable',
+          eventPost: 'not_applicable',
+        },
+      },
+    });
+    helperUnavailable.notify(activation('down'));
+    expect(helperUnavailable.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message:
+        'The local keyboard owner is unavailable. Talking Quill will restart it automatically.',
+    });
+    await helperUnavailable.controller.shutdown();
+  });
+
+  it('uses keyboard service language for macOS readiness failures', async () => {
+    const test = fixture({
+      platform: 'darwin',
+      helperReadiness: {
+        status: 'unavailable',
+        reason: 'owner-missing',
+        helperVersion: '1.0.0',
+        permissions: {
+          accessibility: 'granted',
+          inputMonitoring: 'granted',
+          eventPost: 'granted',
+        },
+      },
+    });
+
+    await test.initialized;
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'error',
+      message: 'The keyboard service is unavailable. Talking Quill will restart it automatically.',
+    });
+    await test.controller.shutdown();
+  });
+
+  it('keeps native activation behind explicit application initialization and drops early input', async () => {
+    const test = fixture({ deferInitialize: true });
     test.notify(activation('down'));
-    expect(test.controller.snapshot.phase).toBe('idle');
-    await test.controller.updateGeneral({ app: { enabled: true } });
-    test.helper.readiness.status = 'unavailable';
+    expect(test.spies.configureActivation).not.toHaveBeenCalled();
+    expect(test.spies.createWidgetForActivation).not.toHaveBeenCalled();
+
+    await test.controller.initialize();
+    await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalledOnce());
+    expect(test.spies.createWidgetForActivation).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    await test.controller.shutdown();
+  });
+
+  it('does not implement a second activation queue while helper readiness is changing', async () => {
+    const starting: HelperReadiness = {
+      status: 'starting',
+      reason: null,
+      helperVersion: null,
+      permissions: {
+        accessibility: 'not_applicable',
+        inputMonitoring: 'not_applicable',
+        eventPost: 'not_applicable',
+      },
+    };
+    const synchronization = deferred<unknown>();
+    const test = fixture({
+      helperReadiness: starting,
+      configureActivation: () => synchronization.promise,
+    });
+    test.notify(activation('down', false, undefined, 'general', 1));
+    expect(test.spies.createWidgetForActivation).not.toHaveBeenCalled();
+
+    test.setHelperReadiness({
+      ...starting,
+      status: 'ready',
+      helperVersion: '1.0.0',
+    });
+    await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalledOnce());
+    test.notify(activation('up', false, undefined, 'general', 1));
+    synchronization.resolve({});
+    await synchronization.promise;
+
+    expect(test.spies.createWidgetForActivation).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    await test.controller.shutdown();
+  });
+
+  it('drops a queued startup gesture when authentication fails before reconnect', async () => {
+    const starting: HelperReadiness = {
+      status: 'starting',
+      reason: null,
+      helperVersion: null,
+      permissions: {
+        accessibility: 'not_applicable',
+        inputMonitoring: 'not_applicable',
+        eventPost: 'not_applicable',
+      },
+    };
+    const test = fixture({ helperReadiness: starting });
     test.notify(activation('down'));
-    expect(test.controller.snapshot.phase).toBe('idle');
+    test.setHelperReadiness({ ...starting, status: 'unavailable', reason: 'owner-auth-failed' });
+    test.setHelperReadiness({
+      ...starting,
+      status: 'ready',
+      helperVersion: '1.0.0',
+    });
+    await vi.waitFor(() => expect(test.spies.configureActivation).toHaveBeenCalled());
+    await vi.waitFor(() => expect(test.spies.createWidgetForActivation).toHaveBeenCalledOnce());
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    await test.controller.shutdown();
+  });
+
+  it('routes a physical-owner activation notification through Electron and creates the missing widget before capture', async () => {
+    let resolveWidget!: (ready: boolean) => void;
+    const test = fixture({
+      createWidgetForActivation: () =>
+        new Promise((resolve) => {
+          resolveWidget = resolve;
+        }),
+    });
+
+    test.notify(activation('down'));
+    await vi.waitFor(() => expect(test.spies.createWidgetForActivation).toHaveBeenCalledOnce());
+    expect(test.spies.showWidget).not.toHaveBeenCalled();
+    expect(test.spies.startDictation).not.toHaveBeenCalled();
+    resolveWidget(true);
+
+    await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+    expect(test.controller.snapshot.phase).toBe('arming');
     await test.controller.shutdown();
   });
 
@@ -2180,6 +2673,7 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot.abortReason).toBe('provider-error');
     expect(test.spies.insert).toHaveBeenCalledWith(
       'locally transcribed',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -2218,6 +2712,7 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot.abortReason).toBe('provider-error');
     expect(test.spies.insert).toHaveBeenCalledWith(
       'locally transcribed',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -2283,6 +2778,7 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot.completion).toBe('inserted');
     expect(test.spies.insert).toHaveBeenCalledWith(
       'polished',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -2487,6 +2983,7 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot.abortReason).toBe('timeout');
     expect(test.spies.insert).toHaveBeenCalledWith(
       'locally transcribed',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -2557,6 +3054,7 @@ describe('EchoSessionController integration', () => {
     expect(test.controller.snapshot.abortReason).toBe('timeout');
     expect(test.spies.insert).toHaveBeenCalledWith(
       'locally transcribed',
+      { activationGeneration: 1, targetToken: DEFAULT_ACTIVATION_TARGET },
       expect.any(AbortSignal),
       expect.any(Function),
     );
@@ -2591,7 +3089,7 @@ describe('EchoSessionController integration', () => {
       await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('processingSmart'));
       test.controller.abort(reason);
       await vi.waitFor(() => expect(test.spies.insert).toHaveBeenCalledOnce());
-      const insertionSignal = test.spies.insert.mock.calls[0]?.[1];
+      const insertionSignal = test.spies.insert.mock.calls[0]?.[2];
       expect(smartOperation.signal?.aborted).toBe(true);
       expect(insertionSignal?.aborted).toBe(false);
       await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('completed'));
@@ -3065,6 +3563,7 @@ describe('EchoSessionController integration', () => {
         mode === 'recording' ? helperEnable.promise : Promise.resolve({ mode }),
       acquireModelUse: () => Promise.resolve({ status: { state: 'ready' }, release }),
     });
+    await test.initialized;
 
     test.notify(activation('down'));
     await Promise.resolve();
@@ -3209,7 +3708,7 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('up'));
     test.notify(key('enter'));
     await vi.waitFor(() => expect(test.spies.insert).toHaveBeenCalledOnce());
-    const signal = test.spies.insert.mock.calls[0]?.[1];
+    const signal = test.spies.insert.mock.calls[0]?.[2];
     const shutdown = test.controller.shutdown();
     expect(signal?.aborted).toBe(true);
     if (insertionControl.release === null) throw new Error('Insertion was not started');
@@ -3228,7 +3727,7 @@ describe('EchoSessionController integration', () => {
       vi.useFakeTimers();
       let onCommitted: (() => void) | undefined;
       const test = fixture({
-        insert: (_text, _signal, commit) => {
+        insert: (_text, _activationContext, _signal, commit) => {
           onCommitted = commit;
           return new Promise(() => undefined);
         },
@@ -3239,7 +3738,7 @@ describe('EchoSessionController integration', () => {
       test.notify(key('enter'));
       await vi.advanceTimersByTimeAsync(1);
       expect(test.spies.insert).toHaveBeenCalledOnce();
-      const insertionSignal = test.spies.insert.mock.calls[0]?.[1];
+      const insertionSignal = test.spies.insert.mock.calls[0]?.[2];
       if (committed) onCommitted?.();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(insertionSignal?.aborted).toBe(true);
@@ -3252,7 +3751,7 @@ describe('EchoSessionController integration', () => {
     const insertion = deferred<{ inserted: boolean; copied: boolean }>();
     let commit: (() => void) | undefined;
     const test = fixture({
-      insert: (_text, _signal, onCommitted) => {
+      insert: (_text, _activationContext, _signal, onCommitted) => {
         commit = onCommitted;
         return insertion.promise;
       },

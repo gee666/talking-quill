@@ -1,3 +1,5 @@
+export const CANONICAL_PACKAGE_TARGETS: readonly ['win'];
+
 export interface PackagePlan {
   readonly command: string;
   readonly artifactRequirement: 'none' | 'nsis' | 'dmg-zip';
@@ -7,3 +9,7 @@ export interface PackagePlan {
 }
 
 export function createPackagePlan(target: string | undefined): PackagePlan;
+export function createProductionEnvironment(
+  plan: PackagePlan,
+  sourceEnvironment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;

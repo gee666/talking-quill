@@ -1,0 +1,60 @@
+[package]
+name = "talking-quill-owner-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Platform-neutral owner protocol v1 for Talking Quill"
+autobins = false
+autoexamples = false
+autobenches = false
+
+[package.metadata.talking-quill-boundary]
+role = "owner-protocol"
+stage = "b1-protocol-v1"
+protocol = 1
+runtime = false
+
+[features]
+default = []
+# Deterministic authentication and transports for Rust integration tests only.
+# Production dependants never enable this feature, so these trust-bypassing
+# seams are absent from packaged owner/gateway libraries.
+test-transport = []
+
+[dependencies]
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+p256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Integration tests compile the library as an external dependency. Requiring
+# the explicit feature prevents them from passing only because another
+# workspace package happened to unify the test transport into this crate.
+[[test]]
+name = "owner_protocol"
+path = "tests/owner_protocol.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "session_integration"
+path = "tests/session_integration.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "transport"
+path = "tests/transport.rs"
+required-features = ["test-transport"]
+
+[lints]
+workspace = true

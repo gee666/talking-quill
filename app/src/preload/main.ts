@@ -24,6 +24,7 @@ const api: MainApi = {
       await invoke('info:open-release', { url });
     },
     notices: async () => (await invoke('info:notices', {})).text,
+    exportDiagnostics: async () => (await invoke('info:export-diagnostics', {})).status,
   },
   activationTest: {
     start: () => invoke('activation-test:start', {}),
@@ -31,11 +32,9 @@ const api: MainApi = {
     onChanged: (listener) => subscribe('activation-test:changed', listener),
   },
   shortcutCapture: {
-    start: async () => {
-      await invoke('shortcut-capture:start', {});
-    },
-    stop: async () => {
-      await invoke('shortcut-capture:stop', {});
+    start: async () => (await invoke('shortcut-capture:start', {})).leaseId,
+    stop: async (leaseId) => {
+      await invoke('shortcut-capture:stop', { leaseId });
     },
   },
   app: {

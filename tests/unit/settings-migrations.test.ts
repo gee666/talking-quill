@@ -46,13 +46,21 @@ function migrateV21ToCurrent(input: Readonly<Record<string, unknown>>) {
 function migrateV25ToCurrent(input: Readonly<Record<string, unknown>>) {
   const v26 = SETTINGS_MIGRATIONS[25]?.(input);
   if (typeof v26 !== 'object' || v26 === null) throw new Error('V25 migration did not emit v26');
-  return SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(v26 as Readonly<Record<string, unknown>>));
+  return migrateV26ToCurrent(v26 as Readonly<Record<string, unknown>>);
+}
+
+function migrateV26ToCurrent(input: Readonly<Record<string, unknown>>) {
+  const v27 = SETTINGS_MIGRATIONS[26]?.(input);
+  if (typeof v27 !== 'object' || v27 === null) throw new Error('V26 migration did not emit v27');
+  const v28 = SETTINGS_MIGRATIONS[27]?.(v27 as Readonly<Record<string, unknown>>);
+  if (typeof v28 !== 'object' || v28 === null) throw new Error('V27 migration did not emit v28');
+  return SettingsSchema.parse(v28);
 }
 
 describe('frozen settings migrations', () => {
   it('keeps the public migration table complete and frozen', () => {
     expect(Object.keys(SETTINGS_MIGRATIONS).map(Number)).toEqual(
-      Array.from({ length: 26 }, (_, index) => index + 1),
+      Array.from({ length: 27 }, (_, index) => index + 1),
     );
     expect(Object.isFrozen(SETTINGS_MIGRATIONS)).toBe(true);
     expect(PRIMARY_RAW_FIXTURES.map((fixture) => fixture.version)).toEqual(
@@ -136,14 +144,14 @@ describe('frozen settings migrations', () => {
     if (defaultRecording === null) throw new Error('Missing recording settings');
     (defaultRecording as Record<string, unknown>).preferredMicrophoneId = 'default';
 
-    const migratedDefault = SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(legacyDefault));
+    const migratedDefault = migrateV26ToCurrent(legacyDefault);
     expect(migratedDefault.recording.preferredMicrophoneId).toBeNull();
 
     const explicit = structuredClone(legacyDefault);
     const explicitRecording = readRecord(explicit.recording);
     if (explicitRecording === null) throw new Error('Missing recording settings');
     (explicitRecording as Record<string, unknown>).preferredMicrophoneId = 'studio-microphone';
-    const migratedExplicit = SettingsSchema.parse(SETTINGS_MIGRATIONS[26]?.(explicit));
+    const migratedExplicit = migrateV26ToCurrent(explicit);
     expect(migratedExplicit.recording.preferredMicrophoneId).toBe('studio-microphone');
   });
 
@@ -167,7 +175,7 @@ describe('frozen settings migrations', () => {
     });
 
     const current = migrateV21ToCurrent(v21);
-    expect(current.schemaVersion).toBe(27);
+    expect(current.schemaVersion).toBe(28);
     expect(current.transcription.language).toBe('fr');
     expect(current.dictationProfiles.map(({ id }) => id)).toEqual([
       'general',

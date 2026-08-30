@@ -10,22 +10,34 @@ if (pnpmCli === undefined) throw new Error('pnpm CLI path is unavailable');
 
 const output = resolve('tmp', 'packaged-media-build');
 rmSync(output, { recursive: true, force: true });
-const buildEnvironment = { ...process.env, TALKING_QUILL_TASK6_TEST_HARNESS: '1' };
+const buildEnvironment = {
+  ...process.env,
+  TALKING_QUILL_TASK6_TEST_HARNESS: '1',
+  // This isolated, non-release package still exercises the canonical metadata writer.
+  // Give it a visibly synthetic same-architecture predecessor rather than weakening that gate.
+  TALKING_QUILL_PREDECESSOR_VERSION: '0.0.4',
+  TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: '11'.repeat(32),
+  TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: '22'.repeat(32),
+  TALKING_QUILL_PREDECESSOR_OWNER_SHA256: '33'.repeat(32),
+};
 let failure = null;
 try {
   run(['--filter', '@talking-quill/app', 'build:test'], buildEnvironment);
   run(['exec', 'node', 'scripts/build-helper.mjs', '--platform', 'win32', '--arch', 'x64']);
-  run([
-    '--dir',
-    'app',
-    'exec',
-    'electron-builder',
-    '--config',
-    '../build/electron-builder.packaged-test.yml',
-    '--dir',
-    '--win',
-    '--x64',
-  ]);
+  run(
+    [
+      '--dir',
+      'app',
+      'exec',
+      'electron-builder',
+      '--config',
+      '../build/electron-builder.packaged-test.yml',
+      '--dir',
+      '--win',
+      '--x64',
+    ],
+    buildEnvironment,
+  );
   run(
     [
       'exec',

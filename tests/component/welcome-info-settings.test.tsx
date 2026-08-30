@@ -311,17 +311,20 @@ describe('Welcome, Info, and settings completion', () => {
         .getAllByRole('listitem')
         .map((item) => item.textContent),
     ).toEqual([
-      'General: Alt + X (final trigger X) — Smart processing',
-      'Prompt: Alt + X + P (final trigger P) — Smart processing',
-      'Prompt to English: Alt + X + Q (final trigger Q) — Smart processing',
-      'Markdown: Alt + X + M (final trigger M) — Smart processing',
-      'Translate to English: Alt + X + T (final trigger T) — Smart processing',
+      'General: Alt + X · Smart processing',
+      'Prompt: Alt + X + P · Smart processing',
+      'Prompt to English: Alt + X + Q · Smart processing',
+      'Markdown: Alt + X + M · Smart processing',
+      'Translate to English: Alt + X + T · Smart processing',
     ]);
     expect(
       screen.getByText(/If you have already changed one, your version is kept/i),
     ).toBeVisible();
     expect(within(profiles).queryByText('Meeting notes')).not.toBeInTheDocument();
     expect(screen.getByText(/Shortcuts can be changed anytime in Settings/i)).toBeVisible();
+    expect(
+      screen.queryByText(/final trigger|hold that last key|let go of the last key/i),
+    ).toBeNull();
     expect(screen.queryByText(/Test activation shortcut/i)).not.toBeInTheDocument();
   });
 
@@ -520,9 +523,11 @@ describe('Welcome, Info, and settings completion', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: 'Privacy & data' }));
-    const logging = screen.getByRole('checkbox', {
-      name: 'Write a technical log to help with problems',
-    });
+    expect(screen.getByText(/allowlisted ZIP with a SHA-256 integrity manifest/iu)).toBeVisible();
+    expect(screen.queryByText(/keyboard-service/iu)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open logs folder' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Export diagnostic logs' })).toBeVisible();
+    const logging = screen.getByRole('checkbox', { name: 'Debug logging' });
     expect(logging).not.toBeChecked();
     await user.click(logging);
     expect((api.settings as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith({

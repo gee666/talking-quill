@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export interface PathContainmentOperations {
   readonly isAbsolute: (path: string) => boolean;
@@ -34,6 +34,45 @@ export function isStrictPathChild(
     !relativePath.startsWith(`..${operations.sep}`) &&
     !operations.isAbsolute(relativePath)
   );
+}
+
+export interface UninstallResetTargetPolicy {
+  readonly expectedTarget?: string;
+  readonly isolatedTestBase?: string;
+}
+
+export function validateUninstallResetTarget(
+  value: string,
+  policy: UninstallResetTargetPolicy = {},
+): string {
+  const target = selectAbsolutePathOverride(undefined, value);
+  if (
+    target === null ||
+    basename(target) !== 'Talking Quill' ||
+    basename(dirname(target)) !== 'Roaming' ||
+    basename(dirname(dirname(target))) !== 'AppData'
+  ) {
+    throw new Error('Uninstall reset target is not the exact Talking Quill roaming-data folder');
+  }
+  const { expectedTarget, isolatedTestBase } = policy;
+  if (expectedTarget !== undefined) {
+    const expected = selectAbsolutePathOverride(undefined, expectedTarget);
+    if (expected?.toLocaleLowerCase('en-US') !== target.toLocaleLowerCase('en-US')) {
+      throw new Error('Uninstall reset target does not belong to the signed-in Windows user');
+    }
+  }
+  if (isolatedTestBase !== undefined) {
+    const base = selectAbsolutePathOverride(undefined, isolatedTestBase);
+    const profileRoot = dirname(dirname(dirname(target)));
+    const testRoot = dirname(profileRoot);
+    if (
+      base?.toLocaleLowerCase('en-US') !== dirname(testRoot).toLocaleLowerCase('en-US') ||
+      basename(profileRoot) !== 'profile'
+    ) {
+      throw new Error('Uninstall test reset target is outside its fixed temporary root');
+    }
+  }
+  return target;
 }
 
 export function selectAbsolutePathOverride(

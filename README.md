@@ -2,9 +2,11 @@
 
 # Talking Quill
 
+> **Keyboard-owner status:** Windows packages contain two native roles: the non-suppressing gateway and the same-interactive-user detached owner. Windows installs no service, LocalSystem role, enrollment, maintenance executable, or ProgramData runtime. macOS includes its LoginItem and maintenance bridge. Any package identity, authentication, maintenance, or native-health mismatch fails closed.
+
 **Talk naturally. Get useful text wherever you are typing.**
 
-Talking Quill is a dictation app for Windows and macOS. Press a shortcut, speak, and it puts the result into the app you were already using—an email, a document, a chat window, a terminal, a browser, or almost any other text field.
+Talking Quill is a dictation app for Windows and macOS. Once the I1 safety gates pass and activation capture is enabled, a shortcut will start dictation and put the result into the app you were already using—an email, a document, a chat window, a terminal, a browser, or almost any other text field.
 
 The speech-to-text part runs on your own computer. You can keep the result exactly as it was transcribed, or optionally let a Smart profile tidy it up, format it, translate it, or reshape it using an AI provider you choose.
 
@@ -17,13 +19,11 @@ Open the **[latest Talking Quill release](https://github.com/gee666/talking-quil
 Choose one of these installers:
 
 - **Most Windows computers:** `Talking-Quill-<version>-win-x64.exe`
-- **Windows on ARM:** `Talking-Quill-<version>-win-arm64.exe`
-
-If you are not sure which one you need, open **Settings → System → About** and look at **System type**. Intel and AMD computers use x64. A computer described as ARM-based uses ARM64.
+Talking Quill supports Windows x64 and ARM64, plus macOS x64 and ARM64.
 
 Download the matching `.exe`, open it, choose where to install Talking Quill, and follow the prompts.
 
-The current release is unsigned, so Windows SmartScreen may show **Windows protected your PC**. If you downloaded the installer from this repository’s release page, choose **More info → Run anyway** to continue.
+The current release is unsigned, so Windows SmartScreen may show **Windows protected your PC**. If you downloaded the installer from this repository's release page, choose **More info -> Run anyway** to continue. Windows then shows a **User Account Control (UAC)** prompt because the per-machine installer writes Program Files and removes obsolete service state. Confirm the publisher is **Unknown publisher** only when you intentionally downloaded this unsigned local build, then choose **Yes**. Talking Quill does not claim Authenticode signing.
 
 ### macOS
 
@@ -34,7 +34,7 @@ Choose one of these disk images:
 
 You can check by opening **Apple menu → About This Mac**. If it shows **Chip: Apple…**, use ARM64. If it shows an Intel processor, use x64.
 
-Open the `.dmg`, then drag **Talking Quill** into **Applications**. The `.zip` files on the release page are used by the updater; the DMG is the easier way to install the app yourself.
+Open the `.dmg`, then drag **Talking Quill** into **Applications**. The `.zip` files on the release page are selected automatically by the architecture-specific updater; the DMG is the easier way to install the app yourself. Updater metadata binds the exact ZIP, native-role layout, and one-hop predecessor before owner maintenance begins.
 
 The current release is unsigned, so macOS may refuse the first launch. In Finder, open **Applications**, Control-click **Talking Quill**, choose **Open**, and confirm. If macOS still blocks it, go to **System Settings → Privacy & Security** and choose **Open Anyway** for Talking Quill.
 
@@ -59,7 +59,7 @@ The first-run setup walks you through the important parts:
 1. Allow microphone access and pick the microphone you want to use.
 2. Choose the language you normally speak.
 3. Download a local speech model. The Small model is roughly 250 MB; Large v3 Turbo is roughly 1.09 GB and is usually more accurate.
-4. Try your shortcut in the built-in test box.
+4. Configure and test your shortcut in the built-in editor test box. On Windows, global capture becomes available only after the same-session owner authenticates over its private inherited channel and completes disabled-first reconciliation.
 5. Optionally connect a Smart processing provider. You can skip this and use fully local Raw dictation.
 
 On a Mac, Talking Quill also needs **Accessibility** and **Input Monitoring** permission so the global shortcuts work and the finished text can be inserted into other apps. Screen Recording permission is only needed if you turn on On-Screen Awareness.
@@ -68,9 +68,9 @@ On a Mac, Talking Quill also needs **Accessibility** and **Input Monitoring** pe
 
 ### Dictate into the apps you already use
 
-You do not have to open a special editor. Put the cursor where you want the text, use a Talking Quill shortcut, and start speaking. A small floating widget shows when it is listening, transcribing, or cleaning up the result.
+With an enrolled, healthy Windows keyboard owner, you will not have to open a special editor: put the cursor where you want the text, use a Talking Quill shortcut, and start speaking. A small floating widget shows when it is listening, transcribing, or cleaning up the result.
 
-A quick press is good for a sentence or short note. Hold the final shortcut key a little longer for Extended dictation, which keeps listening through pauses and can handle longer thoughts. Press **Enter** or repeat the shortcut to finish, and press **Escape** if you want to cancel.
+A quick press is good for a sentence or short note. Hold the final shortcut key a little longer for Extended dictation, which keeps listening through pauses and can handle longer thoughts. In an installed local-owner build, **Enter** or the repeated shortcut finishes and **Escape** cancels. The detached owner remains responsible for balancing any key it captures if Electron or its gateway exits.
 
 ### Keep everything local—or clean it up with Smart processing
 
@@ -137,6 +137,12 @@ You can change the widget size, sounds, theme, launch-at-login behavior, and whe
 Talking Quill does use the network when you download a speech model, test or use an online Smart provider, or check for an app update.
 
 For a detailed walkthrough of profiles, shortcuts, privacy settings, providers, and recording modes, see the **[Talking Quill user guide](docs/README.md)**.
+
+## Personal-use Windows and macOS packages
+
+Build and install a fresh unsigned Windows x64/ARM64 or macOS Intel/Apple Silicon package with the commands in [`docs/personal-use-install.md`](docs/personal-use-install.md). That guide covers SmartScreen/UAC, local macOS signing, privacy grants, first run, verification, repair, rollback, uninstall, troubleshooting, and friend-Mac transfer. Fresh local installation needs no predecessor or promotion evidence; updater packages still require exact predecessor metadata and authenticated publication gates are unchanged.
+
+For the detailed macOS owner security/lifecycle contract, see [`docs/macos-local-owner-install.md`](docs/macos-local-owner-install.md). Ad-hoc builds may require permission reauthorization after every changed binary.
 
 ## License
 

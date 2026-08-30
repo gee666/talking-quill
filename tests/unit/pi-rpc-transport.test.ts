@@ -238,7 +238,7 @@ describe('Pi RPC strict NDJSON transport', () => {
   });
 });
 
-describe('single-use Pi 0.84.2 RPC operation', () => {
+describe('single-use supported Pi RPC operation', () => {
   it('pins the capability boundary and builds ordered RPC/extension argv', () => {
     expect(
       createPiRpcArguments(identity(), expected, ['/trusted/one.ts', '/trusted/two.ts']),
@@ -260,6 +260,12 @@ describe('single-use Pi 0.84.2 RPC operation', () => {
     expect(() =>
       assertRpcCompatibility({
         packageVersion: '0.84.3',
+        safetyFlags: PI_RPC_REQUIRED_SAFETY_FLAGS,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertRpcCompatibility({
+        packageVersion: '0.84.4',
         safetyFlags: PI_RPC_REQUIRED_SAFETY_FLAGS,
       }),
     ).toThrow(expect.objectContaining({ code: 'PI_INCOMPATIBLE' }));

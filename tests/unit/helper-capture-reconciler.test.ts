@@ -13,6 +13,30 @@ function deferred<Value>() {
 }
 
 describe('HelperCaptureReconciler', () => {
+  it('treats unavailable session-key capture as authoritative capture-off without RPC retries', async () => {
+    const setSessionCapture = vi.fn((mode: HelperSessionCaptureMode) => Promise.resolve({ mode }));
+    const resetSessionCapture = vi.fn(() => Promise.resolve());
+    const onCaptureOff = vi.fn();
+    const reconciler = new HelperCaptureReconciler(
+      {
+        sessionKeyCaptureAvailable: false,
+        setSessionCapture,
+        resetSessionCapture,
+      },
+      onCaptureOff,
+    );
+    const generation = reconciler.beginGeneration();
+    reconciler.markNativeCaptureArmed();
+
+    await expect(reconciler.request('recording', generation)).resolves.toBeUndefined();
+    await expect(reconciler.request('off', generation)).resolves.toBeUndefined();
+
+    expect(setSessionCapture).not.toHaveBeenCalled();
+    expect(resetSessionCapture).not.toHaveBeenCalled();
+    expect(reconciler.captureOffGuaranteed).toBe(true);
+    expect(onCaptureOff).not.toHaveBeenCalled();
+  });
+
   it('reissues capture-off when native activation invalidates an in-flight acknowledgement', async () => {
     const firstDisable = deferred<unknown>();
     const secondDisable = deferred<unknown>();

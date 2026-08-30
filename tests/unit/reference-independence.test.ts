@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   compareBlobInventory,
@@ -9,6 +11,26 @@ describe('deleted reference independence', () => {
     { path: 'reference/nested/source.bin', blob: 'a'.repeat(40) },
     { path: 'reference/other/source.txt', blob: 'b'.repeat(40) },
   ];
+
+  it('ships a complete content-addressed upstream inventory without requiring deleted git objects', () => {
+    const inventory = JSON.parse(
+      readFileSync('scripts/reference-independence-inventory.json', 'utf8'),
+    ) as {
+      commit: string;
+      inventorySha256: string;
+      entries: { blob: string; path: string }[];
+    };
+    const allowlist = JSON.parse(
+      readFileSync('scripts/reference-independence-allowlist.json', 'utf8'),
+    ) as { referenceInventoryCommit: string };
+    const digest = createHash('sha256')
+      .update(inventory.entries.map(({ blob, path }) => `${blob} ${path}\n`).join(''))
+      .digest('hex');
+    expect(inventory.entries.length).toBeGreaterThan(5_000);
+    expect(inventory.commit).toBe(allowlist.referenceInventoryCommit);
+    expect(digest).toBe(inventory.inventorySha256);
+    expect(readFileSync('scripts/reference-independence.mjs', 'utf8')).not.toContain('cat-file');
+  });
 
   it('rejects a reference component at every depth and spelling', () => {
     expect(pathContainsReferenceComponent('reference/file')).toBe(true);

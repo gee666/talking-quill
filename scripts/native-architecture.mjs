@@ -48,9 +48,7 @@ export function parseNativeArchitectures(bytes, path) {
 export async function inspectNativeTree(root, options) {
   const { architecture, platform, exceptions = {} } = options ?? {};
   if (!['x64', 'arm64'].includes(architecture) || !['win', 'mac'].includes(platform)) {
-    throw new Error(
-      'Native tree inspection requires a win|mac platform and x64|arm64 architecture',
-    );
+    throw new Error('Native tree inspection supports Windows and macOS x64/arm64 only');
   }
   const exceptionEntries = Object.entries(exceptions);
   for (const [path, architecture] of exceptionEntries) {
@@ -84,7 +82,7 @@ export async function inspectNativeTree(root, options) {
           `Native format mismatch: ${name} is ${parsed.format}, expected ${expectedFormat}`,
         );
       }
-      if (!parsed.architectures.includes(architecture)) {
+      if (parsed.architectures.length !== 1 || parsed.architectures[0] !== architecture) {
         const exceptionArchitecture = exceptions[name];
         if (
           exceptionArchitecture === undefined ||
@@ -92,7 +90,7 @@ export async function inspectNativeTree(root, options) {
           parsed.architectures[0] !== exceptionArchitecture
         ) {
           throw new Error(
-            `Native architecture mismatch: ${name} is ${parsed.architectures.join('+')}, expected ${architecture}`,
+            `Native architecture mismatch: ${name} is ${parsed.architectures.join('+')}, expected exactly ${architecture}`,
           );
         }
       }

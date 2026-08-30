@@ -1,0 +1,18 @@
+extends: electron-builder.unsigned.yml
+
+afterPack: after-pack-macos-owner.cjs
+
+mac:
+  sign: ../build/mac-owner-sign.cjs
+  identity: null
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.inherit.plist
+  minimumSystemVersion: '13.0'
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]

@@ -222,8 +222,6 @@ const REQUIRED_RENDERER_CHUNKS = Object.freeze([
   ['capture', 'js'],
   ['capture.worklet', 'js'],
   ['audio', 'js'],
-  ['echo-session', 'js'],
-  ['echo-session', 'css'],
   ['Dialog', 'js'],
   ['HistoryScreen', 'js'],
   ['InfoScreen', 'js'],
@@ -231,6 +229,8 @@ const REQUIRED_RENDERER_CHUNKS = Object.freeze([
   ['SmartProcessingSection', 'js'],
   ['UpdateDialog', 'js'],
   ['schemas', 'js'],
+  ['theme', 'js'],
+  ['theme', 'css'],
 ]);
 const REQUIRED_BRAND_LOGOS = Object.freeze(['logo-light', 'logo-dark']);
 
@@ -299,8 +299,17 @@ const COMMON_RESOURCE_PATHS = [
   ONNX_RESOURCE_PREFIX,
   'helper',
 ];
+const WINDOWS_PERSONAL_RUNTIME_RESOURCES = Object.freeze([
+  'helper/talking-quill-helper.exe',
+  'helper/talking-quill-keyboard-owner.exe',
+]);
+const RELEASE_PACKAGE_METADATA_PATH = 'keyboard-owner-release-v1.json';
 const PLATFORM_RESOURCE_PATHS = Object.freeze({
-  win: Object.freeze(['elevate.exe', 'helper/talking-quill-helper.exe']),
+  win: Object.freeze([
+    'elevate.exe',
+    RELEASE_PACKAGE_METADATA_PATH,
+    ...WINDOWS_PERSONAL_RUNTIME_RESOURCES,
+  ]),
   mac: Object.freeze(['electron.icns', 'icon.icns', 'helper/talking-quill-helper']),
 });
 
@@ -393,6 +402,27 @@ const WINDOWS_LOCALE_PATTERN = /^locales\/[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,3})?\.p
 const MAC_LOCALIZATION_DIRECTORY_PATTERN = /^[a-z]{2,3}(?:_[A-Z]{2}|_419)?\.lproj$/u;
 const MAC_FRAMEWORK_PATTERN =
   /^Talking Quill\.app\/Contents\/Frameworks\/(?:Electron Framework\.framework|Mantle\.framework|ReactiveObjC\.framework|Squirrel\.framework|Sparkle\.framework|Talking Quill Helper(?: \(GPU\)| \(Plugin\)| \(Renderer\))?\.app)(?:\/.*)?$/u;
+const MAC_OWNER_BUNDLE_PREFIX =
+  'Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app';
+const MAC_OWNER_PHYSICAL_EXACT = new Set([
+  'Talking Quill.app/Contents/Library',
+  'Talking Quill.app/Contents/Library/LoginItems',
+  MAC_OWNER_BUNDLE_PREFIX,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/Info.plist`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/MacOS`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/MacOS/talking-quill-keyboard-owner`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/Resources`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/_CodeSignature`,
+  `${MAC_OWNER_BUNDLE_PREFIX}/Contents/_CodeSignature/CodeResources`,
+  'Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge',
+]);
+const MAC_OWNER_RESOURCE_PATHS = Object.freeze([
+  'keyboard-owner-r5m.json',
+  'keyboard-owner-installed-v1',
+  'macos-keychain-denial.node',
+  RELEASE_PACKAGE_METADATA_PATH,
+]);
 const MAC_PHYSICAL_EXACT = new Set([
   '.background',
   '.background/background.tiff',
@@ -493,7 +523,7 @@ export function validatePhysicalEntries(entries) {
   assertSafePaths(entries.map(normalizePackagePath));
 }
 
-export function validatePhysicalPackageEntries(entries, target) {
+export function validatePhysicalPackageEntries(entries, target, options = {}) {
   const normalized = entries.map(normalizePackagePath);
   assertSafePaths(normalized);
   const unexpected = normalized.filter((entry) => {
@@ -504,8 +534,10 @@ export function validatePhysicalPackageEntries(entries, target) {
         !entry.startsWith('resources/')
       );
     }
+    const nestedOwner = options.macosOwner === true && MAC_OWNER_PHYSICAL_EXACT.has(entry);
     return (
       !MAC_PHYSICAL_EXACT.has(entry) &&
+      !nestedOwner &&
       !entry.startsWith('Talking Quill.app/Contents/Resources/') &&
       !MAC_FRAMEWORK_PATTERN.test(entry)
     );
@@ -515,13 +547,15 @@ export function validatePhysicalPackageEntries(entries, target) {
   }
 }
 
-export function validateResourceEntries(entries, target) {
+export function validateResourceEntries(entries, target, options = {}) {
   if (!['win', 'mac'].includes(target)) {
     throw new Error(`Unknown packaged resource target: ${String(target)}`);
   }
   const normalized = entries.map(normalizePackagePath);
   const allowed = new Set([
     ...COMMON_RESOURCE_PATHS,
+    ...(options.macosOwner === true ? MAC_OWNER_RESOURCE_PATHS : []),
+    ...(options.windowsInstalledAcceptance === true ? ['windows-installed-acceptance-v1.txt'] : []),
     ...PLATFORM_RESOURCE_PATHS[target],
     ...ONNX_RESOURCE_PATHS[target],
   ]);
@@ -535,15 +569,18 @@ export function validateResourceEntries(entries, target) {
   if (unexpected.length > 0) {
     throw new Error(`Unexpected packaged resources: ${unexpected.join(', ')}`);
   }
-  const helper =
-    target === 'mac' ? 'helper/talking-quill-helper' : 'helper/talking-quill-helper.exe';
+  const helpers =
+    target === 'mac' ? ['helper/talking-quill-helper'] : WINDOWS_PERSONAL_RUNTIME_RESOURCES;
   for (const required of [
     'app.asar',
     'LICENSE',
     'THIRD_PARTY_NOTICES.txt',
     'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
     ONNX_RESOURCE_PREFIX,
-    helper,
+    ...helpers,
+    ...(target === 'win' ? [RELEASE_PACKAGE_METADATA_PATH] : []),
+    ...(options.windowsInstalledAcceptance === true ? ['windows-installed-acceptance-v1.txt'] : []),
+    ...(options.macosOwner === true ? MAC_OWNER_RESOURCE_PATHS : []),
   ]) {
     if (!normalized.includes(required)) {
       throw new Error(`Required packaged resource is missing: ${required}`);

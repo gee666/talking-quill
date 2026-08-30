@@ -1,0 +1,374 @@
+name: Build local macOS Keyboard Owner packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-local-owner
+  cancel-in-progress: false
+
+jobs:
+  hosted-package-checks:
+    name: Hosted macOS package-policy checks ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run tests/unit/macos-owner-r8m.test.ts tests/unit/mac-signing.test.ts tests/unit/package-policy.test.ts
+      # Hosted runners never claim LoginItem lifecycle, Keychain ACL, or TCC evidence.
+
+  build:
+    name: Self-hosted native lifecycle ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: '["self-hosted","macOS","talking-quill-permissioned","x64"]'
+            target: x86_64-apple-darwin
+          - arch: arm64
+            runner: '["self-hosted","macOS","talking-quill-permissioned","arm64"]'
+            target: aarch64-apple-darwin
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    env:
+      TALKING_QUILL_PACKAGE_TARGET: mac
+      TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
+      TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: dmg-zip
+      TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'
+      TALKING_QUILL_MACOS_POLICY_SIGNER_SHA256: ${{ secrets.TALKING_QUILL_MACOS_POLICY_SIGNER_SHA256 }}
+      TALKING_QUILL_MACOS_POLICY_CMS_IDENTITY: ${{ secrets.TALKING_QUILL_MACOS_POLICY_CMS_IDENTITY }}
+      TALKING_QUILL_MACOS_INSTALLATION_ID: ${{ secrets.TALKING_QUILL_MACOS_INSTALLATION_ID }}
+      TALKING_QUILL_MACOS_LOCAL_IDENTITY: ${{ secrets.TALKING_QUILL_MACOS_LOCAL_IDENTITY }}
+      TALKING_QUILL_MACOS_LOCAL_CERT_SHA256: ${{ secrets.TALKING_QUILL_MACOS_LOCAL_CERT_SHA256 }}
+      TALKING_QUILL_MACOS_LOCAL_CERT_SHA1: ${{ secrets.TALKING_QUILL_MACOS_LOCAL_CERT_SHA1 }}
+      TALKING_QUILL_MACOS_LOCAL_P12_BASE64: ${{ secrets.TALKING_QUILL_MACOS_LOCAL_P12_BASE64 }}
+      TALKING_QUILL_MACOS_LOCAL_P12_PASSWORD: ${{ secrets.TALKING_QUILL_MACOS_LOCAL_P12_PASSWORD }}
+      TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD: ${{ secrets.TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          target: ${{ matrix.target }}
+      - run: pnpm install --frozen-lockfile
+      - name: Import controlled local signing and CMS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TALKING_QUILL_MACOS_LOCAL_P12_BASE64:?missing encrypted PKCS#12 secret}"
+          : "${TALKING_QUILL_MACOS_LOCAL_P12_PASSWORD:?missing PKCS#12 password}"
+          : "${TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD:?missing ephemeral keychain password}"
+          keychain="$RUNNER_TEMP/talking-quill-local-owner.keychain-db"
+          p12="$RUNNER_TEMP/talking-quill-local-owner.p12"
+          printf '%s' "$TALKING_QUILL_MACOS_LOCAL_P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$p12" -k "$keychain" -P "$TALKING_QUILL_MACOS_LOCAL_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$TALKING_QUILL_MACOS_BUILD_KEYCHAIN_PASSWORD" "$keychain"
+          certificate="$RUNNER_TEMP/talking-quill-local-owner.cer"
+          security find-certificate -c "$TALKING_QUILL_MACOS_LOCAL_IDENTITY" -p "$keychain" > "$certificate"
+          security add-trusted-cert -d -r trustRoot -k "$keychain" "$certificate"
+          rm -f "$certificate"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
+          rm -f "$p12"
+      - run: cargo test --manifest-path helper/Cargo.toml --locked -p talking-quill-owner-protocol -p talking-quill-helper -p talking-quill-keyboard-owner --lib --bins
+      - run: cargo check --manifest-path helper/Cargo.toml --locked -p talking-quill-helper --target ${{ matrix.target }}
+      - run: cargo check --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --release --target ${{ matrix.target }} --features local-unsigned-owner --lib --bins
+      - run: pnpm exec vitest run tests/unit/macos-owner-r8m.test.ts tests/unit/mac-signing.test.ts tests/unit/package-policy.test.ts
+      - name: Package enabled local owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test '${{ matrix.arch }}' = x64; then
+            TALKING_QUILL_PERSONAL_FRESH_INSTALL=1 pnpm package:mac:owner:x64
+          else
+            TALKING_QUILL_PERSONAL_FRESH_INSTALL=1 pnpm package:mac:owner:arm64
+          fi
+      - name: Build exact predecessor-enrolled refresh candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_archive="$(find release -maxdepth 1 -type f -name 'Talking-Quill-*-mac-${{ matrix.arch }}.zip' -print)"
+          test "$(printf '%s\n' "$source_archive" | awk 'NF { count += 1 } END { print count + 0 }')" -eq 1
+          cp "$source_archive" tmp/native-source.zip
+          rm -rf tmp/native-source-artifact
+          mkdir -p tmp/native-source-artifact
+          ditto -x -k tmp/native-source.zip tmp/native-source-artifact
+          source_policy='tmp/native-source-artifact/Talking Quill.app/Contents/Resources/keyboard-owner-r5m.json'
+          source_build="$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).releaseBuildDigest")"
+          source_gateway="$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).gateway.executableSha256")"
+          source_owner="$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).owner.executableSha256")"
+          TALKING_QUILL_MACOS_TEST_SUCCESSOR_NONCE="ci-successor-${{ matrix.arch }}-${GITHUB_RUN_ID}" \
+          TALKING_QUILL_PREDECESSOR_VERSION="$(node -p "require('./app/package.json').version")" \
+          TALKING_QUILL_MACOS_PREDECESSOR_BUILD="$source_build" \
+          TALKING_QUILL_MACOS_PREDECESSOR_GATEWAY_SHA256="$source_gateway" \
+          TALKING_QUILL_MACOS_PREDECESSOR_OWNER_SHA256="$source_owner" \
+            pnpm --filter @talking-quill/app package:mac:owner:${{ matrix.arch }}
+          candidate_archive="$(find release -maxdepth 1 -type f -name 'Talking-Quill-*-mac-${{ matrix.arch }}.zip' -print)"
+          cp "$candidate_archive" tmp/native-candidate.zip
+          rm -rf tmp/native-candidate-artifact && mkdir -p tmp/native-candidate-artifact
+          ditto -x -k tmp/native-candidate.zip tmp/native-candidate-artifact
+          candidate_policy='tmp/native-candidate-artifact/Talking Quill.app/Contents/Resources/keyboard-owner-r5m.json'
+          candidate_build="$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).releaseBuildDigest")"
+          candidate_gateway="$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).gateway.executableSha256")"
+          candidate_owner="$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).owner.executableSha256")"
+      - name: Execute exact packaged ZIP artifact and native lifecycle checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TALKING_QUILL_MACOS_POLICY_SIGNER_SHA256:?missing CMS signer pin}"
+          : "${TALKING_QUILL_MACOS_LOCAL_CERT_SHA256:?missing code-signing leaf pin}"
+          command -v codesign >/dev/null
+          command -v security >/dev/null
+          command -v ditto >/dev/null
+          archive_list="$(find release -maxdepth 1 -type f -name 'Talking-Quill-*-mac-${{ matrix.arch }}.zip' -print)"
+          archive_count="$(printf '%s\n' "$archive_list" | awk 'NF { count += 1 } END { print count + 0 }')"
+          test "$archive_count" -eq 1
+          rm -rf tmp/native-packaged-artifact
+          mkdir -p tmp/native-packaged-artifact
+          ditto -x -k tmp/native-candidate.zip tmp/native-packaged-artifact
+          candidate='tmp/native-packaged-artifact/Talking Quill.app'
+          source='tmp/native-source-artifact/Talking Quill.app'
+          rm -rf '/Applications/Talking Quill.app'
+          ditto --noqtn "$source" '/Applications/Talking Quill.app'
+          app='/Applications/Talking Quill.app'
+          helper="$app/Contents/Resources/helper/talking-quill-helper"
+          owner="$app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner"
+          bridge="$app/Contents/MacOS/talking-quill-macos-service-bridge"
+          test -x "$helper" && test -x "$owner" && test -x "$bridge"
+          test -s "$app/Contents/Resources/keyboard-owner-r5m.json"
+          test -s "$app/Contents/Resources/keyboard-owner-installed-v1"
+          addon_arch="$(lipo -archs "$app/Contents/Resources/macos-keychain-denial.node")"
+          expected_addon_arch='${{ matrix.arch }}'; test "$expected_addon_arch" = x64 && expected_addon_arch=x86_64 || true
+          test "$addon_arch" = "$expected_addon_arch"
+          codesign --verify --deep --strict "$app"
+          codesign --verify --deep --strict "$candidate"
+          source_policy="$source/Contents/Resources/keyboard-owner-r5m.json"
+          candidate_policy="$candidate/Contents/Resources/keyboard-owner-r5m.json"
+          test "$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).releaseBuildDigest")" != "$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).releaseBuildDigest")"
+          test "$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).gateway.executableSha256")" != "$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).gateway.executableSha256")"
+          test "$(node -p "JSON.parse(require('fs').readFileSync('$source_policy')).owner.executableSha256")" != "$(node -p "JSON.parse(require('fs').readFileSync('$candidate_policy')).owner.executableSha256")"
+          test "$(codesign -d --extract-certificates "$RUNNER_TEMP/source-leaf" "$source" 2>/dev/null; shasum -a 256 "$RUNNER_TEMP/source-leaf0" | awk '{print $1}')" = "$(codesign -d --extract-certificates "$RUNNER_TEMP/candidate-leaf" "$candidate" 2>/dev/null; shasum -a 256 "$RUNNER_TEMP/candidate-leaf0" | awk '{print $1}')"
+          # Stable self-signed leaf persists while changed role bytes produce new
+          # CDHashes. This automates identity mechanics, not TCC re-approval.
+          source_cdhash="$(codesign -dvvv "$source/Contents/Resources/helper/talking-quill-helper" 2>&1 | awk -F= '/^CDHash=/{print $2}')"
+          candidate_cdhash="$(codesign -dvvv "$candidate/Contents/Resources/helper/talking-quill-helper" 2>&1 | awk -F= '/^CDHash=/{print $2}')"
+          test "$source_cdhash" != "$candidate_cdhash"
+          "$owner" --build-info | grep -q '"captureEnabled":true'
+          "$bridge" status | grep -Eq '^[0-4]$'
+          node scripts/inspect-package.mjs tmp/native-packaged-artifact --macos-owner --strict
+          build_id="$(node -p "JSON.parse(require('fs').readFileSync('$app/Contents/Resources/keyboard-owner-r5m.json')).releaseBuildDigest")"
+          # The packaged gateway provisions the ACL, registers via the outer
+          # bridge, authenticates the packaged owner, and proves the allow path.
+          "$helper" --macos-owner-probe "$build_id"
+          "$bridge" status | grep -Eq '^1$'
+      - name: Native Keychain ACL allow and non-enrolled-process denial
+        env:
+          TALKING_QUILL_RUN_MACOS_NATIVE_HARNESS: '1'
+          TALKING_QUILL_R5M_NATIVE_OWNER_FIXTURE: /Applications/Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner
+          TALKING_QUILL_R5M_NATIVE_GATEWAY_FIXTURE: /Applications/Talking Quill.app/Contents/Resources/helper/talking-quill-helper
+          TALKING_QUILL_R5M_NATIVE_OUTER_APP: /Applications/Talking Quill.app
+        run: |
+          set -euo pipefail
+          TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE=permissioned-ci-v1 \
+          TALKING_QUILL_MACOS_TEST_SUCCESSOR_NONCE="drag-to-trash-fixture-${{ matrix.arch }}-${GITHUB_RUN_ID}" \
+            cargo build --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --target '${{ matrix.target }}' --features local-unsigned-owner,macos-native-lifecycle-fixture --bin macos-keychain-fixture
+          TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE="$GITHUB_WORKSPACE/helper/target/${{ matrix.target }}/debug/macos-keychain-fixture"
+          export TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE
+          test -x "$TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE"
+          cargo test --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --test macos_r5m_native exact_packaged_artifact_identity_and_bridge_policy_validate -- --ignored --exact --nocapture
+          cargo test --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --test macos_r5m_native native_keychain_zero_one_duplicate_malformed_and_ui_fail_semantics -- --ignored --exact --nocapture
+          # Build a distinct permissioned-only Drag-to-Trash package. The normal
+          # inspector must reject its compile-gated fault marker.
+          rm -rf tmp/native-release-artifacts && mkdir -p tmp/native-release-artifacts
+          find release -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' \) -exec cp {} tmp/native-release-artifacts/ \;
+          set +e
+          fixture_script=package:mac:owner:x64:fixture
+          test '${{ matrix.arch }}' = arm64 && fixture_script=package:mac:owner:arm64:fixture || true
+          TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE=permissioned-ci-v1 \
+          TALKING_QUILL_MACOS_TEST_SUCCESSOR_NONCE="drag-to-trash-fixture-${{ matrix.arch }}-${GITHUB_RUN_ID}" \
+            pnpm --filter @talking-quill/app "$fixture_script" >tmp/drag-fixture-package.log 2>&1
+          fixture_package_status=$?
+          set -e
+          test "$fixture_package_status" -ne 0
+          grep -q 'Packaged owner contains lifecycle test hook' tmp/drag-fixture-package.log
+          fixture_directory=release/mac; test '${{ matrix.arch }}' = arm64 && fixture_directory=release/mac-arm64 || true
+          fixture_app="$fixture_directory/Talking Quill.app"; test -d "$fixture_app"
+
+          # This separately signed fixture has the exact enrolled owner identity
+          # and performs direct no-UI SecItemCopyMatching terminal queries.
+          codesign --force --sign "$TALKING_QUILL_MACOS_LOCAL_IDENTITY" --identifier com.talkingquill.app.keyboard-owner "$TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE"
+          enrolled_owner_requirement="$(codesign -d -r- "$TALKING_QUILL_R5M_NATIVE_OWNER_FIXTURE" 2>&1 | awk -F 'designated => ' 'NF == 2 { print $2 }')"
+          test -n "$enrolled_owner_requirement"
+          codesign --verify --strict "-R=$enrolled_owner_requirement" "$TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE"
+          keychain_fifo_in="$RUNNER_TEMP/tq-keychain-fixture-in"; keychain_fifo_out="$RUNNER_TEMP/tq-keychain-fixture-out"
+          rm -f "$keychain_fifo_in" "$keychain_fifo_out"; mkfifo "$keychain_fifo_in" "$keychain_fifo_out"
+          "$TALKING_QUILL_R5M_NATIVE_KEYCHAIN_FIXTURE" serve-authenticated <"$keychain_fifo_in" >"$keychain_fifo_out" & keychain_fixture_pid=$!
+          exec 9>"$keychain_fifo_in" 10<"$keychain_fifo_out"
+          keychain_fixture_key="$(openssl rand -hex 32)"; printf '%s\n' "$keychain_fixture_key" >&9
+          printf 'handshake-present\n' >&9; IFS= read -r keychain_before <&10
+          KEYCHAIN_RESPONSE="$keychain_before" KEYCHAIN_KEY="$keychain_fixture_key" EXPECTED_PID="$keychain_fixture_pid" node - <<'NODE'
+          const crypto = require('crypto'); const f = process.env.KEYCHAIN_RESPONSE.split(' ');
+          if (f.length !== 7 || f[0] !== process.env.EXPECTED_PID || f[2] !== '1' || f[3] !== 'handshake-present' || f[4] !== '0') process.exit(1);
+          const i32 = n => { const b=Buffer.alloc(4); b.writeInt32BE(Number(n)); return b; }; const u32=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(Number(n));return b}; const u64=n=>Buffer.from(BigInt(n).toString(16).padStart(16,'0'),'hex');
+          const mac=crypto.createHmac('sha256',Buffer.from(process.env.KEYCHAIN_KEY,'hex')).update('talking-quill/macos-keychain-fixture/v1\0').update(u32(f[0])).update(u32(f[1])).update(u64(f[2])).update(f[3]).update(i32(f[4])).update(i32(f[5])).digest('hex'); if(mac!==f[6])process.exit(1);
+          NODE
+          keychain_fixture_audit="$(printf '%s' "$keychain_before" | awk '{print $2}')"
+
+          "$bridge" unregister || true
+          pkill -f '/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner' || true
+          rm -rf '/Applications/Talking Quill.app'
+          ditto --noqtn "$fixture_app" '/Applications/Talking Quill.app'
+          find release -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' \) -delete
+          cp tmp/native-release-artifacts/* release/
+          app='/Applications/Talking Quill.app'; helper="$app/Contents/Resources/helper/talking-quill-helper"
+          owner="$app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner"
+          bridge="$app/Contents/MacOS/talking-quill-macos-service-bridge"
+          fixture_build="$(node -p "JSON.parse(require('fs').readFileSync('$app/Contents/Resources/keyboard-owner-r5m.json')).releaseBuildDigest")"
+          "$helper" --macos-owner-probe "$fixture_build"
+          "$bridge" unregister || true
+          pkill -f '/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner' || true
+          trace="$GITHUB_WORKSPACE/tmp/drag-to-trash-retry-${{ matrix.arch }}.log"; rm -f "$trace"
+          TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE=permissioned-ci-v1 \
+          TALKING_QUILL_MACOS_REMOVAL_RETRY_TRACE="$trace" "$owner" & drag_owner_pid=$!
+          sleep 2; kill -0 "$drag_owner_pid"
+          moved_app="$RUNNER_TEMP/Talking Quill Dragged ${{ matrix.arch }}.app"; rm -rf "$moved_app"; mv "$app" "$moved_app"
+          deadline=$((SECONDS + 45))
+          while kill -0 "$drag_owner_pid" 2>/dev/null && test "$SECONDS" -lt "$deadline"; do sleep 1; done
+          if kill -0 "$drag_owner_pid" 2>/dev/null; then kill "$drag_owner_pid"; exit 1; fi
+          wait "$drag_owner_pid"
+          test "$(awk '{print $1}' "$trace" | sort -u | wc -l | tr -d ' ')" -eq 1
+          grep -q "^$drag_owner_pid injected$" "$trace"; grep -q "^$drag_owner_pid retry$" "$trace"; grep -q "^$drag_owner_pid success$" "$trace"
+          printf 'fixed-absent\n' >&9; IFS= read -r keychain_after <&10
+          KEYCHAIN_RESPONSE="$keychain_after" KEYCHAIN_KEY="$keychain_fixture_key" EXPECTED_PID="$keychain_fixture_pid" EXPECTED_AUDIT="$keychain_fixture_audit" node - <<'NODE'
+          const crypto = require('crypto'); const f = process.env.KEYCHAIN_RESPONSE.split(' ');
+          if (f.length !== 7 || f[0] !== process.env.EXPECTED_PID || f[1] !== process.env.EXPECTED_AUDIT || f[2] !== '2' || f[3] !== 'fixed-absent' || f[4] !== '-25300' || f[5] !== '-25300') process.exit(1);
+          const i32 = n => { const b=Buffer.alloc(4); b.writeInt32BE(Number(n)); return b; }; const u32=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(Number(n));return b}; const u64=n=>Buffer.from(BigInt(n).toString(16).padStart(16,'0'),'hex');
+          const mac=crypto.createHmac('sha256',Buffer.from(process.env.KEYCHAIN_KEY,'hex')).update('talking-quill/macos-keychain-fixture/v1\0').update(u32(f[0])).update(u32(f[1])).update(u64(f[2])).update(f[3]).update(i32(f[4])).update(i32(f[5])).digest('hex'); if(mac!==f[6])process.exit(1);
+          NODE
+          "$moved_app/Contents/MacOS/talking-quill-macos-service-bridge" status | grep -Eq '^[03]$'
+          test ! -e "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/removal-required-v1"
+          test ! -d "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/run-v1" || test -z "$(find "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/run-v1" -mindepth 1 -print -quit)"
+          rm -rf "$moved_app"
+          ditto --noqtn 'tmp/native-source-artifact/Talking Quill.app' '/Applications/Talking Quill.app'
+          app='/Applications/Talking Quill.app'; helper="$app/Contents/Resources/helper/talking-quill-helper"; bridge="$app/Contents/MacOS/talking-quill-macos-service-bridge"
+          "$helper" --macos-owner-probe "$(node -p "JSON.parse(require('fs').readFileSync('$app/Contents/Resources/keyboard-owner-r5m.json')).releaseBuildDigest")"
+
+          # The packaged Electron denial fixture is mandatory; this command must
+          # return the dedicated denial exit code after the gateway allow check.
+          set +e
+          '/Applications/Talking Quill.app/Contents/MacOS/Talking Quill' --macos-owner-acl-denial-test
+          denial_status="$?"
+          set -e
+          test "$denial_status" -eq 77
+          # Retain the unrelated outer-bridge denial probe as a separate identity test.
+          "$bridge" acl-denial | grep -q '^77$'
+          # Exact signed update replacement, then exact uninstall and
+          # durable cleanup. Every wait is bounded and missing cleanup fails.
+          candidate_zip="$GITHUB_WORKSPACE/tmp/native-candidate.zip"
+          open -W -a '/Applications/Talking Quill.app' --args "--update-local-owner=$candidate_zip"
+          candidate_build="$(node -p "JSON.parse(require('fs').readFileSync('tmp/native-packaged-artifact/Talking Quill.app/Contents/Resources/keyboard-owner-r5m.json')).releaseBuildDigest")"
+          deadline=$((SECONDS + 120))
+          until '/Applications/Talking Quill.app/Contents/Resources/helper/talking-quill-helper' --macos-owner-validate-install 2>/dev/null; do
+            test "$SECONDS" -lt "$deadline"
+            sleep 1
+          done
+          '/Applications/Talking Quill.app/Contents/Resources/helper/talking-quill-helper' --macos-owner-probe "$candidate_build"
+          # This workflow proves the exact predecessor-bound update. It does not
+          # label a third successor build as a rollback. Exact rollback to the
+          # accepted predecessor is exercised by the R11 installed lifecycle.
+          bridge='/Applications/Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge'
+          # A shell/unrelated same-user parent cannot manufacture maintenance
+          # authority merely by launching the enrolled bridge bytes.
+          set +e
+          printf '%s\nunregister\n' "$(openssl rand -hex 32)" |
+            "$bridge" serve-authenticated >/dev/null 2>&1
+          direct_bridge_status=$?
+          set -e
+          test "$direct_bridge_status" -ne 0
+          printf 'handshake-present\n' >&9; IFS= read -r keychain_before_uninstall <&10
+          KEYCHAIN_RESPONSE="$keychain_before_uninstall" KEYCHAIN_KEY="$keychain_fixture_key" EXPECTED_PID="$keychain_fixture_pid" EXPECTED_AUDIT="$keychain_fixture_audit" node - <<'NODE'
+          const crypto = require('crypto'); const f = process.env.KEYCHAIN_RESPONSE.split(' ');
+          if (f.length !== 7 || f[0] !== process.env.EXPECTED_PID || f[1] !== process.env.EXPECTED_AUDIT || f[2] !== '3' || f[3] !== 'handshake-present' || f[4] !== '0') process.exit(1);
+          const i32=n=>{const b=Buffer.alloc(4);b.writeInt32BE(Number(n));return b}; const u32=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(Number(n));return b}; const u64=n=>Buffer.from(BigInt(n).toString(16).padStart(16,'0'),'hex');
+          const mac=crypto.createHmac('sha256',Buffer.from(process.env.KEYCHAIN_KEY,'hex')).update('talking-quill/macos-keychain-fixture/v1\0').update(u32(f[0])).update(u32(f[1])).update(u64(f[2])).update(f[3]).update(i32(f[4])).update(i32(f[5])).digest('hex'); if(mac!==f[6])process.exit(1);
+          NODE
+          open -W -a '/Applications/Talking Quill.app' --args --uninstall-local-owner & uninstall_launcher_pid=$!
+          # One CI supervision bound exceeds the native finalizer's single 120s
+          # absolute cleanup deadline; do not start a second cleanup wait.
+          deadline=$((SECONDS + 180))
+          while kill -0 "$uninstall_launcher_pid" 2>/dev/null && test "$SECONDS" -lt "$deadline"; do sleep 1; done
+          if kill -0 "$uninstall_launcher_pid" 2>/dev/null; then kill "$uninstall_launcher_pid"; exit 1; fi
+          wait "$uninstall_launcher_pid"
+          test ! -e '/Applications/Talking Quill.app'
+          maintenance_root="$HOME/Library/Application Support/Talking Quill/KeyboardOwner/maintenance-v1"
+          terminal_status=complete
+          if test -d "$maintenance_root" && test -n "$(find "$maintenance_root" -type f -print -quit)"; then
+            terminal_status=cleanup_pending
+            MAINTENANCE_ROOT="$maintenance_root" node - <<'NODE'
+          const fs = require('fs');
+          for (const name of fs.readdirSync(process.env.MAINTENANCE_ROOT)) {
+            const record = JSON.parse(fs.readFileSync(`${process.env.MAINTENANCE_ROOT}/${name}`));
+            if (record.phase !== 'uninstall_cleanup_pending') process.exit(1);
+          }
+          NODE
+          fi
+          printf 'Observed authenticated uninstall terminal status: %s\n' "$terminal_status"
+          printf 'fixed-absent\n' >&9; IFS= read -r keychain_after_uninstall <&10
+          KEYCHAIN_RESPONSE="$keychain_after_uninstall" KEYCHAIN_KEY="$keychain_fixture_key" EXPECTED_PID="$keychain_fixture_pid" EXPECTED_AUDIT="$keychain_fixture_audit" node - <<'NODE'
+          const crypto = require('crypto'); const f = process.env.KEYCHAIN_RESPONSE.split(' ');
+          if (f.length !== 7 || f[0] !== process.env.EXPECTED_PID || f[1] !== process.env.EXPECTED_AUDIT || f[2] !== '4' || f[3] !== 'fixed-absent' || f[4] !== '-25300' || f[5] !== '-25300') process.exit(1);
+          const i32=n=>{const b=Buffer.alloc(4);b.writeInt32BE(Number(n));return b}; const u32=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(Number(n));return b}; const u64=n=>Buffer.from(BigInt(n).toString(16).padStart(16,'0'),'hex');
+          const mac=crypto.createHmac('sha256',Buffer.from(process.env.KEYCHAIN_KEY,'hex')).update('talking-quill/macos-keychain-fixture/v1\0').update(u32(f[0])).update(u32(f[1])).update(u64(f[2])).update(f[3]).update(i32(f[4])).update(i32(f[5])).digest('hex'); if(mac!==f[6])process.exit(1);
+          NODE
+          exec 9>&- 10<&-; wait "$keychain_fixture_pid"
+          test ! -e "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/removal-required-v1"
+          test ! -d "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/maintenance-v1" ||
+            test -z "$(find "$HOME/Library/Application Support/Talking Quill/KeyboardOwner/maintenance-v1" -type f -print -quit)"
+          cargo test --manifest-path helper/Cargo.toml --locked -p talking-quill-helper owner::macos::maintenance::tests -- --nocapture
+      - name: Remove ephemeral signing keychain
+        if: always()
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/talking-quill-local-owner.keychain-db" || true
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: Talking-Quill-local-owner-mac-${{ matrix.arch }}
+          path: |
+            release/Talking-Quill-*-mac-${{ matrix.arch }}.dmg
+            release/Talking-Quill-*-mac-${{ matrix.arch }}.zip
+            artifact-provenance.json
+          if-no-files-found: error
+          retention-days: 14

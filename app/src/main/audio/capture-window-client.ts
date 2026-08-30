@@ -72,6 +72,7 @@ export type CaptureMessageChannelFactory = () => CaptureMessageChannel;
 
 export class CaptureWindowClient {
   readonly #channelFactory: CaptureMessageChannelFactory;
+  readonly #roleForWebContents: (id: number) => string | null;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #frameListeners = new Set<(frame: CaptureFrame) => void>();
   readonly #deviceListeners = new Set<(defaultInvalidated: boolean) => void>();
@@ -85,8 +86,12 @@ export class CaptureWindowClient {
   #activeCaptureId: string | null = null;
   #lastSequence = -1;
 
-  constructor(channelFactory: CaptureMessageChannelFactory = () => new MessageChannelMain()) {
+  constructor(
+    channelFactory: CaptureMessageChannelFactory = () => new MessageChannelMain(),
+    roleForWebContents: (id: number) => string | null = () => null,
+  ) {
     this.#channelFactory = channelFactory;
+    this.#roleForWebContents = roleForWebContents;
   }
 
   attach(webContents: WebContents): void {
@@ -103,7 +108,14 @@ export class CaptureWindowClient {
       protocolVersion: CAPTURE_PORT_PROTOCOL_VERSION,
     });
     try {
-      transferPort(webContents, 'capture:port', descriptor, channel.port2);
+      transferPort(
+        webContents,
+        this.#roleForWebContents(webContents.id),
+        'capture',
+        'capture:port',
+        descriptor,
+        channel.port2,
+      );
     } catch (error: unknown) {
       this.#closePort();
       channel.port2.close();

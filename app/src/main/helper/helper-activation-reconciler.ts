@@ -2,9 +2,10 @@ import {
   helperParamsSchemas,
   type ActivationBinding,
   type HelperParams,
+  type HelperResult,
 } from '../../shared/helper/protocol';
 import { type HelperReadinessReason } from '../../shared/schemas/helper-readiness';
-import { deepFreezeShortcut } from '../../shared/schemas/shortcut';
+import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 import { type HelperRpcSession } from './helper-rpc-channel';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3_000;
@@ -23,13 +24,16 @@ interface ActivationReconcileOptions {
 interface HelperActivationReconcilerOptions {
   readonly getSession: () => HelperRpcSession | null;
   readonly isSessionAvailable: (session: HelperRpcSession) => boolean;
+  readonly isSessionCurrent: (session: HelperRpcSession) => boolean;
   readonly request: (
     session: HelperRpcSession,
     params: HelperParams<'activation.configure'>,
     timeoutMs: number,
     timeoutReason: HelperReadinessReason,
-  ) => Promise<unknown>;
+  ) => Promise<HelperResult<'activation.configure'>>;
   readonly createNotRunningError: (message: string) => Error;
+  readonly createProtocolError: (message: string) => Error;
+  readonly reportProtocolFault: (session: HelperRpcSession, error: Error) => void;
   readonly isNotRunningError: (error: unknown) => boolean;
 }
 
@@ -44,6 +48,7 @@ export class HelperActivationReconciler {
   readonly #options: HelperActivationReconcilerOptions;
   #desired: ActivationConfiguration = Object.freeze({ enabled: false, bindings: [] });
   #blockedByHealth = true;
+  #effective: { readonly session: HelperRpcSession; readonly enabled: boolean } | null = null;
   #revision = 0;
   #applied: { readonly session: HelperRpcSession; readonly revision: number } | null = null;
   #intentTail: Promise<void> = Promise.resolve();
@@ -51,6 +56,13 @@ export class HelperActivationReconciler {
 
   constructor(options: HelperActivationReconcilerOptions) {
     this.#options = options;
+  }
+
+  get effectiveEnabled(): boolean | null {
+    const effective = this.#effective;
+    return effective !== null && effective.session === this.#options.getSession()
+      ? effective.enabled
+      : null;
   }
 
   configure(
@@ -102,11 +114,40 @@ export class HelperActivationReconciler {
 
   prepareFreshSession(): void {
     this.#applied = null;
+    this.#effective = null;
     this.setBlockedByHealth(true);
+  }
+
+  async beginPhysicalObservation(): Promise<void> {
+    await this.#enqueueReconcile(async () => {
+      const session = this.#options.getSession();
+      if (session === null || !this.#options.isSessionAvailable(session)) {
+        throw this.#options.createNotRunningError('Native physical observation is unavailable');
+      }
+      const requested = { enabled: false, bindings: [...this.#desired.bindings] };
+      const effective = await this.#options.request(
+        session,
+        requested,
+        DEFAULT_REQUEST_TIMEOUT_MS,
+        'request-timeout',
+      );
+      if (!activationAcknowledgementMatches(requested, effective) || effective.enabled) {
+        throw this.#options.createProtocolError(
+          'Native helper did not enter passive physical observation',
+        );
+      }
+      this.#effective = { session, enabled: false };
+      this.#applied = null;
+    });
+  }
+
+  endPhysicalObservation(): Promise<void> {
+    return this.reconcile(false);
   }
 
   processUnavailable(session: HelperRpcSession): void {
     if (this.#applied?.session === session) this.#applied = null;
+    if (this.#effective?.session === session) this.#effective = null;
     this.setBlockedByHealth(true);
   }
 
@@ -135,19 +176,87 @@ export class HelperActivationReconciler {
     session: HelperRpcSession,
     timeoutMs: number,
     timeoutReason: HelperReadinessReason,
+    onAuthoritative: () => void,
   ): Promise<void> {
     return this.#enqueueReconcile(async () => {
       const options = { allowUnavailable: false, timeoutMs, timeoutReason };
-      if (this.#options.getSession() !== session || !this.#options.isSessionAvailable(session)) {
-        this.#applied = null;
-        throw this.#options.createNotRunningError('Native helper activation changed process');
-      }
-      if (this.#blockedByHealth || !this.#desired.enabled) {
-        this.#applied = { session, revision: this.#revision };
+      for (;;) {
+        this.#assertFreshSession(session);
+        const revision = this.#revision;
+        const requested = {
+          enabled: false,
+          bindings: [...this.#desired.bindings],
+        };
+        const effective = await this.#options.request(
+          session,
+          requested,
+          options.timeoutMs,
+          options.timeoutReason,
+        );
+        this.#assertFreshSession(session);
+        if (!activationAcknowledgementMatches(requested, effective) || effective.enabled) {
+          const error = this.#options.createProtocolError(
+            'Native helper did not confirm disabled-first activation reconciliation',
+          );
+          this.#options.reportProtocolFault(session, error);
+          throw error;
+        }
+        this.#effective = { session, enabled: false };
+        if (revision !== this.#revision) continue;
+        if (this.#blockedByHealth || !this.#desired.enabled) {
+          this.#applied = { session, revision };
+          onAuthoritative();
+          return;
+        }
+        await this.#reconcileFreshEnable(options, session);
+        onAuthoritative();
         return;
       }
-      await this.#reconcile(options);
     });
+  }
+
+  #assertFreshSession(session: HelperRpcSession): void {
+    if (this.#options.getSession() !== session || !this.#options.isSessionCurrent(session)) {
+      this.#applied = null;
+      if (this.#effective?.session === session) this.#effective = null;
+      throw this.#options.createNotRunningError('Native helper activation changed process');
+    }
+  }
+
+  async #reconcileFreshEnable(
+    options: ActivationReconcileOptions,
+    session: HelperRpcSession,
+  ): Promise<void> {
+    for (;;) {
+      this.#assertFreshSession(session);
+      const revision = this.#revision;
+      const desired = this.#desired;
+      if (this.#blockedByHealth || !desired.enabled) {
+        this.#effective = { session, enabled: false };
+        this.#applied = { session, revision };
+        return;
+      }
+      const requested = { enabled: true, bindings: [...desired.bindings] };
+      const effective = await this.#options.request(
+        session,
+        requested,
+        options.timeoutMs,
+        options.timeoutReason,
+      );
+      this.#assertFreshSession(session);
+      if (!activationAcknowledgementMatches(requested, effective)) {
+        const error = this.#options.createProtocolError(
+          'Native helper returned a mismatched activation configuration',
+        );
+        this.#options.reportProtocolFault(session, error);
+        throw error;
+      }
+      this.#effective = { session, enabled: effective.enabled };
+      if (revision === this.#revision) {
+        this.#applied = { session, revision };
+        return;
+      }
+    }
   }
 
   #enqueueReconcile(operation: () => Promise<void>): Promise<void> {
@@ -164,6 +273,7 @@ export class HelperActivationReconciler {
       const revision = this.#revision;
       const session = this.#options.getSession();
       if (expectedSession !== undefined && session !== expectedSession) {
+        if (this.#effective?.session === expectedSession) this.#effective = null;
         if (options.allowUnavailable) return;
         throw this.#options.createNotRunningError('Native helper activation changed process');
       }
@@ -172,36 +282,64 @@ export class HelperActivationReconciler {
       }
       if (session === null || !this.#options.isSessionAvailable(session)) {
         this.#applied = null;
+        if (session === null || this.#effective?.session === session) this.#effective = null;
         if (options.allowUnavailable) return;
         throw this.#options.createNotRunningError('Native helper activation is unavailable');
       }
       const desired = this.#desired;
+      const requested = {
+        enabled: !this.#blockedByHealth && desired.enabled,
+        bindings: [...desired.bindings],
+      };
+      let effective: HelperResult<'activation.configure'>;
       try {
-        await this.#options.request(
+        effective = await this.#options.request(
           session,
-          {
-            enabled: !this.#blockedByHealth && desired.enabled,
-            bindings: [...desired.bindings],
-          },
+          requested,
           options.timeoutMs,
           options.timeoutReason,
         );
       } catch (error: unknown) {
         if (options.allowUnavailable && this.#options.isNotRunningError(error)) {
           this.#applied = null;
+          if (this.#effective?.session === session) this.#effective = null;
           return;
         }
         throw error;
       }
       if (this.#options.getSession() !== session) {
         this.#applied = null;
+        if (this.#effective?.session === session) this.#effective = null;
         if (options.allowUnavailable) return;
         throw this.#options.createNotRunningError('Native helper activation changed process');
       }
+      if (!activationAcknowledgementMatches(requested, effective)) {
+        const error = this.#options.createProtocolError(
+          'Native helper returned a mismatched activation configuration',
+        );
+        this.#options.reportProtocolFault(session, error);
+        throw error;
+      }
+      this.#effective = { session, enabled: effective.enabled };
       if (revision === this.#revision) {
         this.#applied = { session, revision };
         return;
       }
     }
   }
+}
+
+function activationAcknowledgementMatches(
+  requested: HelperParams<'activation.configure'>,
+  effective: HelperResult<'activation.configure'>,
+): boolean {
+  if (effective.enabled !== requested.enabled) return false;
+  if (effective.bindings.length !== requested.bindings.length) return false;
+  return effective.bindings.every((binding, index) => {
+    const candidate = requested.bindings[index];
+    return (
+      binding.profileId === candidate?.profileId &&
+      shortcutsEqual(binding.shortcut, candidate.shortcut)
+    );
+  });
 }

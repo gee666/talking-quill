@@ -3,6 +3,7 @@ import type { HelperSessionCaptureMode } from '../../shared/helper/protocol';
 const CAPACITY_RETRY_MS = 10;
 
 export interface HelperCaptureReconcilerPort {
+  readonly sessionKeyCaptureAvailable?: boolean | null;
   setSessionCapture(mode: HelperSessionCaptureMode): Promise<unknown>;
   resetSessionCapture(signal?: AbortSignal): Promise<unknown>;
 }
@@ -36,12 +37,14 @@ export class HelperCaptureReconciler {
   }
 
   markNativeCaptureArmed(): void {
+    if (this.#helper.sessionKeyCaptureAvailable === false) return;
     this.#revision += 1;
     this.#applied = null;
     this.#captureOffGuaranteed = false;
   }
 
   markAppliedUnknown(): void {
+    if (this.#helper.sessionKeyCaptureAvailable === false) return;
     this.#revision += 1;
     this.#applied = null;
   }
@@ -60,6 +63,16 @@ export class HelperCaptureReconciler {
 
   request(mode: HelperSessionCaptureMode, generation: number): Promise<void> {
     if (generation !== this.#generation || (this.#disposed && mode !== 'off')) {
+      return Promise.resolve();
+    }
+
+    if (this.#helper.sessionKeyCaptureAvailable === false) {
+      if (this.#desired !== mode) {
+        this.#desired = mode;
+        this.#revision += 1;
+      }
+      this.#applied = 'off';
+      if (!this.#captureOffGuaranteed) this.#confirmCaptureOff();
       return Promise.resolve();
     }
 

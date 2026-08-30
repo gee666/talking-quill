@@ -11,8 +11,9 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.{ts,tsx}'],
     environment: 'node',
-    // Native Electron/SQLite suites are memory-heavy; cap forks for deterministic cross-OS CI.
-    maxWorkers: 4,
+    // Native Electron/SQLite suites are memory-heavy; two forks avoid Windows job-object/
+    // memory pressure killing workers when validation follows Rust and package builds.
+    maxWorkers: 2,
     setupFiles: ['tests/setup.ts'],
     coverage: {
       provider: 'v8',

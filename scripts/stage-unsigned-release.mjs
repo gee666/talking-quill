@@ -3,6 +3,12 @@ import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dump, load } from 'js-yaml';
+import {
+  authorizeWindowsUpdaterReleaseBinding,
+  createUpdaterReleaseBinding,
+  RELEASE_PACKAGE_METADATA_NAME,
+  validatePackageReleaseMetadata,
+} from './release-package-metadata.mjs';
 
 async function main() {
   const [platform, arch] = process.argv.slice(2).filter((value) => value !== '--');
@@ -24,12 +30,41 @@ async function main() {
   const rawMetadataName = platform === 'win' ? 'latest.yml' : 'latest-mac.yml';
   const channelMetadataName = platform === 'win' ? `latest-${arch}.yml` : `latest-${arch}-mac.yml`;
 
+  const packageRoot = packageRootForTarget(release, platform, arch);
+  const packageMetadataPath =
+    platform === 'win'
+      ? resolve(packageRoot, 'resources', RELEASE_PACKAGE_METADATA_NAME)
+      : resolve(
+          packageRoot,
+          'Talking Quill.app',
+          'Contents',
+          'Resources',
+          RELEASE_PACKAGE_METADATA_NAME,
+        );
+  const packageMetadata = validatePackageReleaseMetadata(
+    JSON.parse(await readFile(packageMetadataPath, 'utf8')),
+  );
+  if (
+    packageMetadata.version !== version ||
+    packageMetadata.platform !== platform ||
+    packageMetadata.architecture !== arch ||
+    (platform === 'mac' &&
+      (packageMetadata.predecessor === null ||
+        packageMetadata.outerIdentity?.mode !== 'certificate'))
+  ) {
+    throw new Error('Serialized package metadata does not match the updater target.');
+  }
+  const updateEvidence = await fileEvidence(resolve(release, updateName));
+  const unsignedBinding = createUpdaterReleaseBinding(packageMetadata, updateEvidence.sha256);
+  const releaseBinding =
+    platform === 'win' ? authorizeWindowsUpdaterReleaseBinding(unsignedBinding) : unsignedBinding;
   const metadata = load(await readFile(resolve(release, rawMetadataName), 'utf8'));
   const channelMetadata = await canonicalizeUpdateMetadata(metadata, {
     expectedVersion: version,
     allowedFiles: finalNames,
     expectedUpdateFile: updateName,
     evidence: (name) => fileEvidence(resolve(release, name)),
+    releaseBinding,
   });
   await requireFile(resolve(release, blockmapName));
   await requireFile(resolve(root, 'artifact-provenance.json'));
@@ -45,18 +80,36 @@ async function main() {
     dump(channelMetadata, { lineWidth: 120 }),
     'utf8',
   );
+  await writeFile(
+    resolve(output, `release-identity-${platform}-${arch}.json`),
+    `${JSON.stringify(releaseBinding, null, 2)}\n`,
+    'utf8',
+  );
   await copyFile(
     resolve(root, 'artifact-provenance.json'),
     resolve(output, `provenance-${platform}-${arch}.json`),
   );
+  if (platform === 'win') {
+    await copyFile(
+      resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt'),
+      resolve(output, 'THIRD_PARTY_NOTICES.txt'),
+    );
+  }
   console.log(
-    `Staged unsigned ${platform}/${arch} release payload, blockmap, updater channel, and provenance.`,
+    `Staged unsigned ${platform}/${arch} release payload, blockmap, updater channel, notices, and provenance.`,
   );
+}
+
+export function packageRootForTarget(release, platform, architecture) {
+  if (platform === 'win') {
+    return resolve(release, architecture === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked');
+  }
+  return resolve(release, architecture === 'x64' ? 'mac' : 'mac-arm64');
 }
 
 export async function canonicalizeUpdateMetadata(
   value,
-  { expectedVersion, allowedFiles, expectedUpdateFile, evidence },
+  { expectedVersion, allowedFiles, expectedUpdateFile, evidence, releaseBinding },
 ) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Generated updater metadata is not an object.');
@@ -100,12 +153,22 @@ export async function canonicalizeUpdateMetadata(
   ) {
     throw new Error('Generated updater metadata does not select the expected update payload.');
   }
+  if (
+    releaseBinding !== undefined &&
+    (releaseBinding?.schemaVersion !== 1 ||
+      releaseBinding.version !== expectedVersion ||
+      releaseBinding.packageSha256 !== updateEvidence.sha256 ||
+      releaseBinding.transactionBinding !== 'source-target-package-sha256-v1')
+  ) {
+    throw new Error('Updater transaction binding does not match the exact payload bytes.');
+  }
   return {
     version: expectedVersion,
     files: [updateEntry],
     path: expectedUpdateFile,
     sha512: updateEvidence.sha512,
     ...(typeof value.releaseDate === 'string' ? { releaseDate: value.releaseDate } : {}),
+    ...(releaseBinding === undefined ? {} : { talkingQuillRelease: releaseBinding }),
   };
 }
 
@@ -114,6 +177,7 @@ async function fileEvidence(path) {
   return {
     size: bytes.length,
     sha512: createHash('sha512').update(bytes).digest('base64'),
+    sha256: createHash('sha256').update(bytes).digest('hex'),
   };
 }
 

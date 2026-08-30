@@ -11,11 +11,14 @@ import type { WelcomeService } from '../../app/src/main/welcome/welcome-service'
 
 const MODEL_ID = 'Xenova/whisper-small' as WhisperModelId;
 
-function modelStatus(state: ModelStatus['state']): ModelStatus {
+function modelStatus(
+  state: ModelStatus['state'],
+  downloadedBytes = state === 'ready' ? 10 : 0,
+): ModelStatus {
   return {
     modelId: MODEL_ID,
     state,
-    downloadedBytes: state === 'ready' ? 10 : 0,
+    downloadedBytes,
     totalBytes: 10,
     detail: null,
     repairable: false,
@@ -84,6 +87,150 @@ describe('model runtime coordinator', () => {
     expect(readinessChanged).toHaveBeenCalledTimes(1);
     expect(invalidateModelSelection).toHaveBeenCalledTimes(1);
     removeProgress();
+  });
+
+  it('repairs complete preserved model files before reporting setup missing', async () => {
+    const settings = {
+      get: () => ({ transcription: { modelId: MODEL_ID }, welcome: { modelEvidence: null } }),
+      subscribe: vi.fn(() => () => undefined),
+    } as unknown as SettingsStore;
+    const status = vi
+      .fn<(...arguments_: unknown[]) => Promise<ModelStatus>>()
+      .mockResolvedValueOnce(modelStatus('corrupt', 10))
+      .mockResolvedValueOnce(modelStatus('ready'));
+    const models = {
+      setBeforeMutation: vi.fn(),
+      setAfterInstallValidation: vi.fn(),
+      status,
+      manifestRevision: vi.fn(() => 'revision-1'),
+    } as unknown as ModelManager;
+    const coordinator = new ModelRuntimeCoordinator({
+      settings,
+      events: { send: vi.fn() } as unknown as IpcEventEmitter,
+      models,
+      whisper: { unload: vi.fn() } as unknown as WhisperWorkerClient,
+    });
+
+    await expect(
+      coordinator.bindState({ setModelReady: vi.fn() } as unknown as AppStateService),
+    ).resolves.toMatchObject({ state: 'ready' });
+    expect(status).toHaveBeenNthCalledWith(1, MODEL_ID);
+    expect(status).toHaveBeenNthCalledWith(2, MODEL_ID, true);
+  });
+
+  it('keeps an incomplete model actionable without starting an automatic download', async () => {
+    const settings = {
+      get: () => ({ transcription: { modelId: MODEL_ID }, welcome: { modelEvidence: null } }),
+      subscribe: vi.fn(() => () => undefined),
+    } as unknown as SettingsStore;
+    const status = vi.fn(() => Promise.resolve(modelStatus('missing', 4)));
+    const models = {
+      setBeforeMutation: vi.fn(),
+      setAfterInstallValidation: vi.fn(),
+      status,
+      manifestRevision: vi.fn(() => 'revision-1'),
+    } as unknown as ModelManager;
+    const coordinator = new ModelRuntimeCoordinator({
+      settings,
+      events: { send: vi.fn() } as unknown as IpcEventEmitter,
+      models,
+      whisper: { unload: vi.fn() } as unknown as WhisperWorkerClient,
+    });
+
+    await expect(
+      coordinator.bindState({ setModelReady: vi.fn() } as unknown as AppStateService),
+    ).resolves.toMatchObject({ state: 'missing', downloadedBytes: 4 });
+    expect(status).toHaveBeenCalledOnce();
+  });
+
+  it('clears stale readiness and reconciles complete files after the selected model changes', async () => {
+    const replacement = 'Xenova/whisper-future' as WhisperModelId;
+    let settingsValue = {
+      transcription: { modelId: MODEL_ID },
+      welcome: { modelEvidence: null },
+    };
+    let settingsListener: ((value: typeof settingsValue) => void) | undefined;
+    const settings = {
+      get: () => settingsValue,
+      subscribe: vi.fn((listener: (value: typeof settingsValue) => void) => {
+        settingsListener = listener;
+        return () => undefined;
+      }),
+    } as unknown as SettingsStore;
+    const replacementStatus = (state: ModelStatus['state']): ModelStatus => ({
+      ...modelStatus(state, 10),
+      modelId: replacement,
+    });
+    const status = vi
+      .fn<(...arguments_: unknown[]) => Promise<ModelStatus>>()
+      .mockResolvedValueOnce(modelStatus('ready'))
+      .mockResolvedValueOnce(replacementStatus('corrupt'))
+      .mockResolvedValueOnce(replacementStatus('ready'));
+    const coordinator = new ModelRuntimeCoordinator({
+      settings,
+      events: { send: vi.fn() } as unknown as IpcEventEmitter,
+      models: {
+        setBeforeMutation: vi.fn(),
+        setAfterInstallValidation: vi.fn(),
+        status,
+        manifestRevision: vi.fn(() => 'revision-1'),
+      } as unknown as ModelManager,
+      whisper: { unload: vi.fn() } as unknown as WhisperWorkerClient,
+    });
+    const setModelReady = vi.fn();
+    const readinessChanged = vi.fn();
+    await coordinator.bindState({ setModelReady } as unknown as AppStateService);
+    coordinator.bindEcho({ readinessChanged } as unknown as EchoSessionController);
+    coordinator.subscribeSelectedModel(false);
+    if (settingsListener === undefined) throw new Error('Settings listener was not installed');
+
+    settingsValue = { ...settingsValue, transcription: { modelId: replacement } };
+    settingsListener(settingsValue);
+
+    expect(setModelReady).toHaveBeenCalledWith(false);
+    expect(readinessChanged).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(setModelReady).toHaveBeenLastCalledWith(true));
+    expect(status).toHaveBeenNthCalledWith(2, replacement);
+    expect(status).toHaveBeenNthCalledWith(3, replacement, true);
+  });
+
+  it('keeps readiness false when selected-model inspection fails', async () => {
+    const replacement = 'Xenova/whisper-future' as WhisperModelId;
+    let modelId = MODEL_ID;
+    let settingsListener:
+      ((value: { transcription: { modelId: WhisperModelId } }) => void) | undefined;
+    const settings = {
+      get: () => ({ transcription: { modelId }, welcome: { modelEvidence: null } }),
+      subscribe: vi.fn((listener: NonNullable<typeof settingsListener>) => {
+        settingsListener = listener;
+        return () => undefined;
+      }),
+    } as unknown as SettingsStore;
+    const status = vi
+      .fn<(...arguments_: unknown[]) => Promise<ModelStatus>>()
+      .mockResolvedValueOnce(modelStatus('ready'))
+      .mockRejectedValueOnce(new Error('inspection failed'));
+    const coordinator = new ModelRuntimeCoordinator({
+      settings,
+      events: { send: vi.fn() } as unknown as IpcEventEmitter,
+      models: {
+        setBeforeMutation: vi.fn(),
+        setAfterInstallValidation: vi.fn(),
+        status,
+        manifestRevision: vi.fn(() => 'revision-1'),
+      } as unknown as ModelManager,
+      whisper: { unload: vi.fn() } as unknown as WhisperWorkerClient,
+    });
+    const setModelReady = vi.fn();
+    await coordinator.bindState({ setModelReady } as unknown as AppStateService);
+    coordinator.subscribeSelectedModel(false);
+    if (settingsListener === undefined) throw new Error('Settings listener was not installed');
+
+    modelId = replacement;
+    settingsListener({ transcription: { modelId } });
+    await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2));
+
+    expect(setModelReady).toHaveBeenLastCalledWith(false);
   });
 
   it('invalidates worker-validated readiness before model mutation', async () => {

@@ -4,7 +4,29 @@ import { extname, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const config = JSON.parse(readFileSync(resolve(root, 'release.config.json'), 'utf8'));
-const tracked = git(['ls-files']).split(/\r?\n/u).filter(Boolean);
+const promotionGateScripts = ['scripts/verify-draft-release.mjs'];
+const fullReleaseTree =
+  existsSync(resolve(root, 'package.json')) ||
+  existsSync(resolve(root, '.github/workflows/release-unsigned.yml'));
+if (fullReleaseTree) {
+  for (const path of promotionGateScripts) {
+    if (!existsSync(resolve(root, path))) {
+      throw new Error(`Required release trust path is missing: ${path}`);
+    }
+  }
+}
+// Audit the complete candidate working tree, including newly added source
+// files before they are committed. Untracked agent plans are local user input,
+// but a plan added to the index is a release-integrity failure.
+const indexed = git(['ls-files', '--cached']).split(/\r?\n/u).filter(Boolean);
+const indexedPlans = indexed.filter((path) => path.startsWith('.agent-plans/'));
+if (indexedPlans.length > 0) {
+  throw new Error(`Tracked agent plans are forbidden: ${indexedPlans.join(', ')}`);
+}
+const untracked = git(['ls-files', '--others', '--exclude-standard'])
+  .split(/\r?\n/u)
+  .filter((path) => path.length > 0 && !path.startsWith('.agent-plans/'));
+const tracked = [...new Set([...indexed, ...untracked])];
 if (
   existsSync(resolve(root, 'reference')) ||
   tracked.some((path) => path.startsWith('reference/'))
@@ -68,7 +90,11 @@ const violations = [];
 let textualFiles = 0;
 for (const path of tracked) {
   if (!textExtensions.has(extname(path).toLowerCase())) continue;
-  const bytes = readFileSync(resolve(root, path));
+  const absolutePath = resolve(root, path);
+  // A release implementation can delete a tracked source before its commit is
+  // created; audit the candidate working tree rather than reopening tombstones.
+  if (!existsSync(absolutePath)) continue;
+  const bytes = readFileSync(absolutePath);
   if (bytes.includes(0)) continue;
   textualFiles += 1;
   const source = bytes.toString('utf8');

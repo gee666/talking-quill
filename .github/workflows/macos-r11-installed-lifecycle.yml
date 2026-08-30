@@ -1,0 +1,253 @@
+name: macOS R11 exact-artifact installed lifecycle
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful release-unsigned workflow run ID
+        required: true
+        type: string
+      candidate_tag:
+        description: Exact candidate tag (vX.Y.Z)
+        required: true
+        type: string
+      baseline_x64_run_id:
+        description: Accepted x64 predecessor release-unsigned run ID
+        required: true
+        type: string
+      baseline_x64_zip_sha256:
+        description: Accepted exact x64 predecessor ZIP SHA-256
+        required: true
+        type: string
+      baseline_arm64_run_id:
+        description: Accepted ARM64 predecessor release-unsigned run ID
+        required: true
+        type: string
+      baseline_arm64_zip_sha256:
+        description: Accepted exact ARM64 predecessor ZIP SHA-256
+        required: true
+        type: string
+      signing_mode:
+        description: Local install-anyway identity represented by both accepted runs
+        required: true
+        type: choice
+        options:
+          - self-signed
+          - adhoc
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: macos-r11-${{ inputs.candidate_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  authenticate-inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      candidate_run_id: ${{ steps.x64.outputs.candidate_run_id }}
+      candidate_commit: ${{ steps.x64.outputs.candidate_commit }}
+      candidate_run_attempt: ${{ steps.x64.outputs.candidate_run_attempt }}
+      baseline_x64_run_id: ${{ steps.x64.outputs.baseline_run_id }}
+      baseline_arm64_run_id: ${{ steps.arm64.outputs.baseline_run_id }}
+      candidate_tag: ${{ steps.tag.outputs.candidate_tag }}
+    steps:
+      - name: Require trusted default-branch dispatch
+        shell: bash
+        run: |
+          test "$GITHUB_REPOSITORY" = 'gee666/talking-quill'
+          test "$GITHUB_EVENT_NAME" = 'workflow_dispatch'
+          test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Reject non-canonical inputs before path/API use
+        shell: bash
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          BASELINE_X64_RUN_ID: ${{ inputs.baseline_x64_run_id }}
+          BASELINE_ARM64_RUN_ID: ${{ inputs.baseline_arm64_run_id }}
+          BASELINE_X64_ZIP_SHA256: ${{ inputs.baseline_x64_zip_sha256 }}
+          BASELINE_ARM64_ZIP_SHA256: ${{ inputs.baseline_arm64_zip_sha256 }}
+        run: |
+          node - <<'NODE'
+          const decimal = /^(?:[1-9]\d*)$/;
+          const hash = /^[0-9a-f]{64}$/;
+          const tag = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+          for (const name of ['CANDIDATE_RUN_ID','BASELINE_X64_RUN_ID','BASELINE_ARM64_RUN_ID']) if (!decimal.test(process.env[name])) throw new Error(`Invalid ${name}`);
+          for (const name of ['BASELINE_X64_ZIP_SHA256','BASELINE_ARM64_ZIP_SHA256']) if (!hash.test(process.env[name])) throw new Error(`Invalid ${name}`);
+          if (!tag.test(process.env.CANDIDATE_TAG)) throw new Error('Invalid CANDIDATE_TAG');
+          NODE
+      - name: Read immutable GitHub run and artifact provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          BASELINE_X64_RUN_ID: ${{ inputs.baseline_x64_run_id }}
+          BASELINE_ARM64_RUN_ID: ${{ inputs.baseline_arm64_run_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY" > repository.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > candidate-run.json
+          for arch in x64 arm64; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?name=Talking-Quill-local-owner-mac-$arch" > "candidate-artifacts-$arch.json"
+          done
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BASELINE_X64_RUN_ID" > baseline-run-x64.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BASELINE_X64_RUN_ID/artifacts?name=Talking-Quill-local-owner-mac-x64" > baseline-artifacts-x64.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BASELINE_ARM64_RUN_ID" > baseline-run-arm64.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BASELINE_ARM64_RUN_ID/artifacts?name=Talking-Quill-local-owner-mac-arm64" > baseline-artifacts-arm64.json
+      - id: x64
+        name: Authenticate x64 candidate and predecessor
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_x64_run_id }}
+          BASELINE_ZIP_SHA256: ${{ inputs.baseline_x64_zip_sha256 }}
+        run: >-
+          node scripts/macos-r11-provenance.mjs
+          --arch x64
+          --repository "$GITHUB_REPOSITORY"
+          --repository-json repository.json
+          --candidate-run-id "$CANDIDATE_RUN_ID"
+          --baseline-run-id "$BASELINE_RUN_ID"
+          --candidate-run-json candidate-run.json
+          --baseline-run-json baseline-run-x64.json
+          --candidate-artifacts-json candidate-artifacts-x64.json
+          --baseline-artifacts-json baseline-artifacts-x64.json
+          --baseline-zip-sha256 "$BASELINE_ZIP_SHA256"
+          --output provenance-x64.json
+      - id: arm64
+        name: Authenticate ARM64 candidate and predecessor
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_arm64_run_id }}
+          BASELINE_ZIP_SHA256: ${{ inputs.baseline_arm64_zip_sha256 }}
+        run: >-
+          node scripts/macos-r11-provenance.mjs
+          --arch arm64
+          --repository "$GITHUB_REPOSITORY"
+          --repository-json repository.json
+          --candidate-run-id "$CANDIDATE_RUN_ID"
+          --baseline-run-id "$BASELINE_RUN_ID"
+          --candidate-run-json candidate-run.json
+          --baseline-run-json baseline-run-arm64.json
+          --candidate-artifacts-json candidate-artifacts-arm64.json
+          --baseline-artifacts-json baseline-artifacts-arm64.json
+          --baseline-zip-sha256 "$BASELINE_ZIP_SHA256"
+          --output provenance-arm64.json
+      - name: Require one coherent predecessor release for both architectures
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const x64 = JSON.parse(fs.readFileSync('provenance-x64.json'));
+          const arm64 = JSON.parse(fs.readFileSync('provenance-arm64.json'));
+          if (x64.baseline.runId !== arm64.baseline.runId || x64.baseline.headSha !== arm64.baseline.headSha) throw new Error('Architecture baselines are not one release');
+          NODE
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.x64.outputs.candidate_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: tag
+        name: Bind immutable tag to authenticated candidate source
+        shell: bash
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          CANDIDATE_COMMIT: ${{ steps.x64.outputs.candidate_commit }}
+        run: |
+          test "v$(node -p "require('./package.json').version")" = "$CANDIDATE_TAG"
+          git fetch --force origin "refs/tags/$CANDIDATE_TAG:refs/tags/$CANDIDATE_TAG"
+          test "$(git rev-list -n 1 "$CANDIDATE_TAG")" = "$CANDIDATE_COMMIT"
+          printf 'candidate_tag=%s\n' "$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: authenticated-macos-r11-inputs
+          path: provenance-*.json
+          if-no-files-found: error
+          retention-days: 1
+
+  installed-lifecycle:
+    needs: authenticate-inputs
+    name: Staffed exact lifecycle (${{ matrix.arch }}, ${{ inputs.signing_mode }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: '["self-hosted","macOS","talking-quill-permissioned","physical-input","x64"]'
+            baseline_output: baseline_x64_run_id
+          - arch: arm64
+            runner: '["self-hosted","macOS","talking-quill-permissioned","physical-input","arm64"]'
+            baseline_output: baseline_arm64_run_id
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.authenticate-inputs.outputs.candidate_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: authenticated-macos-r11-inputs
+          path: authenticated-inputs
+      - name: Download authenticated immutable artifact IDs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          provenance="authenticated-inputs/provenance-${{ matrix.arch }}.json"
+          candidate_id="$(node -p "JSON.parse(require('fs').readFileSync('$provenance')).candidate.artifact.id")"
+          baseline_id="$(node -p "JSON.parse(require('fs').readFileSync('$provenance')).baseline.artifact.id")"
+          test "$candidate_id" != "$baseline_id"
+          mkdir -p tmp/macos-r11-download candidate-part baseline-part
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$candidate_id/zip" > tmp/macos-r11-download/candidate.zip
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$baseline_id/zip" > tmp/macos-r11-download/baseline.zip
+          ditto -x -k tmp/macos-r11-download/candidate.zip candidate-part
+          ditto -x -k tmp/macos-r11-download/baseline.zip baseline-part
+      - id: artifacts
+        name: Resolve unambiguous exact artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dmg=(candidate-part/Talking-Quill-*-mac-${{ matrix.arch }}.dmg)
+          candidate_zip=(candidate-part/Talking-Quill-*-mac-${{ matrix.arch }}.zip)
+          baseline_zip=(baseline-part/Talking-Quill-*-mac-${{ matrix.arch }}.zip)
+          test "${#candidate_dmg[@]}" -eq 1 && test -f "${candidate_dmg[0]}"
+          test "${#candidate_zip[@]}" -eq 1 && test -f "${candidate_zip[0]}"
+          test "${#baseline_zip[@]}" -eq 1 && test -f "${baseline_zip[0]}"
+          printf 'candidate_dmg=%s\ncandidate_zip=%s\nbaseline_zip=%s\n' "${candidate_dmg[0]}" "${candidate_zip[0]}" "${baseline_zip[0]}" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "${candidate_dmg[0]}" "${candidate_zip[0]}" "${baseline_zip[0]}"
+      - name: Execute native LoginItem/TCC/Keychain/input/update/removal lifecycle
+        shell: bash
+        env:
+          TALKING_QUILL_RELEASE_COMMIT: ${{ needs.authenticate-inputs.outputs.candidate_commit }}
+          TALKING_QUILL_RELEASE_RUN_ID: ${{ needs.authenticate-inputs.outputs.candidate_run_id }}
+          TALKING_QUILL_RELEASE_RUN_ATTEMPT: ${{ needs.authenticate-inputs.outputs.candidate_run_attempt }}
+          TALKING_QUILL_RELEASE_TAG: ${{ needs.authenticate-inputs.outputs.candidate_tag }}
+          TALKING_QUILL_MACOS_OPERATOR_PUBLIC_KEY_SHA256: ${{ vars.TALKING_QUILL_MACOS_OPERATOR_PUBLIC_KEY_SHA256 }}
+        run: >-
+          node scripts/macos-r11-installed-lifecycle.mjs
+          --arch ${{ matrix.arch }}
+          --signing-mode ${{ inputs.signing_mode }}
+          --candidate-dmg "${{ steps.artifacts.outputs.candidate_dmg }}"
+          --candidate-zip "${{ steps.artifacts.outputs.candidate_zip }}"
+          --baseline-zip "${{ steps.artifacts.outputs.baseline_zip }}"
+          --provenance "authenticated-inputs/provenance-${{ matrix.arch }}.json"
+          --checkpoint-root "tmp/macos-r11-checkpoints-${{ matrix.arch }}"
+          --work-root "tmp/macos-r11-work-${{ matrix.arch }}"
+          --manual-timeout-seconds 3600
+          --evidence "macos-lifecycle-evidence-${{ matrix.arch }}.json"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: macos-lifecycle-evidence-${{ matrix.arch }}
+          path: macos-lifecycle-evidence-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 30

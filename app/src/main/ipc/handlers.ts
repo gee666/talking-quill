@@ -53,6 +53,7 @@ export interface HandlerDependencies {
   readonly applicationUpdates: ApplicationUpdateController;
   readonly systemInfo: SystemInfoService;
   readonly notices: NoticesService;
+  readonly diagnosticSummary: () => Readonly<Record<string, unknown>>;
   readonly packagedMediaReady?: (role: 'capture' | 'widget') => void;
   readonly requestDataReset: () => Promise<string>;
   readonly acknowledgeDataReset: (acknowledgementToken: string) => void;
@@ -109,16 +110,28 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       return { accepted: true };
     },
     'info:notices': async () => ({ text: await dependencies.notices.read() }),
+    'info:export-diagnostics': async (_request, context) => {
+      const owner = dependencies.windows.getByWebContentsId(context.webContentsId);
+      if (owner === null) throw new Error('Diagnostic export dialog owner is unavailable');
+      return {
+        status: await dependencies.systemInfo.exportDiagnostics(
+          owner,
+          dependencies.diagnosticSummary(),
+        ),
+      };
+    },
     'activation-test:start': (_request, context) =>
       dependencies.echo.startActivationTest(context.webContentsId, context.onDestroyed),
     'activation-test:stop': (_request, context) =>
       dependencies.echo.stopActivationTest(context.webContentsId),
-    'shortcut-capture:start': async (_request, context) => {
-      await dependencies.echo.startShortcutCapture(context.webContentsId, context.onDestroyed);
-      return { accepted: true };
-    },
-    'shortcut-capture:stop': async (_request, context) => {
-      await dependencies.echo.stopShortcutCapture(context.webContentsId);
+    'shortcut-capture:start': async (_request, context) => ({
+      leaseId: await dependencies.echo.startShortcutCapture(
+        context.webContentsId,
+        context.onDestroyed,
+      ),
+    }),
+    'shortcut-capture:stop': async ({ leaseId }, context) => {
+      await dependencies.echo.stopShortcutCapture(context.webContentsId, leaseId);
       return { accepted: true };
     },
     'app:set-enabled': ({ enabled }) =>
@@ -233,7 +246,8 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       await dependencies.windows.closeMainByWebContentsId(context.webContentsId);
       return { accepted: true };
     },
-    'widget:ready': () => {
+    'widget:ready': (_request, context) => {
+      dependencies.windows.markRendererReady('widget', context.webContentsId);
       dependencies.packagedMediaReady?.('widget');
       return dependencies.echo.snapshot;
     },
@@ -252,6 +266,7 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
     'capture:ready': (_request, context) => {
       const window = dependencies.windows.getByWebContentsId(context.webContentsId);
       if (window !== null) dependencies.recording.attachCapture(window.webContents);
+      dependencies.windows.markRendererReady('capture', context.webContentsId);
       dependencies.packagedMediaReady?.('capture');
       return { accepted: true };
     },

@@ -60,6 +60,12 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     reason: 'Uses the child-process type for bounded stdio RPC and never creates a process.',
     tokens: Object.freeze(['node:child_process']),
   }),
+  'app/src/main/app/installed-observation.ts': Object.freeze({
+    category: 'local-diagnostic-pipe-only',
+    reason:
+      'Uses one caller-supplied, strictly validated local named pipe for packaged installed-observation responses; no network endpoint is accepted.',
+    tokens: Object.freeze(['node:net']),
+  }),
   'app/src/main/helper/helper-client.ts': Object.freeze({
     category: 'native-helper-process-only',
     reason:
@@ -70,6 +76,38 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     category: 'native-owned-data-removal-only',
     reason: 'Executes only the bundled helper identity-bound reset mode with fixed arguments.',
     tokens: Object.freeze(['node:child_process']),
+  }),
+  'app/src/main/app/windows-uninstall-target.ts': Object.freeze({
+    category: 'windows-uninstall-target-only',
+    reason:
+      'Runs fixed System32 PowerShell arguments to resolve the signed-in desktop profile for explicit uninstall data removal.',
+    tokens: Object.freeze(['node:child_process']),
+    childProcessMembers: Object.freeze([
+      'SpawnSyncOptionsWithStringEncoding',
+      'SpawnSyncReturns',
+      'spawnSync',
+    ]),
+  }),
+  'app/src/main/app/application.ts': Object.freeze({
+    category: 'macos-owner-lifecycle-only',
+    reason:
+      'Synchronously invokes only the bundled helper macOS cleanup-resume and exact-install validation modes before owner lifecycle activation.',
+    tokens: Object.freeze(['node:child_process']),
+    childProcessMembers: Object.freeze(['execFileSync']),
+  }),
+  'app/src/main/info/macos-owner-update-coordinator.ts': Object.freeze({
+    category: 'macos-owner-lifecycle-only',
+    reason:
+      'Runs bounded ditto extraction and the exact bundled native macOS maintenance finalizer with authenticated private pipes.',
+    tokens: Object.freeze(['node:child_process']),
+    childProcessMembers: Object.freeze(['execFile', 'spawn']),
+  }),
+  'app/src/main/info/electron-update-backend.ts': Object.freeze({
+    category: 'reviewed-update-lifecycle-only',
+    reason:
+      'Spawns only the closed-inventory updater elevation launch on Windows; macOS remains on electron-updater quitAndInstall.',
+    tokens: Object.freeze(['node:child_process']),
+    childProcessMembers: Object.freeze(['spawn']),
   }),
   'app/src/main/security/redaction.ts': Object.freeze({
     category: 'address-validation-only',
@@ -518,6 +556,32 @@ export function detectNetworkTokens(source, fileName = 'network-boundary.ts') {
   return Object.freeze([...tokens].sort());
 }
 
+export function childProcessImportMembers(source, fileName = 'network-boundary.ts') {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    /\.tsx$/iu.test(fileName) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const members = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      !['child_process', 'node:child_process'].includes(statement.moduleSpecifier.text)
+    )
+      continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined || !ts.isNamedImports(bindings)) {
+      throw new Error(`${fileName}: child_process must use reviewed named imports`);
+    }
+    for (const element of bindings.elements)
+      members.push(element.propertyName?.text ?? element.name.text);
+  }
+  return Object.freeze(members.sort());
+}
+
 export async function verifyNetworkBoundary(root = SOURCE_ROOT) {
   const findings = [];
   for (const absolute of await walk(root)) {
@@ -541,6 +605,15 @@ export async function verifyNetworkBoundary(root = SOURCE_ROOT) {
     const missing = approval.tokens.filter((token) => !seen.has(token));
     if (missing.length > 0)
       throw new Error(`Stale network approval for ${path}: ${missing.join(', ')}`);
+    if ('childProcessMembers' in approval) {
+      const source = await readFile(resolve(ROOT, path), 'utf8');
+      const actual = childProcessImportMembers(source, path);
+      if (JSON.stringify(actual) !== JSON.stringify(approval.childProcessMembers)) {
+        throw new Error(
+          `Changed child_process inventory for ${path}: expected ${approval.childProcessMembers.join(', ')}, got ${actual.join(', ')}`,
+        );
+      }
+    }
   }
   return Object.freeze(
     Object.entries(APPROVED_NETWORK_BOUNDARIES).map(([path, value]) =>

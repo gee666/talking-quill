@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   HelperBinaryError,
   resolveHelperExecutable,
+  resolveOwnedTreeRemovalExecutable,
   validateHelperExecutable,
 } from '../../app/src/main/helper/helper-path';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
@@ -23,6 +24,22 @@ describe('native helper path policy', () => {
         platform: 'win32',
       }),
     ).toBe(join(appPath, 'native', 'talking-quill-helper.exe'));
+    expect(
+      resolveHelperExecutable({
+        packaged: true,
+        resourcesPath,
+        appPath,
+        platform: 'win32',
+      }),
+    ).toBe(join(resourcesPath, 'helper', 'talking-quill-helper.exe'));
+    expect(
+      resolveOwnedTreeRemovalExecutable({
+        packaged: true,
+        resourcesPath,
+        appPath,
+        platform: 'win32',
+      }),
+    ).toBe(join(resourcesPath, 'helper', 'talking-quill-helper.exe'));
     expect(
       resolveHelperExecutable({
         packaged: true,

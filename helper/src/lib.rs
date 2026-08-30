@@ -1,8 +1,29 @@
+#[doc(hidden)]
+pub mod diagnostic_transport;
 pub mod framing;
-pub mod keyboard;
+pub mod gateway;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod macho;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod macos_outer_identity;
+#[cfg(target_os = "macos")]
+pub mod macos_service_bridge;
+
+#[cfg(target_os = "macos")]
+#[used]
+static MACOS_BUILD_VARIANT: &str = env!("TALKING_QUILL_MACOS_BUILD_VARIANT");
 pub mod owned_tree;
-pub mod platform;
+pub mod owner;
 pub mod protocol;
+#[cfg(any(
+    all(windows, feature = "windows-installed-acceptance"),
+    all(test, feature = "windows-installed-acceptance")
+))]
+pub mod windows_acceptance_launcher;
+#[cfg(windows)]
+pub mod windows_installer;
+#[cfg(windows)]
+pub mod windows_update;
 
 use std::{
     io::{self, Read, Write},
@@ -13,33 +34,39 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
     framing::{FrameError, read_frame, write_frame},
-    platform::{
-        CallbackGate, NativePlatform, Platform, PlatformError, TerminalReason, TerminalSignal,
+    gateway::{
+        ActivationCaptureGate, CallbackGate, GatewayBackend, PlatformError, TerminalReason,
+        TerminalSignal,
     },
     protocol::{HandleOutcome, Outbound, OutboundEncodingError, Server, encode_outbound},
 };
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const CRITICAL_OUTBOUND_QUEUE_CAPACITY: usize = 1;
+const FINAL_OUTBOUND_QUEUE_CAPACITY: usize = 1;
 const INPUT_QUEUE_CAPACITY: usize = 8;
 const CLEAN_WRITER_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const TERMINAL_DIAGNOSTIC_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("protocol framing failed: {0}")]
     Framing(#[from] FrameError),
-    #[error("native platform startup failed: {0}")]
-    Platform(#[from] PlatformError),
+    #[error("gateway backend startup failed: {0}")]
+    Gateway(#[from] PlatformError),
     #[error("stdin reader thread failed")]
     ReaderThread,
     #[error("stdout writer thread failed")]
     WriterThread,
     #[error("stdout protocol writer failed: {0}")]
     Writer(FrameError),
+    #[error("stdout protocol writer did not finish within the shutdown deadline")]
+    WriterFlushTimeout,
     #[error("terminal helper failure: {0:?}")]
     Terminal(TerminalReason),
 }
@@ -55,6 +82,13 @@ enum CoordinatorOutcome {
     Framing(FrameError),
     ReaderStopped,
     Terminal(TerminalReason),
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalObservabilityOutcome {
+    Shutdown,
+    Failure,
 }
 
 /// A slot reserved before an irreversible paste operation. The writer owns the
@@ -91,11 +125,18 @@ impl CriticalDelivery {
 /// Clean exit waits a bounded interval for queued frames to flush, then detaches
 /// a writer blocked by a non-reading parent rather than hanging the helper.
 pub fn run() -> Result<(), RunError> {
+    run_with_activation_capture_gate(ActivationCaptureGate::for_process())
+}
+
+fn run_with_activation_capture_gate(
+    activation_capture_gate: ActivationCaptureGate,
+) -> Result<(), RunError> {
     let gate = Arc::new(CallbackGate::new());
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(OUTBOUND_QUEUE_CAPACITY);
     let (critical_tx, critical_rx) = bounded(CRITICAL_OUTBOUND_QUEUE_CAPACITY);
+    let (final_tx, final_rx) = bounded(FINAL_OUTBOUND_QUEUE_CAPACITY);
 
     let writer_terminal = Arc::clone(&terminal);
     let (writer_done_tx, writer_done_rx) = bounded(1);
@@ -104,7 +145,7 @@ pub fn run() -> Result<(), RunError> {
         .spawn(move || {
             let panic_terminal = Arc::clone(&writer_terminal);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                writer_loop(critical_rx, outbound_rx, writer_terminal)
+                writer_loop(final_rx, critical_rx, outbound_rx, writer_terminal)
             }))
             .unwrap_or_else(|_| {
                 panic_terminal.trigger(TerminalReason::StdoutDisconnected);
@@ -117,27 +158,32 @@ pub fn run() -> Result<(), RunError> {
         })
         .map_err(|_| RunError::WriterThread)?;
 
-    let platform = match NativePlatform::start(
+    let platform = match crate::owner::platform_client::OwnerGatewayBackend::start(
         outbound_tx.clone(),
         Arc::clone(&gate),
         Arc::clone(&terminal),
+        activation_capture_gate,
     ) {
         Ok(platform) => platform,
         Err(error) => {
             gate.close();
+            drop(final_tx);
             drop(critical_tx);
             drop(outbound_tx);
             let _ = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT);
-            return Err(RunError::Platform(error));
+            return Err(RunError::Gateway(error));
         }
     };
-    let mut server = Server::new(
+    let mut server = Server::new_with_activation_capture_gate(
         platform,
         outbound_tx.clone(),
         critical_tx.clone(),
+        final_tx.clone(),
         Arc::clone(&gate),
         Arc::clone(&terminal),
+        activation_capture_gate,
     );
+    drop(final_tx);
     drop(critical_tx);
     drop(outbound_tx);
 
@@ -149,8 +195,10 @@ pub fn run() -> Result<(), RunError> {
         Ok(reader) => reader,
         Err(_) => {
             server.shutdown();
+            let snapshot = server.take_terminal_observability();
             drop(server);
             let _ = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT);
+            publish_terminal_observability(snapshot, TerminalObservabilityOutcome::Failure);
             return Err(RunError::ReaderThread);
         }
     };
@@ -160,14 +208,26 @@ pub fn run() -> Result<(), RunError> {
     let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
     server.shutdown();
     let outcome = outcome_after_shutdown(outcome, &terminal);
+    let snapshot = server.take_terminal_observability();
     drop(server);
 
     // Accepted critical batches receive the same bounded flush window on
     // terminal exits; dropping them immediately can hide a committed paste.
-    let writer_result = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT)?;
+    let writer_result = wait_for_writer(writer, &writer_done_rx, CLEAN_WRITER_FLUSH_TIMEOUT);
+    let terminal_outcome = if matches!(outcome, CoordinatorOutcome::Clean)
+        && matches!(writer_result, Ok(Some(Ok(()))))
+    {
+        TerminalObservabilityOutcome::Shutdown
+    } else {
+        TerminalObservabilityOutcome::Failure
+    };
+    publish_terminal_observability(snapshot, terminal_outcome);
+    let writer_result = writer_result?;
 
-    if let Some(Err(error)) = writer_result {
-        return Err(RunError::Writer(error));
+    match writer_result {
+        Some(Err(error)) => return Err(RunError::Writer(error)),
+        None => return Err(RunError::WriterFlushTimeout),
+        Some(Ok(())) => {}
     }
 
     match outcome {
@@ -184,23 +244,114 @@ pub fn run() -> Result<(), RunError> {
 /// writer; unlike `run`, this test adapter joins its scoped writer directly so
 /// it cannot safely detach a borrow.
 #[doc(hidden)]
-pub fn run_framed_stream<P: Platform, R: Read + Send + 'static, W: Write + Send>(
+pub fn run_framed_stream<P: GatewayBackend, R: Read + Send + 'static, W: Write + Send>(
     platform: P,
     input: R,
+    output: W,
+) -> Result<(), RunError> {
+    run_framed_stream_with_factory(input, output, |_, _, _, _| Ok(platform))
+}
+
+/// In-memory coordinator variant which constructs the platform through the
+/// production `GatewayBackend::start` boundary. This exists only for integration
+/// tests that need real callback senders and the exact production writer.
+#[doc(hidden)]
+pub fn run_framed_stream_started<P: GatewayBackend, R: Read + Send + 'static, W: Write + Send>(
+    input: R,
+    output: W,
+) -> Result<(), RunError> {
+    run_framed_stream_with_factory(input, output, P::start)
+}
+
+fn run_framed_stream_with_factory<
+    P: GatewayBackend,
+    R: Read + Send + 'static,
+    W: Write + Send,
+    F: FnOnce(
+        Sender<Outbound>,
+        Arc<CallbackGate>,
+        Arc<TerminalSignal>,
+        ActivationCaptureGate,
+    ) -> Result<P, PlatformError>,
+>(
+    input: R,
+    output: W,
+    platform_factory: F,
+) -> Result<(), RunError> {
+    run_framed_stream_with_factory_and_gate_inner(
+        input,
+        output,
+        ActivationCaptureGate::default(),
+        platform_factory,
+    )
+}
+
+/// Cross-process integration seam for exercising enable reconciliation. It is
+/// absent from optimized/package builds and accepts no endpoint credentials.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn run_framed_stream_with_factory_and_gate<
+    P: GatewayBackend,
+    R: Read + Send + 'static,
+    W: Write + Send,
+    F: FnOnce(
+        Sender<Outbound>,
+        Arc<CallbackGate>,
+        Arc<TerminalSignal>,
+        ActivationCaptureGate,
+    ) -> Result<P, PlatformError>,
+>(
+    input: R,
+    output: W,
+    activation_capture_gate: ActivationCaptureGate,
+    platform_factory: F,
+) -> Result<(), RunError> {
+    run_framed_stream_with_factory_and_gate_inner(
+        input,
+        output,
+        activation_capture_gate,
+        platform_factory,
+    )
+}
+
+fn run_framed_stream_with_factory_and_gate_inner<
+    P: GatewayBackend,
+    R: Read + Send + 'static,
+    W: Write + Send,
+    F: FnOnce(
+        Sender<Outbound>,
+        Arc<CallbackGate>,
+        Arc<TerminalSignal>,
+        ActivationCaptureGate,
+    ) -> Result<P, PlatformError>,
+>(
+    input: R,
     mut output: W,
+    activation_capture_gate: ActivationCaptureGate,
+    platform_factory: F,
 ) -> Result<(), RunError> {
     let gate = Arc::new(CallbackGate::new());
     let (terminal_tx, terminal_rx) = bounded(1);
     let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
     let (outbound_tx, outbound_rx) = bounded(OUTBOUND_QUEUE_CAPACITY);
     let (critical_tx, critical_rx) = bounded(CRITICAL_OUTBOUND_QUEUE_CAPACITY);
-    let mut server = Server::new(
+    let (final_tx, final_rx) = bounded(FINAL_OUTBOUND_QUEUE_CAPACITY);
+    let platform = platform_factory(
+        outbound_tx.clone(),
+        Arc::clone(&gate),
+        Arc::clone(&terminal),
+        activation_capture_gate,
+    )?;
+    let mut server = Server::new_with_activation_capture_gate(
         platform,
         outbound_tx.clone(),
         critical_tx.clone(),
+        final_tx.clone(),
         Arc::clone(&gate),
         Arc::clone(&terminal),
+        activation_capture_gate,
     );
+    drop(final_tx);
     drop(critical_tx);
     drop(outbound_tx);
     let (input_tx, input_rx) = bounded(INPUT_QUEUE_CAPACITY);
@@ -220,11 +371,18 @@ pub fn run_framed_stream<P: Platform, R: Read + Send + 'static, W: Write + Send>
     let writer_terminal = Arc::clone(&terminal);
     let (outcome, writer_result) = thread::scope(|scope| {
         let writer = scope.spawn(move || {
-            write_prioritized_messages(critical_rx, outbound_rx, writer_terminal, &mut output)
+            write_prioritized_messages(
+                final_rx,
+                critical_rx,
+                outbound_rx,
+                writer_terminal,
+                &mut output,
+            )
         });
         let outcome = coordinate(&mut server, &input_rx, &terminal_rx, &terminal);
         server.shutdown();
         let outcome = outcome_after_shutdown(outcome, &terminal);
+        let _terminal_snapshot = server.take_terminal_observability();
         drop(server);
         let writer_result = writer
             .join()
@@ -239,6 +397,53 @@ pub fn run_framed_stream<P: Platform, R: Read + Send + 'static, W: Write + Send>
         CoordinatorOutcome::ReaderStopped => Err(RunError::ReaderThread),
         CoordinatorOutcome::Terminal(reason) => Err(RunError::Terminal(reason)),
     }
+}
+
+fn publish_terminal_observability(
+    snapshot: Option<serde_json::Value>,
+    outcome: TerminalObservabilityOutcome,
+) {
+    let Some(mut observability) = snapshot else {
+        return;
+    };
+    if matches!(outcome, TerminalObservabilityOutcome::Failure) {
+        observability["keyboardCapture"]["terminalDisablements"] = serde_json::json!(1);
+    }
+    let record = serde_json::json!({
+        "event": "helper.runtime.terminal",
+        "outcome": outcome,
+        "observability": observability,
+    });
+    let Ok(mut line) = serde_json::to_string(&record) else {
+        return;
+    };
+    line.push('\n');
+    write_stderr_bounded(line, "talking-quill-helper-terminal-diagnostic");
+}
+
+fn write_stderr_bounded(line: String, _thread_name: &'static str) {
+    diagnostic_transport::report_raw(line);
+    // A blocked parent cannot delay shutdown. The dedicated writer retains a
+    // bounded raw queue and all owner aggregates, then resumes on the same pipe
+    // if the parent starts reading again.
+    let _ = diagnostic_transport::flush(TERMINAL_DIAGNOSTIC_WRITE_TIMEOUT);
+}
+
+#[doc(hidden)]
+pub fn report_owner_connection_diagnostic(
+    diagnostic: crate::owner::client::OwnerClientDiagnostic,
+    health_refresh: &'static str,
+    owner_process_state: crate::owner::client::OwnerProcessState,
+) -> Result<(), diagnostic_transport::DiagnosticDurabilityError> {
+    diagnostic_transport::report_owner(diagnostic, health_refresh, owner_process_state)
+}
+
+#[doc(hidden)]
+pub fn report_run_error(error: &str) {
+    write_stderr_bounded(
+        format!("talking-quill-helper: {error}\n"),
+        "talking-quill-helper-error-diagnostic",
+    );
 }
 
 fn wait_for_writer(
@@ -263,7 +468,7 @@ fn wait_for_writer(
     }
 }
 
-fn coordinate<P: Platform>(
+fn coordinate<P: GatewayBackend>(
     server: &mut Server<P>,
     input: &Receiver<InputMessage>,
     terminal_events: &Receiver<TerminalReason>,
@@ -328,13 +533,14 @@ fn stdin_loop<R: Read>(mut input: R, sender: Sender<InputMessage>) {
 }
 
 fn writer_loop(
+    final_response: Receiver<Outbound>,
     critical: Receiver<CriticalDelivery>,
     outbound: Receiver<Outbound>,
     terminal: Arc<TerminalSignal>,
 ) -> Result<(), FrameError> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    write_prioritized_messages(critical, outbound, terminal, &mut stdout)
+    write_prioritized_messages(final_response, critical, outbound, terminal, &mut stdout)
 }
 
 #[cfg(test)]
@@ -343,27 +549,47 @@ fn write_messages<W: Write>(
     terminal: Arc<TerminalSignal>,
     writer: &mut W,
 ) -> Result<(), FrameError> {
+    let (final_tx, final_rx) = bounded(1);
     let (critical_tx, critical_rx) = bounded(1);
+    drop(final_tx);
     drop(critical_tx);
-    write_prioritized_messages(critical_rx, outbound, terminal, writer)
+    write_prioritized_messages(final_rx, critical_rx, outbound, terminal, writer)
 }
 
 fn write_prioritized_messages<W: Write>(
+    final_response: Receiver<Outbound>,
     critical: Receiver<CriticalDelivery>,
     outbound: Receiver<Outbound>,
     terminal: Arc<TerminalSignal>,
     writer: &mut W,
 ) -> Result<(), FrameError> {
+    let never_final = crossbeam_channel::never();
+    let never_critical = crossbeam_channel::never();
+    let never_outbound = crossbeam_channel::never();
+    let mut final_open = true;
     let mut critical_open = true;
     let mut outbound_open = true;
-    while critical_open || outbound_open {
-        // Terminal failures stop ordinary output, but accepted critical
-        // deliveries remain an obligation until their sender closes.
+    while final_open || critical_open || outbound_open {
+        // Terminal failures stop ordinary/final output, but accepted critical
+        // paste deliveries remain an obligation until their sender closes.
         if terminal.is_triggered() {
             if terminal.reason() == Some(TerminalReason::StdoutDisconnected) {
                 return Ok(());
             }
+            final_open = false;
             outbound_open = false;
+        }
+
+        if final_open {
+            match final_response.try_recv() {
+                Ok(response) => {
+                    return drain_before_final_response(
+                        response, &critical, &outbound, &terminal, writer,
+                    );
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => final_open = false,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
         }
 
         if critical_open {
@@ -377,40 +603,54 @@ fn write_prioritized_messages<W: Write>(
             }
         }
 
-        let item = match (critical_open, outbound_open) {
-            (true, true) => crossbeam_channel::select_biased! {
-                recv(critical) -> delivery => match delivery {
-                    Ok(delivery) => Some(EitherOutbound::Critical(delivery)),
-                    Err(_) => {
-                        critical_open = false;
-                        None
-                    }
-                },
-                recv(outbound) -> message => match message {
-                    Ok(message) => Some(EitherOutbound::Ordinary(message)),
-                    Err(_) => {
-                        outbound_open = false;
-                        None
-                    }
-                },
+        if !final_open && !critical_open && !outbound_open {
+            break;
+        }
+
+        let selected_final = if final_open {
+            &final_response
+        } else {
+            &never_final
+        };
+        let selected_critical = if critical_open {
+            &critical
+        } else {
+            &never_critical
+        };
+        let selected_outbound = if outbound_open {
+            &outbound
+        } else {
+            &never_outbound
+        };
+        let item = crossbeam_channel::select_biased! {
+            recv(selected_final) -> response => match response {
+                Ok(response) => Some(EitherOutbound::Final(response)),
+                Err(_) => {
+                    final_open = false;
+                    None
+                }
             },
-            (true, false) => match critical.recv() {
+            recv(selected_critical) -> delivery => match delivery {
                 Ok(delivery) => Some(EitherOutbound::Critical(delivery)),
                 Err(_) => {
                     critical_open = false;
                     None
                 }
             },
-            (false, true) => match outbound.recv() {
+            recv(selected_outbound) -> message => match message {
                 Ok(message) => Some(EitherOutbound::Ordinary(message)),
                 Err(_) => {
                     outbound_open = false;
                     None
                 }
             },
-            (false, false) => None,
         };
         match item {
+            Some(EitherOutbound::Final(response)) => {
+                return drain_before_final_response(
+                    response, &critical, &outbound, &terminal, writer,
+                );
+            }
             Some(EitherOutbound::Critical(delivery)) => {
                 write_critical_delivery(delivery, &terminal, writer)?;
             }
@@ -424,8 +664,29 @@ fn write_prioritized_messages<W: Write>(
 }
 
 enum EitherOutbound {
+    Final(Outbound),
     Critical(CriticalDelivery),
     Ordinary(Outbound),
+}
+
+fn drain_before_final_response<W: Write>(
+    final_response: Outbound,
+    critical: &Receiver<CriticalDelivery>,
+    outbound: &Receiver<Outbound>,
+    terminal: &TerminalSignal,
+    writer: &mut W,
+) -> Result<(), FrameError> {
+    // Shutdown closes callback admission and quiesces all accepted producers
+    // before publishing this reserved delivery. Everything already accepted by
+    // either normal path is therefore a finite prefix which must precede the
+    // one final response.
+    while let Ok(delivery) = critical.try_recv() {
+        write_critical_delivery(delivery, terminal, writer)?;
+    }
+    while let Ok(message) = outbound.try_recv() {
+        write_message(message, terminal, writer)?;
+    }
+    write_message(final_response, terminal, writer)
 }
 
 fn write_critical_delivery<W: Write>(
@@ -469,11 +730,24 @@ fn write_message<W: Write>(
 mod tests {
     use super::*;
     use crate::{
-        keyboard::{
-            ActivationBinding, ActivationKey, EventPhase, HelperEvent, ProfileId, Shortcut,
-        },
+        gateway::GATEWAY_POLICY_MARKER,
         protocol::{RequestId, RpcResponse},
     };
+    use talking_quill_keyboard_core::{
+        ActivationBinding, ActivationContext, ActivationGeneration, ActivationKey, EventPhase,
+        KeyboardEvent, ProfileId, Shortcut,
+    };
+
+    #[test]
+    fn production_gateway_carries_the_permanent_no_suppression_marker() {
+        assert_eq!(
+            std::hint::black_box(GATEWAY_POLICY_MARKER),
+            "TALKING_QUILL_KEYBOARD_GATEWAY=PROTOCOL_V1_GATEWAY_CANNOT_SUPPRESS"
+        );
+        let forwarding_gate = ActivationCaptureGate::for_process();
+        assert!(forwarding_gate.is_open());
+        assert!(!forwarding_gate.development_disabled());
+    }
 
     struct BrokenWriter;
 
@@ -516,11 +790,12 @@ mod tests {
         let terminal = Arc::new(TerminalSignal::new(Arc::clone(&gate), terminal_tx));
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
-            .send(Outbound::Event(HelperEvent::Activation {
+            .send(Outbound::Event(KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
                     Shortcut::legacy_alt_letter(ActivationKey::Z, false),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Down,
             }))
             .unwrap();
@@ -576,11 +851,12 @@ mod tests {
         let (completion_tx, completion_rx) = bounded(1);
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
-            .send(Outbound::Event(HelperEvent::Activation {
+            .send(Outbound::Event(KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
                     Shortcut::legacy_alt_letter(ActivationKey::A, false),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Down,
             }))
             .unwrap();
@@ -593,13 +869,16 @@ mod tests {
                 Outbound::PasteCommitted(crate::protocol::RequestId::for_test(8)),
             ])
             .unwrap();
-        terminal.trigger(TerminalReason::OutboundQueueUnavailable);
         drop(completion_tx);
+        terminal.trigger(TerminalReason::OutboundQueueUnavailable);
+        let (final_tx, final_rx) = bounded(1);
+        drop(final_tx);
         drop(critical_tx);
         drop(outbound_tx);
 
         let mut output = Vec::new();
-        write_prioritized_messages(critical_rx, outbound_rx, terminal, &mut output).unwrap();
+        write_prioritized_messages(final_rx, critical_rx, outbound_rx, terminal, &mut output)
+            .unwrap();
         let mut framed = io::Cursor::new(output);
         let first = read_frame(&mut framed).unwrap().unwrap();
         let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -618,11 +897,12 @@ mod tests {
         let terminal = Arc::new(TerminalSignal::new(gate, terminal_tx));
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
-            .send(Outbound::Event(HelperEvent::Activation {
+            .send(Outbound::Event(KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
                     Shortcut::legacy_alt_letter(ActivationKey::Z, false),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Down,
             }))
             .unwrap();
@@ -648,11 +928,12 @@ mod tests {
         let terminal = Arc::new(TerminalSignal::new(gate, terminal_tx));
         let (outbound_tx, outbound_rx) = bounded(1);
         outbound_tx
-            .send(Outbound::Event(HelperEvent::Activation {
+            .send(Outbound::Event(KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
                     Shortcut::legacy_alt_letter(ActivationKey::Z, false),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Down,
             }))
             .unwrap();

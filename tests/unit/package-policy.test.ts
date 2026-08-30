@@ -22,8 +22,6 @@ import {
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
 const mergedMasterRendererAssets = [
-  'out/renderer/assets/echo-session-valid.js',
-  'out/renderer/assets/echo-session-valid.css',
   'out/renderer/assets/logo-light-valid.png',
   'out/renderer/assets/logo-dark-valid.png',
 ] as const;
@@ -36,6 +34,8 @@ const performanceLazyChunks = [
   'out/renderer/assets/SmartProcessingSection-valid.js',
   'out/renderer/assets/UpdateDialog-valid.js',
   'out/renderer/assets/schemas-valid.js',
+  'out/renderer/assets/theme-valid.js',
+  'out/renderer/assets/theme-valid.css',
 ] as const;
 
 const mergedRendererAssets = [...mergedMasterRendererAssets, ...performanceLazyChunks];
@@ -139,7 +139,13 @@ const validResources = (target: 'win' | 'mac') => {
       ? [`${architectureRoot}/libonnxruntime.1.21.0.dylib`]
       : [`${architectureRoot}/DirectML.dll`, `${architectureRoot}/onnxruntime.dll`]),
     `${architectureRoot}/onnxruntime_binding.node`,
-    target === 'win' ? 'helper/talking-quill-helper.exe' : 'helper/talking-quill-helper',
+    ...(target === 'win'
+      ? [
+          'keyboard-owner-release-v1.json',
+          'helper/talking-quill-helper.exe',
+          'helper/talking-quill-keyboard-owner.exe',
+        ]
+      : ['helper/talking-quill-helper']),
   ];
 };
 
@@ -148,6 +154,19 @@ describe('packaged runtime allowlist', () => {
     expect(validAsar.filter((entry) => entry.startsWith('out/renderer/assets/'))).toHaveLength(56);
     expect(() => validateAsarEntries(validAsar)).not.toThrow();
     expect(() => validateResourceEntries(validResources('win'), 'win')).not.toThrow();
+    expect(() =>
+      validateResourceEntries(
+        [...validResources('win'), 'windows-installed-acceptance-v1.txt'],
+        'win',
+      ),
+    ).toThrow('Unexpected packaged resources');
+    expect(() =>
+      validateResourceEntries(
+        [...validResources('win'), 'windows-installed-acceptance-v1.txt'],
+        'win',
+        { windowsInstalledAcceptance: true },
+      ),
+    ).not.toThrow();
     expect(() =>
       validateResourceEntries(
         [...validResources('mac'), 'icon.icns', 'en_GB.lproj', 'es_419.lproj'],
@@ -215,8 +234,8 @@ describe('packaged runtime allowlist', () => {
     ).toThrow('Required renderer asset is missing');
     for (const requiredAsset of [
       'out/renderer/assets/audio-valid.js',
-      'out/renderer/assets/echo-session-valid.js',
-      'out/renderer/assets/echo-session-valid.css',
+      'out/renderer/assets/theme-valid.js',
+      'out/renderer/assets/theme-valid.css',
       'out/renderer/assets/InfoScreen-valid.js',
       'out/renderer/assets/SettingsScreen-valid.js',
       'out/renderer/assets/SmartProcessingSection-valid.js',
@@ -270,7 +289,6 @@ describe('packaged runtime allowlist', () => {
     for (const unexpectedAsset of [
       'out/renderer/assets/rogue.js',
       'out/renderer/assets/status-presentation-valid.js',
-      'out/renderer/assets/theme-valid.css',
       'out/renderer/assets/audio-valid.css',
       'out/renderer/assets/InfoScreen-valid.css',
       'out/renderer/assets/app-icon-valid.png',
@@ -325,13 +343,19 @@ describe('packaged runtime allowlist', () => {
     expect(installer).toContain('UninstPage custom');
     expect(installer).not.toContain('!macro customUninstallPage');
     expect(installer).toContain('${NSD_Uncheck} $DeleteTalkingQuillDataCheckbox');
-    expect(installer).toContain('--talking-quill-reset-owned-data-and-exit="$1"');
+    expect(installer).toContain('--talking-quill-reset-owned-data-and-exit="$2"');
     expect(installer).toContain('TALKING_QUILL_UNINSTALL_RESET_CHALLENGE');
     expect(installer).toContain('IfFileExists "$INSTDIR\\${APP_FILENAME}.exe"');
     expect(installer).toMatch(/ExecWait[^\n]+\$0/u);
     expect(installer).toContain('${If} $0 != 0');
     expect(installer).toContain('Abort');
-    expect(installer).not.toContain('RMDir /r');
+    expect(installer).toContain('!insertmacro TalkingQuillRunMachineCleanup uninstall');
+    expect(installer).toContain('RMDir /r "$INSTDIR"');
+    expect(builder).toContain('runAfterFinish: false');
+    expect(installer).not.toContain('!macro customUnInstallSection');
+    expect(installer).not.toContain('RMDir /r "$5\\Talking Quill\\KeyboardAuthority"');
+    expect(installer).not.toContain('RMDir /r "$APPDATA');
+    expect(installer).not.toContain('RMDir /r "$LOCALAPPDATA');
     expect(installer).not.toMatch(/Ollama/i);
     expect(await readFile(resolve('scripts/run-package.mjs'), 'utf8')).toContain(
       "TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'",
@@ -345,29 +369,233 @@ describe('packaged runtime allowlist', () => {
       dirname(electronBuilderRequire.resolve('app-builder-lib/package.json')),
       'templates/nsis',
     );
-    const [custom, assisted, uninstaller] = await Promise.all([
+    const [
+      custom,
+      assisted,
+      uninstaller,
+      installer,
+      installSection,
+      installUtil,
+      installerInclude,
+      common,
+      extractAppPackage,
+      oneInstance,
+      multiUserUi,
+      installValidation,
+      cleanup,
+    ] = await Promise.all([
       readFile(resolve('build/installer.nsh'), 'utf8'),
       readFile(resolve(templateRoot, 'assistedInstaller.nsh'), 'utf8'),
       readFile(resolve(templateRoot, 'uninstaller.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'installer.nsi'), 'utf8'),
+      readFile(resolve(templateRoot, 'installSection.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'include/installUtil.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'include/installer.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'common.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'include/extractAppPackage.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'include/allowOnlyOneInstallerInstance.nsh'), 'utf8'),
+      readFile(resolve(templateRoot, 'multiUserUi.nsh'), 'utf8'),
+      readFile(resolve('build/installer-install-validation.nsh'), 'utf8'),
+      readFile(resolve('build/windows-personal-machine-cleanup.ps1'), 'utf8'),
     ]);
-    expect(() => validateNsisUninstallPolicy({ custom, assisted, uninstaller })).not.toThrow();
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace('!macro customUnWelcomePage', '!macro customUninstallPage'),
-        assisted,
-        uninstaller,
-      }),
-    ).toThrow(/after InstFiles|pre-InstFiles|Missing NSIS macro/u);
+    const pinned = {
+      assisted,
+      uninstaller,
+      installer,
+      installSection,
+      installUtil,
+      installerInclude,
+      common,
+      extractAppPackage,
+      oneInstance,
+      multiUserUi,
+      installValidation,
+      cleanup,
+    };
+    expect(custom).not.toContain('/TALKINGQUILLTESTCOMMITFAIL=');
+    expect(installValidation).toContain('/TALKINGQUILLTESTCOMMITFAIL=');
+    expect(() => validateNsisUninstallPolicy({ custom, ...pinned })).not.toThrow();
     expect(() =>
       validateNsisUninstallPolicy({
         custom,
-        assisted,
+        ...pinned,
+        cleanup: cleanup.replace(
+          'Write-InstallTransaction -State committed',
+          '# commit marker removed',
+        ),
+      }),
+    ).toThrow(
+      'machine install recovery must use durable staging/prepared/restoring/committed transactions',
+    );
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        installValidation: installValidation.replace('/TALKINGQUILLTESTCOMMITFAIL=', ''),
+      }),
+    ).toThrow('install failure injection must exist only in the isolated validation include');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace('!macro customUnWelcomePage', '!macro removedUnWelcomePage'),
+        ...pinned,
+      }),
+    ).toThrow('Missing NSIS macro customUnWelcomePage');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
         uninstaller: uninstaller.replace(
           '!insertmacro customUnInstall',
           '# custom reset hook removed',
         ),
       }),
-    ).toThrow('before install deletion');
+    ).toThrow('runtime cleanup and checked file removal hooks moved');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace('${NSD_Uncheck} $DeleteTalkingQuillDataCheckbox', ''),
+        ...pinned,
+      }),
+    ).toThrow('preserve personal data unless confirmed');
+    const hookOrderError =
+      'generated running-process and old-uninstaller paths must yield to the custom lifecycle barrier';
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace(
+          '!insertmacro TalkingQuillRunMachineCleanup install personal_cleanup_failed',
+          '# lifecycle barrier removed',
+        ),
+        ...pinned,
+      }),
+    ).toThrow('install cancellation and failure must share guarded armed rollback');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace('Function TalkingQuillOnUserAbort', 'Function removedOnUserAbort'),
+        ...pinned,
+      }),
+    ).toThrow('Missing NSIS function TalkingQuillOnUserAbort');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace(
+          'StrCpy $PersonalInstallTransactionArmed "1"\n  ; Skip the generated',
+          '; transaction arm removed\n  ; Skip the generated',
+        ),
+        ...pinned,
+      }),
+    ).toThrow('install cancellation and failure must share guarded armed rollback');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        installSection: installSection.replace(
+          '!ifmacrondef customUninstallOldVersion',
+          '!ifmacrondef removedCustomUninstallOldVersion',
+        ),
+      }),
+    ).toThrow(hookOrderError);
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace('${If} $TEMP != $R1', '${If} $R0 != $R1'),
+        ...pinned,
+      }),
+    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace(
+          '[Environment+SpecialFolder]::CommonApplicationData).TrimEnd',
+          '[Environment+SpecialFolder]::CommonApplicationData)',
+        ),
+        ...pinned,
+      }),
+    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        uninstaller: uninstaller.replace(
+          '!ifmacrondef customUnInstall',
+          '!ifmacrondef removedCustomUnInstall',
+        ),
+      }),
+    ).toThrow('generated process killing must be unreachable');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        extractAppPackage: extractAppPackage.replace(
+          '"$(decompressionFailed)$\\n$R0" /SD IDOK',
+          '"$(decompressionFailed)$\\n$R0"',
+        ),
+      }),
+    ).toThrow('MessageBox without a silent default');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        extractAppPackage: extractAppPackage.replace(
+          'StrCmp $R0 "success" ${ZIP_DECOMPRESSION_SUCCESS_LABEL}',
+          'StrCmp $R0 "success" +3',
+        ),
+      }),
+    ).toThrow('silent-reachable generated failures must default safely and return nonzero');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        cleanup: cleanup.replace(
+          '$path = Normalize-RuntimeExecutablePath -Path ([string]$_.ExecutablePath)',
+          '$path = [string]$_.ExecutablePath',
+        ),
+      }),
+    ).toThrow('generated process killing must be unreachable');
+    for (const installSectionMutation of [
+      installSection.replace(
+        '!ifmacrodef customUninstallOldVersion',
+        '!ifmacrodef removedCustomUninstallOldVersion',
+      ),
+      installSection.replace(
+        '!insertmacro customUninstallOldVersion',
+        '# lifecycle hook invocation removed',
+      ),
+      installSection.replace(
+        '!insertmacro customUninstallOldVersion\n!else',
+        '!insertmacro customUninstallOldVersion\n# branch boundary removed',
+      ),
+      installSection.replace('SetOutPath $INSTDIR', '# extraction boundary removed'),
+    ]) {
+      expect(() =>
+        validateNsisUninstallPolicy({
+          custom,
+          ...pinned,
+          installSection: installSectionMutation,
+        }),
+      ).toThrow(hookOrderError);
+    }
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        installer: installer.replace('!include "installSection.nsh"', '# section include removed'),
+      }),
+    ).toThrow(hookOrderError);
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
+        installUtil: installUtil.replace(
+          '!ifmacrondef customUninstallOldVersion',
+          '# utility guard removed',
+        ),
+      }),
+    ).toThrow(hookOrderError);
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom: custom.replace(
+          '!macroend\n\n; Patched installSection.nsh',
+          '!macroend\nDeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "UninstallString"\n\n; Patched installSection.nsh',
+        ),
+        ...pinned,
+      }),
+    ).toThrow(hookOrderError);
   });
 
   it('requires the physical notices and unpacked native runtime resources', () => {
@@ -556,6 +784,65 @@ describe('packaged runtime allowlist', () => {
       validatePhysicalPackageEntries(
         ['Talking Quill.app', 'Talking Quill.app/Contents/Frameworks/Unknown.framework/payload'],
         'mac',
+      ),
+    ).toThrow('Unexpected physical package entries');
+  });
+
+  it('allows only the exact nested owner bundle and requires every owner resource', () => {
+    const ownerResources = [
+      ...validResources('mac'),
+      'keyboard-owner-r5m.json',
+      'keyboard-owner-installed-v1',
+      'macos-keychain-denial.node',
+      'keyboard-owner-release-v1.json',
+    ];
+    expect(() =>
+      validateResourceEntries(ownerResources, 'mac', { macosOwner: true }),
+    ).not.toThrow();
+    for (const required of [
+      'keyboard-owner-r5m.json',
+      'keyboard-owner-installed-v1',
+      'macos-keychain-denial.node',
+      'keyboard-owner-release-v1.json',
+    ]) {
+      expect(() =>
+        validateResourceEntries(
+          ownerResources.filter((entry) => entry !== required),
+          'mac',
+          { macosOwner: true },
+        ),
+      ).toThrow('Required packaged resource is missing');
+    }
+    const nested = 'Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app';
+    const exactBundle = [
+      'Talking Quill.app/Contents/Library',
+      'Talking Quill.app/Contents/Library/LoginItems',
+      nested,
+      `${nested}/Contents`,
+      `${nested}/Contents/Info.plist`,
+      `${nested}/Contents/MacOS`,
+      `${nested}/Contents/MacOS/talking-quill-keyboard-owner`,
+      `${nested}/Contents/Resources`,
+      `${nested}/Contents/_CodeSignature`,
+      `${nested}/Contents/_CodeSignature/CodeResources`,
+      'Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge',
+    ];
+    expect(() =>
+      validatePhysicalPackageEntries(exactBundle, 'mac', { macosOwner: true }),
+    ).not.toThrow();
+    expect(() =>
+      validatePhysicalPackageEntries(
+        ['Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge'],
+        'mac',
+      ),
+    ).toThrow('Unexpected physical package entries');
+    expect(() =>
+      validatePhysicalPackageEntries(
+        [...exactBundle, `${nested}/Contents/MacOS/second-owner`],
+        'mac',
+        {
+          macosOwner: true,
+        },
       ),
     ).toThrow('Unexpected physical package entries');
   });

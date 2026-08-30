@@ -22,6 +22,8 @@ const exempt = new Set([
   'scripts/release-audit.mjs',
   'scripts/inspect-package.mjs',
   'scripts/reference-independence-allowlist.json',
+  'scripts/reference-independence-inventory.json',
+  'scripts/reference-independence.mjs',
   'tests/unit/reference-independence.test.ts',
   'eslint.config.mjs',
 ]);

@@ -1268,6 +1268,15 @@ describe('RecordingService ownership', () => {
     await test.service.shutdown();
   });
 
+  it('shares one shutdown promise across concurrent callers', async () => {
+    const test = harness();
+    const first = test.service.shutdown();
+    const second = test.service.shutdown();
+    expect(second).toBe(first);
+    await first;
+    expect(test.capture.dispose).toHaveBeenCalledOnce();
+  });
+
   it('moves to unavailable and releases ownership when the capture port disappears', async () => {
     const test = harness();
     const owner = new FakeOwner();

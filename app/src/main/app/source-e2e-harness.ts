@@ -13,6 +13,7 @@ import type { HistoryStore } from '../persistence/history-store';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { PiProviderOptions } from '../providers/pi';
 import type { RecordingService } from '../audio/recording-service';
+import type { ScreenshotService } from '../screenshot/screenshot-service';
 import type { VocabularyDialogPort } from '../vocabulary/file-service';
 
 export interface SourceTask6Composition {
@@ -20,6 +21,7 @@ export interface SourceTask6Composition {
   readonly recording: EchoRecordingPort;
   readonly whisper: EchoWhisperPort;
   readonly insertion: EchoInsertionPort;
+  readonly screenshots?: Pick<ScreenshotService, 'capture' | 'permissionStatus'>;
   readonly welcome: {
     readonly microphone: boolean;
     readonly model: boolean;
@@ -96,9 +98,12 @@ export class SourceE2EHarness {
     };
   }
 
-  createPackagedMediaReady(
-    composition: SourceTask6Composition | null,
-  ): ((role: 'capture' | 'widget') => void) | undefined {
+  createPackagedMediaReady(composition: SourceTask6Composition | null):
+    | {
+        readonly rendererReady: (role: 'capture' | 'widget') => void;
+        readonly armAfterEchoBinding: () => void;
+      }
+    | undefined {
     if (!__TALKING_QUILL_TASK6_TEST_HARNESS__) return undefined;
     if (
       composition === null ||
@@ -109,12 +114,22 @@ export class SourceE2EHarness {
       return undefined;
     }
     const readyRoles = new Set<'capture' | 'widget'>();
+    let echoBound = false;
     let activated = false;
-    return (role) => {
-      readyRoles.add(role);
-      if (readyRoles.size < 2 || activated) return;
+    const activateIfReady = (): void => {
+      if (activated || !echoBound || readyRoles.size !== 2) return;
       activated = true;
       composition.startPackagedMedia();
+    };
+    return {
+      rendererReady: (role) => {
+        readyRoles.add(role);
+        activateIfReady();
+      },
+      armAfterEchoBinding: () => {
+        echoBound = true;
+        activateIfReady();
+      },
     };
   }
 

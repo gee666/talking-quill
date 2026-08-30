@@ -91,6 +91,43 @@ export class DataLifecycleService {
     return this.#journalPath;
   }
 
+  /**
+   * Rebinds a valid application-data tree copied to a different profile path.
+   * The marker and temporary session files are path-bound runtime data. User
+   * settings, models, commands, history, and credentials remain untouched.
+   */
+  async reconcileCopiedProfile(): Promise<boolean> {
+    const canonicalRoot = await this.#assertCanonicalOwnedLocation();
+    // These directories are app-owned process state, never profile data. Clear
+    // them on every cold start, including copies that keep the same Windows
+    // user name and therefore the same lexical AppData path.
+    await Promise.all(
+      ['tmp', 'runtime'].map((name) =>
+        rm(resolve(this.#root, name), { recursive: true, force: true }),
+      ),
+    );
+    let source: string | null = null;
+    try {
+      source = await readFile(this.#markerPath, 'utf8');
+    } catch (error: unknown) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    }
+    if (source === null) return false;
+    const marker = OwnershipMarkerSchema.parse(JSON.parse(source) as unknown);
+    const expected = ownershipMarker(canonicalRoot);
+    if (marker.rootIdentity === expected.rootIdentity) return false;
+
+    const resetJournal = await readFile(this.#journalPath, 'utf8').catch((error: unknown) => {
+      if (isNodeError(error) && error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (resetJournal !== null) {
+      throw new Error('A copied application profile contains pending reset state');
+    }
+    await writeJsonAtomic(this.#markerPath, expected);
+    return true;
+  }
+
   async initializeOwnership(): Promise<void> {
     const canonicalRoot = await this.#assertCanonicalOwnedLocation();
     const expected = ownershipMarker(canonicalRoot);

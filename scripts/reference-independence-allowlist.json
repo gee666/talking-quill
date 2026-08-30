@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "referenceInventoryCommit": "5226c4f023ab2900ecb8c087fd1bf242a21e3f22^",
+  "referenceInventoryCommit": "7205f3fa7512280341cc1c9202c740e322b19997",
   "entries": [
     {
       "path": "app/assets/provider-logos/anthropic.png",
@@ -65,7 +65,10 @@
     {
       "path": "app/assets/provider-logos/generic-openai.png",
       "blob": "302f5dbee0aebe15a3fc4cd6073d58314c418487",
-      "sourcePaths": ["reference/frontend/src/media/llmprovider/generic-openai.png"],
+      "sourcePaths": [
+        "reference/frontend/src/media/llmprovider/generic-openai.png",
+        "reference/frontend/src/media/ttsproviders/generic-openai.png"
+      ],
       "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
     },
     {
@@ -155,7 +158,10 @@
     {
       "path": "app/assets/provider-logos/perplexity.png",
       "blob": "f4767169a12cbe2189eab51d8c59deafe4ae5b33",
-      "sourcePaths": ["reference/frontend/src/media/llmprovider/perplexity.png"],
+      "sourcePaths": [
+        "reference/frontend/src/media/llmprovider/perplexity.png",
+        "reference/frontend/src/pages/Admin/Agents/WebSearchSelection/icons/perplexity.png"
+      ],
       "reason": "Approved provider logo copied from the deleted MIT reference asset inventory; separate trademark approval remains an external release blocker."
     },
     {

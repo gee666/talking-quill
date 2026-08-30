@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -18,16 +19,25 @@ const child = spawn(helper, [], {
   stdio: ['pipe', 'pipe', 'inherit'],
   shell: false,
   windowsHide: false,
-  env: { NO_COLOR: '1' },
+  env: { ...process.env, NO_COLOR: '1' },
 });
 const childExit = new Promise((resolveExit, reject) => {
   child.once('error', reject);
-  child.once('exit', (code) => (code === 0 ? resolveExit() : reject(new Error(`exit ${code}`))));
+  child.once('exit', (code) => {
+    const error = code === 0 ? null : new Error(`helper exited with code ${String(code)}`);
+    for (const request of pending.values()) {
+      request.reject(error ?? new Error('helper exited before responding'));
+    }
+    pending.clear();
+    if (error === null) resolveExit();
+    else reject(error);
+  });
 });
 let pendingBytes = Buffer.alloc(0);
 let nextId = 1;
 const pending = new Map();
 const notifications = [];
+const requestSequence = [];
 
 child.stdout.on('data', (chunk) => {
   pendingBytes = Buffer.concat([pendingBytes, chunk]);
@@ -45,37 +55,154 @@ child.stdout.on('data', (chunk) => {
       else request.resolve(message.result);
     } else {
       notifications.push(message);
-      console.log(`event ${JSON.stringify(message)}`);
+      console.log(`event ${JSON.stringify(redactNotification(message))}`);
     }
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 7 });
-await request('activation.configure', { enabled: false, bindings: [] });
-await request('session.set_capture', { mode: 'off' });
+const initialized = await request('initialize', { protocolVersion: 10 });
+validateKeyboardOwnerSnapshot(initialized.keyboardOwner);
+validateKeyboardCaptureCapability(initialized.keyboardCapture, initialized.keyboardOwner);
 const permissions = await request('permissions.get', {});
+const health = await request('ping', {});
+validateKeyboardOwnerSnapshot(health.keyboardOwner);
+if (
+  health.keyboardOwner.instanceId !== initialized.keyboardOwner.instanceId ||
+  health.keyboardOwner.leaseEpoch !== initialized.keyboardOwner.leaseEpoch
+) {
+  throw new Error('Helper ping changed keyboard-owner instance or lease epoch');
+}
+await request('session.set_capture', { mode: 'off' });
+await request('activation.configure', { enabled: false, bindings: fullChordBindings() });
+if (
+  JSON.stringify(requestSequence.slice(0, 5)) !==
+  JSON.stringify([
+    'initialize',
+    'permissions.get',
+    'ping',
+    'session.set_capture',
+    'activation.configure',
+  ])
+) {
+  throw new Error(`Helper disabled-first startup order changed: ${requestSequence.join(' -> ')}`);
+}
 const activationRegistration = await configureActivationCoverage(initialized, permissions);
 await request('activation.configure', { enabled: false, bindings: [] });
+const observability = await request('runtime.observability', {});
+validateKeyboardOwnerSnapshot(observability.keyboardOwner);
+if (typeof observability.owner?.authAttempts !== 'number') {
+  throw new Error(`Malformed owner observability: ${JSON.stringify(observability.owner)}`);
+}
+const maintenanceBoundary = await validateMaintenanceBoundary(initialized.keyboardOwner);
 const safeReport = {
   initialized,
   activationRegistration,
-  health: await request('ping', {}),
+  health,
   permissions,
+  observability,
+  maintenanceBoundary,
   frontApp: await request('front_app.get', {}).catch((error) => ({ unavailable: error.message })),
 };
 console.log(JSON.stringify(safeReport, null, 2));
 
-if (interactive) await runInteractive();
+if (interactive) {
+  if (activationRegistration.safeDisabled) {
+    throw new Error('Interactive activation checks require a trusted native test build');
+  }
+  await runInteractive();
+}
 await request('session.set_capture', { mode: 'off' }).catch(() => undefined);
 await request('activation.configure', { enabled: false, bindings: [] }).catch(() => undefined);
-await request('shutdown', {});
+const shutdown = await request('shutdown', {});
+if (!['neutral', 'draining'].includes(shutdown.ownerDisposition)) {
+  throw new Error(`Malformed owner shutdown disposition: ${JSON.stringify(shutdown)}`);
+}
 await childExit;
+
+function validateKeyboardOwnerSnapshot(owner) {
+  if (
+    owner?.model !== 'out_of_process' ||
+    owner.protocolVersion !== 1 ||
+    ![
+      'safe_disabled',
+      'idle',
+      'leased_disabled',
+      'leased_enabled',
+      'draining',
+      'maintenance',
+      'degraded',
+      'unavailable',
+    ].includes(owner.state) ||
+    typeof owner.instanceId !== 'string' ||
+    typeof owner.buildId !== 'string' ||
+    typeof owner.authenticated !== 'boolean' ||
+    (owner.leaseEpoch !== null && (!Number.isSafeInteger(owner.leaseEpoch) || owner.leaseEpoch < 1))
+  ) {
+    throw new Error(`Malformed keyboardOwner snapshot: ${JSON.stringify(owner)}`);
+  }
+  if (owner.authenticated && (!owner.instanceId || !owner.buildId || owner.leaseEpoch === null)) {
+    throw new Error(
+      `Authenticated keyboardOwner has incomplete identity: ${JSON.stringify(owner)}`,
+    );
+  }
+}
+
+async function validateMaintenanceBoundary(owner) {
+  if (owner.authenticated) {
+    return {
+      skipped:
+        'Authenticated maintenance is exercised only by the R8 installed coordinator to avoid sealing an interactive native harness owner.',
+    };
+  }
+  try {
+    await request('owner.prepare_maintenance', {
+      operation: 'uninstall',
+      transactionId: 'a'.repeat(64),
+      sourceBuildId: 'b'.repeat(64),
+    });
+  } catch (error) {
+    return { failClosed: true, message: error instanceof Error ? error.message : String(error) };
+  }
+  throw new Error('Unavailable owner unexpectedly accepted maintenance preparation');
+}
+
+function validateKeyboardCaptureCapability(capability, owner) {
+  if (
+    capability.activationAvailable !== capability.sessionKeyCaptureAvailable ||
+    (capability.activationAvailable &&
+      (capability.buildDisabled ||
+        capability.runtimeRollbackActive ||
+        !owner.authenticated ||
+        owner.leaseEpoch === null ||
+        owner.state !== 'leased_disabled'))
+  ) {
+    throw new Error(
+      `Malformed owner-gated keyboardCapture handshake: ${JSON.stringify({ capability, owner })}`,
+    );
+  }
+}
 
 async function configureActivationCoverage(initialization, permissions) {
   const permissionReady = Object.values(permissions).every((value) =>
     ['granted', 'not_applicable'].includes(value),
   );
-  if (initialization.hookStatus !== 'ready' || !permissionReady) {
+  if (initialization.keyboardCapture.buildDisabled) {
+    const rejected = await request('activation.configure', {
+      enabled: true,
+      bindings: fullChordBindings(),
+    });
+    if (rejected.enabled !== false || rejected.bindings.length !== fullChordBindings().length) {
+      throw new Error(
+        `Safe-disabled helper accepted activation configuration: ${JSON.stringify(rejected)}`,
+      );
+    }
+    return {
+      safeDisabled: true,
+      configuration: rejected,
+      verified: 'Build-disabled protocol behavior rejected activation enablement.',
+    };
+  }
+  if (initialization.hookStatus !== 'installed_unobserved' || !permissionReady) {
     return {
       skipped:
         'Native hook or permissions unavailable; full-chord runtime coverage requires an interactive trusted host.',
@@ -87,6 +214,7 @@ async function configureActivationCoverage(initialization, permissions) {
     bindings: expectedBindings,
   });
   if (
+    configuration.enabled !== true ||
     configuration.bindings.length !== expectedBindings.length ||
     expectedBindings.some((expected, index) => {
       const actual = configuration.bindings[index];
@@ -130,10 +258,16 @@ async function runInteractive() {
     });
     console.log(
       windows
-        ? 'For 20 seconds, focus the editor and perform Alt+X, Alt+X+P, Alt+X+Q, Alt+X+M, and Alt+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Alt may reach the editor, but every configured shortcut letter (including X) must be absent.'
-        : 'For 20 seconds, focus the editor and perform Option+X, Option+X+P, Option+X+Q, Option+X+M, and Option+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Modifier events may remain native, but every configured shortcut letter must be absent.',
+        ? 'For 20 seconds, focus the editor and perform Alt+X, Alt+X+P, Alt+X+Q, Alt+X+M, and Alt+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Every captured candidate character must remain absent and modifier edges must remain balanced.'
+        : 'For 20 seconds, focus the editor and perform Option+X, Option+X+P, Option+X+Q, Option+X+M, and Option+X+T. Keep X held while pressing each suffix, release all keys between chords, and release the suffix before X. Every captured candidate character must remain absent and modifier edges must remain balanced.',
     );
     await delay(20_000);
+    const capturedCharactersAbsent = await terminal.question(
+      'Verify the editor contains none of the captured candidate characters; type ABSENT to assert this: ',
+    );
+    if (capturedCharactersAbsent.trim() !== 'ABSENT') {
+      throw new Error('Interactive native run did not assert captured characters were absent');
+    }
     await request('activation.configure', { enabled: false, bindings: [] });
     const activations = printObserved('activation.event');
     assertPairedEvents(activations, 'activation.event');
@@ -197,14 +331,64 @@ async function runInteractive() {
       throw new Error('Enter was captured in cancel-only mode');
     }
 
-    await terminal.question(
-      'Copy distinctive Unicode/multiline text, focus Notepad or TextEdit, then return here and press Enter. ',
+    const expectedPasteText = await terminal.question(
+      'Enter the exact distinctive Unicode text you will copy for the paste check: ',
     );
-    console.log('Switch back to the target in the next three seconds.');
-    await delay(3_000);
+    if (expectedPasteText.length === 0) throw new Error('Paste check text must not be empty');
+    await terminal.question(
+      `Copy this exact text, then press Enter: ${JSON.stringify(expectedPasteText)} `,
+    );
+    notifications.length = 0;
+    await request('activation.configure', {
+      enabled: true,
+      bindings: fullChordBindings(),
+    });
+    console.log('Focus the paste target and perform the Prompt shortcut now.');
+    await delay(10_000);
+    await request('activation.configure', { enabled: false, bindings: [] });
+    const activation = notifications
+      .filter(
+        (event) =>
+          event.method === 'activation.event' &&
+          event.params.profileId === 'prompt' &&
+          ['down', 'complete'].includes(event.params.phase),
+      )
+      .at(-1)?.params;
+    if (activation === undefined) throw new Error('No Prompt activation was observed');
     console.log(`front app before paste: ${JSON.stringify(await request('front_app.get', {}))}`);
-    console.log(`paste dispatch: ${JSON.stringify(await request('paste.inject', {}))}`);
-    await terminal.question('Verify the exact clipboard text appeared once, then press Enter. ');
+    let expectedManualOutcome;
+    if (activation.targetToken === null) {
+      console.log(
+        'No strong native target token was available; this control is intentionally clipboard-only.',
+      );
+      expectedManualOutcome = 'CLIPBOARD_ONLY';
+    } else {
+      const expectedClipboardSha256 = createHash('sha256')
+        .update(expectedPasteText, 'utf8')
+        .digest('hex');
+      const pasteResult = await request('paste.inject', {
+        activationGeneration: activation.activationGeneration,
+        targetToken: activation.targetToken,
+        expectedClipboardSha256,
+      });
+      console.log(`paste dispatch: ${JSON.stringify(pasteResult)}`);
+      if (typeof pasteResult.submitted !== 'boolean') {
+        throw new Error('paste.inject returned an invalid result');
+      }
+      expectedManualOutcome = pasteResult.submitted
+        ? 'EXACT_ONCE'
+        : pasteResult.reason === 'indeterminate'
+          ? 'INDETERMINATE'
+          : 'CLIPBOARD_ONLY';
+    }
+    const pasteAssertion = await terminal.question(
+      `Type ${expectedManualOutcome} to confirm the authority-consistent observed outcome: `,
+    );
+    if (pasteAssertion.trim() !== expectedManualOutcome) {
+      throw new Error(
+        `Interactive paste assertion contradicted native authority; expected ${expectedManualOutcome}`,
+      );
+    }
   } finally {
     terminal.close();
   }
@@ -212,30 +396,89 @@ async function runInteractive() {
 
 function printObserved(method) {
   const observed = notifications.filter((notification) => notification.method === method);
-  console.log(`${method}: ${String(observed.length)} event(s) ${JSON.stringify(observed)}`);
+  console.log(
+    `${method}: ${String(observed.length)} event(s) ${JSON.stringify(observed.map(redactNotification))}`,
+  );
   return observed;
 }
 
+function redactNotification(notification) {
+  if (notification.method !== 'activation.event' || notification.params.targetToken === null) {
+    return notification;
+  }
+  return {
+    ...notification,
+    params: { ...notification.params, targetToken: '<redacted>' },
+  };
+}
+
 function assertPairedEvents(events, label) {
-  const counts = new Map();
+  if (events.length === 0) {
+    throw new Error(`${label} did not contain events`);
+  }
+  if (events.every((event) => event.method === 'activation.event')) {
+    assertPairedActivationEvents(events, label);
+    return;
+  }
+
+  const active = new Set();
   for (const event of events) {
-    const identity = JSON.stringify({
-      profileId: event.params.profileId,
-      shortcut: event.params.shortcut,
-      ...(event.params.key === undefined ? {} : { key: event.params.key }),
-    });
-    const count = counts.get(identity) ?? { down: 0, up: 0, complete: 0 };
-    count[event.params.phase] += 1;
-    counts.set(identity, count);
+    const identity = JSON.stringify({ key: event.params.key });
+    if (event.params.phase === 'down') {
+      if (active.has(identity)) throw new Error(`${label} contained a repeated/orphan down`);
+      active.add(identity);
+    } else if (event.params.phase === 'up') {
+      if (!active.delete(identity)) throw new Error(`${label} contained an up before down`);
+    } else {
+      throw new Error(`${label} contained an unknown phase`);
+    }
   }
-  if (
-    counts.size === 0 ||
-    [...counts.values()].some(
-      (count) => count.complete === 0 && (count.down === 0 || count.down !== count.up),
-    )
-  ) {
-    throw new Error(`${label} did not contain exact paired down/up events`);
+  if (active.size !== 0) throw new Error(`${label} did not contain an up for every down`);
+}
+
+function assertPairedActivationEvents(events, label) {
+  let lastGeneration = 0;
+  let active = null;
+  for (const event of events) {
+    const { activationGeneration, phase, targetToken } = event.params;
+    const validToken =
+      targetToken === null ||
+      (typeof targetToken === 'string' &&
+        targetToken.length > 0 &&
+        Buffer.byteLength(targetToken, 'utf8') <= 64);
+    if (
+      !Number.isSafeInteger(activationGeneration) ||
+      activationGeneration < 1 ||
+      !Object.hasOwn(event.params, 'targetToken') ||
+      !validToken
+    ) {
+      throw new Error(`${label} contained an invalid v8 activation context`);
+    }
+
+    if (phase === 'down' || phase === 'complete') {
+      if (activationGeneration <= lastGeneration || active !== null) {
+        throw new Error(`${label} contained a non-monotonic or overlapping activation`);
+      }
+      lastGeneration = activationGeneration;
+      if (phase === 'down') active = event.params;
+      continue;
+    }
+
+    if (phase !== 'up' || active === null || !sameActivationIdentity(active, event.params)) {
+      throw new Error(`${label} contained an orphan or mismatched up`);
+    }
+    active = null;
   }
+  if (active !== null) throw new Error(`${label} did not contain an up for every down`);
+}
+
+function sameActivationIdentity(left, right) {
+  return (
+    left.activationGeneration === right.activationGeneration &&
+    left.targetToken === right.targetToken &&
+    left.profileId === right.profileId &&
+    JSON.stringify(left.shortcut) === JSON.stringify(right.shortcut)
+  );
 }
 
 function fullChordBindings() {
@@ -277,6 +520,7 @@ function shortcutMatches(shortcut, keys, modifiers) {
 }
 
 function request(method, params) {
+  requestSequence.push(method);
   const id = nextId++;
   const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
   if (payload.length === 0 || payload.length > 16 * 1024) throw new Error('Request too large');
@@ -298,7 +542,13 @@ function request(method, params) {
         reject(error);
       },
     });
-    child.stdin.write(frame);
+    child.stdin.write(frame, (error) => {
+      if (error) {
+        pending.delete(id);
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
   });
 }
 

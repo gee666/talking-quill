@@ -144,44 +144,39 @@ describe('dictation profile contracts', () => {
     expect(DictationProfileListSchema.safeParse(valid).success).toBe(false);
   });
 
-  it('rejects same-modifier prefix conflicts but allows different modifiers', () => {
+  it('allows same-modifier shared prefixes for built-in and custom shortcut families', () => {
     const profiles = [
       ...defaults(),
       {
         id: '11111111-1111-4111-8111-111111111111',
         name: 'Short',
-        shortcut: shortcut(['A']),
+        shortcut: shortcut(['A'], { ctrl: true, alt: false }),
+        processingMode: 'raw' as const,
+        smartPrompt: null,
+      },
+      {
+        id: '22222222-2222-4222-8222-222222222222',
+        name: 'Long',
+        shortcut: shortcut(['A', 'B'], { ctrl: true, alt: false }),
         processingMode: 'raw' as const,
         smartPrompt: null,
       },
     ];
-    expect(
-      DictationProfileListSchema.safeParse([
-        ...profiles,
-        {
-          id: '22222222-2222-4222-8222-222222222222',
-          name: 'Long',
-          shortcut: shortcut(['A', 'B']),
-          processingMode: 'raw',
-          smartPrompt: null,
-        },
-      ]).success,
-    ).toBe(false);
-    expect(
-      DictationProfileListSchema.safeParse([
-        ...profiles,
-        {
-          id: '22222222-2222-4222-8222-222222222222',
-          name: 'Long shifted',
-          shortcut: shortcut(['A', 'B'], { shift: true }),
-          processingMode: 'raw',
-          smartPrompt: null,
-        },
-      ]).success,
-    ).toBe(true);
+    expect(DictationProfileListSchema.safeParse(profiles).success).toBe(true);
+
+    const customUnderBuiltIn = {
+      id: '33333333-3333-4333-8333-333333333333',
+      name: 'Alt X child',
+      shortcut: shortcut(['X', 'Z']),
+      processingMode: 'raw' as const,
+      smartPrompt: null,
+    };
+    expect(DictationProfileListSchema.safeParse([...profiles, customUnderBuiltIn]).success).toBe(
+      true,
+    );
   });
 
-  it('reserves every built-in default chord prefix even after its owner moves away', () => {
+  it('reserves exact built-in defaults for new profiles while preserving persisted custom values', () => {
     const moved = defaults().map((profile, index) => ({
       ...profile,
       shortcut: shortcut([String.fromCharCode(71 + index) as Shortcut['keys'][number]], {
@@ -189,49 +184,33 @@ describe('dictation profile contracts', () => {
         alt: false,
       }),
     }));
-    for (const reservedShortcut of [
-      shortcut(['X']),
-      shortcut(['X', 'P']),
-      shortcut(['X', 'P', 'E']),
-      shortcut(['X', 'M']),
-      shortcut(['X', 'E']),
-      shortcut(['X', 'Q']),
-      shortcut(['X', 'T']),
-    ]) {
+    for (const builtIn of defaults()) {
+      const custom = {
+        id: '11111111-1111-4111-8111-111111111111',
+        name: 'Existing custom',
+        shortcut: builtIn.shortcut,
+        processingMode: 'raw' as const,
+        smartPrompt: null,
+      };
+      expect(DictationProfileListSchema.safeParse([...moved, custom]).success).toBe(true);
       expect(
-        DictationProfileListSchema.safeParse([
-          ...moved,
-          {
-            id: '11111111-1111-4111-8111-111111111111',
-            name: 'Custom',
-            shortcut: reservedShortcut,
-            processingMode: 'raw',
-            smartPrompt: null,
-          },
-        ]).success,
+        DictationProfileCreateSchema.safeParse({
+          name: custom.name,
+          shortcut: custom.shortcut,
+          processingMode: custom.processingMode,
+          smartPrompt: null,
+        }).success,
       ).toBe(false);
     }
-    const editedGeneral = defaults();
-    const general = editedGeneral[0];
+
+    const duplicate = defaults();
+    const general = duplicate[0];
     if (general === undefined) throw new Error('General profile is missing');
-    editedGeneral[0] = { ...general, shortcut: shortcut(['X', 'Q']) };
-    expect(DictationProfileListSchema.safeParse(editedGeneral).success).toBe(false);
-
-    const renamedGeneral = defaults();
-    const canonicalGeneral = renamedGeneral[0];
-    if (canonicalGeneral === undefined) throw new Error('General profile is missing');
-    renamedGeneral[0] = { ...canonicalGeneral, name: 'Renamed General' };
-    expect(DictationProfileListSchema.safeParse(renamedGeneral).success).toBe(true);
-
+    const prompt = duplicate[1];
+    if (prompt === undefined) throw new Error('Prompt profile is missing');
+    duplicate[1] = { ...prompt, shortcut: structuredClone(general.shortcut) };
+    expect(DictationProfileListSchema.safeParse(duplicate).success).toBe(false);
     expect(DictationProfileListSchema.safeParse(defaults()).success).toBe(true);
-    expect(
-      DictationProfileCreateSchema.safeParse({
-        name: 'Reserved custom',
-        shortcut: shortcut(['X', 'E']),
-        processingMode: 'raw',
-        smartPrompt: null,
-      }).success,
-    ).toBe(false);
   });
 
   it('requires a complete shortcut while allowing strict nonbinding patches', () => {

@@ -8,6 +8,7 @@ const prefix = join(root, 'prefix');
 const packageRoot = join(prefix, 'node_modules/@earendil-works/pi-coding-agent');
 const receiptPath = join(root, 'receipt.json');
 const action = process.argv[2] ?? 'verify';
+const supportedVersion = '0.84.3';
 
 if (action === 'cleanup') {
   rmSync(root, { recursive: true, force: true });
@@ -25,7 +26,7 @@ if (action === 'install') {
     '--ignore-scripts',
     '--no-audit',
     '--no-fund',
-    '@earendil-works/pi-coding-agent@0.84.2',
+    `@earendil-works/pi-coding-agent@${supportedVersion}`,
   ];
   const result =
     process.platform === 'win32'
@@ -50,7 +51,7 @@ function writeReceipt() {
   const manifestPath = join(packageRoot, 'package.json');
   const cliPath = join(packageRoot, 'dist/cli.js');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  if (manifest.name !== '@earendil-works/pi-coding-agent' || manifest.version !== '0.84.2')
+  if (manifest.name !== '@earendil-works/pi-coding-agent' || manifest.version !== supportedVersion)
     throw new Error('Owned Pi fixture package identity mismatch');
   const cli = readFileSync(cliPath);
   const shim = process.platform === 'win32' ? join(prefix, 'pi.cmd') : join(prefix, 'bin/pi');
@@ -81,7 +82,7 @@ function verifyReceipt() {
   if (
     receipt.schemaVersion !== 1 ||
     receipt.packageName !== '@earendil-works/pi-coding-agent' ||
-    receipt.version !== '0.84.2' ||
+    receipt.version !== supportedVersion ||
     manifest.name !== receipt.packageName ||
     manifest.version !== receipt.version ||
     createHash('sha256').update(cli).digest('hex') !== receipt.cliSha256 ||

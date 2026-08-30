@@ -27,6 +27,19 @@ export function helperExecutableName(platform: HelperPlatform): string {
   return platform === 'win32' ? 'talking-quill-helper.exe' : 'talking-quill-helper';
 }
 
+export function resolveOwnedTreeRemovalExecutable(context: HelperPathContext): string {
+  if (context.platform !== 'win32' && context.platform !== 'darwin') {
+    throw new HelperBinaryError('binary-invalid');
+  }
+  const name = helperExecutableName(context.platform);
+  const candidate = context.packaged
+    ? join(context.resourcesPath, 'helper', name)
+    : join(context.appPath, 'native', name);
+  const absolute = resolve(candidate);
+  if (!isAbsolute(absolute)) throw new HelperBinaryError('binary-invalid');
+  return absolute;
+}
+
 export function resolveHelperExecutable(context: HelperPathContext): string {
   if (context.platform !== 'win32' && context.platform !== 'darwin') {
     throw new HelperBinaryError('binary-invalid');

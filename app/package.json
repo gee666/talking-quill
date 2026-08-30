@@ -1,6 +1,6 @@
 {
   "name": "@talking-quill/app",
-  "version": "0.0.4",
+  "version": "0.0.68",
   "private": true,
   "description": "Talking Quill desktop application",
   "author": "Talking Quill contributors",
@@ -13,15 +13,20 @@
     "dev": "node ../scripts/run-dev.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
     "rebuild:native": "electron-builder install-app-deps",
-    "package:win": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.yml --win nsis --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
-    "package:win:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && electron-builder --config ../build/electron-builder.yml --win nsis --arm64 && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
-    "package:win:dir": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.yml --win dir --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
-    "package:win:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && electron-builder --config ../build/electron-builder.unsigned.yml --win nsis --x64 --publish never && node ../scripts/inspect-package.mjs ../release/win-unpacked",
-    "package:win:arm64:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && electron-builder --config ../build/electron-builder.unsigned.yml --win nsis --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
-    "package:mac:x64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 && electron-builder --config ../build/electron-builder.yml --mac dmg zip --x64 && node ../scripts/inspect-package.mjs ../release/mac",
-    "package:mac:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 && electron-builder --config ../build/electron-builder.yml --mac dmg zip --arm64 && node ../scripts/inspect-package.mjs ../release/mac-arm64",
-    "package:mac:x64:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 && electron-builder --config ../build/electron-builder.unsigned.yml --mac dmg zip --x64 --publish never && node ../scripts/inspect-package.mjs ../release/mac",
-    "package:mac:arm64:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 && electron-builder --config ../build/electron-builder.unsigned.yml --mac dmg zip --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/mac-arm64"
+    "package:win": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && node ../scripts/rebuild-electron-native.mjs x64 && electron-builder --config ../build/electron-builder.unsigned.yml --config.npmRebuild=false --win nsis --x64 --publish never && node ../scripts/inspect-package.mjs ../release/win-unpacked",
+    "package:win:dir": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && node ../scripts/rebuild-electron-native.mjs x64 && electron-builder --config ../build/electron-builder.yml --config.npmRebuild=false --win dir --x64 && node ../scripts/inspect-package.mjs ../release/win-unpacked",
+    "package:win:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && node ../scripts/rebuild-electron-native.mjs arm64 && electron-builder --config ../build/electron-builder.unsigned.yml --config.npmRebuild=false --win nsis --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
+    "package:win:arm64:dir": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && node ../scripts/rebuild-electron-native.mjs arm64 && electron-builder --config ../build/electron-builder.yml --config.npmRebuild=false --win dir --arm64 && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
+    "package:win:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch x64 && node ../scripts/rebuild-electron-native.mjs x64 && electron-builder --config ../build/electron-builder.unsigned.yml --config.npmRebuild=false --win nsis --x64 --publish never && node ../scripts/inspect-package.mjs ../release/win-unpacked",
+    "package:win:arm64:unsigned": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform win32 --arch arm64 && node ../scripts/rebuild-electron-native.mjs arm64 && electron-builder --config ../build/electron-builder.unsigned.yml --config.npmRebuild=false --win nsis --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/win-arm64-unpacked",
+    "package:mac:x64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 --include-macos-owner && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --x64 --publish never && node ../scripts/inspect-package.mjs ../release/mac --macos-owner",
+    "package:mac:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 --include-macos-owner && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/mac-arm64 --macos-owner",
+    "package:mac:x64:unsigned": "pnpm package:mac:x64",
+    "package:mac:arm64:unsigned": "pnpm package:mac:arm64",
+    "package:mac:owner:x64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 --include-macos-owner && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --x64 --publish never && node ../scripts/inspect-package.mjs ../release/mac --macos-owner",
+    "package:mac:owner:arm64": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 --include-macos-owner && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/mac-arm64 --macos-owner",
+    "package:mac:owner:x64:fixture": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch x64 --include-macos-owner --macos-lifecycle-fixture && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --x64 --publish never && node ../scripts/inspect-package.mjs ../release/mac --macos-owner",
+    "package:mac:owner:arm64:fixture": "node ../scripts/prepackage-check.mjs && pnpm --dir .. build && node ../scripts/build-helper.mjs --platform darwin --arch arm64 --include-macos-owner --macos-lifecycle-fixture && electron-builder --config ../build/electron-builder.macos-owner.yml --mac dmg zip --arm64 --publish never && node ../scripts/inspect-package.mjs ../release/mac-arm64 --macos-owner"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
@@ -32,5 +37,8 @@
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/semver": "7.7.1"
   }
 }

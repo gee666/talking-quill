@@ -68,12 +68,13 @@ export async function runBoundedLifecycle(
   phase: LifecyclePhase,
   steps: readonly LifecycleStep[],
   timeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
-  options: { readonly stopOnFailure?: boolean } = {},
+  options: { readonly stopOnFailure?: boolean; readonly deadline?: number } = {},
 ): Promise<readonly LifecycleDiagnostic[]> {
   const diagnostics: LifecycleDiagnostic[] = [];
-  const deadline = Date.now() + Math.max(1, timeoutMs);
+  const deadline = options.deadline ?? Date.now() + Math.max(1, timeoutMs);
   for (const step of steps) {
-    const remainingMs = Math.max(1, deadline - Date.now());
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     const outcome = await settleBounded(step.run, remainingMs);
     if (outcome !== null) {
       diagnostics.push({ phase, step: step.name, outcome });

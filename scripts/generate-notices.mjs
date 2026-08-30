@@ -11,6 +11,7 @@ const lockPath = resolve(root, 'pnpm-lock.yaml');
 const cargoLockPaths = [resolve(root, 'helper/Cargo.lock')];
 const modelPath = resolve(root, 'scripts/model-manifest.json');
 const attributionPath = resolve(root, 'docs/attribution/anythingllm-mit.txt');
+const powerToysAttributionPath = resolve(root, 'docs/attribution/powertoys-mit.txt');
 const vendoredNoticeRoot = resolve(root, 'docs/third-party');
 const VENDORED_MISSING_MATERIAL = Object.freeze({
   'guid-typescript@1.0.9': ['guid-typescript-1.0.9-LICENSE.txt'],
@@ -32,11 +33,12 @@ const VENDORED_MISSING_MATERIAL = Object.freeze({
     'onnxruntime/89f8206ba4/ThirdPartyNotices.txt',
   ],
 });
-const [lock, cargoLocks, modelSource, anythingLlmMit] = await Promise.all([
+const [lock, cargoLocks, modelSource, anythingLlmMit, powerToysMit] = await Promise.all([
   readFile(lockPath, 'utf8'),
   Promise.all(cargoLockPaths.map((path) => readFile(path, 'utf8'))),
   readFile(modelPath, 'utf8'),
   readFile(attributionPath, 'utf8'),
+  readFile(powerToysAttributionPath, 'utf8'),
 ]);
 
 const licenseReport = JSON.parse(
@@ -87,13 +89,15 @@ const npmRecords = [...npmPackages.values()].sort(compareRecord);
 assertCompleteLicenses(npmRecords, 'JavaScript');
 
 const cargo = resolveRustTool('cargo');
-const rustTargets = [
-  'x86_64-pc-windows-msvc',
-  'aarch64-pc-windows-msvc',
-  'x86_64-apple-darwin',
-  'aarch64-apple-darwin',
-];
+const rustTargets = ['x86_64-pc-windows-msvc', 'x86_64-apple-darwin', 'aarch64-apple-darwin'];
 const cargoPackages = new Map();
+const workspaceCargoPackages = new Set([
+  'talking-quill-helper',
+  'talking-quill-keyboard-core',
+  'talking-quill-keyboard-owner',
+  'talking-quill-owner-protocol',
+  'talking-quill-windows-owner-ipc',
+]);
 for (const target of rustTargets) {
   for (const manifestPath of ['helper/Cargo.toml']) {
     const tree = execFileSync(
@@ -126,7 +130,7 @@ for (const target of rustTargets) {
       const license = licenseSource?.trim().replace(/ \(\*\)$/u, '') ?? '';
       if (match === null || license.length === 0)
         throw new Error(`Invalid Cargo license record: ${line}`);
-      const workspacePackage = match[1] === 'talking-quill-helper';
+      const workspacePackage = workspaceCargoPackages.has(match[1]);
       const record = {
         name: match[1],
         version: match[2],
@@ -236,6 +240,11 @@ Provider and local Whisper behavior was independently implemented with reference
 
 ${anythingLlmMit.trim()}
 
+Microsoft PowerToys Keyboard Manager MIT attribution
+The Windows dummy-key menu-neutralization behavior was adapted from the MIT-licensed PowerToys Keyboard Manager strategy. Talking Quill's Rust implementation is independently structured, but preserves attribution for the adapted implementation technique and associated behavioral tests.
+
+${powerToysMit.trim()}
+
 Legal review limitation
 This generated engineering inventory records available attribution material but does not claim legal sufficiency. Distribution still requires qualified legal review.
 `;
@@ -343,8 +352,15 @@ function collectLicenseTexts(records) {
     }
     for (const name of files) {
       const text = readFileSync(resolve(directory, name), 'utf8').trim();
-      if (text.length < 20)
+      if (text.length < 20) {
+        const exactDualLicensePointer =
+          name.toLowerCase() === 'license' &&
+          text === 'MIT OR Apache-2.0' &&
+          files.includes('LICENSE-MIT') &&
+          files.includes('LICENSE-APACHE');
+        if (exactDualLicensePointer) continue;
         throw new Error(`Required license text is empty: ${record.name}/${name}`);
+      }
       const hash = sha256(text);
       const owner = `${record.name}@${record.version}/${name}`;
       const existing = byHash.get(hash);

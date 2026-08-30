@@ -55,6 +55,59 @@ async function fixture(prefix: string) {
 }
 
 describe('DataLifecycleService', () => {
+  it('rebinds a copied profile and removes only path-bound temporary runtime state', async () => {
+    const { allowedBase, root, homeDirectory } = await fixture('data-copied-profile');
+    await Promise.all([
+      writeFile(
+        join(root, 'settings.json'),
+        '{"voiceCommands":[{"name":"portable"}],"shortcuts":{"general":"Alt+X+P"}}',
+      ),
+      writeFile(join(root, 'history.db'), 'portable-history'),
+      writeFile(join(root, 'credentials.json'), 'portable-credentials'),
+      mkdir(join(root, 'models', 'portable-model'), { recursive: true }),
+      mkdir(join(root, 'tmp', 'sessions', 'old-owner-session'), { recursive: true }),
+      mkdir(join(root, 'runtime'), { recursive: true }),
+    ]);
+    await writeFile(join(root, 'models', 'portable-model', 'model.bin'), 'model');
+    await writeFile(join(root, 'tmp', 'sessions', 'old-owner-session', 'lease.json'), 'stale');
+    await writeFile(
+      join(root, 'runtime', 'keyboard-owner.json'),
+      JSON.stringify({ instanceId: 'machine-a', buildId: 'old-build', leaseEpoch: 99 }),
+    );
+    const migratedRoot = join(allowedBase, 'Talking Quill copied');
+    await rename(root, migratedRoot);
+
+    const migrated = new DataLifecycleService(migratedRoot, { allowedBase, homeDirectory });
+    await expect(migrated.reconcileCopiedProfile()).resolves.toBe(true);
+    await expect(migrated.initializeOwnership()).resolves.toBeUndefined();
+    await expect(readFile(join(migratedRoot, 'settings.json'), 'utf8')).resolves.toContain(
+      'portable',
+    );
+    await expect(
+      readFile(join(migratedRoot, 'models', 'portable-model', 'model.bin'), 'utf8'),
+    ).resolves.toBe('model');
+    await expect(readFile(join(migratedRoot, 'history.db'), 'utf8')).resolves.toBe(
+      'portable-history',
+    );
+    await expect(readFile(join(migratedRoot, 'credentials.json'), 'utf8')).resolves.toBe(
+      'portable-credentials',
+    );
+    await expect(lstat(join(migratedRoot, 'tmp'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(join(migratedRoot, 'runtime'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await Promise.all([
+      mkdir(join(migratedRoot, 'tmp', 'sessions'), { recursive: true }),
+      mkdir(join(migratedRoot, 'runtime'), { recursive: true }),
+    ]);
+    await writeFile(join(migratedRoot, 'runtime', 'keyboard-owner.json'), 'same-path-stale');
+    await expect(migrated.reconcileCopiedProfile()).resolves.toBe(false);
+    await expect(lstat(join(migratedRoot, 'tmp'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(join(migratedRoot, 'runtime'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(migratedRoot, 'settings.json'), 'utf8')).resolves.toContain(
+      'portable',
+    );
+  });
+
   it('journals a full reset outside the data root and recovers it on startup', async () => {
     const { parent, root, options, service } = await fixture('data-reset');
     const ollama = join(parent, 'ollama-models');

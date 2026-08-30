@@ -20,7 +20,7 @@ import {
 } from './providers';
 import { TranscriptionLanguageSchema } from './transcription';
 
-export const SETTINGS_SCHEMA_VERSION = 27 as const;
+export const SETTINGS_SCHEMA_VERSION = 28 as const;
 
 export const PiInstallationPathSchema = z.string().trim().min(1).max(8_192).nullable();
 
@@ -140,7 +140,7 @@ export const SettingsObjectSchema = z
   })
   .strict();
 
-export const SettingsSchema = SettingsObjectSchema.superRefine((settings, context) => {
+export const SettingsV28Schema = SettingsObjectSchema.superRefine((settings, context) => {
   const general = settings.dictationProfiles.find((profile) => profile.id === 'general');
   if (general === undefined) return;
   if (settings.app.defaultProcessingMode !== general.processingMode) {
@@ -151,6 +151,10 @@ export const SettingsSchema = SettingsObjectSchema.superRefine((settings, contex
     });
   }
 });
+
+// Runtime settings always use the current schema. SettingsStore conditionally serializes the
+// frozen released-compatible subset as v27 and keeps all other state explicitly at v28.
+export const SettingsSchema = SettingsV28Schema;
 
 const AppSettingsPatchSchema = AppSettingsSchema.partial();
 const PublicAppSettingsPatchSchema = AppSettingsSchema.omit({

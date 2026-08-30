@@ -1,0 +1,97 @@
+[package]
+name = "talking-quill-keyboard-owner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Out-of-process native keyboard owner for Talking Quill"
+autobins = false
+autoexamples = false
+autobenches = false
+
+[package.metadata.talking-quill-boundary]
+role = "keyboard-owner"
+stage = "r4-production-runtime-host"
+runtime = true
+executable = true
+owner-protocol-server = true
+
+[features]
+default = []
+# Explicit local personal-use runtime mode. It does not provide installed
+# bootstrap/provisioning and does not include a physical-input test seam.
+local-unsigned-owner = []
+# Owner-only native acceptance seams.
+transactional-shortcuts-dev = ["talking-quill-keyboard-core/native-test-input"]
+windows-native-test-input = ["talking-quill-keyboard-core/native-test-input"]
+# macOS permissioned-runner-only lifecycle fault/Keychain fixture. Production
+# packaging never enables it and build.rs requires an explicit CI fixture gate.
+macos-native-lifecycle-fixture = []
+[dependencies]
+crossbeam-channel.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+talking-quill-keyboard-core = { path = "../keyboard-core" }
+talking-quill-owner-protocol = { path = "../owner-protocol" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+security-framework-sys.workspace = true
+sha1.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+talking-quill-windows-owner-ipc = { path = "../windows-owner-ipc" }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Media_Audio",
+  "Win32_Security",
+  "Win32_Security_Authentication_Identity",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Certificates",
+  "Win32_Security_WinTrust",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_DataExchange",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Registry",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+proptest.workspace = true
+talking-quill-owner-protocol = { path = "../owner-protocol", features = ["test-transport"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "talking-quill-keyboard-owner"
+path = "src/main.rs"
+
+[[bin]]
+name = "macos-keychain-fixture"
+path = "src/bin/macos-keychain-fixture.rs"
+required-features = ["macos-native-lifecycle-fixture"]
+
+[lints]
+workspace = true

@@ -1,35 +1,31 @@
 import { createHash } from 'node:crypto';
-import { clipboard, nativeImage } from 'electron';
-import { ECHO_CLIPBOARD_RESTORE_MS } from '../../shared/constants/echo-session';
+import { clipboard } from 'electron';
+import { ECHO_CLIPBOARD_RESTORE_MS as ECHO_POST_COMMIT_SETTLE_MS } from '../../shared/constants/echo-session';
+import type { HelperActivationContext, HelperPasteResult } from '../../shared/helper/protocol';
 import type { HelperClient } from '../helper';
 
-export interface ClipboardSnapshot {
-  readonly text: string;
-  readonly html: string;
-  readonly rtf: string;
-  readonly imagePng: Uint8Array | null;
-}
-
 export interface ClipboardAdapter {
-  snapshot(): ClipboardSnapshot;
   writeText(text: string): void;
-  restore(snapshot: ClipboardSnapshot): void;
 }
 
 export interface PasteAdapter {
   injectPaste(
+    activationContext: Readonly<HelperActivationContext>,
+    expectedClipboardSha256: string,
     signal?: AbortSignal,
     onCommitted?: () => void,
-  ): Promise<{ readonly submitted: boolean }>;
+  ): Promise<HelperPasteResult>;
 }
 
 export const INSERTION_DISPATCH_TIMEOUT_MS = 3_500;
-export const INSERTION_RESTORE_TIMEOUT_MS = 1_000;
+export const INSERTION_COMMIT_SETTLE_TIMEOUT_MS = 1_000;
 
 export interface InsertionResult {
   readonly inserted: boolean;
   readonly copied: boolean;
   readonly cancelled?: boolean;
+  /** Native injection was claimed but completion was not proved; never retry. */
+  readonly indeterminate?: boolean;
 }
 
 export class InsertionService {
@@ -49,14 +45,21 @@ export class InsertionService {
 
   async insert(
     text: string,
+    activationContext: Readonly<HelperActivationContext>,
     signal?: AbortSignal,
     onCommitted?: () => void,
   ): Promise<InsertionResult> {
     if (isAborted(signal)) return { inserted: false, copied: false, cancelled: true };
-    const snapshot = this.#clipboard.snapshot();
+
+    // This is the sole clipboard mutation. The intended plain text remains the
+    // authoritative clipboard-only fallback; neither success, cancellation nor
+    // delayed completion snapshots/restores a subset of pasteboard formats.
     this.#clipboard.writeText(text);
-    const ownershipFingerprint = clipboardFingerprint(this.#clipboard.snapshot());
+    const expectedClipboardSha256 = clipboardTextSha256(text);
+    if (activationContext.targetToken === null) return { inserted: false, copied: true };
+
     let submitted = false;
+    let indeterminate = false;
     let nativeCommitted = false;
     let commitPublished = false;
     const publishCommit = (): void => {
@@ -66,101 +69,40 @@ export class InsertionService {
       onCommitted?.();
     };
     try {
-      submitted = (
-        await boundedOperation(
-          this.#paste.injectPaste(signal, publishCommit),
-          INSERTION_DISPATCH_TIMEOUT_MS,
-        )
-      ).submitted;
+      const pasteResult = await boundedOperation(
+        this.#paste.injectPaste(activationContext, expectedClipboardSha256, signal, publishCommit),
+        INSERTION_DISPATCH_TIMEOUT_MS,
+      );
+      submitted = pasteResult.submitted;
+      indeterminate = !pasteResult.submitted && pasteResult.reason === 'indeterminate';
     } catch {
       submitted = false;
     }
-    // The helper emits the irreversible boundary before its RPC response. Once observed, a late
-    // false response, transport rejection, caller abort, or missing acknowledgement cannot turn an
-    // actual native paste into cancellation.
     submitted ||= nativeCommitted;
     if (!submitted) {
-      if (isAborted(signal)) {
-        if (clipboardFingerprint(this.#clipboard.snapshot()) === ownershipFingerprint) {
-          this.#clipboard.restore(snapshot);
-        }
-        return { inserted: false, copied: false, cancelled: true };
-      }
+      if (indeterminate) return { inserted: false, copied: true, indeterminate: true };
+      if (isAborted(signal)) return { inserted: false, copied: true, cancelled: true };
       return { inserted: false, copied: true };
     }
-    // Paste dispatch is the cancellation commit point. The caller records it before the
-    // clipboard restoration delay so late Esc cannot misreport an already-inserted session.
+
     publishCommit();
     await boundedOperation(
-      this.#delay(ECHO_CLIPBOARD_RESTORE_MS),
-      INSERTION_RESTORE_TIMEOUT_MS,
+      this.#delay(ECHO_POST_COMMIT_SETTLE_MS),
+      INSERTION_COMMIT_SETTLE_TIMEOUT_MS,
     ).catch(() => undefined);
-    // Once paste has been dispatched, cancellation must not strand our temporary
-    // clipboard value. Restore only while it is still ours so a user clipboard
-    // change during the delay always wins.
-    if (clipboardFingerprint(this.#clipboard.snapshot()) === ownershipFingerprint) {
-      try {
-        this.#clipboard.restore(snapshot);
-      } catch {
-        // Paste dispatch is already committed. Restoration failure must not misreport the
-        // insertion or let a later cancellation overwrite its terminal outcome.
-      }
-    }
     return { inserted: true, copied: false };
   }
 }
 
 export class ElectronClipboardAdapter implements ClipboardAdapter {
-  snapshot(): ClipboardSnapshot {
-    const image = clipboard.readImage();
-    return {
-      text: clipboard.readText(),
-      html: clipboard.readHTML(),
-      rtf: clipboard.readRTF(),
-      imagePng: image.isEmpty() ? null : Uint8Array.from(image.toPNG()),
-    };
-  }
-
   writeText(text: string): void {
     clipboard.writeText(text);
   }
-
-  restore(snapshot: ClipboardSnapshot): void {
-    clipboard.write({
-      text: snapshot.text,
-      ...(snapshot.html.length === 0 ? {} : { html: snapshot.html }),
-      ...(snapshot.rtf.length === 0 ? {} : { rtf: snapshot.rtf }),
-      ...(snapshot.imagePng === null
-        ? {}
-        : { image: nativeImage.createFromBuffer(Buffer.from(snapshot.imagePng)) }),
-    });
-  }
 }
 
-export function clipboardFingerprint(snapshot: ClipboardSnapshot): string {
-  const hash = createHash('sha256');
-  updateFingerprintField(hash, 1, Buffer.from(snapshot.text, 'utf8'));
-  updateFingerprintField(hash, 2, Buffer.from(snapshot.html, 'utf8'));
-  updateFingerprintField(hash, 3, Buffer.from(snapshot.rtf, 'utf8'));
-  updateFingerprintField(
-    hash,
-    4,
-    snapshot.imagePng === null ? null : Buffer.from(snapshot.imagePng),
-  );
-  return hash.digest('hex');
-}
-
-function updateFingerprintField(
-  hash: ReturnType<typeof createHash>,
-  type: number,
-  value: Buffer | null,
-): void {
-  const header = Buffer.allocUnsafe(10);
-  header.writeUInt8(type, 0);
-  header.writeUInt8(value === null ? 0 : 1, 1);
-  header.writeBigUInt64BE(BigInt(value?.byteLength ?? 0), 2);
-  hash.update(header);
-  if (value !== null) hash.update(value);
+/** SHA-256 of the exact UTF-8 bytes written by Electron, encoded as lowercase hex. */
+export function clipboardTextSha256(text: string): string {
+  return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
 }
 
 export function createInsertionService(helper: HelperClient): InsertionService {

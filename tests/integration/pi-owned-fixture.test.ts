@@ -222,7 +222,7 @@ suite('owned npm-installed Pi against a nonbillable localhost provider', () => {
     }
   }, 90_000);
 
-  it('completes one real Pi 0.84.2 RPC operation with its native agent_end shape', async () => {
+  it('completes one real Pi 0.84.3 RPC operation with its native agent_end shape', async () => {
     const stages: PiRpcTimingStage[] = [];
     const provider = new PiProvider({
       environment: {

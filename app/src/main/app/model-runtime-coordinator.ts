@@ -57,9 +57,10 @@ export class ModelRuntimeCoordinator {
     });
   }
 
-  bindState(state: AppStateService): ReturnType<ModelManager['status']> {
+  async bindState(state: AppStateService): ReturnType<ModelManager['status']> {
     this.#stateTarget = state;
-    return this.#models.status(this.#settings.get().transcription.modelId);
+    const modelId = this.#settings.get().transcription.modelId;
+    return this.#reconcileModelStatus(modelId);
   }
 
   bindEcho(echo: EchoSessionController): () => void {
@@ -104,21 +105,45 @@ export class ModelRuntimeCoordinator {
 
   subscribeSelectedModel(assumeReady: boolean): () => void {
     let selectedModelId = this.#settings.get().transcription.modelId;
+    let selectionGeneration = 0;
     return this.#settings.subscribe((next) => {
       if (next.transcription.modelId === selectedModelId) return;
       selectedModelId = next.transcription.modelId;
+      const requestedGeneration = ++selectionGeneration;
       if (assumeReady) {
         this.#stateTarget?.setModelReady(true);
         this.#echoTarget?.readinessChanged();
         return;
       }
-      void this.#models.status(next.transcription.modelId).then((status) => {
-        if (this.#settings.get().transcription.modelId === status.modelId) {
+      this.#stateTarget?.setModelReady(false);
+      this.#echoTarget?.readinessChanged();
+      const requestedModelId = next.transcription.modelId;
+      void this.#reconcileModelStatus(requestedModelId).then(
+        (status) => {
+          if (
+            selectionGeneration !== requestedGeneration ||
+            this.#settings.get().transcription.modelId !== requestedModelId
+          ) {
+            return;
+          }
           this.#stateTarget?.setModelReady(status.state === 'ready');
           this.#echoTarget?.readinessChanged();
-        }
-      });
+        },
+        () => {
+          // The pessimistic state set above remains authoritative and actionable.
+        },
+      );
     });
+  }
+
+  async #reconcileModelStatus(modelId: WhisperModelId): ReturnType<ModelManager['status']> {
+    const status = await this.#models.status(modelId);
+    if (status.state === 'ready' || status.downloadedBytes !== status.totalBytes) return status;
+    try {
+      return await this.#models.status(modelId, true);
+    } catch {
+      return status;
+    }
   }
 
   #validationKey(modelId: WhisperModelId): string {

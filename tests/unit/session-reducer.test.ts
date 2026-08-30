@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { IDLE_ECHO_SESSION, reduceEchoSession } from '../../app/src/main/echo/session-reducer';
 
 const SESSION_ID = '00000000-0000-4000-8000-000000000001';
+const ACTIVATION_CONTEXT = Object.freeze({ activationGeneration: 1, targetToken: null });
 
 function arming() {
   return reduceEchoSession(IDLE_ECHO_SESSION, {
@@ -9,6 +10,7 @@ function arming() {
     sessionId: SESSION_ID,
     alternate: false,
     processingMode: 'raw',
+    activationContext: ACTIVATION_CONTEXT,
     now: 1_000,
   }).state;
 }
@@ -25,9 +27,14 @@ describe('Echo session reducer', () => {
       sessionId: SESSION_ID,
       alternate: false,
       processingMode: 'raw',
+      activationContext: ACTIVATION_CONTEXT,
       now: 10,
     });
-    expect(first.state).toMatchObject({ phase: 'arming', sessionId: SESSION_ID });
+    expect(first.state).toMatchObject({
+      phase: 'arming',
+      sessionId: SESSION_ID,
+      activationContext: ACTIVATION_CONTEXT,
+    });
     expect(first.effects).toEqual([{ type: 'start-capture' }]);
     expect(
       reduceEchoSession(first.state, {
@@ -35,9 +42,26 @@ describe('Echo session reducer', () => {
         sessionId: '00000000-0000-4000-8000-000000000002',
         alternate: true,
         processingMode: 'smart',
+        activationContext: { activationGeneration: 2, targetToken: null },
         now: 11,
       }).state.sessionId,
     ).toBe(SESSION_ID);
+  });
+
+  it('retains the original native activation context throughout the session', () => {
+    const recording = reduceEchoSession(arming(), { type: 'shortcut-up', now: 1_100 }).state;
+    const ready = withCaptureAndAudio(recording);
+    const transcribing = reduceEchoSession(ready, { type: 'submit', source: 'stop' }).state;
+    const inserting = reduceEchoSession(transcribing, {
+      type: 'transcribed',
+      text: 'context survives',
+      smart: false,
+    }).state;
+
+    for (const state of [recording, ready, transcribing, inserting]) {
+      expect(state.activationContext).toBe(ACTIVATION_CONTEXT);
+    }
+    expect(reduceEchoSession(inserting, { type: 'reset' }).state.activationContext).toBeNull();
   });
 
   it('classifies release before the hold timer as Quick', () => {
@@ -128,7 +152,9 @@ describe('Echo session reducer', () => {
       smart: false,
     });
     expect(result.state).toMatchObject({ phase: 'inserting', transcript: 'hello' });
-    expect(result.effects).toEqual([{ type: 'insert', text: 'hello' }]);
+    expect(result.effects).toEqual([
+      { type: 'insert', text: 'hello', activationContext: ACTIVATION_CONTEXT },
+    ]);
   });
 
   it('supports the Smart extension point and raw fallback', () => {
@@ -144,7 +170,9 @@ describe('Echo session reducer', () => {
     expect(smart.state.phase).toBe('processingSmart');
     const fallback = reduceEchoSession(smart.state, { type: 'abort', reason: 'provider-error' });
     expect(fallback.state).toMatchObject({ phase: 'inserting', abortReason: 'provider-error' });
-    expect(fallback.effects).toEqual([{ type: 'insert', text: 'raw' }]);
+    expect(fallback.effects).toEqual([
+      { type: 'insert', text: 'raw', activationContext: ACTIVATION_CONTEXT },
+    ]);
   });
 
   it.each(['user-cancel', 'shutdown', 'target-lost'] as const)(
@@ -225,6 +253,7 @@ describe('Echo session reducer', () => {
       expect(reduceEchoSession(processing, { type: 'abort', reason }).effects).toContainEqual({
         type: 'insert',
         text: 'usable raw',
+        activationContext: ACTIVATION_CONTEXT,
       });
     },
   );
@@ -260,6 +289,20 @@ describe('Echo session reducer', () => {
     },
   );
 
+  it('marks indeterminate native paste without claiming clipboard-only completion', () => {
+    const inserting = { ...arming(), phase: 'inserting' as const, transcript: 'hello' };
+    const completed = reduceEchoSession(inserting, {
+      type: 'inserted',
+      copied: true,
+      indeterminate: true,
+    });
+    expect(completed.state).toMatchObject({
+      phase: 'completed',
+      completion: 'indeterminate',
+      message: 'Paste status uncertain — check the target before pasting again',
+    });
+  });
+
   it('marks clipboard fallback distinctly and resets to idle', () => {
     const inserting = { ...arming(), phase: 'inserting' as const, transcript: 'hello' };
     const completed = reduceEchoSession(inserting, { type: 'inserted', copied: true });
@@ -273,7 +316,7 @@ describe('Echo session reducer', () => {
       state: { ...arming(), phase: 'processingSmart' as const, transcript: 'raw' },
       event: { type: 'smart-completed' as const, text: ' polished ' },
       phase: 'inserting',
-      effects: [{ type: 'insert', text: 'polished' }],
+      effects: [{ type: 'insert', text: 'polished', activationContext: ACTIVATION_CONTEXT }],
     },
     {
       name: 'smart-completed rejects empty output',

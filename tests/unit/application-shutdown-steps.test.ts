@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createApplicationDrainSteps } from '../../app/src/main/app/shutdown-steps';
+import { runBoundedLifecycle } from '../../app/src/main/app/lifecycle';
 
 describe('application shutdown steps', () => {
   it('keeps one producer-to-store order for reset and ordinary shutdown', async () => {
@@ -45,5 +46,35 @@ describe('application shutdown steps', () => {
     expect(steps.map(({ name }) => name)).toEqual(expectedOrder);
     expect(calls).toEqual(expectedOrder);
     expect(ipc.drain).toHaveBeenCalledWith(['data:reset-all']);
+  });
+
+  it('persists settings and vault before a permanently blocked diagnostic logger', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const steps = createApplicationDrainSteps({
+      ipc: null,
+      tray: null,
+      providerMutations: null,
+      echo: null,
+      providers: null,
+      recording: null,
+      models: null,
+      whisper: null,
+      helper: { stop: () => undefined },
+      history: { close: () => void calls.push('history') },
+      settings: { flush: () => Promise.resolve(void calls.push('settings')) },
+      vault: { flush: () => Promise.resolve(void calls.push('vault')) },
+      diagnostics: { dispose: () => new Promise<void>(() => undefined) },
+    });
+    const lifecycle = runBoundedLifecycle('shutdown', steps, 100);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(calls).toEqual(['history', 'settings', 'vault']);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(lifecycle).resolves.toContainEqual({
+      phase: 'shutdown',
+      step: 'diagnostic-logger',
+      outcome: 'timed-out',
+    });
+    vi.useRealTimers();
   });
 });

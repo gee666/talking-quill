@@ -25,6 +25,7 @@ export interface ArtifactProvenanceManifest {
 }
 
 export const artifactProvenanceManifestPath: string;
+export function currentSourceTreeHash(): Promise<string>;
 export function writeArtifactProvenanceManifest(
   options: ArtifactIdentity & {
     readonly packageRoot: string;

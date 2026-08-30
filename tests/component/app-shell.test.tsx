@@ -3,13 +3,17 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MainApi } from '../../app/src/shared/bridge/api';
-import type { AppStatus } from '../../app/src/shared/schemas/app-state';
+import type { AppState, AppStatus } from '../../app/src/shared/schemas/app-state';
 import { DEFAULT_PROMPT_PROFILE } from '../../app/src/shared/schemas/dictation-profiles';
 import { DEFAULT_SETTINGS, type Settings } from '../../app/src/shared/schemas/settings';
+import { ShortcutCaptureLeaseIdSchema } from '../../app/src/shared/schemas/shortcut-capture';
 import { shortcutFromLegacyActivation } from '../../app/src/shared/schemas/shortcut';
 import { PROVIDER_CATALOG } from '../../app/src/main/providers/registry';
 import { AppShell } from '../../app/src/renderer/main/AppShell';
-import { APP_STATUS_PRESENTATIONS } from '../../app/src/renderer/status-presentation';
+import {
+  APP_STATUS_PRESENTATIONS,
+  exactAppStatusLabel,
+} from '../../app/src/renderer/status-presentation';
 
 const setEnabled = vi.fn<MainApi['app']['setEnabled']>();
 const getBootstrap = vi.fn<MainApi['app']['getBootstrap']>();
@@ -35,6 +39,9 @@ const readyHelper = {
 } as const;
 
 const BINDING_TOKEN = '11111111-1111-4111-8111-111111111111';
+const SHORTCUT_CAPTURE_LEASE = ShortcutCaptureLeaseIdSchema.parse(
+  '33333333-3333-4333-8333-333333333333',
+);
 
 const api: MainApi = {
   welcome: {
@@ -81,6 +88,7 @@ const api: MainApi = {
     openLocation: () => Promise.resolve(),
     openRelease: () => Promise.resolve(),
     notices: () => Promise.resolve('Third-party notices'),
+    exportDiagnostics: () => Promise.resolve('cancelled'),
   },
   activationTest: {
     start: startActivationTest,
@@ -93,7 +101,7 @@ const api: MainApi = {
     },
   },
   shortcutCapture: {
-    start: () => Promise.resolve(),
+    start: () => Promise.resolve(SHORTCUT_CAPTURE_LEASE),
     stop: () => Promise.resolve(),
   },
   app: {
@@ -380,13 +388,15 @@ function renderShell(
   status: AppStatus = 'needs-setup',
   modelReady = status === 'ready',
   settings = structuredClone(DEFAULT_SETTINGS),
+  helper: AppState['helper'] = readyHelper,
+  platform = 'win32',
 ) {
   return render(
     <AppShell
       bootstrap={{
         appVersion: '1.2.3',
-        platform: 'win32',
-        state: { enabled: true, status, modelReady, helper: readyHelper },
+        platform,
+        state: { enabled: true, status, modelReady, helper },
         settings: {
           ...settings,
           welcome: {
@@ -540,7 +550,8 @@ describe('main application shell', () => {
 
   it('reports model readiness independently from the disabled aggregate status', () => {
     const first = renderShell('disabled', false);
-    expect(screen.getAllByText('Needs setup')).toHaveLength(2);
+    expect(screen.getByText('Install or repair it in Settings > Speech model')).toBeVisible();
+    expect(screen.getByText('Model missing')).toBeVisible();
     expect(screen.queryByText('Model available')).not.toBeInTheDocument();
 
     first.unmount();
@@ -548,7 +559,7 @@ describe('main application shell', () => {
     expect(screen.getByText('Model available')).toBeVisible();
   });
 
-  it('lists each profile shortcut as its own row and explains hold timing on the Dashboard', () => {
+  it('lists each profile shortcut without generated hold or release instructions', () => {
     const configured = structuredClone(DEFAULT_SETTINGS);
     const general = configured.dictationProfiles.find((profile) => profile.id === 'general');
     if (general === undefined) throw new Error('Default General profile is missing');
@@ -564,18 +575,86 @@ describe('main application shell', () => {
     expect(generalTerm.nextElementSibling).toHaveTextContent(
       'Ctrl + Alt + Shift + Win + X + P · Smart',
     );
-    expect(screen.getByText(/press your shortcut and let go straight away/i)).toBeVisible();
-    expect(screen.getByText(/hold the last key of the shortcut for more than/i)).toBeVisible();
-    expect(screen.getByText(/600 ms/)).toBeVisible();
+    expect(screen.queryByText(/press your shortcut and let go straight away/i)).toBeNull();
+    expect(screen.queryByText(/hold the last key/i)).toBeNull();
+    expect(screen.queryByText(/600 ms/)).toBeNull();
   });
 
   it.each(Object.entries(APP_STATUS_PRESENTATIONS))(
     'renders the centralized %s status consistently',
     (status, presentation) => {
       renderShell(status as AppStatus);
-      expect(screen.getAllByText(presentation.label)).toHaveLength(2);
+      const label = status === 'needs-setup' ? 'Install speech model' : presentation.label;
+      expect(screen.getAllByText(label)).toHaveLength(2);
     },
   );
+
+  it('shows the same actionable keyboard requirement in both status locations', () => {
+    renderShell('needs-setup', true, structuredClone(DEFAULT_SETTINGS), {
+      ...readyHelper,
+      status: 'unavailable',
+      reason: 'owner-missing',
+    });
+
+    expect(screen.getAllByText('Repair local keyboard owner')).toHaveLength(2);
+    expect(
+      screen.getAllByText(
+        'The local keyboard owner could not start. Talking Quill will try again automatically. Reinstall the app if it remains unavailable.',
+      ),
+    ).toHaveLength(2);
+    expect(screen.queryByText('Needs Setup')).toBeNull();
+  });
+
+  it.each([
+    ['win32', 'Local keyboard owner restarting', 'Starting local keyboard owner'],
+    ['darwin', 'Keyboard service restarting', 'Starting keyboard service'],
+  ] as const)(
+    'uses platform-correct %s keyboard status labels',
+    (platform, restartingLabel, startingLabel) => {
+      const base = {
+        enabled: true,
+        status: 'needs-setup',
+        modelReady: true,
+        helper: readyHelper,
+      } satisfies AppState;
+      expect(
+        exactAppStatusLabel(
+          {
+            ...base,
+            helper: { ...readyHelper, status: 'unavailable', reason: 'crash-loop' },
+          },
+          platform,
+        ),
+      ).toBe(restartingLabel);
+      expect(
+        exactAppStatusLabel(
+          { ...base, helper: { ...readyHelper, status: 'starting', reason: null } },
+          platform,
+        ),
+      ).toBe(startingLabel);
+    },
+  );
+
+  it('keeps the installed keyboard service wording on macOS', () => {
+    renderShell(
+      'needs-setup',
+      true,
+      structuredClone(DEFAULT_SETTINGS),
+      {
+        ...readyHelper,
+        status: 'unavailable',
+        reason: 'owner-missing',
+      },
+      'darwin',
+    );
+
+    expect(screen.getAllByText('Repair keyboard service')).toHaveLength(2);
+    expect(
+      screen.getAllByText(
+        'The keyboard service could not start. Talking Quill will try again automatically. Reinstall the app if it remains unavailable.',
+      ),
+    ).toHaveLength(2);
+  });
 
   it('tracks maximize state with accessible Maximize and Restore labels', async () => {
     const user = userEvent.setup();
@@ -635,7 +714,7 @@ describe('main application shell', () => {
       }),
     );
     expect(
-      await screen.findByText('That was extended dictation: Prompt, Alt + X + P (final trigger P)'),
+      await screen.findByText('That was extended dictation: Prompt, Alt + X + P'),
     ).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Stop shortcut test' }));
     expect(stopActivationTest).toHaveBeenCalled();

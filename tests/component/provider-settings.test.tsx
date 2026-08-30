@@ -11,6 +11,7 @@ import type { MainApi } from '../../app/src/shared/bridge/api';
 import type { ProviderCredentialState } from '../../app/src/shared/schemas/credentials';
 import type { ProviderConfig } from '../../app/src/shared/schemas/providers';
 import { DEFAULT_SETTINGS, type Settings } from '../../app/src/shared/schemas/settings';
+import { ShortcutCaptureLeaseIdSchema } from '../../app/src/shared/schemas/shortcut-capture';
 
 const saveConfig = vi.fn<MainApi['providers']['saveConfig']>();
 const setSecret = vi.fn<MainApi['providers']['setSecret']>();
@@ -25,6 +26,9 @@ const setOnScreenAwareness = vi.fn<MainApi['providers']['setOnScreenAwareness']>
 const verifyVision = vi.fn<MainApi['providers']['verifyVision']>();
 const confirmVision = vi.fn<MainApi['providers']['confirmVision']>();
 const BINDING_TOKEN = '11111111-1111-4111-8111-111111111111';
+const SHORTCUT_CAPTURE_LEASE = ShortcutCaptureLeaseIdSchema.parse(
+  '33333333-3333-4333-8333-333333333333',
+);
 const LEGACY_PROVIDER_ENDPOINTS = [
   'file:///legacy/provider',
   'ftp://legacy.example/models',
@@ -98,9 +102,10 @@ const api: MainApi = {
     openLocation: () => Promise.resolve(),
     openRelease: () => Promise.resolve(),
     notices: () => Promise.resolve('Third-party notices'),
+    exportDiagnostics: () => Promise.resolve('cancelled'),
   },
   shortcutCapture: {
-    start: () => Promise.resolve(),
+    start: () => Promise.resolve(SHORTCUT_CAPTURE_LEASE),
     stop: () => Promise.resolve(),
   },
   activationTest: {

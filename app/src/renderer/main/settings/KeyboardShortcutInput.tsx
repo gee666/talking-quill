@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import type { ShortcutCaptureLeaseId } from '../../../shared/schemas/shortcut-capture';
+import { shortcutPlatformPolicy } from '../../../shared/schemas/shortcut-platform-policy';
 import {
+  ShortcutSchema,
   shortcutModifiersEqual,
   type Shortcut,
   type ShortcutKey,
@@ -7,9 +10,20 @@ import {
 } from '../../../shared/schemas/shortcut';
 import { Input } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
+import {
+  restoreShortcutCaptureLease,
+  retryShortcutCaptureRestorations,
+} from './shortcut-capture-restoration';
 
-const MODIFIER_MISMATCH_GUIDANCE =
-  'Hold the same modifier keys the whole time. Let go of the letters and start again. Your saved shortcut hasn’t changed.';
+const MODIFIER_MISMATCH_ERROR = 'Hold the same modifiers for the whole shortcut.';
+
+interface CaptureAttempt {
+  readonly generation: number;
+  readonly start: Promise<ShortcutCaptureLeaseId>;
+  released: boolean;
+  refocusRequested: boolean;
+  restoration: Promise<void> | null;
+}
 
 export function KeyboardShortcutInput({
   label,
@@ -29,75 +43,114 @@ export function KeyboardShortcutInput({
   readonly onCaptureValidityChange: (valid: boolean) => void;
 }) {
   const [captureError, setCaptureError] = useState<string | undefined>();
-  const [captureGuidance, setCaptureGuidance] = useState<string | undefined>();
-  const [captureState, setCaptureState] = useState<'idle' | 'preparing' | 'ready'>('idle');
+  const [captureState, setCaptureState] = useState<'idle' | 'preparing' | 'ready' | 'restoring'>(
+    'idle',
+  );
   const inputElement = useRef<HTMLInputElement>(null);
+  const onChangeRef = useRef(onChange);
+  const onCaptureValidityChangeRef = useRef(onCaptureValidityChange);
   const focused = useRef(false);
   const mounted = useRef(false);
-  const captureRequested = useRef(false);
+  const captureAttempt = useRef<CaptureAttempt | null>(null);
   const captureGeneration = useRef(0);
+  const captureOriginal = useRef<Shortcut | null>(null);
+  const acceptedCandidate = useRef(false);
   const heldLetters = useRef<ShortcutKey[]>([]);
+  const sequenceKeys = useRef<ShortcutKey[]>([]);
   const sequenceModifiers = useRef<ShortcutModifiers | null>(null);
   const sequenceFenced = useRef(false);
+  const sequenceClosed = useRef(false);
   const sequenceFenceGuidance = useRef<string | null>(null);
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+    onCaptureValidityChangeRef.current = onCaptureValidityChange;
+  }, [onCaptureValidityChange, onChange]);
 
   const resetHeldSequence = useCallback(() => {
     heldLetters.current = [];
+    sequenceKeys.current = [];
     sequenceModifiers.current = null;
     sequenceFenced.current = false;
+    sequenceClosed.current = false;
     sequenceFenceGuidance.current = null;
+  }, []);
+
+  const restoreOriginalShortcut = useCallback(() => {
+    if (!acceptedCandidate.current || captureOriginal.current === null) return;
+    acceptedCandidate.current = false;
+    onChangeRef.current(structuredClone(captureOriginal.current));
   }, []);
 
   const resetTransient = useCallback(() => {
     resetHeldSequence();
-    setCaptureGuidance(undefined);
     setCaptureError(undefined);
   }, [resetHeldSequence]);
 
   const releaseCapture = useCallback(
-    (reportFailure: boolean) => {
-      if (!captureRequested.current) return;
-      captureRequested.current = false;
-      void window.talkingQuill.shortcutCapture.stop().then(
+    (reportFailure: boolean, generation: number) => {
+      const attempt = captureAttempt.current;
+      if (attempt === null || attempt.released || attempt.generation !== generation) {
+        return;
+      }
+      attempt.released = true;
+      if (reportFailure) setCaptureState('restoring');
+      const restoration = restoreShortcutCaptureLease(attempt.start);
+      attempt.restoration = restoration;
+      void restoration.then(
         () => {
-          if (mounted.current) onCaptureValidityChange(true);
+          if (captureAttempt.current === attempt) captureAttempt.current = null;
+          if (!mounted.current || captureGeneration.current !== generation) return;
+          captureOriginal.current = null;
+          acceptedCandidate.current = false;
+          setCaptureState('idle');
+          if (reportFailure) {
+            setCaptureError(undefined);
+            onCaptureValidityChangeRef.current(true);
+          }
         },
         () => {
-          if (!reportFailure || !mounted.current) return;
+          attempt.released = false;
+          attempt.refocusRequested = false;
+          attempt.restoration = null;
+          if (!reportFailure || !mounted.current || captureGeneration.current !== generation)
+            return;
+          restoreOriginalShortcut();
+          setCaptureState('idle');
           setCaptureError(
-            'Your shortcuts couldn’t be switched back on. Click this field again, then press Tab to leave it.',
+            'Your shortcuts couldn’t be switched back on. Your previous shortcut was kept. Click this field again, then press Tab to retry the same capture lease.',
           );
-          onCaptureValidityChange(false);
+          onCaptureValidityChangeRef.current(false);
         },
       );
     },
-    [onCaptureValidityChange],
+    [restoreOriginalShortcut],
   );
 
   const exitCapture = useCallback(() => {
     focused.current = false;
-    captureGeneration.current += 1;
-    resetTransient();
-    setCaptureState('idle');
-    releaseCapture(true);
-  }, [releaseCapture, resetTransient]);
+    const generation = captureGeneration.current;
+    resetHeldSequence();
+    releaseCapture(true, generation);
+  }, [releaseCapture, resetHeldSequence]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       focused.current = false;
+      const generation = captureGeneration.current;
       captureGeneration.current += 1;
       resetHeldSequence();
-      releaseCapture(false);
+      releaseCapture(false, generation);
     };
   }, [releaseCapture, resetHeldSequence]);
 
   useEffect(() => {
     const onWindowBlur = () => {
-      if (!focused.current && !captureRequested.current) return;
+      if (!focused.current && captureAttempt.current === null) return;
       inputElement.current?.blur();
-      if (focused.current || captureRequested.current) exitCapture();
+      if (focused.current || captureAttempt.current !== null) exitCapture();
     };
     window.addEventListener('blur', onWindowBlur);
     return () => window.removeEventListener('blur', onWindowBlur);
@@ -106,16 +159,24 @@ export function KeyboardShortcutInput({
   useEffect(() => {
     if (!disabled) return;
     focused.current = false;
-    captureGeneration.current += 1;
+    const generation = captureGeneration.current;
     resetHeldSequence();
     inputElement.current?.blur();
-    releaseCapture(true);
     queueMicrotask(() => {
       if (!mounted.current) return;
-      resetTransient();
-      setCaptureState('idle');
+      releaseCapture(true, generation);
     });
-  }, [disabled, releaseCapture, resetHeldSequence, resetTransient]);
+  }, [disabled, releaseCapture, resetHeldSequence]);
+
+  const rejectSequence = useCallback(
+    (message: string) => {
+      sequenceFenced.current = true;
+      sequenceFenceGuidance.current = message;
+      restoreOriginalShortcut();
+      setCaptureError(message);
+    },
+    [restoreOriginalShortcut],
+  );
 
   const preventCommand = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.code === 'Tab') return false;
@@ -132,16 +193,90 @@ export function KeyboardShortcutInput({
     ) {
       return false;
     }
-    sequenceFenced.current = true;
-    sequenceFenceGuidance.current = MODIFIER_MISMATCH_GUIDANCE;
-    setCaptureGuidance(MODIFIER_MISMATCH_GUIDANCE);
+    rejectSequence(MODIFIER_MISMATCH_ERROR);
     return true;
   };
 
-  const captureHint =
-    captureState === 'preparing'
-      ? 'Getting ready…'
-      : (captureGuidance ?? 'Click here and press the shortcut you want.');
+  const acquireCapture = useCallback(() => {
+    focused.current = true;
+    resetTransient();
+    captureOriginal.current = structuredClone(shortcut);
+    acceptedCandidate.current = false;
+    const generation = captureGeneration.current + 1;
+    captureGeneration.current = generation;
+    setCaptureState('preparing');
+    onCaptureValidityChangeRef.current(false);
+    const attempt: CaptureAttempt = {
+      generation,
+      start: retryShortcutCaptureRestorations().then(() =>
+        window.talkingQuill.shortcutCapture.start(),
+      ),
+      released: false,
+      refocusRequested: false,
+      restoration: null,
+    };
+    captureAttempt.current = attempt;
+    void attempt.start.then(
+      () => {
+        if (
+          captureAttempt.current === attempt &&
+          !attempt.released &&
+          focused.current &&
+          captureGeneration.current === attempt.generation
+        ) {
+          setCaptureState('ready');
+          setCaptureError(undefined);
+          onCaptureValidityChangeRef.current(true);
+        }
+      },
+      () => {
+        if (
+          captureAttempt.current !== attempt ||
+          attempt.released ||
+          !focused.current ||
+          captureGeneration.current !== attempt.generation
+        ) {
+          return;
+        }
+        attempt.released = true;
+        captureAttempt.current = null;
+        resetHeldSequence();
+        setCaptureState('idle');
+        setCaptureError(
+          'Talking Quill can’t read your keys right now. Your previous shortcut was kept. Try again.',
+        );
+        onCaptureValidityChangeRef.current(false);
+      },
+    );
+  }, [resetHeldSequence, resetTransient, shortcut]);
+
+  const beginCapture = useCallback(() => {
+    if (disabled) return;
+    const pending = captureAttempt.current;
+    if (pending === null) {
+      acquireCapture();
+      return;
+    }
+    focused.current = true;
+    releaseCapture(true, captureGeneration.current);
+    if (pending.refocusRequested || pending.restoration === null) return;
+    pending.refocusRequested = true;
+    void pending.restoration.then(
+      () => {
+        pending.refocusRequested = false;
+        if (focused.current && captureAttempt.current === null) acquireCapture();
+      },
+      () => {
+        pending.refocusRequested = false;
+      },
+    );
+  }, [acquireCapture, disabled, releaseCapture]);
+
+  const retryCapture = useCallback(() => {
+    if (captureError === undefined) return;
+    const attempt = captureAttempt.current;
+    if (attempt === null || (!attempt.released && attempt.restoration === null)) beginCapture();
+  }, [beginCapture, captureError]);
 
   return (
     <>
@@ -151,97 +286,78 @@ export function KeyboardShortcutInput({
         value={formatKeyboardShortcut(shortcut, platform)}
         disabled={disabled}
         readOnly
-        aria-busy={captureState === 'preparing' ? true : undefined}
+        aria-busy={captureState === 'preparing' || captureState === 'restoring' ? true : undefined}
         spellCheck={false}
-        hint={captureHint}
         error={captureError ?? error}
-        onFocus={() => {
-          if (disabled) return;
-          focused.current = true;
-          resetTransient();
-          const generation = captureGeneration.current + 1;
-          captureGeneration.current = generation;
-          captureRequested.current = true;
-          setCaptureState('preparing');
-          void window.talkingQuill.shortcutCapture.start().then(
-            () => {
-              if (focused.current && captureGeneration.current === generation) {
-                setCaptureState('ready');
-                setCaptureError(undefined);
-                onCaptureValidityChange(true);
-              } else if (!focused.current && captureRequested.current) {
-                releaseCapture(false);
-              }
-            },
-            () => {
-              if (!focused.current || captureGeneration.current !== generation) return;
-              resetHeldSequence();
-              setCaptureState('idle');
-              setCaptureGuidance(undefined);
-              setCaptureError('Talking Quill can’t read your keys right now. Try again.');
-              onCaptureValidityChange(false);
-            },
-          );
-        }}
+        onFocus={beginCapture}
+        onClick={retryCapture}
         onBlur={exitCapture}
         onKeyDownCapture={(event) => {
           if (!preventCommand(event)) return;
-          if (captureState !== 'ready') {
-            setCaptureGuidance('Still getting ready — try again in a moment.');
-            return;
-          }
+          if (captureState !== 'ready') return;
           if (event.repeat || event.nativeEvent.isComposing) return;
           if (isModifierOnly(event.code)) {
+            if (heldLetters.current.length === 0 && sequenceFenced.current) resetHeldSequence();
             if (fenceChangedModifiers(event) || sequenceFenced.current) {
-              setCaptureGuidance(MODIFIER_MISMATCH_GUIDANCE);
-            } else {
-              setCaptureGuidance('Keep holding, then tap one or more letters.');
+              setCaptureError(MODIFIER_MISMATCH_ERROR);
             }
             return;
           }
           const key = shortcutKeyFromCode(event.code);
           if (key === null) {
-            setCaptureGuidance(
-              'A shortcut can only use the letters A to Z. Your saved shortcut hasn’t changed.',
-            );
+            rejectSequence('Use only the letters A to Z.');
+            return;
+          }
+          if (event.getModifierState('AltGraph')) {
+            rejectSequence('Use physical Ctrl and Alt instead of AltGr.');
             return;
           }
           if (heldLetters.current.includes(key)) return;
+          if (sequenceKeys.current.includes(key)) {
+            rejectSequence('Use each letter only once.');
+            return;
+          }
+          if (sequenceClosed.current) {
+            rejectSequence('Hold each earlier letter while pressing the next.');
+            return;
+          }
+
           heldLetters.current = [...heldLetters.current, key];
+          sequenceKeys.current = [...sequenceKeys.current, key];
           const modifiers = modifiersFromEvent(event);
           if (sequenceFenced.current) {
-            setCaptureGuidance(
-              sequenceFenceGuidance.current ??
-                'Let go of the letters and start again. Your saved shortcut hasn’t changed.',
-            );
+            setCaptureError(sequenceFenceGuidance.current ?? 'Release the letters and try again.');
             return;
           }
           if (sequenceModifiers.current === null) {
             if (!hasModifier(modifiers)) {
-              const guidance =
-                'Hold Ctrl, Alt, Shift or the Windows key (Control, Option, Shift or Command on a Mac) before the first letter. Let go of the letters and start again. Your saved shortcut hasn’t changed.';
-              sequenceFenced.current = true;
-              sequenceFenceGuidance.current = guidance;
-              setCaptureGuidance(guidance);
+              rejectSequence('Add Ctrl, Alt, Shift, or the Windows key.');
               return;
             }
             sequenceModifiers.current = modifiers;
           } else if (!shortcutModifiersEqual(sequenceModifiers.current, modifiers)) {
-            sequenceFenced.current = true;
-            sequenceFenceGuidance.current = MODIFIER_MISMATCH_GUIDANCE;
-            setCaptureGuidance(MODIFIER_MISMATCH_GUIDANCE);
+            rejectSequence(MODIFIER_MISMATCH_ERROR);
             return;
           }
-          const candidate: Shortcut = {
-            modifiers,
-            keys: [...heldLetters.current],
-          };
+
+          const parsed = ShortcutSchema.safeParse({
+            modifiers: sequenceModifiers.current,
+            keys: [...sequenceKeys.current],
+          });
+          if (!parsed.success) {
+            rejectSequence('Enter a valid shortcut.');
+            return;
+          }
+          const policy = shortcutPlatformPolicy(parsed.data, platform);
+          if (policy.status === 'impossible') {
+            rejectSequence(policy.message);
+            return;
+          }
+
+          acceptedCandidate.current = true;
           setCaptureError(undefined);
-          setCaptureGuidance(
-            `Got it: ${formatKeyboardShortcut(candidate, platform)}. ${key} is the key that starts dictation.`,
-          );
           onCaptureValidityChange(true);
-          onChange(candidate);
+          onChange(parsed.data);
         }}
         onKeyUpCapture={(event) => {
           if (!preventCommand(event)) return;
@@ -250,14 +366,20 @@ export function KeyboardShortcutInput({
             return;
           }
           const key = shortcutKeyFromCode(event.code);
-          if (key !== null) {
-            heldLetters.current = heldLetters.current.filter((held) => held !== key);
-            if (heldLetters.current.length === 0) resetHeldSequence();
+          if (key === null || !heldLetters.current.includes(key)) {
+            if (sequenceFenced.current && heldLetters.current.length === 0) resetHeldSequence();
+            return;
+          }
+          heldLetters.current = heldLetters.current.filter((held) => held !== key);
+          if (heldLetters.current.length === 0) {
+            resetHeldSequence();
+          } else {
+            sequenceClosed.current = true;
           }
         }}
       />
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {captureError ?? error ?? captureGuidance}
+        {captureError ?? error}
       </span>
     </>
   );

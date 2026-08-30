@@ -5,44 +5,124 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { nativeRoleLayout, verifyStagedNativeRoleSet } from './helper-build-contract.mjs';
+import { replaceNativeRoleDirectory } from './native-staging.mjs';
+import { windowsUpdatePublicKeyIdentity } from './release-package-metadata.mjs';
+
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const options = parseOptions(process.argv.slice(2));
 const platform = normalizePlatform(options.platform ?? process.platform);
 const architecture = normalizeArchitecture(options.architecture ?? process.arch);
+const acceptanceBuildEnvironment = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
+const acceptanceBuildValue = process.env[acceptanceBuildEnvironment];
+if (
+  acceptanceBuildValue !== undefined &&
+  acceptanceBuildValue !== '' &&
+  acceptanceBuildValue !== '1'
+) {
+  throw new Error(`${acceptanceBuildEnvironment} must be exactly 1 when set`);
+}
+if (acceptanceBuildValue === '1' && platform !== 'win32') {
+  throw new Error(`${acceptanceBuildEnvironment} is valid only for Windows helper builds`);
+}
+const gatewayFeatures =
+  acceptanceBuildValue === '1' && platform === 'win32' ? ['windows-installed-acceptance'] : [];
 if (platform !== process.platform) {
   throw new Error(
     `Cannot build a ${platform} helper on ${process.platform}; use the native CI runner`,
   );
 }
+if (platform === 'darwin') {
+  const translated = spawnSync('/usr/sbin/sysctl', ['-in', 'sysctl.proc_translated'], {
+    encoding: 'utf8',
+  });
+  const machine = spawnSync('/usr/bin/uname', ['-m'], { encoding: 'utf8' });
+  if (machine.status !== 0) throw new Error('Cannot determine physical Mac architecture');
+  const physical =
+    translated.status === 0 && translated.stdout.trim() === '1'
+      ? 'arm64'
+      : machine.stdout.trim() === 'x86_64'
+        ? 'x64'
+        : machine.stdout.trim();
+  if (architecture !== physical) {
+    throw new Error(
+      `Cannot package a ${architecture} macOS helper on ${physical} hardware; use the matching native runner`,
+    );
+  }
+}
 
+if (platform === 'win32') windowsUpdatePublicKeyIdentity();
 const target = rustTarget(platform, architecture);
 const cargo = resolveRustTool('cargo');
 const rustup = resolveRustTool('rustup');
 await verifyVersions();
 run(rustup, ['target', 'add', target]);
-run(cargo, [
-  'build',
-  '--manifest-path',
-  'helper/Cargo.toml',
-  '--locked',
-  '--release',
-  '--target',
-  target,
-]);
 
-const executableName = platform === 'win32' ? 'talking-quill-helper.exe' : 'talking-quill-helper';
-const source = join(repositoryRoot, 'helper', 'target', target, 'release', executableName);
-const destinationDirectory = join(repositoryRoot, 'app', 'native');
-const destination = join(destinationDirectory, executableName);
-const sourceMetadata = await stat(source);
-if (!sourceMetadata.isFile() || sourceMetadata.size === 0) {
-  throw new Error(`Rust build did not produce a non-empty regular helper: ${source}`);
+// Build each trust role explicitly. The gateway package has no owner feature;
+// only the detached owner receives the enabled local-unsigned feature.
+buildCargoRole('talking-quill-helper', 'talking-quill-helper', gatewayFeatures);
+const macosOwnerFeatures = ['local-unsigned-owner'];
+if (
+  platform === 'darwin' &&
+  options.macosLifecycleFixture === true &&
+  process.env.TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE === 'permissioned-ci-v1'
+) {
+  macosOwnerFeatures.push('macos-native-lifecycle-fixture');
 }
-await rm(destinationDirectory, { recursive: true, force: true });
-await mkdir(destinationDirectory, { recursive: true });
-await copyFile(source, destination);
-if (platform === 'darwin') await chmod(destination, 0o755);
-console.log(`Staged ${target} helper at ${destination}`);
+buildCargoRole('talking-quill-keyboard-owner', 'talking-quill-keyboard-owner', macosOwnerFeatures);
+if (platform === 'darwin') {
+  buildCargoRole('talking-quill-helper', 'talking-quill-macos-service-bridge');
+}
+
+const destinationDirectory = join(repositoryRoot, 'app', 'native');
+const stagingDirectory = join(repositoryRoot, 'app', `.native-staging-${process.pid}`);
+await rm(stagingDirectory, { recursive: true, force: true });
+await mkdir(stagingDirectory, { recursive: true });
+try {
+  for (const role of nativeRoleLayout(platform)) {
+    await stage(
+      join(repositoryRoot, 'helper', 'target', target, 'release', role.name),
+      join(stagingDirectory, role.name),
+    );
+  }
+  // Verify all bytes before replacing the previous coherent role set.
+  await verifyStagedNativeRoleSet(stagingDirectory, { platform, architecture });
+  await replaceNativeRoleDirectory({
+    appDirectory: join(repositoryRoot, 'app'),
+    stagingDirectory,
+    platform,
+    architecture,
+  });
+} finally {
+  await rm(stagingDirectory, { recursive: true, force: true });
+}
+console.log(`Staged verified ${target} local owner roles at ${destinationDirectory}`);
+
+function buildCargoRole(packageName, binaryName, features = []) {
+  const arguments_ = [
+    'build',
+    '--manifest-path',
+    'helper/Cargo.toml',
+    '--locked',
+    '--release',
+    '--target',
+    target,
+    '-p',
+    packageName,
+    '--no-default-features',
+    '--bin',
+    binaryName,
+  ];
+  if (features.length > 0) arguments_.push('--features', features.join(','));
+  run(cargo, arguments_);
+}
+
+async function stage(from, to) {
+  const metadata = await stat(from);
+  if (!metadata.isFile() || metadata.size === 0) throw new Error(`Missing native role: ${from}`);
+  await copyFile(from, to);
+  if (platform === 'darwin') await chmod(to, 0o755);
+}
 
 function parseOptions(arguments_) {
   const parsed = {};
@@ -51,6 +131,9 @@ function parseOptions(arguments_) {
     if (argument === '--') continue;
     if (argument === '--platform') parsed.platform = arguments_[++index];
     else if (argument === '--arch') parsed.architecture = arguments_[++index];
+    // Retained as a compatibility no-op: R9 always stages the enabled owner.
+    else if (argument === '--include-macos-owner') parsed.includeMacosOwner = true;
+    else if (argument === '--macos-lifecycle-fixture') parsed.macosLifecycleFixture = true;
     else throw new Error(`Unknown helper-build argument: ${String(argument)}`);
   }
   return parsed;

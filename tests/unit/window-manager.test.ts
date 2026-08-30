@@ -142,12 +142,21 @@ beforeEach(() => {
 function createManager(
   requestQuit = vi.fn(),
   load: RendererLoader['load'] = vi.fn(() => Promise.resolve()),
+  showMainOnFirstLoad = true,
+  autoRendererReady = true,
 ): WindowManager {
-  return new WindowManager(
+  const state: { manager: WindowManager | null } = { manager: null };
+  const wrappedLoad: RendererLoader['load'] = async (window, role) => {
+    await load(window, role);
+    if (autoRendererReady && (role === 'capture' || role === 'widget')) {
+      state.manager?.markRendererReady(role, window.webContents.id);
+    }
+  };
+  const manager = new WindowManager(
     {
       allowsDevTools: false,
       urlFor: (role: string) => `talking-quill://app/${role}/index.html`,
-      load,
+      load: wrappedLoad,
     } as unknown as RendererLoader,
     {
       register: vi.fn(),
@@ -157,8 +166,15 @@ function createManager(
       flush: vi.fn(() => Promise.resolve()),
       get: vi.fn(() => ({ app: { closeToTray: true } })),
     } as unknown as SettingsStore,
-    { requestQuit, onMaximizedChanged: vi.fn(), onMainHidden: vi.fn() },
+    {
+      requestQuit,
+      onMaximizedChanged: vi.fn(),
+      onMainHidden: vi.fn(),
+      showMainOnFirstLoad,
+    },
   );
+  state.manager = manager;
+  return manager;
 }
 
 function mainWindows() {
@@ -173,11 +189,44 @@ function widgetWindows() {
   );
 }
 
+function captureWindows() {
+  return electron.BrowserWindow.instances.filter(
+    ({ options }) => options.title === 'Talking Quill Capture',
+  );
+}
+
 describe('WindowManager renderer recovery', () => {
+  it('waits for capture and widget IPC readiness after renderer load', async () => {
+    const manager = createManager(
+      vi.fn(),
+      vi.fn(() => Promise.resolve()),
+      true,
+      false,
+    );
+    let prepared = false;
+    const creating = manager.createAll().then(() => {
+      prepared = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(prepared).toBe(false);
+
+    const capture = captureWindows()[0];
+    const widget = widgetWindows()[0];
+    if (capture === undefined || widget === undefined) throw new Error('Renderer windows missing');
+    manager.markRendererReady('capture', capture.webContents.id);
+    await Promise.resolve();
+    expect(prepared).toBe(false);
+    manager.markRendererReady('widget', widget.webContents.id);
+    await creating;
+    expect(prepared).toBe(true);
+  });
+
   it('reasserts topmost presentation and invalidates the transparent widget surface', async () => {
     const manager = createManager();
     await manager.createAll();
-    expect(widgetWindows()).toHaveLength(0);
+    expect(widgetWindows()).toHaveLength(1);
+    expect(widgetWindows()[0]?.isVisible()).toBe(false);
     expect(await manager.createWidgetForActivation()).toBe(true);
     const widget = widgetWindows()[0];
 
@@ -187,9 +236,30 @@ describe('WindowManager renderer recovery', () => {
     expect(widget?.showInactive).toHaveBeenCalledOnce();
     expect(widget?.moveTop).toHaveBeenCalledOnce();
     expect(widget?.webContents.invalidate).toHaveBeenCalledOnce();
+    expect(widget?.focus).not.toHaveBeenCalled();
+    expect(mainWindows()[0]?.focus).not.toHaveBeenCalled();
   });
 
-  it('creates one widget per activation and removes it at the end', async () => {
+  it('keeps widget creation, interaction, and capture restoration non-focusable', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    await manager.createWidgetForActivation();
+    const widget = widgetWindows()[0];
+
+    expect((widget?.options as { readonly focusable?: boolean }).focusable).toBe(false);
+    manager.setWidgetInteractive(widget?.webContents.id ?? -1, true);
+    manager.setWidgetInteractive(widget?.webContents.id ?? -1, false);
+    manager.excludeWidgetFromCapture();
+    manager.restoreWidgetVisibility(null, 'default', null);
+
+    expect(widget?.setFocusable).toHaveBeenCalledTimes(3);
+    expect(widget?.setFocusable).toHaveBeenNthCalledWith(1, false);
+    expect(widget?.setFocusable).toHaveBeenNthCalledWith(2, false);
+    expect(widget?.setFocusable).toHaveBeenNthCalledWith(3, false);
+    expect(widget?.focus).not.toHaveBeenCalled();
+  });
+
+  it('preloads one hidden widget and reuses it across activations', async () => {
     const manager = createManager();
     await manager.createAll();
     expect(await manager.createWidgetForActivation()).toBe(true);
@@ -199,10 +269,13 @@ describe('WindowManager renderer recovery', () => {
 
     manager.showWidget('default', null);
     manager.removeWidget();
-    expect(first?.destroyed).toBe(true);
+    expect(first?.destroyed).toBe(false);
+    expect(first?.hide).toHaveBeenCalledOnce();
+    expect(first?.isVisible()).toBe(false);
 
     expect(await manager.createWidgetForActivation()).toBe(true);
-    expect(widgetWindows()).toHaveLength(2);
+    expect(widgetWindows()).toHaveLength(1);
+    expect(widgetWindows()[0]).toBe(first);
   });
 
   it('defers showing a widget created during screen capture until exclusion ends', async () => {
@@ -219,7 +292,7 @@ describe('WindowManager renderer recovery', () => {
     expect(widget?.showInactive).toHaveBeenCalledOnce();
   });
 
-  it('creates a new widget after a failed activation is removed', async () => {
+  it('keeps the preloaded widget hidden and reusable after a failed show', async () => {
     const manager = createManager();
     await manager.createAll();
     expect(await manager.createWidgetForActivation()).toBe(true);
@@ -230,8 +303,63 @@ describe('WindowManager renderer recovery', () => {
     manager.removeWidget();
     expect(await manager.createWidgetForActivation()).toBe(true);
 
-    expect(first?.destroyed).toBe(true);
-    expect(widgetWindows()).toHaveLength(2);
+    expect(first?.destroyed).toBe(false);
+    expect(first?.hide).toHaveBeenCalledOnce();
+    expect(widgetWindows()).toHaveLength(1);
+  });
+
+  it('does not bring the main window forward after a renderer recovery', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = mainWindows()[0];
+    first?.emit('ready-to-show');
+    expect(first?.show).toHaveBeenCalledOnce();
+
+    first?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+    const replacement = mainWindows()[1];
+    replacement?.emit('ready-to-show');
+    expect(replacement?.show).not.toHaveBeenCalled();
+  });
+
+  it('keeps login startup and unsolicited status changes in the background', async () => {
+    const manager = createManager(
+      vi.fn(),
+      vi.fn(() => Promise.resolve()),
+      false,
+    );
+    await manager.createAll();
+    const main = mainWindows()[0];
+    main?.emit('ready-to-show');
+    manager.showMain();
+    expect(main?.show).not.toHaveBeenCalled();
+
+    manager.showMainByUser();
+    expect(main?.show).toHaveBeenCalledOnce();
+  });
+
+  it('does not show a recovery when the first main renderer fails before ready-to-show', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = mainWindows()[0];
+    first?.webContents.emit('render-process-gone');
+    await vi.advanceTimersByTimeAsync(250);
+    const replacement = mainWindows()[1];
+    replacement?.emit('ready-to-show');
+    expect(replacement?.show).not.toHaveBeenCalled();
+  });
+
+  it('honours an explicit show request made during renderer recovery', async () => {
+    const manager = createManager();
+    await manager.createAll();
+    const first = mainWindows()[0];
+    first?.webContents.emit('render-process-gone');
+    manager.showMainByUser();
+    await vi.advanceTimersByTimeAsync(250);
+    const replacement = mainWindows()[1];
+    replacement?.emit('ready-to-show');
+    expect(replacement?.show).toHaveBeenCalledOnce();
+    expect(replacement?.focus).toHaveBeenCalledOnce();
   });
 
   it('cancels pending recovery when quitting begins', async () => {
@@ -249,7 +377,7 @@ describe('WindowManager renderer recovery', () => {
 
     expect(mainWindows()).toHaveLength(1);
     await manager.createAll();
-    expect(electron.BrowserWindow.instances).toHaveLength(2);
+    expect(electron.BrowserWindow.instances).toHaveLength(3);
   });
 
   it('recovers a renderer crash before its first did-finish-load event', async () => {

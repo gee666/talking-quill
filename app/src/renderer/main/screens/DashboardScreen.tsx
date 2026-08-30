@@ -1,11 +1,10 @@
 import { useState, type RefObject } from 'react';
-import { ECHO_HOLD_THRESHOLD_MS } from '../../../shared/constants/echo-session';
 import { providerModelSelectionPolicy } from '../../../shared/provider-model-selection';
 import type { AppState } from '../../../shared/schemas/app-state';
 import type { Settings } from '../../../shared/schemas/settings';
 import { Card, Status, Toast, Toggle } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
-import { presentAppStatus } from '../../status-presentation';
+import { exactAppStatusLabel, presentAppStatus } from '../../status-presentation';
 
 const STATUS_COPY: Record<
   AppState['status'],
@@ -60,6 +59,7 @@ export function DashboardScreen({
   const status = presentAppStatus(state.status);
   const copy = STATUS_COPY[state.status];
   const helper = presentHelperReadiness(state.helper.status);
+  const setupRequirement = missingSetupRequirement(state, platform);
   const smartProviderId = settings.smartProcessing.selectedProviderId;
   const smartProviderConfig = settings.smartProcessing.providers[smartProviderId];
   const smartProviderReadiness =
@@ -89,9 +89,9 @@ export function DashboardScreen({
           <h1 ref={headingRef} tabIndex={-1}>
             {copy.heading}
           </h1>
-          <p>{copy.introduction}</p>
+          <p>{setupRequirement ?? copy.introduction}</p>
         </div>
-        <Status tone={status.tone}>{status.label}</Status>
+        <Status tone={status.tone}>{exactAppStatusLabel(state, platform)}</Status>
       </header>
       <div className="screen__grid">
         <Card
@@ -130,7 +130,11 @@ export function DashboardScreen({
             </div>
             <div>
               <dt>Speech model</dt>
-              <dd>{state.modelReady ? 'Model available' : 'Needs setup'}</dd>
+              <dd>
+                {state.modelReady
+                  ? 'Model available'
+                  : 'Install or repair it in Settings > Speech model'}
+              </dd>
             </div>
             <div>
               <dt>AI clean-up</dt>
@@ -147,24 +151,6 @@ export function DashboardScreen({
               placeholder="Your inserted dictation will appear here…"
             />
           </label>
-          <ul className="stack">
-            <li>
-              <strong>Quick note:</strong> press your shortcut and let go straight away.{' '}
-              {settings.recording.autoSubmitOnSilence
-                ? 'Press Enter when you are done, or let Talking Quill finish after your chosen pause.'
-                : 'Press Enter or repeat your shortcut when you are done.'}
-            </li>
-            <li>
-              <strong>Longer note:</strong> hold the last key of the shortcut for more than{' '}
-              {String(ECHO_HOLD_THRESHOLD_MS)} ms. Recording keeps going through your pauses.
-            </li>
-            <li>To finish a longer note, press Enter or use your shortcut again.</li>
-            <li>Press Escape before insertion to cancel at any recording or processing stage.</li>
-          </ul>
-          <p className="hint">
-            Each shortcut uses its own setting: Raw writes exactly what you said, Smart lets an AI
-            service tidy it up first.
-          </p>
         </Card>
         <Card title="What is ready" description={copy.readiness}>
           <div className="group readiness-group">
@@ -176,11 +162,11 @@ export function DashboardScreen({
               <span>Typing helper</span>
               <Status tone={helper.tone}>{helper.label}</Status>
             </div>
-            <p className="body-copy readiness-note">{helperReadinessDetail(state)}</p>
+            <p className="body-copy readiness-note">{helperReadinessDetail(state, platform)}</p>
             <div className="readiness-row">
               <span>Speech model</span>
               <Status tone={state.modelReady ? 'success' : 'warning'}>
-                {state.modelReady ? 'Available' : 'Needs setup'}
+                {state.modelReady ? 'Available' : 'Model missing'}
               </Status>
             </div>
           </div>
@@ -188,6 +174,14 @@ export function DashboardScreen({
       </div>
     </div>
   );
+}
+
+function missingSetupRequirement(state: AppState, platform: string): string | null {
+  if (state.status !== 'needs-setup') return null;
+  if (!state.modelReady) {
+    return 'The selected speech model is unavailable. Open Settings > Speech model and install or repair it.';
+  }
+  return helperReadinessDetail(state, platform);
 }
 
 function presentHelperReadiness(status: AppState['helper']['status']): {
@@ -210,7 +204,8 @@ function presentHelperReadiness(status: AppState['helper']['status']): {
   }
 }
 
-function helperReadinessDetail(state: AppState): string {
+function helperReadinessDetail(state: AppState, platform: string): string {
+  const ownerName = platform === 'darwin' ? 'keyboard service' : 'local keyboard owner';
   switch (state.helper.reason) {
     case 'input-monitoring-required':
       return 'Open System Settings on your Mac, allow Input Monitoring for Talking Quill, then restart the app.';
@@ -222,12 +217,33 @@ function helperReadinessDetail(state: AppState): string {
     case 'protocol-mismatch':
       return 'This part of Talking Quill does not match the rest of the app. Reinstalling will fix it.';
     case 'crash-loop':
-      return 'The typing helper keeps stopping. Restart Talking Quill, and reinstall it if that keeps happening.';
+      return `The ${ownerName} keeps stopping. Talking Quill will try to start it again automatically. Reinstall the app if it still cannot start.`;
+    case 'capture-disabled':
+      return 'Global shortcuts are safely disabled in this build.';
+    case 'owner-missing':
+      return `The ${ownerName} could not start. Talking Quill will try again automatically. Reinstall the app if it remains unavailable.`;
+    case 'owner-auth-failed':
+    case 'owner-security-fault':
+      return `Talking Quill could not verify its ${ownerName}. Repair or reinstall the app before using shortcuts.`;
+    case 'owner-busy':
+      return `Another Talking Quill controller is using the ${ownerName}. Close it and Talking Quill will try again automatically.`;
+    case 'owner-draining':
+      return `Release all shortcut keys while the ${ownerName} finishes safely. Talking Quill will reconnect automatically.`;
+    case 'owner-maintenance':
+      return `The ${ownerName} is being updated. Shortcuts will return automatically when maintenance finishes.`;
+    case 'owner-incompatible':
+      return `The ${ownerName} needs the same Talking Quill version. Update or repair the app.`;
+    case 'owner-rollback':
+      return 'Keyboard shortcuts are disabled by the recovery safety latch.';
+    case 'owner-degraded':
+      return `The ${ownerName} lost its safe connection. Talking Quill will restart it automatically.`;
+    case 'owner-indeterminate':
+      return `The ${ownerName} cannot prove a safe state. Repair or reinstall the app before using shortcuts.`;
     case null:
       return state.helper.status === 'ready'
         ? 'Your shortcut works everywhere, and Talking Quill can type into whichever app you are using.'
-        : 'Checking the typing helper.';
+        : `Checking the ${ownerName}.`;
     default:
-      return 'The typing helper could not start. Restart Talking Quill, and reinstall it if that does not help.';
+      return `The ${ownerName} could not start. Talking Quill will try again automatically. Reinstall the app if it remains unavailable.`;
   }
 }

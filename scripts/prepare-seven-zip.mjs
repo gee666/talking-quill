@@ -13,8 +13,8 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const architecture = process.argv[2];
 
 if (process.platform !== 'win32') throw new Error('Pinned 7-Zip preparation requires Windows.');
-if (!['x64', 'arm64'].includes(architecture ?? '')) {
-  throw new Error('Expected 7-Zip architecture: x64 or arm64.');
+if (architecture !== 'x64') {
+  throw new Error('Windows release extraction supports x64 only.');
 }
 
 const toolRoot = resolve(repositoryRoot, 'tmp', 'release-tools', `7zip-${VERSION}`);
@@ -40,12 +40,7 @@ if (extraction.status !== 0) {
 
 const executable = resolve(toolRoot, architecture, '7za.exe');
 const verification = spawnSync(executable, ['i'], { encoding: 'utf8' });
-if (
-  verification.status !== 0 ||
-  !verification.stdout.includes(
-    `7-Zip (a) ${VERSION} (${architecture === 'arm64' ? 'arm64' : 'x64'})`,
-  )
-) {
+if (verification.status !== 0 || !verification.stdout.includes(`7-Zip (a) ${VERSION} (x64)`)) {
   throw new Error(
     `Pinned 7-Zip verification failed: ${verification.error?.message ?? verification.stderr.trim()}`,
   );

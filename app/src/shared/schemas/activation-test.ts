@@ -5,11 +5,33 @@ import { ShortcutSchema } from './shortcut';
 export const ActivationTestStateSchema = z
   .object({
     active: z.boolean(),
-    phase: z.enum(['idle', 'waiting', 'pressed', 'quick', 'extended']),
+    phase: z.enum(['idle', 'waiting', 'pressed', 'quick', 'extended', 'observed']),
     profileId: DictationProfileIdSchema.nullable(),
     shortcut: ShortcutSchema.nullable(),
     elapsedMs: z.number().int().nonnegative(),
-    unavailableReason: z.enum(['helper-unavailable', 'session-active', 'app-disabled']).nullable(),
+    unavailableReason: z
+      .enum(['helper-unavailable', 'platform-unavailable', 'session-active', 'app-disabled'])
+      .nullable(),
+    furthestBoundary: z
+      .enum([
+        'hook-installed',
+        'pump-alive',
+        'hook-callback',
+        'physical-callback',
+        'registered-candidate',
+        'registered-match',
+        'registered-release',
+        'callback-channel',
+        'adapter-dequeued',
+        'owner-admitted',
+        'owner-flushed',
+        'gateway-received',
+        'v10-notification',
+        'electron-received',
+        'observation-accepted',
+      ])
+      .nullable()
+      .optional(),
   })
   .strict();
 

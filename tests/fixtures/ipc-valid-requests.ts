@@ -1,10 +1,14 @@
 import type { InvokeChannel, InvokeRequest } from '../../app/src/shared/ipc/registry';
+import { ShortcutCaptureLeaseIdSchema } from '../../app/src/shared/schemas/shortcut-capture';
 
 type ValidInvokeRequestMap = { readonly [Channel in InvokeChannel]: InvokeRequest<Channel> };
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const TOKEN = '22222222-2222-4222-8222-222222222222';
 const OPERATION = 'operation-valid-1';
+const SHORTCUT_CAPTURE_LEASE = ShortcutCaptureLeaseIdSchema.parse(
+  '33333333-3333-4333-8333-333333333333',
+);
 
 /**
  * One compile-time checked, schema-valid request for every registered invoke channel.
@@ -23,10 +27,11 @@ export const VALID_INVOKE_REQUESTS = Object.freeze({
   'info:open-location': { location: 'data' },
   'info:open-release': { url: 'https://github.com/example/project/releases/tag/v1.0.0' },
   'info:notices': {},
+  'info:export-diagnostics': {},
   'activation-test:start': {},
   'activation-test:stop': {},
   'shortcut-capture:start': {},
-  'shortcut-capture:stop': {},
+  'shortcut-capture:stop': { leaseId: SHORTCUT_CAPTURE_LEASE },
   'app:set-enabled': { enabled: true },
   'settings:update': { app: { soundsEnabled: false } },
   'profile:create': {

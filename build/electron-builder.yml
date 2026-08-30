@@ -65,12 +65,15 @@ extraResources:
     filter:
       - talking-quill-helper
       - talking-quill-helper.exe
+      - talking-quill-keyboard-owner.exe
 npmRebuild: true
 buildDependenciesFromSource: false
 afterPack: after-pack.cjs
+afterSign: after-sign.cjs
 artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}
 win:
   icon: icon.png
+  requestedExecutionLevel: asInvoker
   signExts:
     - .exe
   target:
@@ -81,8 +84,11 @@ win:
 nsis:
   include: installer.nsh
   oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
+  perMachine: true
+  allowToChangeInstallationDirectory: false
+  # The elevated installer owns installation only. The user starts the
+  # medium-integrity application after the installer has fully exited.
+  runAfterFinish: false
   deleteAppDataOnUninstall: false
   createDesktopShortcut: true
   createStartMenuShortcut: true

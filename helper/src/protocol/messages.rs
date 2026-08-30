@@ -6,19 +6,43 @@ use serde::{
 };
 use serde_json::{Value, value::RawValue};
 
-use crate::{
-    framing::MAX_FRAME_BYTES,
-    keyboard::{ActivationBinding, EventPhase, HelperEvent, SessionKey},
+use crate::framing::MAX_FRAME_BYTES;
+use talking_quill_keyboard_core::{
+    ActivationBinding, ActivationContext, EventPhase, KeyboardEvent, SessionKey,
 };
 
-pub const INBOUND_METHODS: [&str; 8] = [
+#[cfg(not(feature = "windows-installed-acceptance"))]
+pub const INBOUND_METHODS: [&str; 11] = BASE_INBOUND_METHODS;
+
+#[cfg(feature = "windows-installed-acceptance")]
+pub const INBOUND_METHODS: [&str; 13] = [
     "initialize",
     "activation.configure",
     "session.set_capture",
     "paste.inject",
     "front_app.get",
     "permissions.get",
+    "runtime.observability",
+    "acceptance.endpoint_observability",
+    "acceptance.pause_lease_renewal",
     "ping",
+    "owner.prepare_maintenance",
+    "diagnostic.ack",
+    "shutdown",
+];
+
+#[cfg(not(feature = "windows-installed-acceptance"))]
+const BASE_INBOUND_METHODS: [&str; 11] = [
+    "initialize",
+    "activation.configure",
+    "session.set_capture",
+    "paste.inject",
+    "front_app.get",
+    "permissions.get",
+    "runtime.observability",
+    "ping",
+    "owner.prepare_maintenance",
+    "diagnostic.ack",
     "shutdown",
 ];
 
@@ -202,7 +226,8 @@ fn raw_value_is_object(value: &RawValue) -> bool {
 #[derive(Debug)]
 pub enum Outbound {
     Response(RpcResponse),
-    Event(HelperEvent),
+    Event(KeyboardEvent),
+    RegisteredObservation(u64),
     PasteCommitted(RequestId),
     InputDevicesChanged,
 }
@@ -227,6 +252,7 @@ enum NotificationParams<'a> {
     Activation(ActivationEventParams),
     ActivationComplete(ActivationCompleteParams),
     Session(SessionKeyEventParams<'a>),
+    RegisteredObservation(RegisteredObservationParams),
     PasteCommitted(PasteCommittedParams<'a>),
     InputDevicesChanged(EmptyNotificationParams),
 }
@@ -241,10 +267,18 @@ struct PasteCommittedParams<'a> {
 struct EmptyNotificationParams {}
 
 #[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredObservationParams {
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 struct ActivationEventParams {
     phase: EventPhase,
     #[serde(flatten)]
     binding: ActivationBinding,
+    #[serde(flatten)]
+    context: ActivationContext,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -253,6 +287,8 @@ struct ActivationCompleteParams {
     phase: &'static str,
     #[serde(flatten)]
     binding: ActivationBinding,
+    #[serde(flatten)]
+    context: ActivationContext,
     held_ms: u64,
 }
 
@@ -274,32 +310,47 @@ pub enum OutboundEncodingError {
 pub fn encode_outbound(message: &Outbound) -> Result<Vec<u8>, OutboundEncodingError> {
     let serializable = match message {
         Outbound::Response(response) => SerializableOutbound::Response(response),
-        Outbound::Event(HelperEvent::Activation { binding, phase }) => {
-            SerializableOutbound::Notification(RpcNotification {
-                jsonrpc: "2.0",
-                method: "activation.event",
-                params: NotificationParams::Activation(ActivationEventParams {
-                    phase: *phase,
-                    binding: *binding,
-                }),
-            })
-        }
-        Outbound::Event(HelperEvent::ActivationComplete { binding, held_ms }) => {
-            SerializableOutbound::Notification(RpcNotification {
-                jsonrpc: "2.0",
-                method: "activation.event",
-                params: NotificationParams::ActivationComplete(ActivationCompleteParams {
-                    phase: "complete",
-                    binding: *binding,
-                    held_ms: *held_ms,
-                }),
-            })
-        }
-        Outbound::Event(HelperEvent::SessionKey { key, phase }) => {
+        Outbound::Event(KeyboardEvent::Activation {
+            binding,
+            context,
+            phase,
+        }) => SerializableOutbound::Notification(RpcNotification {
+            jsonrpc: "2.0",
+            method: "activation.event",
+            params: NotificationParams::Activation(ActivationEventParams {
+                phase: *phase,
+                binding: *binding,
+                context: *context,
+            }),
+        }),
+        Outbound::Event(KeyboardEvent::ActivationComplete {
+            binding,
+            context,
+            held_ms,
+        }) => SerializableOutbound::Notification(RpcNotification {
+            jsonrpc: "2.0",
+            method: "activation.event",
+            params: NotificationParams::ActivationComplete(ActivationCompleteParams {
+                phase: "complete",
+                binding: *binding,
+                context: *context,
+                held_ms: *held_ms,
+            }),
+        }),
+        Outbound::Event(KeyboardEvent::SessionKey { key, phase }) => {
             SerializableOutbound::Notification(RpcNotification {
                 jsonrpc: "2.0",
                 method: "session.key",
                 params: NotificationParams::Session(SessionKeyEventParams { key, phase: *phase }),
+            })
+        }
+        Outbound::RegisteredObservation(generation) => {
+            SerializableOutbound::Notification(RpcNotification {
+                jsonrpc: "2.0",
+                method: "registered_input.observed",
+                params: NotificationParams::RegisteredObservation(RegisteredObservationParams {
+                    generation: *generation,
+                }),
             })
         }
         Outbound::PasteCommitted(request_id) => {
@@ -422,13 +473,61 @@ impl RpcError {
             message: "Response too large",
         }
     }
+    pub const fn owner_authentication() -> Self {
+        Self {
+            code: -32_005,
+            message: "Keyboard owner authentication failed",
+        }
+    }
+    pub const fn owner_incompatible() -> Self {
+        Self {
+            code: -32_006,
+            message: "Keyboard owner incompatible",
+        }
+    }
+    pub const fn owner_busy() -> Self {
+        Self {
+            code: -32_007,
+            message: "Keyboard owner busy",
+        }
+    }
+    pub const fn owner_draining() -> Self {
+        Self {
+            code: -32_008,
+            message: "Keyboard owner draining",
+        }
+    }
+    pub const fn owner_rollback() -> Self {
+        Self {
+            code: -32_009,
+            message: "Keyboard owner rollback latched",
+        }
+    }
+    pub const fn owner_security_fault() -> Self {
+        Self {
+            code: -32_010,
+            message: "Keyboard owner security fault",
+        }
+    }
+    pub const fn indeterminate() -> Self {
+        Self {
+            code: -32_011,
+            message: "Operation result indeterminate",
+        }
+    }
+    pub const fn owner_singleton_collision() -> Self {
+        Self {
+            code: -32_012,
+            message: "Keyboard owner singleton collision",
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::{ActivationKey, ProfileId};
-    use crate::platform::FrontApp;
+    use crate::gateway::FrontApp;
+    use talking_quill_keyboard_core::{ActivationGeneration, ActivationKey, ProfileId, Shortcut};
 
     fn string_response(length: usize) -> Outbound {
         Outbound::Response(
@@ -479,25 +578,27 @@ mod tests {
     #[test]
     fn every_keyboard_notification_is_frame_bounded() {
         for event in [
-            HelperEvent::Activation {
+            KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::GENERAL,
-                    crate::keyboard::Shortcut::legacy_alt_letter(ActivationKey::Z, false),
+                    Shortcut::legacy_alt_letter(ActivationKey::Z, false),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Down,
             },
-            HelperEvent::Activation {
+            KeyboardEvent::Activation {
                 binding: ActivationBinding::new(
                     ProfileId::PROMPT,
-                    crate::keyboard::Shortcut::legacy_alt_letter(ActivationKey::Z, true),
+                    Shortcut::legacy_alt_letter(ActivationKey::Z, true),
                 ),
+                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
                 phase: EventPhase::Up,
             },
-            HelperEvent::SessionKey {
+            KeyboardEvent::SessionKey {
                 key: SessionKey::Escape,
                 phase: EventPhase::Down,
             },
-            HelperEvent::SessionKey {
+            KeyboardEvent::SessionKey {
                 key: SessionKey::Enter,
                 phase: EventPhase::Up,
             },

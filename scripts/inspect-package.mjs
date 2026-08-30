@@ -29,12 +29,23 @@ import {
   validateSecretContent,
 } from './package-policy.mjs';
 import { SECRET_SCAN_OVERLAP_BYTES } from './secret-rules.mjs';
+import {
+  verifyCompleteNativeRoleInventory,
+  verifyHelperBuildContract,
+  verifyMacosServiceBridgeBuildContract,
+  verifyOwnerBuildContract,
+} from './helper-build-contract.mjs';
 import { inspectNativeTree, readNativeArchitectures } from './native-architecture.mjs';
 import {
   artifactUploadPaths,
   verifyArtifactProvenanceManifest,
   writeArtifactProvenanceManifest,
 } from './artifact-provenance.mjs';
+import {
+  RELEASE_PACKAGE_METADATA_NAME,
+  verifyMatchingPackageReleaseMetadataBytes,
+  verifySerializedPackageReleaseMetadata,
+} from './release-package-metadata.mjs';
 
 const require = createRequire(import.meta.url);
 const invocationDirectory = process.cwd();
@@ -42,6 +53,8 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const packageArgument = process.argv
   .slice(2)
   .find((argument) => argument !== '--' && !argument.startsWith('--'));
+const macosOwnerPackage = process.argv.includes('--macos-owner');
+const windowsInstalledAcceptance = process.env.TALKING_QUILL_ACCEPTANCE_BUILD === '1';
 const strictArtifactInspection =
   process.argv.includes('--strict') || process.env.TALKING_QUILL_PACKAGE_INSPECTION_STRICT === '1';
 const artifactRequirementArgument = process.argv.find((argument) =>
@@ -154,9 +167,14 @@ for (const nativeEntry of nativeEntries) {
   }
 }
 const resourceEntries = await walkResources(resources);
-validateResourceEntries(resourceEntries, isMacBundle ? 'mac' : 'win');
+validateResourceEntries(resourceEntries, isMacBundle ? 'mac' : 'win', {
+  macosOwner: macosOwnerPackage,
+  windowsInstalledAcceptance,
+});
 const physicalEntries = await inspectPhysicalTree(packageRoot, isMacBundle);
-validatePhysicalPackageEntries(physicalEntries, isMacBundle ? 'mac' : 'win');
+validatePhysicalPackageEntries(physicalEntries, isMacBundle ? 'mac' : 'win', {
+  macosOwner: macosOwnerPackage,
+});
 const unpackedNativeEntries = await inspectNativeTree(packageRoot, {
   platform: boundPlatform,
   architecture: boundArch,
@@ -165,12 +183,17 @@ const unpackedNativeEntries = await inspectNativeTree(packageRoot, {
 if (unpackedNativeEntries.length === 0) {
   throw new Error('No native executable images were discovered in the unpacked package');
 }
+const unpackedReleaseMetadata =
+  !isMacBundle || macosOwnerPackage
+    ? await readFile(resolve(resources, RELEASE_PACKAGE_METADATA_NAME))
+    : null;
 const artifactEvidence = await inspectFinalArtifacts(
   packageRoot,
   isMacBundle,
   strictArtifactInspection,
   artifactRequirement,
   { version: expectedVersion, platform: boundPlatform, arch: boundArch },
+  unpackedReleaseMetadata,
 );
 const noticeCheck = spawnSync(process.execPath, ['scripts/generate-notices.mjs', '--check'], {
   stdio: 'inherit',
@@ -206,6 +229,86 @@ if (!helperMetadata.isFile() || helperMetadata.isSymbolicLink() || helperMetadat
 }
 if (isMacBundle && (helperMetadata.mode & 0o111) === 0) {
   throw new Error('macOS native helper is not executable');
+}
+await verifyHelperBuildContract(helper, { windows: !isMacBundle });
+if (macosOwnerPackage) {
+  if (!isMacBundle) throw new Error('The keyboard-owner package mode is macOS-only');
+  const owner = resolve(
+    macBundle,
+    'Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner',
+  );
+  const ownerMetadata = await lstat(owner);
+  if (
+    !ownerMetadata.isFile() ||
+    ownerMetadata.isSymbolicLink() ||
+    ownerMetadata.size === 0 ||
+    (ownerMetadata.mode & 0o111) === 0
+  ) {
+    throw new Error('Nested keyboard owner is not a non-empty executable regular file');
+  }
+  await verifyOwnerBuildContract(owner);
+  const bridge = resolve(macBundle, 'Contents/MacOS/talking-quill-macos-service-bridge');
+  await verifyMacosServiceBridgeBuildContract(bridge);
+  await verifyCompleteNativeRoleInventory(
+    unpackedNativeEntries.map((entry) => resolve(packageRoot, entry.path)),
+    [helper, owner, bridge],
+  );
+  const ownerBytes = await readFile(owner);
+  for (const forbiddenFixtureMarker of [
+    'macos-native-lifecycle-fixture',
+    'TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE',
+    'permissioned-ci-v1',
+  ]) {
+    if (ownerBytes.includes(Buffer.from(forbiddenFixtureMarker))) {
+      throw new Error(`Packaged owner contains lifecycle test hook: ${forbiddenFixtureMarker}`);
+    }
+  }
+  const installedMarker = resolve(resources, 'keyboard-owner-installed-v1');
+  const installedMarkerMetadata = await lstat(installedMarker);
+  if (
+    !installedMarkerMetadata.isFile() ||
+    installedMarkerMetadata.isSymbolicLink() ||
+    (await readFile(installedMarker, 'utf8')) !== 'talking-quill-keyboard-owner-v1\n'
+  ) {
+    throw new Error('Installed keyboard-owner marker is missing or invalid');
+  }
+  const denialAddon = resolve(resources, 'macos-keychain-denial.node');
+  const denialAddonMetadata = await lstat(denialAddon);
+  if (
+    !denialAddonMetadata.isFile() ||
+    denialAddonMetadata.isSymbolicLink() ||
+    denialAddonMetadata.size === 0 ||
+    (denialAddonMetadata.mode & 0o111) === 0
+  ) {
+    throw new Error('macOS Keychain denial addon is missing or invalid');
+  }
+  // One outer sealed policy avoids a nested owner CodeDirectory/hash cycle.
+  for (const policy of [resolve(resources, 'keyboard-owner-r5m.json')]) {
+    const metadata = await lstat(policy);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      metadata.size === 0 ||
+      metadata.size > 64 * 1024
+    ) {
+      throw new Error('Installed keyboard-owner policy is missing or invalid');
+    }
+  }
+}
+if (!isMacBundle) {
+  const windowsRoleDirectory = resolve(resources, 'helper');
+  await verifyOwnerBuildContract(resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe'));
+  await verifyCompleteNativeRoleInventory(
+    unpackedNativeEntries.map((entry) => resolve(packageRoot, entry.path)),
+    [helper, resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe')],
+  );
+}
+if (!isMacBundle || macosOwnerPackage) {
+  await verifySerializedPackageReleaseMetadata(
+    resolve(resources, RELEASE_PACKAGE_METADATA_NAME),
+    packageRoot,
+    { version: expectedVersion, platform: boundPlatform, architecture: boundArch },
+  );
 }
 
 const executable = isMacBundle
@@ -307,7 +410,14 @@ function isTextRuntimePath(path) {
   return /\.(?:c?js|mjs|json|html|css|txt|md|xml|plist|ya?ml)$/iu.test(path);
 }
 
-async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement, expectedArtifact) {
+async function inspectFinalArtifacts(
+  packageDirectory,
+  mac,
+  strict,
+  requirement,
+  expectedArtifact,
+  unpackedReleaseMetadata,
+) {
   const releaseDirectory = dirname(packageDirectory);
   const releaseFileNames = (await readdir(releaseDirectory, { withFileTypes: true }))
     .filter((entry) => entry.isFile())
@@ -373,8 +483,15 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
         continue;
       }
       const entries = await inspectPhysicalTree(inspectionRoot, mac);
-      validatePhysicalPackageEntries(entries, mac ? 'mac' : 'win');
-      await inspectExtractedRuntime(inspectionRoot, mac, expectedArtifact.arch);
+      validatePhysicalPackageEntries(entries, mac ? 'mac' : 'win', {
+        macosOwner: macosOwnerPackage,
+      });
+      await inspectExtractedRuntime(
+        inspectionRoot,
+        mac,
+        expectedArtifact.arch,
+        unpackedReleaseMetadata,
+      );
       inspected += 1;
     } finally {
       detach?.();
@@ -388,7 +505,7 @@ async function inspectFinalArtifacts(packageDirectory, mac, strict, requirement,
   return { summary, artifacts };
 }
 
-async function inspectExtractedRuntime(root, mac, expectedArch) {
+async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseMetadata) {
   const extractedResources = mac
     ? resolve(root, 'Talking Quill.app', 'Contents', 'Resources')
     : resolve(root, 'resources');
@@ -401,6 +518,7 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
       'helper',
       mac ? 'talking-quill-helper' : 'talking-quill-helper.exe',
     ),
+    ...(mac ? [] : [resolve(extractedResources, 'helper/talking-quill-keyboard-owner.exe')]),
     resolve(
       extractedResources,
       'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
@@ -413,7 +531,68 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
       extractedResources,
       `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${mac ? 'darwin' : 'win32'}/${expectedArch}/${mac ? 'libonnxruntime.1.21.0.dylib' : 'onnxruntime.dll'}`,
     ),
+    ...(mac && macosOwnerPackage
+      ? [
+          resolve(
+            root,
+            'Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner',
+          ),
+          resolve(root, 'Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge'),
+        ]
+      : []),
   ];
+  const extractedHelper = requiredNativePaths[1];
+  if (extractedHelper === undefined) throw new Error('Extracted helper path is unavailable');
+  await verifyHelperBuildContract(extractedHelper, { windows: !mac });
+  if (mac && macosOwnerPackage) {
+    const extractedOwner = resolve(
+      root,
+      'Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner',
+    );
+    const extractedBridge = resolve(
+      root,
+      'Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge',
+    );
+    await verifyOwnerBuildContract(extractedOwner);
+    await verifyMacosServiceBridgeBuildContract(extractedBridge);
+    const extractedInventory = await inspectNativeTree(root, {
+      platform: 'mac',
+      architecture: expectedArch,
+      exceptions: nativeArchitectureExceptions(true),
+    });
+    await verifyCompleteNativeRoleInventory(
+      extractedInventory.map((entry) => resolve(root, entry.path)),
+      [extractedHelper, extractedOwner, extractedBridge],
+    );
+  }
+  if (!mac) {
+    const roleDirectory = resolve(extractedResources, 'helper');
+    await verifyOwnerBuildContract(resolve(roleDirectory, 'talking-quill-keyboard-owner.exe'));
+    const extractedInventory = await inspectNativeTree(root, {
+      platform: 'win',
+      architecture: expectedArch,
+      exceptions: nativeArchitectureExceptions(false),
+    });
+    await verifyCompleteNativeRoleInventory(
+      extractedInventory.map((entry) => resolve(root, entry.path)),
+      [extractedHelper, resolve(roleDirectory, 'talking-quill-keyboard-owner.exe')],
+    );
+  }
+  if (!mac || macosOwnerPackage) {
+    const extractedMetadataPath = resolve(extractedResources, RELEASE_PACKAGE_METADATA_NAME);
+    if (unpackedReleaseMetadata === null) {
+      throw new Error('Unpacked release metadata is unavailable for final-artifact comparison');
+    }
+    verifyMatchingPackageReleaseMetadataBytes(
+      unpackedReleaseMetadata,
+      await readFile(extractedMetadataPath),
+    );
+    await verifySerializedPackageReleaseMetadata(extractedMetadataPath, root, {
+      version: expectedVersion,
+      platform: mac ? 'mac' : 'win',
+      architecture: expectedArch,
+    });
+  }
   for (const path of requiredNativePaths) {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size === 0) {
@@ -423,7 +602,8 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
     if (
       native === null ||
       (mac ? native.format === 'pe' : native.format !== 'pe') ||
-      !native.architectures.includes(expectedArch)
+      native.architectures.length !== 1 ||
+      native.architectures[0] !== expectedArch
     ) {
       throw new Error(`Extracted required runtime is not a ${expectedArch} native image: ${path}`);
     }
@@ -437,7 +617,10 @@ async function inspectExtractedRuntime(root, mac, expectedArch) {
     throw new Error('Extracted artifact did not expose every required native runtime image');
   }
   const extractedResourceEntries = await walkResources(extractedResources);
-  validateResourceEntries(extractedResourceEntries, mac ? 'mac' : 'win');
+  validateResourceEntries(extractedResourceEntries, mac ? 'mac' : 'win', {
+    macosOwner: macosOwnerPackage,
+    windowsInstalledAcceptance,
+  });
   const extractedAsar = resolve(extractedResources, 'app.asar');
   const entries = listPackage(extractedAsar).map(normalizePackagePath);
   validateAsarEntries(entries, {

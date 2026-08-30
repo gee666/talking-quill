@@ -7,7 +7,6 @@ import type { SettingsStore } from '../../app/src/main/persistence/settings-stor
 import type { ProviderConfigService } from '../../app/src/main/providers/provider-config-service';
 import type { ProviderService } from '../../app/src/main/providers/provider-service';
 import type { PreparedCompletionLease } from '../../app/src/main/providers/contracts';
-import type { ScreenshotService } from '../../app/src/main/screenshot/screenshot-service';
 import type { ProviderCompletionRequest } from '../../app/src/shared/schemas/providers';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
@@ -187,7 +186,7 @@ function createHarness(
     screenshots: {
       permissionStatus: () => 'granted' as const,
       capture,
-    } as unknown as ScreenshotService,
+    },
     helper: {
       getFrontApp: () =>
         Promise.resolve({

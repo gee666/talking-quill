@@ -1,10 +1,9 @@
 import { z } from 'zod';
-import {
-  DictationProfileSchema,
-  type DictationProfile,
-} from '../../../shared/schemas/dictation-profiles';
-import { SettingsObjectSchema } from '../../../shared/schemas/settings';
 import { LegacyRecordingSettingsSchema } from './legacy-settings-contracts';
+import {
+  LegacyDictationProfileV27Schema,
+  LegacySettingsV27ObjectSchema,
+} from './legacy-settings-v27';
 
 const LegacyBuiltInProfileIdV22Schema = z.enum([
   'general',
@@ -13,7 +12,7 @@ const LegacyBuiltInProfileIdV22Schema = z.enum([
   'translate-to-english',
 ]);
 const LegacyProfileIdV22Schema = z.union([LegacyBuiltInProfileIdV22Schema, z.uuid()]);
-const LegacyDictationProfileV22Schema = DictationProfileSchema.extend({
+const LegacyDictationProfileV22Schema = LegacyDictationProfileV27Schema.extend({
   id: LegacyProfileIdV22Schema,
 });
 const LegacyDictationProfileListV22Schema = z
@@ -38,7 +37,7 @@ const LegacyDictationProfileListV22Schema = z
     }
   });
 
-export const LegacySettingsV22Schema = SettingsObjectSchema.omit({
+export const LegacySettingsV22Schema = LegacySettingsV27ObjectSchema.omit({
   schemaVersion: true,
   recording: true,
   dictationProfiles: true,
@@ -59,9 +58,4 @@ export const LegacySettingsV22Schema = SettingsObjectSchema.omit({
     }
   });
 
-export type LegacySettingsV22 = Omit<
-  z.infer<typeof LegacySettingsV22Schema>,
-  'dictationProfiles'
-> & {
-  readonly dictationProfiles: readonly DictationProfile[];
-};
+export type LegacySettingsV22 = z.infer<typeof LegacySettingsV22Schema>;

@@ -5,9 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+const ACCEPTANCE_BUILD_ENV = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
 const forbiddenEnvironment = Object.keys(process.env).filter(
   (name) =>
-    /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name) &&
+    (name === ACCEPTANCE_BUILD_ENV || /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name)) &&
     process.env[name] !== '' &&
     process.env[name] !== '0',
 );
@@ -29,13 +30,11 @@ function cleanTargetArtifacts() {
   const target = process.env.TALKING_QUILL_PACKAGE_TARGET ?? lifecycleTarget?.target;
   const arch = process.env.TALKING_QUILL_PACKAGE_ARCH ?? lifecycleTarget?.arch;
   if ((target !== 'win' && target !== 'mac') || (arch !== 'x64' && arch !== 'arm64')) {
-    throw new Error('Packaging target identity is required before cleaning release artifacts');
+    throw new Error('Packaging supports Windows and macOS x64/arm64 only');
   }
   const unpacked =
     target === 'win'
-      ? arch === 'x64'
-        ? ['win-unpacked']
-        : ['win-arm64-unpacked']
+      ? [arch === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked']
       : arch === 'x64'
         ? ['mac']
         : ['mac-arm64'];
@@ -52,11 +51,13 @@ function lifecyclePackageTarget(event) {
     case 'package:win':
     case 'package:win:dir':
       return { target: 'win', arch: 'x64' };
-    case 'package:win:arm64':
-      return { target: 'win', arch: 'arm64' };
     case 'package:mac:x64':
+    case 'package:mac:owner:x64':
+    case 'package:mac:owner:x64:fixture':
       return { target: 'mac', arch: 'x64' };
     case 'package:mac:arm64':
+    case 'package:mac:owner:arm64':
+    case 'package:mac:owner:arm64:fixture':
       return { target: 'mac', arch: 'arm64' };
     default:
       return null;
@@ -69,7 +70,8 @@ function run(script, args) {
     stdio: 'inherit',
     env: Object.fromEntries(
       Object.entries(process.env).filter(
-        ([name]) => !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name),
+        ([name]) =>
+          name !== ACCEPTANCE_BUILD_ENV && !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name),
       ),
     ),
   });

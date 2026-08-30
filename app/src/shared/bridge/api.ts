@@ -50,6 +50,7 @@ import type {
 } from '../schemas/commands';
 import type { VocabularyEntry, VocabularyFileResult } from '../schemas/vocabulary';
 import type { SettingsTransferResult } from '../schemas/settings-transfer';
+import type { ShortcutCaptureLeaseId } from '../schemas/shortcut-capture';
 
 export interface BootstrapData {
   readonly appVersion: string;
@@ -77,6 +78,7 @@ export interface MainApi {
     openLocation(location: InfoLocation): Promise<void>;
     openRelease(url: string): Promise<void>;
     notices(): Promise<string>;
+    exportDiagnostics(): Promise<'cancelled' | 'exported'>;
   };
   readonly activationTest: {
     start(): Promise<ActivationTestState>;
@@ -84,8 +86,8 @@ export interface MainApi {
     onChanged(listener: (state: ActivationTestState) => void): Unsubscribe;
   };
   readonly shortcutCapture: {
-    start(): Promise<void>;
-    stop(): Promise<void>;
+    start(): Promise<ShortcutCaptureLeaseId>;
+    stop(leaseId: ShortcutCaptureLeaseId): Promise<void>;
   };
   readonly app: {
     getBootstrap(): Promise<BootstrapData>;

@@ -96,11 +96,11 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await expect(main.getByRole('heading', { name: 'Ready', exact: true })).toBeFocused();
     const defaults = main.getByRole('list', { name: 'Built-in dictation profile defaults' });
     await expect(defaults.getByRole('listitem')).toHaveText([
-      'General: Alt + X (final trigger X) — Smart processing',
-      'Prompt: Alt + X + P (final trigger P) — Smart processing',
-      'Prompt to English: Alt + X + Q (final trigger Q) — Smart processing',
-      'Markdown: Alt + X + M (final trigger M) — Smart processing',
-      'Translate to English: Alt + X + T (final trigger T) — Smart processing',
+      'General: Alt + X · Smart processing',
+      'Prompt: Alt + X + P · Smart processing',
+      'Prompt to English: Alt + X + Q · Smart processing',
+      'Markdown: Alt + X + M · Smart processing',
+      'Translate to English: Alt + X + T · Smart processing',
     ]);
     await main.getByRole('button', { name: 'Start using Talking Quill' }).click();
     await expect(main.getByRole('heading', { name: 'Talking Quill is ready' })).toBeVisible();
@@ -117,15 +117,27 @@ test('Welcome resumes, completes Raw-only setup, reopens, and reaches first dict
     await driver(application, 'setWelcomePrerequisites', [true]);
 
     await driver(application, 'activationComplete', [100]);
+    await expect
+      .poll(() =>
+        driver(application, 'snapshot').then((value: unknown) => {
+          const snapshot = value as {
+            session: { phase: string };
+            helper: { captureMode: string };
+          };
+          return `${snapshot.session.phase}:${snapshot.helper.captureMode}`;
+        }),
+      )
+      .toMatch(/^recording(?:Quick|Extended):recording$/u);
     await driver(application, 'frames', [0.2, 15]);
     await driver(application, 'key', ['enter']);
     await expect
       .poll(() =>
         driver(application, 'snapshot').then(
-          (value: unknown) => (value as { session: { phase: string } }).session.phase,
+          (value: unknown) => (value as { insertion: { targetText: string } }).insertion.targetText,
         ),
       )
-      .toBe('completed');
+      .toBe('deterministic transcript');
+    await main.getByRole('button', { name: 'Dictation history' }).click();
     await expect(main.getByText('deterministic transcript')).toBeVisible();
 
     await main.getByRole('button', { name: 'About' }).click();

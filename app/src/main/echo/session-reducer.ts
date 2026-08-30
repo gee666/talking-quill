@@ -1,4 +1,5 @@
 import { ECHO_HOLD_THRESHOLD_MS } from '../../shared/constants/echo-session';
+import type { HelperActivationContext } from '../../shared/helper/protocol';
 import type { ProcessingMode } from '../../shared/schemas/history';
 import type { VoiceCommand } from '../../shared/schemas/commands';
 import type {
@@ -15,6 +16,8 @@ export interface EchoSessionState extends EchoSessionSnapshot {
   readonly fallbackReason: 'provider-error' | 'timeout' | null;
   readonly captureReady: boolean;
   readonly audioReady: boolean;
+  /** Native activation identity retained only in the main process for later target-safe paste. */
+  readonly activationContext: Readonly<HelperActivationContext> | null;
   readonly submitPending: boolean;
 }
 
@@ -24,6 +27,7 @@ export type EchoSessionEvent =
       readonly sessionId: string;
       readonly alternate: boolean;
       readonly processingMode: ProcessingMode;
+      readonly activationContext: Readonly<HelperActivationContext>;
       readonly now: number;
     }
   | { readonly type: 'hold-elapsed'; readonly now: number }
@@ -49,7 +53,11 @@ export type EchoSessionEvent =
     }
   | { readonly type: 'insertion-committed' }
   | { readonly type: 'insertion-cancelled' }
-  | { readonly type: 'inserted'; readonly copied: boolean }
+  | {
+      readonly type: 'inserted';
+      readonly copied: boolean;
+      readonly indeterminate?: boolean;
+    }
   | { readonly type: 'fail'; readonly message: string; readonly transcript?: string }
   | { readonly type: 'operational-failure'; readonly message: string }
   | { readonly type: 'reset' };
@@ -59,7 +67,11 @@ export type EchoSessionEffect =
   | { readonly type: 'begin-extended-transcription' }
   | { readonly type: 'stop-and-transcribe' }
   | { readonly type: 'process-smart'; readonly text: string }
-  | { readonly type: 'insert'; readonly text: string }
+  | {
+      readonly type: 'insert';
+      readonly text: string;
+      readonly activationContext: Readonly<HelperActivationContext>;
+    }
   | { readonly type: 'teardown' };
 
 export interface EchoTransition {
@@ -86,6 +98,7 @@ export const IDLE_ECHO_SESSION: EchoSessionState = Object.freeze({
   fallbackReason: null,
   captureReady: false,
   audioReady: false,
+  activationContext: null,
   submitPending: false,
 });
 
@@ -111,6 +124,7 @@ export function reduceEchoSession(
         phase: 'arming',
         processingMode: event.processingMode,
         alternate: event.alternate,
+        activationContext: event.activationContext,
         startedAt: event.now,
       },
       { type: 'start-capture' },
@@ -185,9 +199,10 @@ export function reduceEchoSession(
       return transition(state);
     const transcript = event.transcript.trim();
     if (transcript.length === 0) return terminalError(state, 'No speech was detected.');
-    return transition(
+    return beginInsertion(
+      state,
       { ...state, phase: 'inserting', transcript, insertionState: 'pending' },
-      { type: 'insert', text: event.command.snippet },
+      event.command.snippet,
     );
   }
   if (event.type === 'transcribed') {
@@ -202,7 +217,8 @@ export function reduceEchoSession(
         { type: 'process-smart', text },
       );
     }
-    return transition(
+    return beginInsertion(
+      state,
       {
         ...state,
         phase: 'inserting',
@@ -210,16 +226,17 @@ export function reduceEchoSession(
         finalText: text,
         insertionState: 'pending',
       },
-      { type: 'insert', text },
+      text,
     );
   }
   if (event.type === 'smart-completed') {
     if (state.phase !== 'processingSmart') return transition(state);
     const text = event.text.trim();
     if (text.length === 0) return terminalError(state, 'Smart processing returned no text.');
-    return transition(
+    return beginInsertion(
+      state,
       { ...state, phase: 'inserting', finalText: text, insertionState: 'pending' },
-      { type: 'insert', text },
+      text,
     );
   }
   if (event.type === 'abort') {
@@ -239,7 +256,8 @@ export function reduceEchoSession(
       state.phase === 'processingSmart' &&
       state.transcript !== null
     ) {
-      return transition(
+      return beginInsertion(
+        state,
         {
           ...state,
           phase: 'inserting',
@@ -250,7 +268,7 @@ export function reduceEchoSession(
           finalText: state.transcript,
           insertionState: 'pending',
         },
-        { type: 'insert', text: state.transcript },
+        state.transcript,
       );
     }
     return transition(
@@ -285,8 +303,12 @@ export function reduceEchoSession(
       {
         ...state,
         phase: 'completed',
-        completion: event.copied ? 'copied' : 'inserted',
-        message: event.copied ? 'Copied to clipboard instead' : 'Inserted',
+        completion: event.indeterminate ? 'indeterminate' : event.copied ? 'copied' : 'inserted',
+        message: event.indeterminate
+          ? 'Paste status uncertain — check the target before pasting again'
+          : event.copied
+            ? 'Copied to clipboard instead'
+            : 'Inserted',
         insertionState: event.copied ? 'none' : 'committed',
       },
       { type: 'teardown' },
@@ -294,6 +316,21 @@ export function reduceEchoSession(
   }
   if (state.phase === 'idle' || isTerminal(state.phase)) return transition(state);
   return terminalError(state, event.message, event.transcript);
+}
+
+function beginInsertion(
+  state: EchoSessionState,
+  next: EchoSessionState,
+  text: string,
+): EchoTransition {
+  if (state.activationContext === null) {
+    return terminalError(state, 'Dictation could not be completed.');
+  }
+  return transition(next, {
+    type: 'insert',
+    text,
+    activationContext: state.activationContext,
+  });
 }
 
 function terminalError(

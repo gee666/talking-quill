@@ -76,8 +76,8 @@ if (restoreFailure !== null) {
 if (requestedSignal !== null) process.exitCode = requestedSignal === 'SIGINT' ? 130 : 143;
 else if (failure !== null) throw failure;
 
-async function runNode(script, options) {
-  await run(process.execPath, [resolve(repositoryRoot, script)], script, options);
+async function runNode(script, { arguments: args = [], ...options } = {}) {
+  await run(process.execPath, [resolve(repositoryRoot, script), ...args], script, options);
 }
 
 async function runPnpm(args) {

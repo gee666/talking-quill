@@ -1,12 +1,14 @@
 import { app, clipboard, powerMonitor, safeStorage, session, shell } from 'electron';
 
 declare const __TALKING_QUILL_SOURCE_REVISION__: string;
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CAPTURE_PARTITION, UI_PARTITION } from '../../shared/constants/app';
 import type { InvokeChannel } from '../../shared/ipc/registry';
+import type { HelperReadiness } from '../../shared/schemas/helper-readiness';
 import { CaptureWindowClient } from '../audio/capture-window-client';
 import { RecordingService } from '../audio/recording-service';
 import { EchoSessionController } from '../echo/echo-session-controller';
@@ -18,7 +20,7 @@ import { ScreenshotService } from '../screenshot/screenshot-service';
 import { SmartTranscriptionService } from '../smart/smart-transcription-service';
 import { VocabularyStore } from '../vocabulary/vocabulary-store';
 import { VocabularyFileService } from '../vocabulary/file-service';
-import { HelperClient, resolveHelperExecutable } from '../helper';
+import { HelperClient, activationCaptureRollbackEnabled, resolveHelperExecutable } from '../helper';
 import { installHelperInputDeviceRouter } from '../helper/helper-input-device-router';
 import { installHelperWakeRevalidator } from '../helper/helper-wake-revalidator';
 import { createHandlers } from '../ipc/handlers';
@@ -48,13 +50,22 @@ import { UpdateService } from '../info/update-service';
 import { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
 import { ApplicationUpdateController } from '../info/application-update-controller';
 import { createElectronUpdateBackend } from '../info/electron-update-backend';
+import {
+  MacosOwnerUpdateCoordinator,
+  type DownloadedApplicationUpdate,
+} from '../info/macos-owner-update-coordinator';
+import { parseUnsignedUpdateIdentity } from '../info/unsigned-update-identity';
 import { SystemInfoService } from '../info/system-info-service';
 import { NoticesService } from '../info/notices-service';
 import { DataLifecycleService } from '../data/data-lifecycle-service';
 import { SettingsTransferFileService } from '../data/settings-transfer-file-service';
 import { createNativeOwnedTreeRemoval } from '../data/native-owned-tree-removal';
 import { prepareResetSafely } from '../data/reset-preparation';
-import { DiagnosticLogger } from '../security/diagnostic-logger';
+import {
+  DiagnosticLogger,
+  type DiagnosticFailureCode,
+  type DiagnosticMetadata,
+} from '../security/diagnostic-logger';
 import { createEgressProofObserver } from '../security/egress-audit';
 import { installApplicationProtocol } from '../security/protocol';
 import { getTrustedCaptureDocument, secureSession } from '../security/session-policy';
@@ -77,6 +88,7 @@ import { TrayController } from './tray-controller';
 import { WindowManager } from './window-manager';
 import { WidgetCaptureExclusion } from './widget-capture-exclusion';
 import { WindowRoleRegistry } from './window-role-registry';
+import { runInstalledObservation, type InstalledObservationRequest } from './installed-observation';
 
 // Leave Pi RPC's 5.75 second retirement envelope intact after earlier producer drains.
 const LIFECYCLE_TIMEOUT_MS = 15_000;
@@ -86,6 +98,7 @@ type ApplicationLifecycle = 'new' | 'starting' | 'running' | 'stopping' | 'stopp
 export class TalkingQuillApplication {
   readonly #roles = new WindowRoleRegistry();
   readonly #startupAbort = new AbortController();
+  readonly #windowsLoginStart: boolean;
   readonly #runtimeDisposers: (() => void)[] = [];
   #dataLifecycle: DataLifecycleService | null = null;
   #diagnostics: DiagnosticLogger | null = null;
@@ -109,6 +122,7 @@ export class TalkingQuillApplication {
   #removeModelEvents: (() => void) | null = null;
   #startPromise: Promise<void> | null = null;
   #quitPromise: Promise<void> | null = null;
+  #quitDeadline = 0;
   #lifecycle: ApplicationLifecycle = 'new';
   #quitAllowed = false;
   #shutdownComplete = false;
@@ -117,6 +131,14 @@ export class TalkingQuillApplication {
   #resetAcknowledgementToken: string | null = null;
   #skipDependentShutdown = false;
   #updateInstallRequested = false;
+  #showMainWhenReady = false;
+  #applicationActivationSequence = 0;
+  #acceptanceLoginStartObserved = false;
+  readonly #acceptanceLoginWaiters = new Set<() => void>();
+
+  constructor(options: { readonly windowsLoginStart?: boolean } = {}) {
+    this.#windowsLoginStart = options.windowsLoginStart === true;
+  }
 
   start(): Promise<void> {
     if (this.#startPromise !== null) return this.#startPromise;
@@ -124,6 +146,62 @@ export class TalkingQuillApplication {
     this.#lifecycle = 'starting';
     this.#startPromise = this.#startInternal();
     return this.#startPromise;
+  }
+
+  handleAcceptanceLoginStart(): void {
+    this.#acceptanceLoginStartObserved = true;
+    for (const waiter of this.#acceptanceLoginWaiters) waiter();
+    this.#acceptanceLoginWaiters.clear();
+  }
+
+  async #waitForAcceptanceLoginStart(timeoutMs: number): Promise<boolean> {
+    if (this.#acceptanceLoginStartObserved) return true;
+    return new Promise((resolveWait) => {
+      const complete = () => {
+        clearTimeout(timer);
+        this.#acceptanceLoginWaiters.delete(complete);
+        resolveWait(true);
+      };
+      const timer = setTimeout(() => {
+        this.#acceptanceLoginWaiters.delete(complete);
+        resolveWait(false);
+      }, timeoutMs);
+      this.#acceptanceLoginWaiters.add(complete);
+    });
+  }
+
+  async runInstalledObservation(request: InstalledObservationRequest): Promise<void> {
+    if (
+      this.#lifecycle !== 'running' ||
+      this.#helper === null ||
+      this.#settings === null ||
+      this.#windows === null
+    ) {
+      throw new Error('Application-owned installed observation is not ready');
+    }
+    const windows = this.#windows;
+    await runInstalledObservation(this.#helper, request, {
+      profiles: this.#settings.get().dictationProfiles,
+      persistentWindowRolesReady: windows.hasPersistentWindowRoles(),
+      userDataRoot: app.getPath('userData'),
+      showValidationWidget: async () => {
+        if (!(await windows.createWidgetForActivation())) return false;
+        return windows.showWidget(this.#settings?.get().app.widgetSize ?? 'default');
+      },
+      hideValidationWidget: () => windows.removeWidget(),
+      windowsLoginStart: this.#windowsLoginStart,
+      mainWindowVisible: windows.isMainVisible(),
+      waitForIgnoredLoginStart: (timeoutMs) => this.#waitForAcceptanceLoginStart(timeoutMs),
+      probeDiagnostics: async () => ({
+        enabled: this.#diagnostics?.enabled === true,
+        injectedFailureContained: (await this.#diagnostics?.probeAcceptanceWriteFailure()) === true,
+      }),
+    });
+  }
+
+  stop(): Promise<void> {
+    this.quit();
+    return this.#quitPromise ?? Promise.resolve();
   }
 
   async #startInternal(): Promise<void> {
@@ -136,6 +214,20 @@ export class TalkingQuillApplication {
       });
       const paths = createAppPaths(app.getPath('userData'));
       const helperExecutablePath = this.#helperExecutablePath();
+      if (
+        app.isPackaged &&
+        process.platform === 'darwin' &&
+        helperExecutablePath !== null &&
+        validInstalledMacosOwner(process.resourcesPath, helperExecutablePath)
+      ) {
+        // This signed native mode validates pinned CMS cleanup journals and
+        // finishes an interrupted committed uninstall before provisioning,
+        // updater setup, or any owner connection can run.
+        execFileSync(helperExecutablePath, ['--macos-owner-resume-cleanup'], {
+          stdio: 'ignore',
+          timeout: 30_000,
+        });
+      }
       const dataLifecycle = new DataLifecycleService(paths.root, {
         allowedBase: app.getPath('appData'),
         homeDirectory: app.getPath('home'),
@@ -148,7 +240,8 @@ export class TalkingQuillApplication {
       this.#dataLifecycle = dataLifecycle;
       // Existing roots are rejected if they are links before recovery can touch descendants.
       // A missing root is created only after sibling-journal recovery has completed.
-      validateAppRootBeforeUse(paths, app.getPath('appData'), false);
+      const existingProfile = validateAppRootBeforeUse(paths, app.getPath('appData'), false);
+      if (existingProfile) await dataLifecycle.reconcileCopiedProfile();
       await dataLifecycle.recoverPendingReset();
       validateAppRootBeforeUse(paths, app.getPath('appData'), true);
       await dataLifecycle.initializeOwnership();
@@ -161,15 +254,23 @@ export class TalkingQuillApplication {
 
       const settings = new SettingsStore(paths.settingsFile, { migrations: SETTINGS_MIGRATIONS });
       this.#settings = settings;
-      cleanup.add('settings', () => settings.flush());
       await settings.initialize();
       if (process.platform !== 'win32' && settings.get().recording.includeSystemAudio) {
         await settings.update({ recording: { includeSystemAudio: false } });
       }
-      const diagnostics = new DiagnosticLogger(settings, paths.logs);
-      this.#diagnostics = diagnostics;
-      cleanup.add('diagnostic-logger', () => diagnostics.dispose());
-      await diagnostics.initialize().catch(() => undefined);
+      let diagnostics: DiagnosticLogger;
+      try {
+        diagnostics = new DiagnosticLogger(settings, paths.logs);
+        this.#diagnostics = diagnostics;
+        await diagnostics.initializeBestEffort();
+      } catch (error: unknown) {
+        await settings.flush();
+        throw error;
+      }
+      // Rollback is LIFO. Flush durable user state before attempting diagnostic
+      // disposal, which is reporting-only and must not hold settings hostage.
+      cleanup.add('diagnostic-logger', () => diagnostics.disposeBestEffort());
+      cleanup.add('settings', () => settings.flush());
       const launchAtLogin = new LaunchAtLoginService(app);
       cleanup.add('launch-at-login', () => launchAtLogin.dispose());
       try {
@@ -313,7 +414,7 @@ export class TalkingQuillApplication {
       const state = new AppStateService(settings, events);
       state.setModelReady((await modelRuntime.bindState(state)).state === 'ready');
       const recording = new RecordingService(
-        new CaptureWindowClient(),
+        new CaptureWindowClient(undefined, (id) => this.#roles.get(id)?.role ?? null),
         settings,
         events,
         microphonePermission,
@@ -322,15 +423,37 @@ export class TalkingQuillApplication {
       const updates = new UpdateService(
         new PinnedJsonTransport(undefined, { category: 'update', observeEgress }),
       );
+      const automaticUpdateAvailable =
+        app.isPackaged &&
+        ((process.platform === 'win32' && (process.arch === 'x64' || process.arch === 'arm64')) ||
+          (process.platform === 'darwin' &&
+            (process.arch === 'x64' || process.arch === 'arm64'))) &&
+        existsSync(join(process.resourcesPath, 'app-update.yml'));
+      const installedMacosOwnerAvailable =
+        app.isPackaged &&
+        process.platform === 'darwin' &&
+        helperExecutablePath !== null &&
+        validInstalledMacosOwner(process.resourcesPath, helperExecutablePath) &&
+        existsSync(
+          join(dirname(process.resourcesPath), 'MacOS', 'talking-quill-macos-service-bridge'),
+        );
+      const macosUpdateCoordinator = installedMacosOwnerAvailable
+        ? new MacosOwnerUpdateCoordinator({
+            helper: () => this.#helper,
+            helperExecutable: helperExecutablePath,
+            installedApp: dirname(dirname(process.resourcesPath)),
+            temporaryRoot: app.getPath('temp'),
+          })
+        : null;
+      const automaticInstallAvailable =
+        automaticUpdateAvailable &&
+        (process.platform !== 'darwin' || macosUpdateCoordinator !== null);
       const applicationUpdates = new ApplicationUpdateController({
         currentVersion: app.getVersion(),
-        backend:
-          app.isPackaged &&
-          process.platform === 'win32' &&
-          (process.arch === 'x64' || process.arch === 'arm64') &&
-          existsSync(join(process.resourcesPath, 'app-update.yml'))
-            ? createElectronUpdateBackend(process.arch)
-            : null,
+        backend: automaticInstallAvailable ? createElectronUpdateBackend(process.arch) : null,
+        ...(process.platform !== 'darwin' || macosUpdateCoordinator === null
+          ? {}
+          : { prepareInstall: (download) => macosUpdateCoordinator.prepareUpdate(download) }),
         publish: (update) => events.send('info:update-changed', update),
         requestInstall: () => this.#requestUpdateInstall(),
       });
@@ -345,10 +468,12 @@ export class TalkingQuillApplication {
       this.#recording = recording;
       cleanup.add('recording', () => recording.shutdown());
 
-      const helper = this.#createHelper();
+      const helper = this.#createHelper(
+        diagnostics.enabled ? join(paths.logs, 'owner-connection-helper-journal.json') : undefined,
+      );
       if (helper === null) throw new Error('The native helper is unavailable on this platform');
       this.#helper = helper;
-      cleanup.add('helper', () => helper.stop());
+      cleanup.add('helper', () => this.#stopHelperAndDrainDiagnostics());
       this.#ownRuntimeDisposer(
         cleanup,
         'helper-input-device-routing',
@@ -356,21 +481,50 @@ export class TalkingQuillApplication {
       );
       const task6Loader = sourceHarness.loadTask6({ history, settings, recording });
       const task6Composition = task6Loader === null ? null : await task6Loader;
-      const helperStartPromise =
-        task6Composition === null
-          ? helper.start().finally(() => state.setHelperReadiness(helper.readiness))
-          : Promise.resolve();
-      // Observe an early rejection while windows and IPC are assembled. The authoritative await
-      // below still fails startup after every acquired dependency has rollback ownership.
-      void helperStartPromise.catch(() => undefined);
       const echoHelper = task6Composition?.helper ?? helper;
       if (task6Composition !== null) state.setModelReady(true);
-      state.setHelperReadiness(echoHelper.readiness);
-      const removeHelperReadiness = echoHelper.subscribeReadiness((readiness) => {
+      let lastHelperDiagnostic = '';
+      let helperStartupComplete = false;
+      let helperDiagnosticTail = Promise.resolve();
+      const observeHelperReadiness = (readiness: HelperReadiness): void => {
         state.setHelperReadiness(readiness);
-      });
+        const diagnosticKey = JSON.stringify({
+          status: readiness.status,
+          reason: readiness.reason,
+          helperVersion: readiness.helperVersion,
+          permissions: readiness.permissions,
+          nativeLaunchFailure: helper.nativeLaunchFailure,
+        });
+        const failed = readiness.status === 'unavailable' || readiness.status === 'incompatible';
+        const startupFailure = !helperStartupComplete && failed;
+        helperDiagnosticTail = helperDiagnosticTail
+          .then(async () => {
+            if (diagnosticKey === lastHelperDiagnostic) return;
+            const metadata: DiagnosticMetadata = {
+              component: 'helper',
+              outcome: readiness.status,
+              reason: readiness.reason ?? 'none',
+              ...(failed && helper.nativeLaunchFailure !== null
+                ? { nativeFailure: helper.nativeLaunchFailure }
+                : {}),
+            };
+            const failureCode: DiagnosticFailureCode = `${
+              startupFailure ? 'HELPER_STARTUP' : 'HELPER_RUNTIME'
+            }_${readiness.status.toUpperCase()}` as DiagnosticFailureCode;
+            const written = startupFailure
+              ? await diagnostics.recordStartupFailure(failureCode)
+              : failed
+                ? await diagnostics.recordOperationalFailure(failureCode)
+                : await diagnostics.record('helper.readiness.changed', metadata);
+            if (written) lastHelperDiagnostic = diagnosticKey;
+          })
+          .catch(() => undefined);
+      };
+      const removeHelperReadiness = echoHelper.subscribeReadiness(observeHelperReadiness);
+      // start() begins before window construction. Record the current snapshot
+      // too, otherwise an immediate spawn/owner failure can precede subscription.
+      observeHelperReadiness(echoHelper.readiness);
       this.#removeHelperReadiness = removeHelperReadiness;
-      cleanup.add('helper-readiness', removeHelperReadiness);
 
       const windows = new WindowManager(loader, this.#roles, settings, {
         requestQuit: () => this.quit(),
@@ -378,8 +532,14 @@ export class TalkingQuillApplication {
         onMainHidden: () => {
           void recording.stopTest();
         },
+        showMainOnFirstLoad:
+          !this.#windowsLoginStart && !app.getLoginItemSettings().wasOpenedAtLogin,
       });
       this.#windows = windows;
+      if (this.#showMainWhenReady) {
+        this.#showMainWhenReady = false;
+        windows.showMainByUser();
+      }
       cleanup.add('windows', () => windows.destroyAll());
       windowTarget = windows;
       const widgetCaptureExclusion = new WidgetCaptureExclusion({
@@ -394,12 +554,13 @@ export class TalkingQuillApplication {
         settings,
         configs: providerConfigs,
         providers,
-        screenshots,
+        screenshots: task6Composition?.screenshots ?? screenshots,
         helper: echoHelper,
         screenshotsDirectory: paths.screenshots,
       });
       const echo = new EchoSessionController({
         settings,
+        platform: process.platform === 'darwin' ? 'darwin' : 'win32',
         recording: task6Composition?.recording ?? recording,
         whisper: task6Composition?.whisper ?? whisper,
         helper: echoHelper,
@@ -459,19 +620,11 @@ export class TalkingQuillApplication {
       cleanup.add('welcome-readiness-target', removeModelWelcomeTarget);
       const removeEchoState = echo.subscribe((snapshot) => state.setSession(snapshot));
       this.#ownRuntimeDisposer(cleanup, 'echo-state', removeEchoState);
-      if (task6Composition !== null) {
-        this.#ownRuntimeDisposer(
-          cleanup,
-          'task6-test-driver',
-          sourceHarness.bindAndExposeTask6(task6Composition, echo),
-        );
-      }
-
       const removeSelectedModel = modelRuntime.subscribeSelectedModel(task6Composition !== null);
       this.#ownRuntimeDisposer(cleanup, 'selected-model', removeSelectedModel);
 
       const tray = new TrayController(state, {
-        showMain: () => windows.showMain(),
+        showMain: () => windows.showMainByUser(),
         quit: () => this.quit(),
         setEnabled: async (enabled) => {
           await echo.updateGeneral({ app: { enabled } });
@@ -523,7 +676,17 @@ export class TalkingQuillApplication {
           applicationUpdates,
           systemInfo,
           notices,
-          ...(packagedMediaReady === undefined ? {} : { packagedMediaReady }),
+          diagnosticSummary: () => ({
+            appVersion: app.getVersion(),
+            platform: process.platform,
+            architecture: process.arch,
+            helper: state.getState().helper,
+            nativeLaunchFailure: helper.nativeLaunchFailure,
+            settings: settings.getDiagnostic(),
+          }),
+          ...(packagedMediaReady === undefined
+            ? {}
+            : { packagedMediaReady: packagedMediaReady.rendererReady }),
           requestDataReset: () => this.#prepareDataReset(),
           acknowledgeDataReset: (token) => this.#acknowledgeDataReset(token),
         }),
@@ -535,7 +698,12 @@ export class TalkingQuillApplication {
         ipc.dispose();
       });
 
+      // Every consumer and the hidden non-focusable widget exist before the native gateway can
+      // enable activation. A fresh helper starts disabled, then Echo applies authoritative settings.
       await windows.createAll();
+      this.#assertStartupActive();
+      if (task6Composition === null) await helper.start();
+      helperStartupComplete = true;
       this.#assertStartupActive();
       if (app.isPackaged) {
         void updates
@@ -548,7 +716,15 @@ export class TalkingQuillApplication {
       }
       // Native activation remains disabled until every eager renderer has loaded, so a startup
       // shortcut cannot begin a session whose preloaded widget or capture surface is unavailable.
-      echo.initialize();
+      await echo.initialize();
+      if (task6Composition !== null) {
+        this.#ownRuntimeDisposer(
+          cleanup,
+          'task6-test-driver',
+          sourceHarness.bindAndExposeTask6(task6Composition, echo),
+        );
+        packagedMediaReady?.armAfterEchoBinding();
+      }
       // Cleanup that can enumerate thousands of files starts only after the first usable renderer
       // is shown, and yields between bounded batches so it cannot monopolize the main thread.
       // Maintenance is best-effort once the usable surfaces are live. A locked stale artifact must
@@ -573,11 +749,52 @@ export class TalkingQuillApplication {
         );
         this.#assertStartupActive();
       }
-      await helperStartPromise;
+      if (diagnostics.enabled) {
+        await helper.getRuntimeObservability().catch(() => undefined);
+      }
       this.#assertStartupActive();
       this.#lifecycle = 'running';
+      const localUpdate = process.argv.find((argument) =>
+        argument.startsWith('--update-local-owner='),
+      );
+      const localRollback = process.argv.find((argument) =>
+        argument.startsWith('--rollback-local-owner='),
+      );
+      const localOwnerMaintenanceRequested =
+        localUpdate !== undefined ||
+        localRollback !== undefined ||
+        process.argv.includes('--uninstall-local-owner');
+      if (app.isPackaged && process.platform === 'darwin' && localOwnerMaintenanceRequested) {
+        if (macosUpdateCoordinator === null) {
+          throw new Error('The installed macOS owner maintenance coordinator is unavailable');
+        }
+        if (localUpdate !== undefined) {
+          const archive = localUpdate.slice('--update-local-owner='.length);
+          await macosUpdateCoordinator.prepareUpdate(localMacosUpdate(archive));
+          this.quit();
+          return;
+        }
+        if (localRollback !== undefined) {
+          const archive = localRollback.slice('--rollback-local-owner='.length);
+          await macosUpdateCoordinator.prepareRollback(localMacosUpdate(archive));
+          this.quit();
+          return;
+        }
+        if (process.argv.includes('--uninstall-local-owner')) {
+          await macosUpdateCoordinator.prepareUninstall(() =>
+            shell.trashItem(dirname(dirname(process.resourcesPath))),
+          );
+          this.quit();
+          return;
+        }
+      }
       await diagnostics
-        .record('application.started', { component: 'application', outcome: 'ready' })
+        .record('application.started', {
+          component: 'application',
+          outcome: 'ready',
+          appVersion: app.getVersion(),
+          runtimeVersion: app.getVersion(),
+        })
         .catch(() => undefined);
       cleanup.disarm();
     } catch (error: unknown) {
@@ -589,7 +806,28 @@ export class TalkingQuillApplication {
   }
 
   showMain(): void {
-    this.#windows?.showMain();
+    const windows = this.#windows;
+    if (windows === null) {
+      this.#showMainWhenReady = true;
+      return;
+    }
+    windows.showMainByUser();
+  }
+
+  handleApplicationActivation(source: 'second_instance' | 'os_activate'): void {
+    this.showMain();
+    if (this.#applicationActivationSequence >= 8) return;
+    this.#applicationActivationSequence += 1;
+    void this.#diagnostics
+      ?.record('application.activation', {
+        component: 'application',
+        outcome: 'requested',
+        activationSource: source,
+        activationSequence: this.#applicationActivationSequence,
+        restoreHandlerReached: true,
+        showMainReached: true,
+      })
+      .catch(() => undefined);
   }
 
   async #prepareDataReset(): Promise<string> {
@@ -650,6 +888,7 @@ export class TalkingQuillApplication {
   quit(): void {
     if (this.#quitPromise !== null) return;
     this.#lifecycle = 'stopping';
+    this.#quitDeadline = Date.now() + LIFECYCLE_TIMEOUT_MS;
     void this.#diagnostics
       ?.record('application.stopping', { component: 'application', outcome: 'requested' })
       .catch(() => undefined);
@@ -704,6 +943,7 @@ export class TalkingQuillApplication {
       'shutdown',
       this.#createDrainSteps(),
       LIFECYCLE_TIMEOUT_MS,
+      { deadline: this.#quitDeadline },
     );
     if (diagnostics.some(({ outcome }) => outcome === 'timed-out')) {
       this.#skipDependentShutdown = true;
@@ -733,7 +973,10 @@ export class TalkingQuillApplication {
           () => true,
         ),
         new Promise<boolean>((resolveWait) => {
-          timer = setTimeout(() => resolveWait(false), LIFECYCLE_TIMEOUT_MS);
+          timer = setTimeout(
+            () => resolveWait(false),
+            Math.max(1, this.#quitDeadline - Date.now()),
+          );
           timer.unref();
         }),
       ]);
@@ -764,7 +1007,8 @@ export class TalkingQuillApplication {
         recording: this.#recording,
         models: this.#models,
         whisper: this.#whisper,
-        helper: this.#helper,
+        helper:
+          this.#helper === null ? null : { stop: () => this.#stopHelperAndDrainDiagnostics() },
         history: this.#history,
         settings: this.#settings,
         vault: this.#vault,
@@ -772,6 +1016,25 @@ export class TalkingQuillApplication {
       },
       excludedIpcChannels,
     );
+  }
+
+  async #stopHelperAndDrainDiagnostics(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.#helper?.stop({ requireNeutral: true });
+    } catch (error: unknown) {
+      failures.push(error);
+    }
+    try {
+      this.#removeHelperReadiness?.();
+    } catch (error: unknown) {
+      failures.push(error);
+    } finally {
+      this.#removeHelperReadiness = null;
+    }
+    // Diagnostic writes are best effort and may never settle. Persistence runs
+    // before the diagnostic logger's independently bounded final disposal.
+    if (failures.length > 0) throw failures[0];
   }
 
   #assertStartupActive(): void {
@@ -830,7 +1093,7 @@ export class TalkingQuillApplication {
     });
   }
 
-  #createHelper(): HelperClient | null {
+  #createHelper(diagnosticJournalPath: string | undefined): HelperClient | null {
     const platform = process.platform;
     const architecture = process.arch;
     if (
@@ -844,9 +1107,94 @@ export class TalkingQuillApplication {
     return new HelperClient({
       executablePath,
       expectedHelperVersion: app.getVersion(),
+      ...(diagnosticJournalPath === undefined ? {} : { diagnosticJournalPath }),
       platform,
       architecture,
+      disableActivationCapture: activationCaptureRollbackEnabled(process.env),
+      observeRuntimeObservability: (observability, source) => {
+        void this.#diagnostics
+          ?.record('helper.runtime.snapshot', {
+            component: 'helper',
+            outcome: source,
+            observability,
+          })
+          .catch(() => undefined);
+      },
+      observeOwnerConnectionDiagnostic: (diagnostic) =>
+        this.#diagnostics?.recordOwnerConnectionReplay(diagnostic) ?? Promise.resolve(false),
+      observeProcessLifecycle: (event) => {
+        void this.#diagnostics
+          ?.record(event.phase === 'started' ? 'helper.process.started' : 'helper.process.exited', {
+            component: 'helper',
+            outcome:
+              event.phase === 'started'
+                ? 'runtime'
+                : event.planned === true
+                  ? 'shutdown'
+                  : 'failure',
+            runtimeVersion: app.getVersion(),
+            ...(event.phase === 'exited'
+              ? {
+                  exitCode: event.exitCode ?? null,
+                  exitSignal: event.signal ?? null,
+                  planned: event.planned ?? false,
+                }
+              : {}),
+          })
+          .catch(() => undefined);
+      },
     });
+  }
+}
+
+function localMacosUpdate(archive: string): DownloadedApplicationUpdate {
+  if (process.arch !== 'x64' && process.arch !== 'arm64') {
+    throw new Error('The current macOS architecture cannot validate local updater identity');
+  }
+  const identityPath = join(dirname(archive), `release-identity-mac-${process.arch}.json`);
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(identityPath, 'utf8')) as unknown;
+  } catch (error: unknown) {
+    throw new Error('The local macOS update identity sidecar is missing or invalid', {
+      cause: error,
+    });
+  }
+  const version = (value as { readonly version?: unknown }).version;
+  if (typeof version !== 'string') {
+    throw new Error('The local macOS update identity has no release version');
+  }
+  return {
+    files: [archive],
+    identity: parseUnsignedUpdateIdentity(value, 'darwin', process.arch, version),
+  };
+}
+
+function validInstalledMacosOwner(resourcesPath: string, helperExecutable: string): boolean {
+  const marker = join(resourcesPath, 'keyboard-owner-installed-v1');
+  const policy = join(resourcesPath, 'keyboard-owner-r5m.json');
+  const bridge = join(dirname(resourcesPath), 'MacOS', 'talking-quill-macos-service-bridge');
+  try {
+    for (const path of [marker, policy, helperExecutable, bridge]) {
+      const metadata = lstatSync(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) return false;
+    }
+    const descriptor = openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let markerValue: string;
+    try {
+      markerValue = readFileSync(descriptor, 'utf8');
+    } finally {
+      closeSync(descriptor);
+    }
+    if (markerValue !== 'talking-quill-keyboard-owner-v1\n') return false;
+    execFileSync(helperExecutable, ['--macos-owner-validate-install'], {
+      stdio: 'ignore',
+      timeout: 5_000,
+      killSignal: 'SIGKILL',
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 

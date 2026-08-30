@@ -6,7 +6,7 @@ import type { AppState } from '../../shared/schemas/app-state';
 import type { Settings } from '../../shared/schemas/settings';
 import type { WelcomeState } from '../../shared/schemas/welcome';
 import { Button, Icon, Status, useTheme, type IconName } from '../design';
-import { presentAppStatus } from '../status-presentation';
+import { exactAppStatusLabel, presentAppStatus } from '../status-presentation';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { WelcomeWizard } from './welcome/WelcomeWizard';
 
@@ -93,6 +93,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
   }
 
   const status = presentAppStatus(state.status);
+  const statusLabel = exactAppStatusLabel(state, bootstrap.platform);
   const screenContent =
     screen === 'dashboard' ? (
       <DashboardScreen
@@ -186,7 +187,7 @@ export function AppShell({ bootstrap }: { readonly bootstrap: BootstrapData }) {
             ))}
           </nav>
           <Status tone={status.tone} live>
-            {status.label}
+            {statusLabel}
           </Status>
         </aside>
         <main className="content" id="main-content">

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   StartupCancelledError,
@@ -7,7 +8,6 @@ import {
   runBoundedLifecycle,
   runSynchronousLifecycle,
 } from '../../app/src/main/app/lifecycle';
-
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -134,6 +134,49 @@ describe('application lifecycle hardening', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await expect(lifecycle).resolves.toEqual([]);
     expect(calls).toEqual(['producer', 'dependent']);
+  });
+
+  it('honors an absolute deadline that started before lifecycle draining', async () => {
+    vi.useFakeTimers();
+    const deadline = Date.now() + 100;
+    await vi.advanceTimersByTimeAsync(80);
+    const lifecycle = runBoundedLifecycle(
+      'shutdown',
+      [{ name: 'remaining', run: () => new Promise<void>(() => undefined) }],
+      5_000,
+      { deadline },
+    );
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(lifecycle).resolves.toEqual([
+      { phase: 'shutdown', step: 'remaining', outcome: 'timed-out' },
+    ]);
+  });
+
+  it('starts no lifecycle step after an absolute deadline has expired', async () => {
+    vi.useFakeTimers();
+    const run = vi.fn();
+    const deadline = Date.now() + 10;
+    await vi.advanceTimersByTimeAsync(11);
+    await expect(
+      runBoundedLifecycle('shutdown', [{ name: 'late', run }], 5_000, { deadline }),
+    ).resolves.toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('prepares normal application renderers before helper activation and profile sync', () => {
+    const source = readFileSync('app/src/main/app/application.ts', 'utf8');
+    const renderersReady = source.indexOf('await windows.createAll()');
+    const helperReady = source.indexOf('await helper.start()');
+    const activationReady = source.indexOf('await echo.initialize()');
+
+    expect(renderersReady).toBeGreaterThan(0);
+    expect(helperReady).toBeGreaterThan(renderersReady);
+    expect(activationReady).toBeGreaterThan(helperReady);
+    expect(source.match(/state\.setHelperReadiness\(/gu)).toHaveLength(1);
+    const bind = source.indexOf('sourceHarness.bindAndExposeTask6(task6Composition, echo)');
+    const mediaActivation = source.indexOf('packagedMediaReady?.armAfterEchoBinding()');
+    expect(bind).toBeGreaterThan(activationReady);
+    expect(mediaActivation).toBeGreaterThan(bind);
   });
 
   it('distinguishes intentional startup cancellation from fatal startup failure', () => {

@@ -1,44 +1,116 @@
-[package]
-name = "talking-quill-helper"
-version = "0.0.4"
+[workspace]
+resolver = "3"
+members = [
+  ".",
+  "common-e2e",
+  "keyboard-core",
+  "keyboard-owner",
+  "owner-protocol",
+  "windows-owner-ipc",
+]
+# Default Rust builds include the no-suppression gateway and a separate,
+# feature-free owner executable whose entrypoint is inert and test-only.
+# Local capture requires an explicit owner feature and is never selected here.
+default-members = [".", "keyboard-owner"]
+
+[workspace.package]
+version = "0.0.68"
 edition = "2024"
 rust-version = "1.97.1"
 publish = false
 license = "MIT"
-description = "Native keyboard and paste helper for Talking Quill"
 
-[dependencies]
+[workspace.dependencies]
 crossbeam-channel = "=0.5.16"
+core-foundation-sys = "=0.8.7"
+getrandom = "=0.4.3"
+hkdf = "=0.13.0"
+hmac = { version = "=0.13.0", features = ["zeroize"] }
+libc = "=0.2.186"
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+proptest = "=1.11.0"
+security-framework-sys = { version = "=2.17.0", features = ["macos-12"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["raw_value"] }
+sha1 = "=0.10.6"
+sha2 = "=0.11.0"
+subtle = { version = "=2.6.1", default-features = false, features = ["std"] }
 thiserror = "=2.0.19"
+windows-sys = "=0.61.2"
+zeroize = { version = "=1.9.0", default-features = false, features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[package]
+name = "talking-quill-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Native keyboard and paste helper for Talking Quill"
+
+[package.metadata.talking-quill-boundary]
+role = "gateway"
+stage = "a3-structural-gateway"
+runtime = true
+electron-protocol = 10
+owner-client = true
+can-suppress = false
+
+[features]
+default = []
+windows-installed-acceptance = []
+
+[dependencies]
+crossbeam-channel.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+libc.workspace = true
+p256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+talking-quill-keyboard-core = { path = "keyboard-core" }
+talking-quill-owner-protocol = { path = "owner-protocol" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "=0.2.186"
+core-foundation-sys.workspace = true
+libc.workspace = true
+security-framework-sys.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = [
+talking-quill-windows-owner-ipc = { path = "windows-owner-ipc" }
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
-  "Win32_Media_Audio",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_SystemInformation",
   "Win32_System_Threading",
-  "Win32_UI_HiDpi",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
 ] }
 
 [dev-dependencies]
-proptest = "=1.11.0"
+proptest.workspace = true
+talking-quill-owner-protocol = { path = "owner-protocol", features = ["test-transport"] }
 
 [profile.release]
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
-
-[lints.clippy]
-all = "warn"
+[lints]
+workspace = true

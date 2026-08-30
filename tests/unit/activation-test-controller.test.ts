@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActivationTestController } from '../../app/src/main/echo/activation-test-controller';
-import type { HelperNotification } from '../../app/src/shared/helper/protocol';
+import type {
+  HelperNotification,
+  HelperRuntimeObservability,
+} from '../../app/src/shared/helper/protocol';
 import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
 import { type Shortcut } from '../../app/src/shared/schemas/shortcut';
 
@@ -8,6 +11,32 @@ const PROMPT_SHORTCUT: Shortcut = {
   modifiers: { ctrl: true, alt: true, shift: true, meta: false },
   keys: ['Q', 'P'],
 };
+function observation(overrides: Partial<HelperRuntimeObservability['registeredInput']> = {}) {
+  return {
+    registeredInput: {
+      hookInstalled: 1,
+      pumpAlive: 1,
+      hcActionCallbacks: 0,
+      physicalCallbacks: 0,
+      physicalCallbacksFiltered: 0,
+      registeredCandidateCallbacks: 0,
+      registeredMatchCallbacks: 0,
+      registeredReleaseCallbacks: 0,
+      callbackChannelAccepted: 0,
+      callbackChannelRejected: 0,
+      adapterDequeued: 0,
+      ownerAdmitted: 0,
+      ownerFlushed: 0,
+      ownerRejected: 0,
+      gatewayReceived: 0,
+      v10NotificationAccepted: 0,
+      electronReceived: 0,
+      observationAccepted: 0,
+      ...overrides,
+    },
+  } as HelperRuntimeObservability;
+}
+
 const WRONG_SHORTCUT: Shortcut = {
   modifiers: { ctrl: true, alt: true, shift: true, meta: false },
   keys: ['R', 'P'],
@@ -17,22 +46,34 @@ function activation(
   phase: 'down' | 'up',
   shortcut: Shortcut = PROMPT_SHORTCUT,
   profileId = 'prompt',
+  activationGeneration = 1,
+  targetToken: string | null = null,
 ): Extract<HelperNotification, { method: 'activation.event' }> {
   return {
     jsonrpc: '2.0',
     method: 'activation.event',
-    params: { phase, profileId, shortcut },
+    params: { phase, profileId, shortcut, activationGeneration, targetToken },
   };
 }
 
 function complete(
   heldMs: number,
   shortcut: Shortcut = DEFAULT_SETTINGS.dictationProfiles[0]?.shortcut ?? PROMPT_SHORTCUT,
+  profileId = 'general',
+  activationGeneration = 1,
+  targetToken: string | null = null,
 ): Extract<HelperNotification, { method: 'activation.event' }> {
   return {
     jsonrpc: '2.0',
     method: 'activation.event',
-    params: { phase: 'complete', profileId: 'general', shortcut, heldMs },
+    params: {
+      phase: 'complete',
+      profileId,
+      shortcut,
+      activationGeneration,
+      targetToken,
+      heldMs,
+    },
   };
 }
 
@@ -60,6 +101,25 @@ describe('ActivationTestController', () => {
       profileId: 'general',
       elapsedMs: heldMs,
     });
+  });
+
+  it('accepts an arbitrary profile-owned shared-prefix completion', () => {
+    const publish = vi.fn();
+    const controller = new ActivationTestController({
+      publish,
+      requestCaptureOff: vi.fn(),
+    });
+    controller.start(42, () => () => undefined, null);
+
+    controller.accept(complete(275, PROMPT_SHORTCUT, 'prompt', 9, 'test-target'), profiles());
+
+    expect(controller.state).toMatchObject({
+      phase: 'quick',
+      profileId: 'prompt',
+      shortcut: PROMPT_SHORTCUT,
+      elapsedMs: 275,
+    });
+    expect(publish).toHaveBeenLastCalledWith(controller.state);
   });
 
   it('pairs an exact trigger-P chord and only lets the current renderer stop the test', async () => {
@@ -115,6 +175,8 @@ describe('ActivationTestController', () => {
     controller.accept(activation('down'), profiles());
     vi.setSystemTime(2_100);
     controller.accept(activation('up', WRONG_SHORTCUT), profiles());
+    controller.accept(activation('up', PROMPT_SHORTCUT, 'prompt', 2), profiles());
+    controller.accept(activation('up', PROMPT_SHORTCUT, 'prompt', 1, 'wrong-target'), profiles());
     expect(controller.state.phase).toBe('pressed');
 
     controller.accept(activation('up'), profiles());
@@ -230,6 +292,170 @@ describe('ActivationTestController', () => {
     expect(controller.state).toMatchObject({ active: false, phase: 'idle' });
     expect(secondRemoveOwner).toHaveBeenCalledOnce();
     expect(requestCaptureOff).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('accepts only match plus exact-release proof and advances through dedicated boundaries', async () => {
+    vi.useFakeTimers();
+    const publish = vi.fn();
+    const accepted = vi.fn();
+    let current = observation({ registeredCandidateCallbacks: 1 });
+    const controller = new ActivationTestController({
+      publish,
+      requestCaptureOff: vi.fn(),
+      beginPhysicalObservation: () => Promise.resolve(observation()),
+      samplePhysicalObservation: () => Promise.resolve(current),
+      endPhysicalObservation: () => Promise.resolve(),
+      onObservationAccepted: accepted,
+    });
+    controller.start(42, () => vi.fn(), null);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(controller.state.phase).toBe('waiting');
+
+    current = observation({
+      hcActionCallbacks: 4,
+      physicalCallbacks: 4,
+      registeredCandidateCallbacks: 2,
+      registeredMatchCallbacks: 1,
+      registeredReleaseCallbacks: 1,
+      callbackChannelAccepted: 1,
+      adapterDequeued: 1,
+      ownerAdmitted: 1,
+      ownerFlushed: 1,
+      gatewayReceived: 1,
+      v10NotificationAccepted: 1,
+      electronReceived: 1,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(controller.state).toMatchObject({
+      phase: 'observed',
+      furthestBoundary: 'electron-received',
+    });
+    expect(accepted).toHaveBeenCalledOnce();
+  });
+
+  it('ignores activation and transition chords until a post-baseline observation traverses Electron', async () => {
+    vi.useFakeTimers();
+    let resolveBaseline!: (value: HelperRuntimeObservability) => void;
+    const baselinePromise = new Promise<HelperRuntimeObservability>((resolve) => {
+      resolveBaseline = resolve;
+    });
+    let current = observation();
+    const controller = new ActivationTestController({
+      publish: vi.fn(),
+      requestCaptureOff: vi.fn(),
+      beginPhysicalObservation: () => baselinePromise,
+      samplePhysicalObservation: () => Promise.resolve(current),
+      endPhysicalObservation: () => Promise.resolve(),
+    });
+    controller.start(42, () => vi.fn(), null);
+
+    controller.accept(complete(0), profiles());
+    expect(controller.state.phase).toBe('waiting');
+
+    const transitionChord = observation({
+      registeredCandidateCallbacks: 1,
+      registeredMatchCallbacks: 1,
+      registeredReleaseCallbacks: 1,
+      callbackChannelAccepted: 1,
+      adapterDequeued: 1,
+      ownerAdmitted: 1,
+      ownerFlushed: 1,
+      gatewayReceived: 1,
+      v10NotificationAccepted: 1,
+      electronReceived: 1,
+    });
+    current = transitionChord;
+    resolveBaseline(transitionChord);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(controller.state.phase).toBe('waiting');
+  });
+
+  it.each([
+    [
+      'callback rejection',
+      {
+        registeredCandidateCallbacks: 1,
+        registeredMatchCallbacks: 1,
+        registeredReleaseCallbacks: 1,
+        callbackChannelRejected: 1,
+      },
+    ],
+    [
+      'owner rejection',
+      {
+        registeredCandidateCallbacks: 1,
+        registeredMatchCallbacks: 1,
+        registeredReleaseCallbacks: 1,
+        callbackChannelAccepted: 1,
+        adapterDequeued: 1,
+        ownerRejected: 1,
+      },
+    ],
+    [
+      'gateway rejection',
+      {
+        registeredCandidateCallbacks: 1,
+        registeredMatchCallbacks: 1,
+        registeredReleaseCallbacks: 1,
+        callbackChannelAccepted: 1,
+        adapterDequeued: 1,
+        ownerAdmitted: 1,
+        ownerFlushed: 1,
+        gatewayReceived: 1,
+      },
+    ],
+    [
+      'notification has not reached Electron',
+      {
+        registeredCandidateCallbacks: 1,
+        registeredMatchCallbacks: 1,
+        registeredReleaseCallbacks: 1,
+        callbackChannelAccepted: 1,
+        adapterDequeued: 1,
+        ownerAdmitted: 1,
+        ownerFlushed: 1,
+        gatewayReceived: 1,
+        v10NotificationAccepted: 1,
+      },
+    ],
+  ] as const)('does not succeed after %s', async (_name, counters) => {
+    vi.useFakeTimers();
+    const accepted = vi.fn();
+    const controller = new ActivationTestController({
+      publish: vi.fn(),
+      requestCaptureOff: vi.fn(),
+      beginPhysicalObservation: () => Promise.resolve(observation()),
+      samplePhysicalObservation: () => Promise.resolve(observation(counters)),
+      endPhysicalObservation: () => Promise.resolve(),
+      onObservationAccepted: accepted,
+    });
+    controller.start(42, () => vi.fn(), null);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(controller.state.phase).toBe('waiting');
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
+  it('fails immediately when passive observation is not supported by the platform', () => {
+    vi.useFakeTimers();
+    const publish = vi.fn();
+    const requestCaptureOff = vi.fn();
+    const beginPhysicalObservation = vi.fn();
+    const onDestroyed = vi.fn(() => vi.fn());
+    const controller = new ActivationTestController({
+      publish,
+      requestCaptureOff,
+      beginPhysicalObservation,
+      physicalObservationUnavailable: true,
+    });
+
+    expect(controller.start(42, onDestroyed, null)).toMatchObject({
+      active: false,
+      phase: 'idle',
+      unavailableReason: 'platform-unavailable',
+    });
+    expect(onDestroyed).not.toHaveBeenCalled();
+    expect(beginPhysicalObservation).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 

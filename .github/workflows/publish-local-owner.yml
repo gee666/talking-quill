@@ -1,0 +1,151 @@
+name: Publish Windows x64 and ARM64 unsigned owner installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Windows native release workflow run ID
+        required: true
+        type: string
+      tag:
+        description: Exact candidate tag, for example v0.0.54
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      commit: ${{ steps.run.outputs.commit }}
+    steps:
+      - id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID")"
+          default_branch="$(gh api "repos/$REPOSITORY" --jq .default_branch)"
+          test "$(jq -r .status <<<"$run")" = completed
+          test "$(jq -r .conclusion <<<"$run")" = success
+          test "$(jq -r .event <<<"$run")" = workflow_dispatch
+          test "$(jq -r .head_branch <<<"$run")" = "$default_branch"
+          test "$(jq -r .path <<<"$run")" = .github/workflows/release-unsigned.yml
+          test "$(jq -r .head_repository.full_name <<<"$run")" = "$REPOSITORY"
+          commit="$(jq -r .head_sha <<<"$run")"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: inspect
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.inspect.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download the preserved Windows native candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${TAG#v}"
+          mkdir -p release-artifacts
+          gh run download "$RUN_ID" --repo "$REPOSITORY" --name windows-native-release-candidates --dir release-artifacts
+          (cd release-artifacts && sha256sum --check SHA256SUMS.txt)
+          for arch in x64 arm64; do
+            test -f "release-artifacts/Talking-Quill-$version-win-$arch.exe"
+            test -f "release-artifacts/Talking-Quill-$version-win-$arch.exe.blockmap"
+            test -f "release-artifacts/latest-$arch.yml"
+            test -f "release-artifacts/release-identity-win-$arch.json"
+            test -f "release-artifacts/provenance-win-$arch.json"
+            grep -q 'talkingQuillRelease:' "release-artifacts/latest-$arch.yml"
+            ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
+          done
+          test -f release-artifacts/THIRD_PARTY_NOTICES.txt
+
+      - name: Create the unchanged installer as a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ needs.inspect.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" release-artifacts/* \
+            --repo "$REPOSITORY" \
+            --target "$COMMIT" \
+            --title "Talking Quill $TAG Windows native unsigned owner" \
+            --notes "Unsigned Windows x64 and ARM64 installers with the gateway and detached keyboard owner." \
+            --draft
+
+      - name: Verify the remote draft bytes before stable promotion
+        id: verified_draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ needs.inspect.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded
+          gh api "repos/$REPOSITORY/releases" --paginate --jq ".[] | select(.draft == true and .tag_name == \"$TAG\")" > draft.json
+          release_id="$(jq -er 'select(.draft == true) | .id | select(type == "number" and . > 0)' draft.json)"
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          jq -er '.assets[] | select(.id | type == "number" and . > 0) | [.id, .name] | @tsv' draft.json > draft-assets.tsv
+          while IFS=$'\t' read -r asset_id asset_name; do
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            [[ "$asset_name" =~ ^[A-Za-z0-9._-]+$ ]]
+            gh api "repos/$REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "downloaded/$asset_name"
+          done < draft-assets.tsv
+          node scripts/verify-draft-release.mjs \
+            "$TAG" "$COMMIT" \
+            release-artifacts/release-manifest.json \
+            release-artifacts/SHA256SUMS.txt \
+            draft.json downloaded
+
+      - name: Recheck stable identity and asset inventory while the release is still a draft
+        env:
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ needs.inspect.outputs.commit }}
+          VERIFIED_RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const release = JSON.parse(fs.readFileSync('draft.json', 'utf8'));
+          if (!release.draft || release.prerelease || release.tag_name !== process.env.TAG || release.target_commitish !== process.env.COMMIT || String(release.id) !== process.env.VERIFIED_RELEASE_ID) throw new Error('Draft release identity mismatch');
+          const local = fs.readdirSync('release-artifacts').sort();
+          const remote = release.assets.map(({name}) => name).sort();
+          if (JSON.stringify(local) !== JSON.stringify(remote)) throw new Error('Draft release asset inventory mismatch');
+          NODE
+
+      # This must remain the final command. Every fallible identity and byte
+      # check belongs above it so a validation failure cannot publish a release.
+      - name: Promote the fully verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}
+        shell: bash
+        run: |
+          gh api --method PATCH "repos/$REPOSITORY/releases/$RELEASE_ID" -F draft=false -F prerelease=false -f make_latest=true >/dev/null

@@ -1,15 +1,11 @@
 import { z } from 'zod';
-import { MicrophoneIdSchema } from '../../../shared/schemas/audio';
 import {
-  LegacyPiExtensionSourcesSchema,
-  ProviderIdSchema,
-} from '../../../shared/schemas/providers';
-import {
-  ProviderSettingsDraftSchema,
-  RecordingSettingsSchema,
-  SettingsObjectSchema,
-  SmartProcessingSettingsSchema,
-} from '../../../shared/schemas/settings';
+  LegacyDictationProfileListV27Schema,
+  LegacyProviderDraftV27Schema,
+  LegacyProviderIdV27Schema,
+  LegacySettingsV27ObjectSchema,
+  LegacySmartProcessingV27Schema,
+} from './legacy-settings-v27';
 
 export const LegacyV25LocalPiExtensionSourcesSchema = z
   .array(
@@ -25,25 +21,38 @@ export const LegacyV25LocalPiExtensionSourcesSchema = z
   )
   .max(8);
 
-const LegacyProviderSettingsDraftSchema = ProviderSettingsDraftSchema.extend({
-  piExtensionSources: LegacyPiExtensionSourcesSchema.optional(),
+const LegacyV25PiExtensionSourcesSchema = z
+  .array(
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(512)
+      .regex(/^(?!-).+$/u)
+      .refine(noControlCharacters),
+  )
+  .max(8);
+const LegacyProviderSettingsDraftSchema = LegacyProviderDraftV27Schema.extend({
+  piExtensionSources: LegacyV25PiExtensionSourcesSchema.optional(),
 });
-const LegacySmartProcessingSettingsSchema = SmartProcessingSettingsSchema.extend({
-  providers: z.partialRecord(ProviderIdSchema, LegacyProviderSettingsDraftSchema),
+const LegacySmartProcessingSettingsSchema = LegacySmartProcessingV27Schema.extend({
+  providers: z.partialRecord(LegacyProviderIdV27Schema, LegacyProviderSettingsDraftSchema),
 });
 
 // Released v25 did not persist Pi extension sources. A short-lived prerelease used the same version
 // with the optional provider-draft field, so this migration boundary deliberately accepts both shapes.
-export const LegacySettingsV25Schema = SettingsObjectSchema.omit({
+export const LegacySettingsV25Schema = LegacySettingsV27ObjectSchema.omit({
   schemaVersion: true,
   recording: true,
   smartProcessing: true,
+  dictationProfiles: true,
 }).extend({
   schemaVersion: z.literal(25),
-  recording: RecordingSettingsSchema.extend({
-    preferredMicrophoneId: MicrophoneIdSchema.nullable(),
+  recording: LegacySettingsV27ObjectSchema.shape.recording.extend({
+    preferredMicrophoneId: z.string().min(1).max(4_096).nullable(),
   }),
   smartProcessing: LegacySmartProcessingSettingsSchema,
+  dictationProfiles: LegacyDictationProfileListV27Schema,
 });
 
 export type LegacySettingsV25 = z.infer<typeof LegacySettingsV25Schema>;

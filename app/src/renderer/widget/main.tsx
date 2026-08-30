@@ -48,6 +48,9 @@ export function WidgetShell() {
   useEffect(() => {
     const update = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
     window.addEventListener('resize', update);
+    // A hidden widget can be resized by main before this renderer subscribes.
+    // Reconcile once after mounting instead of depending on that lost event.
+    update();
     return () => window.removeEventListener('resize', update);
   }, []);
   useEffect(() => {

@@ -1,0 +1,83 @@
+name: Windows installed acceptance gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Native acceptance host architecture
+        required: true
+        type: choice
+        options: [x64, arm64]
+      acceptance_bundle_url:
+        description: HTTPS URL for the frozen acceptance evidence bundle
+        required: true
+        type: string
+      acceptance_bundle_sha256:
+        description: Exact SHA-256 of the frozen acceptance evidence bundle
+        required: true
+        type: string
+      acceptance_bundle_authorization:
+        description: Canonical signed authorization for this exact URL, digest, architecture, and time window
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installed-acceptance-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  installed-acceptance:
+    name: Staffed native Windows ${{ inputs.architecture }} acceptance
+    runs-on:
+      - self-hosted
+      - Windows
+      - interactive
+      - talking-quill-acceptance
+      - ${{ inputs.architecture }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+      - name: Authenticate and extract frozen acceptance inputs
+        shell: pwsh
+        env:
+          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
+          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
+          ACCEPTANCE_BUNDLE_AUTHORIZATION: ${{ inputs.acceptance_bundle_authorization }}
+          ACCEPTANCE_BUNDLE_PUBLIC_KEY_SPKI_BASE64URL: ${{ vars.TALKING_QUILL_ACCEPTANCE_BUNDLE_PUBLIC_KEY_SPKI_BASE64URL }}
+          ACCEPTANCE_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          if (-not $env:ACCEPTANCE_BUNDLE_URL.StartsWith('https://')) { throw 'Acceptance bundle URL must use HTTPS.' }
+          if ($env:ACCEPTANCE_BUNDLE_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Acceptance bundle SHA-256 is invalid.' }
+          node scripts/verify-windows-acceptance-authorization.mjs
+          New-Item -ItemType Directory -Force tmp/windows-installed-acceptance | Out-Null
+          $bundle = (Resolve-Path tmp/windows-installed-acceptance).Path + '\frozen-acceptance.zip'
+          Invoke-WebRequest -Uri $env:ACCEPTANCE_BUNDLE_URL -OutFile $bundle
+          $actual = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:ACCEPTANCE_BUNDLE_SHA256) { throw 'Acceptance bundle SHA-256 mismatch.' }
+          Expand-Archive -LiteralPath $bundle -DestinationPath tmp/windows-installed-acceptance/frozen -Force
+          if (-not (Test-Path -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json)) { throw 'Frozen acceptance evidence input is missing.' }
+          $evidenceInput = Get-Content -Raw -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json | ConvertFrom-Json
+          $env:ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL = [string]$evidenceInput.acceptance.manifestPublicKeySpkiBase64url
+          node scripts/verify-windows-acceptance-authorization.mjs
+      - name: Execute installed acceptance matrix
+        shell: pwsh
+        run: node scripts/windows-installed-acceptance.mjs --evidence tmp/windows-installed-acceptance/frozen/evidence-input.json --execute
+      - name: Upload partial or complete acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ inputs.architecture }}-installed-acceptance-evidence
+          path: |
+            tmp/windows-installed-acceptance/evidence.json
+            tmp/windows-installed-acceptance/diagnostics/**
+          if-no-files-found: warn
+          retention-days: 30

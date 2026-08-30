@@ -1,14 +1,23 @@
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
-import type { BrowserWindow, OpenDialogOptions, SaveDialogOptions } from 'electron';
+import type {
+  BrowserWindow,
+  MessageBoxOptions,
+  OpenDialogOptions,
+  SaveDialogOptions,
+} from 'electron';
 import { dialog } from 'electron';
 import writeFileAtomic from 'write-file-atomic';
 import {
   DictationProfilesTransferSchema,
+  DictationProfilesTransferV1Schema,
+  DictationProfilesTransferV2Schema,
   SETTINGS_TRANSFER_FILE_MAX_BYTES,
   VoiceCommandsTransferSchema,
   type SettingsTransferResult,
 } from '../../shared/schemas/settings-transfer';
+import { DictationProfileListSchema } from '../../shared/schemas/dictation-profiles';
+import { shortcutPlatformPolicy } from '../../shared/schemas/shortcut-platform-policy';
 import type { VoiceCommandStore } from '../commands/voice-command-store';
 import type { EchoSessionController } from '../echo/echo-session-controller';
 import { PublicAppError } from '../security/public-error';
@@ -28,6 +37,10 @@ export interface SettingsTransferDialogPort {
     | { readonly canceled: true; readonly filePath?: undefined }
     | { readonly canceled: false; readonly filePath: string }
   >;
+  showMessageBox(
+    owner: BrowserWindow,
+    options: MessageBoxOptions,
+  ): Promise<{ readonly response: number }>;
 }
 
 const nativeDialogs: SettingsTransferDialogPort = {
@@ -42,21 +55,25 @@ const nativeDialogs: SettingsTransferDialogPort = {
     const result = await dialog.showSaveDialog(owner, options);
     return result.canceled ? { canceled: true } : { canceled: false, filePath: result.filePath };
   },
+  showMessageBox: (owner, options) => dialog.showMessageBox(owner, options),
 };
 
 export class SettingsTransferFileService {
   readonly #commands: VoiceCommandStore;
   readonly #echo: EchoSessionController;
   readonly #dialogs: SettingsTransferDialogPort;
+  readonly #platform: string;
 
   constructor(
     commands: VoiceCommandStore,
     echo: EchoSessionController,
     dialogs: SettingsTransferDialogPort = nativeDialogs,
+    platform: string = process.platform,
   ) {
     this.#commands = commands;
     this.#echo = echo;
     this.#dialogs = dialogs;
+    this.#platform = platform;
   }
 
   async importVoiceCommands(owner: BrowserWindow): Promise<SettingsTransferResult> {
@@ -87,8 +104,31 @@ export class SettingsTransferFileService {
     const path = await this.#selectImport(owner, 'Import dictation profiles');
     if (path === null) return { status: 'cancelled' };
     const transfer = DictationProfilesTransferSchema.parse(await readTransferJson(path));
-    await this.#echo.replaceProfiles(transfer.profiles);
-    return { status: 'imported', count: transfer.profiles.length };
+    const profiles = DictationProfileListSchema.parse(transfer.profiles);
+    const policies = profiles.map((profile) =>
+      shortcutPlatformPolicy(profile.shortcut, this.#platform),
+    );
+    const impossible = policies.find((policy) => policy.status === 'impossible');
+    if (impossible?.status === 'impossible') {
+      throw new PublicAppError({ code: 'BAD_REQUEST', message: impossible.message });
+    }
+    const riskyCount = policies.filter((policy) => policy.status === 'risky').length;
+    if (riskyCount > 0) {
+      const confirmation = await this.#dialogs.showMessageBox(owner, {
+        type: 'warning',
+        title: 'Import risky global shortcuts?',
+        message: `${String(riskyCount)} imported shortcut${riskyCount === 1 ? '' : 's'} may overlap operating-system or application input.`,
+        detail:
+          'Review these shortcuts after import. While global capture is enabled, risky shortcuts can intercept input in other applications.',
+        buttons: ['Import profiles', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (confirmation.response !== 0) return { status: 'cancelled' };
+    }
+    await this.#echo.replaceProfiles(profiles);
+    return { status: 'imported', count: profiles.length };
   }
 
   async exportDictationProfiles(owner: BrowserWindow): Promise<SettingsTransferResult> {
@@ -99,11 +139,18 @@ export class SettingsTransferFileService {
     );
     if (path === null) return { status: 'cancelled' };
     const profiles = this.#echo.dictationProfiles;
-    await writeTransferJson(path, {
-      format: 'talking-quill.dictation-profiles',
-      version: 1,
+    const v1Transfer = {
+      format: 'talking-quill.dictation-profiles' as const,
+      version: 1 as const,
       profiles,
-    });
+    };
+    const transfer = DictationProfilesTransferV1Schema.safeParse(v1Transfer);
+    await writeTransferJson(
+      path,
+      transfer.success
+        ? transfer.data
+        : DictationProfilesTransferV2Schema.parse({ ...v1Transfer, version: 2 }),
+    );
     return { status: 'exported', count: profiles.length };
   }
 

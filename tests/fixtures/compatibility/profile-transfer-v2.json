@@ -1,0 +1,126 @@
+{
+  "format": "talking-quill.dictation-profiles",
+  "version": 2,
+  "profiles": [
+    {
+      "id": "general",
+      "name": "General",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "General compatibility fixture"
+    },
+    {
+      "id": "prompt",
+      "name": "Prompt",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X", "P"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "Prompt compatibility fixture"
+    },
+    {
+      "id": "prompt-to-english",
+      "name": "Prompt to English",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X", "Q"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "Prompt translation compatibility fixture"
+    },
+    {
+      "id": "markdown",
+      "name": "Markdown",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X", "M"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "Markdown compatibility fixture"
+    },
+    {
+      "id": "translate-to-english",
+      "name": "Translate to English",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X", "T"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "Translation compatibility fixture"
+    },
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "All modifiers",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": true,
+          "alt": true,
+          "shift": true,
+          "meta": true
+        },
+        "keys": ["A", "B", "C"]
+      },
+      "processingMode": "raw",
+      "smartPrompt": null
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Ordered letters",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": true,
+          "alt": false,
+          "shift": true,
+          "meta": false
+        },
+        "keys": ["C", "B", "A"]
+      },
+      "processingMode": "smart",
+      "smartPrompt": "Preserve this profile exactly"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "Shared prefix child",
+      "shortcut": {
+        "modifiers": {
+          "ctrl": false,
+          "alt": true,
+          "shift": false,
+          "meta": false
+        },
+        "keys": ["X", "Z"]
+      },
+      "processingMode": "raw",
+      "smartPrompt": null
+    }
+  ]
+}

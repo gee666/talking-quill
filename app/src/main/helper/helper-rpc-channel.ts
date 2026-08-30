@@ -10,10 +10,12 @@ import {
   type HelperResult,
 } from '../../shared/helper/protocol';
 import { type HelperReadinessReason } from '../../shared/schemas/helper-readiness';
+import { shortcutsEqual } from '../../shared/schemas/shortcut';
 import { decodeHelperJson, encodeHelperFrame, HelperFrameDecoder } from './framing';
 
-const MAX_OUTSTANDING_REQUESTS = 256;
-const RESERVED_SUPERVISION_REQUESTS = 2;
+const MAX_ORDINARY_REQUESTS = 256;
+const RESERVED_SHUTDOWN_REQUESTS = 1;
+const MAX_DEFERRED_ACTIVATION_EVENTS = 16;
 
 export type HelperRpcErrorCode =
   'not-running' | 'request-capacity' | 'request-timeout' | 'rpc-error' | 'transport-error';
@@ -32,16 +34,23 @@ export interface HelperRpcSession {
   readonly token: symbol;
 }
 
+type ActivationNotification = Extract<HelperNotification, { method: 'activation.event' }>;
+type PairedActivationParams = Extract<ActivationNotification['params'], { phase: 'down' | 'up' }>;
+
 interface PendingRequest {
   readonly method: HelperMethod;
+  readonly activationConfiguration: HelperParams<'activation.configure'> | null;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
-  readonly deadlineAt: number;
+  readonly timeoutMs: number;
+  deadlineAt: number | null;
   readonly timeoutReason: HelperReadinessReason;
   readonly removeAbort: () => void;
   readonly onPasteCommitted?: (() => void) | undefined;
   readonly allowDraining: boolean;
   readonly supervision: boolean;
+  readonly timeoutStartsOnDispatch: boolean;
+  readonly onDispatched?: (() => void) | undefined;
   timer: NodeJS.Timeout | null;
   dispatched: boolean;
   abortRequested: boolean;
@@ -66,6 +75,7 @@ interface HelperRpcChannelOptions {
     pendingError?: Error,
   ) => void;
   readonly onNotification: (session: HelperRpcSession, notification: HelperNotification) => void;
+  readonly onPingResult?: (session: HelperRpcSession, result: HelperResult<'ping'>) => void;
 }
 
 interface HelperRpcRequestOptions {
@@ -75,6 +85,9 @@ interface HelperRpcRequestOptions {
   readonly onPasteCommitted?: (() => void) | undefined;
   readonly allowDraining: boolean;
   readonly supervision: boolean;
+  readonly timeoutStartsOnDispatch?: boolean | undefined;
+  readonly onDispatched?: (() => void) | undefined;
+  readonly priority?: boolean | undefined;
 }
 
 /** Internal transport for the one helper process currently owned by HelperClient. */
@@ -87,8 +100,15 @@ export class HelperRpcChannel {
   #decoder = new HelperFrameDecoder();
   #writeBlocked = false;
   #writeClosed = true;
+  #dispatchedId: number | null = null;
   #draining = false;
   #nextRequestId = 1;
+  #lastActivationGeneration = 0;
+  #activeActivation: PairedActivationParams | null = null;
+  #deferredActivationEvents: {
+    readonly requestId: number;
+    readonly notifications: ActivationNotification[];
+  } | null = null;
 
   constructor(options: HelperRpcChannelOptions) {
     this.#options = options;
@@ -108,7 +128,11 @@ export class HelperRpcChannel {
     this.#writeQueue.length = 0;
     this.#writeBlocked = false;
     this.#writeClosed = false;
+    this.#dispatchedId = null;
     this.#draining = false;
+    this.#lastActivationGeneration = 0;
+    this.#activeActivation = null;
+    this.#deferredActivationEvents = null;
     this.#attachStreams(session);
     return session;
   }
@@ -117,16 +141,29 @@ export class HelperRpcChannel {
     return this.#session === session && !this.#writeClosed;
   }
 
+  resetOwnerActivationStream(session: HelperRpcSession): void {
+    if (this.#session !== session) return;
+    this.#lastActivationGeneration = 0;
+    this.#activeActivation = null;
+    this.#deferredActivationEvents = null;
+  }
+
   beginDraining(session: HelperRpcSession): void {
-    if (this.#session !== session || this.#draining) return;
-    this.#draining = true;
-    const error = this.#options.createError('not-running', 'Native helper is terminating');
-    for (let index = this.#writeQueue.length - 1; index >= 0; index -= 1) {
-      const queued = this.#writeQueue[index];
-      if (queued === undefined || queued.allowDraining) continue;
-      this.#writeQueue.splice(index, 1);
-      this.#rejectQueuedRequest(queued.id, error);
+    if (this.#session !== session) return;
+    if (!this.#draining) {
+      this.#draining = true;
+      const error = this.#options.createError('not-running', 'Native helper is terminating');
+      for (let index = this.#writeQueue.length - 1; index >= 0; index -= 1) {
+        const queued = this.#writeQueue[index];
+        if (queued === undefined || queued.allowDraining) continue;
+        this.#writeQueue.splice(index, 1);
+        this.#rejectQueuedRequest(queued.id, error);
+      }
     }
+    // A correlated protocol fault releases dispatched authority without
+    // pumping. The fault supervisor calls this method again only after it has
+    // rejected ordinary work and deliberately admitted reserved shutdown.
+    this.#pumpWrites(session);
   }
 
   request<Method extends HelperMethod>(
@@ -151,9 +188,9 @@ export class HelperRpcChannel {
       );
     }
 
-    const requestCapacity = options.supervision
-      ? MAX_OUTSTANDING_REQUESTS
-      : MAX_OUTSTANDING_REQUESTS - RESERVED_SUPERVISION_REQUESTS;
+    const requestCapacity = options.allowDraining
+      ? MAX_ORDINARY_REQUESTS + RESERVED_SHUTDOWN_REQUESTS
+      : MAX_ORDINARY_REQUESTS;
     if (this.#pending.size >= requestCapacity) {
       return Promise.reject(
         this.#options.createError('request-capacity', 'Native helper request capacity is full'),
@@ -182,7 +219,13 @@ export class HelperRpcChannel {
       options.signal?.addEventListener('abort', abort, { once: true });
       this.#pending.set(id, {
         method,
-        deadlineAt: performance.now() + options.timeoutMs,
+        activationConfiguration:
+          method === 'activation.configure'
+            ? helperParamsSchemas['activation.configure'].parse(validParams)
+            : null,
+        timeoutMs: options.timeoutMs,
+        deadlineAt:
+          options.timeoutStartsOnDispatch === true ? null : performance.now() + options.timeoutMs,
         timeoutReason: options.timeoutReason,
         timer: null,
         dispatched: false,
@@ -192,11 +235,15 @@ export class HelperRpcChannel {
         onPasteCommitted: options.onPasteCommitted,
         allowDraining: options.allowDraining,
         supervision: options.supervision,
+        timeoutStartsOnDispatch: options.timeoutStartsOnDispatch === true,
+        onDispatched: options.onDispatched,
         abortRequested: false,
         pasteCommitted: false,
       });
       this.#armRequestTimeout(session, id);
-      this.#writeQueue.push({ id, frame, allowDraining: options.allowDraining });
+      const queued = { id, frame, allowDraining: options.allowDraining };
+      if (options.allowDraining || options.priority === true) this.#writeQueue.unshift(queued);
+      else this.#writeQueue.push(queued);
       this.#pumpWrites(session);
     });
   }
@@ -206,8 +253,12 @@ export class HelperRpcChannel {
     this.#writeClosed = true;
     this.#draining = true;
     this.#writeBlocked = false;
+    this.#dispatchedId = null;
     this.#writeQueue.length = 0;
     this.#ignoredResponseIds.clear();
+    this.#lastActivationGeneration = 0;
+    this.#activeActivation = null;
+    this.#deferredActivationEvents = null;
     this.#rejectPending(pendingError);
     this.#session = null;
   }
@@ -226,8 +277,15 @@ export class HelperRpcChannel {
       if (!this.isCurrent(session)) return;
       try {
         for (const payload of this.#decoder.push(chunk)) this.#acceptPayload(session, payload);
-      } catch {
-        this.#options.onFault(session, 'malformed-response');
+      } catch (error: unknown) {
+        this.#options.onFault(
+          session,
+          'malformed-response',
+          this.#options.createError(
+            'transport-error',
+            error instanceof Error ? error.message : 'Malformed helper response',
+          ),
+        );
       }
     });
     child.stdout.once('end', () => {
@@ -235,7 +293,10 @@ export class HelperRpcChannel {
       try {
         this.#decoder.finish();
       } catch {
-        this.#options.onFault(session, 'malformed-response');
+        // EOF can split an otherwise valid frame at any byte when the helper
+        // crashes. Complete invalid frames are rejected in push() above;
+        // truncated EOF follows bounded crash supervision instead.
+        this.#options.onFault(session, 'unexpected-exit');
         return;
       }
       this.#options.onFault(session, 'unexpected-exit');
@@ -245,8 +306,10 @@ export class HelperRpcChannel {
   #armRequestTimeout(session: HelperRpcSession, id: number): void {
     const pending = this.#pending.get(id);
     if (pending === undefined) return;
+    const deadlineAt = pending.deadlineAt;
+    if (deadlineAt === null) return;
     if (pending.timer !== null) clearTimeout(pending.timer);
-    const remaining = Math.max(0, pending.deadlineAt - performance.now());
+    const remaining = Math.max(0, deadlineAt - performance.now());
     pending.timer = setTimeout(() => this.#expireRequest(session, id), remaining);
     pending.timer.unref();
   }
@@ -260,18 +323,32 @@ export class HelperRpcChannel {
     if (current.timer !== null) clearTimeout(current.timer);
     current.removeAbort();
     this.#pending.delete(id);
-    const drainingSupervision = this.#draining && current.supervision && !current.allowDraining;
-    if (drainingSupervision) this.#ignoredResponseIds.add(id);
+    const ignoredDispatchedPredecessor =
+      this.#draining && current.dispatched && !current.allowDraining;
+    const nonSupervisingDiagnostic = current.method === 'diagnostic.ack';
+    if (ignoredDispatchedPredecessor || (current.dispatched && nonSupervisingDiagnostic)) {
+      this.#ignoredResponseIds.add(id);
+    }
     current.reject(
       current.abortRequested
         ? new DOMException('Native helper request cancelled', 'AbortError')
         : this.#options.createError('request-timeout', `Native helper ${current.method} timed out`),
     );
-    if (!drainingSupervision) this.#options.onFault(session, current.timeoutReason);
+    if (current.dispatched && this.#dispatchedId === id) {
+      this.#dispatchedId = null;
+    }
+    if (ignoredDispatchedPredecessor || nonSupervisingDiagnostic) {
+      // Diagnostic acknowledgements never supervise the shared process. A late
+      // response is ignored and the durable helper journal will replay.
+      this.#pumpWrites(session);
+    } else {
+      // Establish fault/drain policy before any queued mutation can dispatch.
+      this.#options.onFault(session, current.timeoutReason);
+    }
   }
 
   #pumpWrites(session: HelperRpcSession): void {
-    if (!this.isCurrent(session) || this.#writeBlocked) return;
+    if (!this.isCurrent(session) || this.#writeBlocked || this.#dispatchedId !== null) return;
     const child = session.child;
     while (this.#writeQueue.length > 0) {
       const queued = this.#writeQueue.shift();
@@ -282,21 +359,35 @@ export class HelperRpcChannel {
         this.#failTransport(session, 'Native helper stdin is unavailable');
         return;
       }
-      if (performance.now() >= pending.deadlineAt) {
+      if (pending.deadlineAt !== null && performance.now() >= pending.deadlineAt) {
         this.#expireRequest(session, queued.id);
         return;
       }
 
       pending.dispatched = true;
-      const writable = child.stdin.write(queued.frame, (error) => {
-        if (error !== null && error !== undefined) {
-          this.#failTransport(session, 'Native helper stdin failed');
-        }
-      });
-      if (!writable) {
-        this.#writeBlocked = true;
+      this.#dispatchedId = queued.id;
+      let writable: boolean;
+      try {
+        writable = child.stdin.write(queued.frame, (error) => {
+          if (error !== null && error !== undefined) {
+            this.#failTransport(session, 'Native helper stdin failed');
+          }
+        });
+      } catch {
+        this.#failTransport(session, 'Native helper stdin failed');
         return;
       }
+      if (pending.timeoutStartsOnDispatch && this.#pending.has(queued.id)) {
+        pending.deadlineAt = performance.now() + pending.timeoutMs;
+        this.#armRequestTimeout(session, queued.id);
+      }
+      try {
+        pending.onDispatched?.();
+      } catch {
+        // Dispatch observation belongs to HelperClient supervision, not protocol parsing.
+      }
+      if (!writable) this.#writeBlocked = true;
+      return;
     }
   }
 
@@ -319,11 +410,14 @@ export class HelperRpcChannel {
       }
       if (this.#ignoredResponseIds.delete(response.data.id)) return;
       const pending = this.#pending.get(response.data.id);
-      if (pending === undefined) throw new Error('Unknown helper response ID');
-      if (pending.timer !== null) clearTimeout(pending.timer);
-      pending.removeAbort();
-      this.#pending.delete(response.data.id);
+      if (pending === undefined || !pending.dispatched || this.#dispatchedId !== response.data.id) {
+        throw new Error('Helper response does not match dispatched authority');
+      }
       if ('error' in response.data) {
+        if (this.#deferredActivationEvents?.requestId === response.data.id) {
+          this.#deferredActivationEvents = null;
+        }
+        this.#releaseDispatchedRequest(response.data.id, pending);
         pending.reject(
           this.#options.createError(
             'rpc-error',
@@ -331,26 +425,72 @@ export class HelperRpcChannel {
             response.data.error.code,
           ),
         );
+        this.#pumpWrites(session);
         return;
       }
       const result = helperResultSchemas[pending.method].safeParse(response.data.result);
       if (!result.success) {
-        pending.reject(
-          this.#options.createError('transport-error', 'Invalid helper result schema'),
+        this.#rejectMalformedDispatchedResponse(
+          response.data.id,
+          pending,
+          'Invalid helper result schema',
         );
-        throw new Error('Invalid helper result schema');
       }
+      if (pending.method === 'paste.inject') {
+        const pasteSubmitted = helperResultSchemas['paste.inject'].parse(result.data).submitted;
+        if (pasteSubmitted !== pending.pasteCommitted) {
+          this.#rejectMalformedDispatchedResponse(
+            response.data.id,
+            pending,
+            pasteSubmitted
+              ? 'Native helper acknowledged paste before its commit notification'
+              : 'Native helper committed a paste before reporting rejection',
+          );
+        }
+      }
+      if (pending.method === 'ping') {
+        this.#options.onPingResult?.(session, helperResultSchemas.ping.parse(result.data));
+      }
+      if (pending.method === 'activation.configure') {
+        const requested = pending.activationConfiguration;
+        const effective = helperResultSchemas['activation.configure'].parse(result.data);
+        const deferred = this.#deferredActivationEvents;
+        if (deferred?.requestId === response.data.id) this.#deferredActivationEvents = null;
+        if (requested !== null && activationAcknowledgementMatches(requested, effective)) {
+          // Configuration replacement cancels the old pair. Its response can race with newly
+          // admitted event output, so validate and publish events held behind that response now.
+          this.#activeActivation = null;
+          for (const event of deferred?.notifications ?? []) {
+            this.#validateActivationEvent(event);
+            this.#options.onNotification(session, event);
+          }
+        }
+      }
+      // Method-specific result and paste ordering are now authoritative. Only
+      // this point may release the serialized slot and expose its successor.
+      this.#releaseDispatchedRequest(response.data.id, pending);
       pending.resolve(result.data);
+      this.#pumpWrites(session);
       return;
     }
 
     const notification = HelperNotificationSchema.parse(raw);
+    if (notification.method === 'activation.event') {
+      if (this.#deferActivationEvent(notification)) return;
+      this.#validateActivationEvent(notification);
+    }
     if (notification.method === 'paste.committed') {
       if (typeof notification.params.requestId !== 'number') {
         throw new Error('Unknown paste commit request ID');
       }
       const pending = this.#pending.get(notification.params.requestId);
-      if (pending?.method !== 'paste.inject') throw new Error('Unknown paste commit request ID');
+      if (
+        pending?.method !== 'paste.inject' ||
+        !pending.dispatched ||
+        this.#dispatchedId !== notification.params.requestId
+      ) {
+        throw new Error('Unknown paste commit request ID');
+      }
       if (pending.pasteCommitted) return;
       pending.pasteCommitted = true;
       try {
@@ -361,6 +501,66 @@ export class HelperRpcChannel {
       return;
     }
     this.#options.onNotification(session, notification);
+  }
+
+  #releaseDispatchedRequest(id: number, pending: PendingRequest): void {
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    pending.removeAbort();
+    this.#pending.delete(id);
+    if (this.#dispatchedId === id) this.#dispatchedId = null;
+  }
+
+  #rejectMalformedDispatchedResponse(id: number, pending: PendingRequest, message: string): never {
+    const error = this.#options.createError('transport-error', message);
+    // Release only the malformed request. Do not pump here: onFault must first
+    // establish drain policy, reject queued ordinary work, and admit only the
+    // reserved shutdown request.
+    this.#releaseDispatchedRequest(id, pending);
+    pending.reject(error);
+    throw error;
+  }
+
+  #deferActivationEvent(notification: ActivationNotification): boolean {
+    if (this.#dispatchedId === null) return false;
+    const pending = this.#pending.get(this.#dispatchedId);
+    if (pending?.method !== 'activation.configure') return false;
+    const deferred = this.#deferredActivationEvents;
+    const startsReplacementStream = deferred === null && notification.params.phase !== 'up';
+    if (!startsReplacementStream && deferred?.requestId !== this.#dispatchedId) return false;
+    const events = deferred?.notifications ?? [];
+    if (events.length >= MAX_DEFERRED_ACTIVATION_EVENTS) {
+      throw new Error('Deferred helper activation capacity exceeded');
+    }
+    if (deferred === null) {
+      this.#deferredActivationEvents = {
+        requestId: this.#dispatchedId,
+        notifications: [notification],
+      };
+    } else {
+      events.push(notification);
+    }
+    return true;
+  }
+
+  #validateActivationEvent(notification: ActivationNotification): void {
+    const params = notification.params;
+    if (params.phase === 'up') {
+      const active = this.#activeActivation;
+      if (active === null || !activationParamsMatch(active, params)) {
+        throw new Error('Unpaired helper activation event');
+      }
+      this.#activeActivation = null;
+      return;
+    }
+
+    if (
+      params.activationGeneration <= this.#lastActivationGeneration ||
+      this.#activeActivation !== null
+    ) {
+      throw new Error('Non-monotonic helper activation generation');
+    }
+    this.#lastActivationGeneration = params.activationGeneration;
+    if (params.phase === 'down') this.#activeActivation = params;
   }
 
   #takeRequestId(): number {
@@ -389,4 +589,33 @@ export class HelperRpcChannel {
     }
     this.#pending.clear();
   }
+}
+
+function activationAcknowledgementMatches(
+  requested: HelperParams<'activation.configure'>,
+  effective: HelperResult<'activation.configure'>,
+): boolean {
+  return (
+    effective.enabled === requested.enabled &&
+    effective.bindings.length === requested.bindings.length &&
+    effective.bindings.every((binding, index) => {
+      const candidate = requested.bindings[index];
+      return (
+        binding.profileId === candidate?.profileId &&
+        shortcutsEqual(binding.shortcut, candidate.shortcut)
+      );
+    })
+  );
+}
+
+function activationParamsMatch(
+  left: PairedActivationParams,
+  right: PairedActivationParams,
+): boolean {
+  return (
+    left.activationGeneration === right.activationGeneration &&
+    left.targetToken === right.targetToken &&
+    left.profileId === right.profileId &&
+    shortcutsEqual(left.shortcut, right.shortcut)
+  );
 }

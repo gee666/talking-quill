@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
 
+import { restoreNodeAbi } from './source-e2e-abi-restoration.mjs';
+import { cleanupSourceE2EProcesses } from './source-e2e-process-cleanup.mjs';
+
 const pnpmCli = process.env.npm_execpath;
 if (pnpmCli === undefined) throw new Error('pnpm CLI path is unavailable');
 let failure = null;
@@ -8,6 +11,7 @@ process.env.TALKING_QUILL_VOCABULARY_TEST_HARNESS = '1';
 process.env.TALKING_QUILL_PI_TEST_HARNESS = '1';
 
 try {
+  cleanupSourceE2EProcesses();
   run(['--filter', '@talking-quill/app', 'build:test']);
   run(['test:whisper-worker']);
   run(['--filter', '@talking-quill/app', 'rebuild:native']);
@@ -15,11 +19,9 @@ try {
 } catch (error) {
   failure = error;
 } finally {
-  try {
-    run(['exec', 'node', 'scripts/rebuild-node-native.mjs']);
-  } catch (restoreError) {
-    failure ??= restoreError;
-  }
+  failure = restoreNodeAbi(failure, cleanupSourceE2EProcesses, () =>
+    run(['exec', 'node', 'scripts/rebuild-node-native.mjs']),
+  );
 }
 
 if (failure !== null) throw failure;

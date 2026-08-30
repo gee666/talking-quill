@@ -16,6 +16,7 @@ export interface WindowManagerCallbacks {
   readonly requestQuit: () => void;
   readonly onMaximizedChanged: (maximized: boolean) => void;
   readonly onMainHidden: () => void;
+  readonly showMainOnFirstLoad: boolean;
 }
 
 const MAX_RENDERER_RECOVERY_ATTEMPTS = 2;
@@ -38,11 +39,16 @@ export class WindowManager {
   readonly #recoveryTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
   readonly #stabilityTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
   readonly #pendingRendererLoads = new Map<BrowserWindow, () => void>();
+  readonly #rendererReadyWebContents = new Set<number>();
+  readonly #pendingRendererReady = new Map<number, (ready: boolean) => void>();
   #desiredWidgetVisibility: DesiredWidgetVisibility | null = null;
   #widgetVisibilityGeneration = 0;
   #widgetExcludedFromCapture = false;
   #widgetCreation: Promise<boolean> | null = null;
   #pendingMainClose: Promise<void> | null = null;
+  #mainInitialLoadHandled = false;
+  #foregroundAllowed: boolean;
+  #explicitMainShowPending = false;
   #quitting = false;
 
   constructor(
@@ -55,11 +61,42 @@ export class WindowManager {
     this.#roles = roles;
     this.#settings = settings;
     this.#callbacks = callbacks;
+    this.#foregroundAllowed = callbacks.showMainOnFirstLoad;
   }
 
   async createAll(): Promise<void> {
-    // The widget is intentionally not preloaded. It is created only for an active session.
-    await Promise.all([this.#createAndLoad('main'), this.#createAndLoad('capture')]);
+    // Load the non-focusable widget before native activation can be enabled. Keeping it hidden
+    // avoids creating a foreground-capable surface in the middle of an activation gesture.
+    const [mainReady, captureReady, widgetReady] = await Promise.all([
+      this.#createAndLoad('main'),
+      this.#createAndLoad('capture'),
+      this.#createAndLoad('widget'),
+    ]);
+    if (this.#quitting) return;
+    if (!mainReady || !captureReady || !widgetReady) {
+      throw new Error('An application renderer could not be prepared');
+    }
+  }
+
+  isMainVisible(): boolean {
+    const main = this.#windows.get('main');
+    return main !== undefined && !main.isDestroyed() && main.isVisible();
+  }
+
+  hasPersistentWindowRoles(): boolean {
+    return (['main', 'capture', 'widget'] as const).every((role) => {
+      const window = this.#windows.get(role);
+      return window !== undefined && !window.isDestroyed();
+    });
+  }
+
+  markRendererReady(role: 'capture' | 'widget', webContentsId: number): void {
+    const window = this.#windows.get(role);
+    if (window === undefined || window.isDestroyed() || window.webContents.id !== webContentsId) {
+      return;
+    }
+    this.#rendererReadyWebContents.add(webContentsId);
+    this.#pendingRendererReady.get(webContentsId)?.(true);
   }
 
   getWebContents(): readonly WebContents[] {
@@ -145,7 +182,11 @@ export class WindowManager {
     this.#widgetVisibilityGeneration += 1;
     this.#desiredWidgetVisibility = null;
     this.#widgetExcludedFromCapture = false;
-    this.#destroyWidgetWindow();
+    const widget = this.#windows.get('widget');
+    if (widget !== undefined && !widget.isDestroyed()) {
+      widget.setFocusable(false);
+      widget.hide();
+    }
   }
 
   setWidgetInteractive(webContentsId: number, interactive: boolean): void {
@@ -156,17 +197,30 @@ export class WindowManager {
   }
 
   showMain(): void {
+    if (!this.#foregroundAllowed) return;
+    this.#showMain();
+  }
+
+  showMainByUser(): void {
+    this.#foregroundAllowed = true;
+    this.#explicitMainShowPending = true;
+    this.#showMain();
+  }
+
+  #showMain(): void {
     const main = this.#windows.get('main');
     if (main === undefined || main.isDestroyed()) return;
     if (main.isMinimized()) main.restore();
     main.show();
     main.focus();
+    this.#explicitMainShowPending = false;
   }
 
   beginQuit(): void {
     if (this.#quitting) return;
     this.#quitting = true;
     for (const invalidate of [...this.#pendingRendererLoads.values()]) invalidate();
+    for (const complete of [...this.#pendingRendererReady.values()]) complete(false);
     this.#clearTimers(this.#recoveryTimers);
     this.#clearTimers(this.#stabilityTimers);
   }
@@ -177,6 +231,7 @@ export class WindowManager {
       if (!window.isDestroyed()) window.destroy();
     }
     this.#windows.clear();
+    this.#rendererReadyWebContents.clear();
   }
 
   async #createAndLoad(role: WindowRole): Promise<boolean> {
@@ -193,6 +248,7 @@ export class WindowManager {
       return false;
     }
     if (loadOutcome === 'loaded') {
+      if (role !== 'main' && !(await this.#waitForRendererReady(window))) return false;
       this.#restoreDesiredWidgetAfterLoad(role, window);
       return true;
     }
@@ -209,6 +265,7 @@ export class WindowManager {
     const widget = this.#windows.get('widget');
     if (widget !== undefined) {
       this.#pendingRendererLoads.get(widget)?.();
+      this.#forgetRendererReady(widget);
       this.#windows.delete('widget');
       this.#roles.unregister(widget.webContents.id);
       if (!widget.isDestroyed()) widget.destroy();
@@ -247,6 +304,33 @@ export class WindowManager {
         finish('failed');
       }
     });
+  }
+
+  #waitForRendererReady(window: BrowserWindow): Promise<boolean> {
+    const webContentsId = window.webContents.id;
+    if (this.#rendererReadyWebContents.has(webContentsId)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (ready: boolean): void => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        if (this.#pendingRendererReady.get(webContentsId) === finish) {
+          this.#pendingRendererReady.delete(webContentsId);
+        }
+        resolve(ready);
+      };
+      const timer = setTimeout(() => finish(false), RENDERER_LOAD_TIMEOUT_MS);
+      timer.unref();
+      this.#pendingRendererReady.set(webContentsId, finish);
+      if (this.#rendererReadyWebContents.has(webContentsId)) finish(true);
+    });
+  }
+
+  #forgetRendererReady(window: BrowserWindow): void {
+    const webContentsId = window.webContents.id;
+    this.#rendererReadyWebContents.delete(webContentsId);
+    this.#pendingRendererReady.get(webContentsId)?.(false);
   }
 
   #setDesiredWidgetVisibility(
@@ -330,7 +414,20 @@ export class WindowManager {
         minHeight: 600,
       });
       window.once('ready-to-show', () => {
-        if (!this.#quitting && !window.isDestroyed()) window.show();
+        const initialLoad = !this.#mainInitialLoadHandled;
+        this.#mainInitialLoadHandled = true;
+        if (this.#explicitMainShowPending) {
+          this.#showMain();
+          return;
+        }
+        if (
+          initialLoad &&
+          this.#callbacks.showMainOnFirstLoad &&
+          !this.#quitting &&
+          !window.isDestroyed()
+        ) {
+          window.show();
+        }
       });
       window.on('close', (event) => {
         if (this.#quitting) return;
@@ -420,7 +517,9 @@ export class WindowManager {
 
   #recover(role: WindowRole, failed: BrowserWindow): void {
     if (this.#quitting || this.#windows.get(role) !== failed) return;
+    if (role === 'main') this.#mainInitialLoadHandled = true;
     this.#pendingRendererLoads.get(failed)?.();
+    this.#forgetRendererReady(failed);
     this.#clearRoleTimer(this.#stabilityTimers, role);
     const attempts = (this.#recoveryAttempts.get(role) ?? 0) + 1;
     this.#recoveryAttempts.set(role, attempts);

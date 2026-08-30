@@ -99,6 +99,7 @@ export class RecordingService {
   #defaultRebindFollowUp = false;
   #defaultRebindInFlight: Promise<void> | null = null;
   #disposed = false;
+  #shutdownPromise: Promise<void> | null = null;
   #welcomeMicrophoneBindingKnown = true;
   #explicitValidationGeneration = 0;
   #onMicrophoneUnavailable: (() => void) | null = null;
@@ -666,8 +667,8 @@ export class RecordingService {
     await this.#permission.openSettings();
   }
 
-  async shutdown(): Promise<void> {
-    if (this.#disposed) return;
+  shutdown(): Promise<void> {
+    if (this.#shutdownPromise !== null) return this.#shutdownPromise;
     this.#disposed = true;
     ++this.#operationGeneration;
     ++this.#deviceRefreshGeneration;
@@ -678,18 +679,21 @@ export class RecordingService {
     for (const waiter of this.#deviceRefreshWaiters) waiter.resolve();
     this.#deviceRefreshWaiters = [];
     const stopping = this.#stopActive();
-    await this.#enqueue(async () => {
-      await stopping;
-    });
-    this.#removeFrameListener();
-    this.#removeDeviceListener();
-    this.#removeDefaultInvalidationListener();
-    this.#removeStopListener();
-    this.#permission.releaseAll();
-    this.#systemAudio?.releaseAll();
-    this.#onMicrophoneUnavailable = null;
-    this.#onMicrophoneValidationChanged = null;
-    this.#capture.dispose();
+    this.#shutdownPromise = (async () => {
+      await this.#enqueue(async () => {
+        await stopping;
+      });
+      this.#removeFrameListener();
+      this.#removeDeviceListener();
+      this.#removeDefaultInvalidationListener();
+      this.#removeStopListener();
+      this.#permission.releaseAll();
+      this.#systemAudio?.releaseAll();
+      this.#onMicrophoneUnavailable = null;
+      this.#onMicrophoneValidationChanged = null;
+      this.#capture.dispose();
+    })();
+    return this.#shutdownPromise;
   }
 
   async #activateWithDeviceRefresh(

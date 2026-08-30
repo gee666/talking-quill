@@ -40,11 +40,20 @@ export function validateFinalArtifactInspection(
   strict: boolean,
 ): void;
 export function validatePhysicalEntries(entries: readonly string[]): void;
+export interface PackageEntryOptions {
+  readonly macosOwner?: boolean;
+  readonly windowsInstalledAcceptance?: boolean;
+}
 export function validatePhysicalPackageEntries(
   entries: readonly string[],
   target: 'win' | 'mac',
+  options?: PackageEntryOptions,
 ): void;
-export function validateResourceEntries(entries: readonly string[], target: 'win' | 'mac'): void;
+export function validateResourceEntries(
+  entries: readonly string[],
+  target: 'win' | 'mac',
+  options?: PackageEntryOptions,
+): void;
 export function validateSecretContent(path: string, source: string): void;
 export function validateRuntimeContent(path: string, source: string): void;
 export function normalizePackagePath(path: string): string;

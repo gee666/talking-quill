@@ -20,6 +20,7 @@ import {
   migrateSettingsV24,
   migrateSettingsV25,
   migrateSettingsV26,
+  migrateSettingsV27,
   migrateRemovedLargeModel,
   migrateUnverifiedWelcome,
   stripDiagnosticLoggingField,
@@ -157,4 +158,5 @@ export const SETTINGS_MIGRATIONS: SettingsMigrations = Object.freeze({
   24: (input) => migrateSettingsV24(LegacySettingsV24Schema.parse(stripRecordingOptions(input))),
   25: (input) => migrateSettingsV25(LegacySettingsV25Schema.parse(input)),
   26: (input) => migrateSettingsV26(LegacySettingsV26Schema.parse(input)),
+  27: (input) => migrateSettingsV27(input),
 });

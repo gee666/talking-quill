@@ -317,7 +317,7 @@ function compareEntries(left, right) {
   return `${left.role ?? ''}:${left.path}`.localeCompare(`${right.role ?? ''}:${right.path}`);
 }
 
-async function currentSourceTreeHash() {
+export async function currentSourceTreeHash() {
   if (process.env.TALKING_QUILL_REQUIRE_CLEAN_SOURCE === '1') {
     const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
       cwd: repositoryRoot,

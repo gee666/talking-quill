@@ -4,17 +4,6 @@ import {
   VoiceCommandSchema,
   type VoiceCommand,
 } from '../../../shared/schemas/commands';
-import {
-  DEFAULT_GENERAL_PROFILE,
-  DEFAULT_MARKDOWN_PROFILE,
-  DEFAULT_PROMPT_PROFILE,
-  DEFAULT_PROMPT_TO_ENGLISH_PROFILE,
-  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
-  GENERAL_PROFILE_ID,
-  PROMPT_PROFILE_ID,
-  defaultDictationProfiles,
-  isReservedBindingForProfile,
-} from '../../../shared/schemas/dictation-profiles';
 import { ProcessingModeSchema } from '../../../shared/schemas/history';
 import {
   DEFAULT_SETTINGS,
@@ -23,12 +12,21 @@ import {
   type Settings,
 } from '../../../shared/schemas/settings';
 import {
+  DEFAULT_GENERAL_PROFILE,
+  DEFAULT_MARKDOWN_PROFILE,
+  DEFAULT_PROMPT_PROFILE,
+  DEFAULT_PROMPT_TO_ENGLISH_PROFILE,
+  DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE,
+  GENERAL_PROFILE_ID,
+  PROMPT_PROFILE_ID,
   ShortcutKeySchema,
+  defaultDictationProfiles,
+  isReservedBindingForProfile,
   shortcutFromLegacyActivation,
   shortcutsConflict,
   shortcutsEqual,
   type Shortcut,
-} from '../../../shared/schemas/shortcut';
+} from './legacy-shortcut-contract';
 import { normalizeWhisperSourceLanguage } from '../../../shared/schemas/whisper-languages';
 import { utf8ByteLength } from '../../../shared/schemas/text-bounds';
 import {
@@ -46,6 +44,8 @@ import {
   type LegacySettingsV25,
 } from './legacy-settings-v25';
 import { LegacySettingsV26Schema, type LegacySettingsV26 } from './legacy-settings-v26';
+import { LegacySettingsV27Schema, type LegacySettingsV27 } from './legacy-settings-v27';
+import { LegacySettingsV27RelaxedSchema } from './legacy-settings-v27-relaxed';
 import type {
   LegacySettingsBase,
   LegacySettingsWithWelcomeProgress,
@@ -276,11 +276,30 @@ export function migrateSettingsV25(legacy: LegacySettingsV25): LegacySettingsV26
   });
 }
 
-export function migrateSettingsV26(legacy: LegacySettingsV26): Settings {
+export function migrateSettingsV26(legacy: LegacySettingsV26): LegacySettingsV27 {
   const migrated = structuredClone(legacy);
   normalizeDefaultMicrophone(migrated.recording);
-  return SettingsSchema.parse({
+  return LegacySettingsV27Schema.parse({
     ...migrated,
+    schemaVersion: 27,
+  });
+}
+
+export function migrateSettingsV27(input: Readonly<Record<string, unknown>>): Settings {
+  const released = LegacySettingsV27Schema.safeParse(input);
+  if (released.success) {
+    return SettingsSchema.parse({
+      ...structuredClone(released.data),
+      schemaVersion: SETTINGS_SCHEMA_VERSION,
+    });
+  }
+
+  // A development build briefly wrote the relaxed shared-prefix shape with the released v27
+  // discriminator. Rescue only data that is otherwise an exact current settings object; malformed
+  // v27 files must still take the normal corruption-recovery path.
+  const relaxed = LegacySettingsV27RelaxedSchema.parse(input);
+  return SettingsSchema.parse({
+    ...structuredClone(relaxed),
     schemaVersion: SETTINGS_SCHEMA_VERSION,
   });
 }

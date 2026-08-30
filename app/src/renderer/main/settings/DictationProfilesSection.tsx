@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   BuiltInDictationProfileIdSchema,
   MAX_DICTATION_PROFILES,
@@ -13,10 +13,10 @@ import {
   type DictationProfilePatch,
 } from '../../../shared/schemas/dictation-profiles';
 import type { Settings } from '../../../shared/schemas/settings';
+import { shortcutPlatformPolicy } from '../../../shared/schemas/shortcut-platform-policy';
 import {
   ShortcutKeySchema,
   shortcutFromLegacyActivation,
-  shortcutsConflict,
   shortcutsEqual,
   type Shortcut,
 } from '../../../shared/schemas/shortcut';
@@ -24,6 +24,7 @@ import { Button, Card, Input, Select, Status, TextArea } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 import { publicErrorMessage } from '../public-error';
 import { KeyboardShortcutInput } from './KeyboardShortcutInput';
+import { waitForShortcutCaptureRestorations } from './shortcut-capture-restoration';
 
 export function DictationProfilesSection({
   settings,
@@ -59,7 +60,7 @@ export function DictationProfilesSection({
         }));
       }
       setError(
-        'That profile couldn’t be saved. Give it a shortcut no other profile uses — and one that isn’t the start of another profile’s shortcut. The shortcuts that come with Talking Quill are always kept free.',
+        'That profile couldn’t be saved. Give it a valid shortcut no other profile uses. The exact shortcuts that come with Talking Quill are always kept free for their built-in profiles.',
       );
     } finally {
       setBusy(false);
@@ -78,11 +79,11 @@ export function DictationProfilesSection({
           profiles={settings.dictationProfiles}
           platform={platform}
           disabled={busy}
-          onSave={(next) => {
-            void mutate(profile.id, () =>
+          onSave={(next) =>
+            mutate(profile.id, () =>
               window.talkingQuill.profiles.update(profile.id, profilePatch(profile, next)),
-            );
-          }}
+            )
+          }
           {...(() => {
             const builtInId = BuiltInDictationProfileIdSchema.safeParse(profile.id);
             return builtInId.success
@@ -213,12 +214,14 @@ function ProfileEditor({
   readonly platform: string;
   readonly disabled: boolean;
   readonly create?: boolean;
-  readonly onSave: (profile: DictationProfile) => void;
+  readonly onSave: (profile: DictationProfile) => Promise<void>;
   readonly onDelete?: () => void;
   readonly onReset?: () => void;
 }) {
   const [draft, setDraft] = useState(profile);
   const [shortcutValid, setShortcutValid] = useState(true);
+  const [saveQueued, setSaveQueued] = useState(false);
+  const saveQueuedRef = useRef(false);
   const builtInMetadata = builtInDictationProfileMetadata(profile.id);
   const conflictingProfile = profiles.find(
     (candidate) =>
@@ -239,6 +242,8 @@ function ProfileEditor({
   const reservationError = reserved
     ? reservedConflictMessage(draft.shortcut, reservationOwner, platform)
     : undefined;
+  const platformPolicy = shortcutPlatformPolicy(draft.shortcut, platform);
+  const platformError = platformPolicy.status === 'impossible' ? platformPolicy.message : undefined;
   return (
     <fieldset className="gesture-test">
       <legend>{create ? 'New custom profile' : profile.name}</legend>
@@ -256,7 +261,7 @@ function ProfileEditor({
         shortcut={draft.shortcut}
         platform={platform}
         disabled={disabled}
-        error={reservationError ?? conflictError}
+        error={reservationError ?? conflictError ?? platformError}
         onChange={(shortcut) => setDraft({ ...draft, shortcut })}
         onCaptureValidityChange={setShortcutValid}
       />
@@ -291,13 +296,27 @@ function ProfileEditor({
         <Button
           disabled={
             disabled ||
+            saveQueued ||
             conflictingProfile !== undefined ||
             reserved ||
+            platformPolicy.status === 'impossible' ||
             !shortcutValid ||
             draft.name.trim().length === 0 ||
             (!create && JSON.stringify(draft) === JSON.stringify(profile))
           }
-          onClick={() => onSave(draft)}
+          onClick={() => {
+            if (saveQueuedRef.current) return;
+            saveQueuedRef.current = true;
+            setSaveQueued(true);
+            const candidate = structuredClone(draft);
+            void waitForShortcutCaptureRestorations()
+              .then(() => onSave(candidate))
+              .catch(() => undefined)
+              .finally(() => {
+                saveQueuedRef.current = false;
+                setSaveQueued(false);
+              });
+          }}
         >
           {create ? 'Create profile' : 'Save profile'}
         </Button>
@@ -323,10 +342,7 @@ function profileConflictMessage(
 ): string {
   const candidate = formatKeyboardShortcut(shortcut, platform);
   const existing = formatKeyboardShortcut(conflictingProfile.shortcut, platform);
-  if (shortcutsEqual(shortcut, conflictingProfile.shortcut)) {
-    return `${candidate} is already used by ${conflictingProfile.name} (${existing}). Pick a different one.`;
-  }
-  return `${candidate} gets in the way of ${conflictingProfile.name} (${existing}) — one shortcut starts with the other, so Talking Quill can’t tell them apart. Pick a different one.`;
+  return `${candidate} is already used by ${conflictingProfile.name} (${existing}). Pick a different one.`;
 }
 
 function reservedConflictMessage(
@@ -341,10 +357,7 @@ function reservedConflictMessage(
   }
   const ownerName = builtInDictationProfileName(ownerId);
   const reservedShortcut = formatKeyboardShortcut(binding.shortcut, platform);
-  if (shortcutsEqual(shortcut, binding.shortcut)) {
-    return `${candidate} is the original shortcut for ${ownerName} (${reservedShortcut}), which stays reserved. Pick a different one.`;
-  }
-  return `${candidate} gets in the way of the original ${ownerName} shortcut (${reservedShortcut}) — one starts with the other. Pick a different one.`;
+  return `${candidate} is the original shortcut for ${ownerName} (${reservedShortcut}), which stays reserved for that profile. Pick a different one.`;
 }
 
 function profilePatch(current: DictationProfile, next: DictationProfile): DictationProfilePatch {
@@ -372,7 +385,7 @@ function firstAvailableShortcut(profiles: readonly DictationProfile[]): Shortcut
   for (const key of ShortcutKeySchema.options) {
     const shortcut = shortcutFromLegacyActivation(key, false);
     if (
-      !profiles.some((profile) => shortcutsConflict(profile.shortcut, shortcut)) &&
+      !profiles.some((profile) => shortcutsEqual(profile.shortcut, shortcut)) &&
       !isReservedBindingForProfile('custom', shortcut)
     ) {
       return shortcut;

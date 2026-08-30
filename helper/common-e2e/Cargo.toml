@@ -1,0 +1,20 @@
+[package]
+name = "talking-quill-common-e2e"
+version = "0.0.68"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+license = "MIT"
+description = "Non-promotable cross-process gateway/owner integration suites"
+
+[dependencies]
+serde_json = { version = "=1.0.150", features = ["raw_value"] }
+talking-quill-helper = { path = ".." }
+talking-quill-keyboard-owner = { path = "../keyboard-owner" }
+talking-quill-owner-protocol = { path = "../owner-protocol", features = ["test-transport"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"

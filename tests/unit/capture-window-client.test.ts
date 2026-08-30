@@ -32,7 +32,7 @@ function harness() {
     postMessage: vi.fn(),
   };
   const channelFactory: CaptureMessageChannelFactory = () => ({ port1, port2 });
-  const client = new CaptureWindowClient(channelFactory);
+  const client = new CaptureWindowClient(channelFactory, () => 'capture');
   client.attach(webContents as unknown as Electron.WebContents);
   return { client, port1, port2, webContents };
 }
@@ -341,11 +341,14 @@ describe('CaptureWindowClient', () => {
       { port1: oldPort, port2: oldTransferredPort },
       { port1: newPort, port2: newTransferredPort },
     ];
-    const client = new CaptureWindowClient(() => {
-      const channel = channels.shift();
-      if (channel === undefined) throw new Error('No test channel');
-      return channel;
-    });
+    const client = new CaptureWindowClient(
+      () => {
+        const channel = channels.shift();
+        if (channel === undefined) throw new Error('No test channel');
+        return channel;
+      },
+      () => 'capture',
+    );
     const contents = { postMessage: vi.fn() } as unknown as Electron.WebContents;
     client.attach(contents);
     client.attach(contents);

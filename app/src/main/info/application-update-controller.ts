@@ -4,10 +4,15 @@ import {
   type UpdateCheckResult,
 } from '../../shared/schemas/info';
 import { compareVersions, normalizeVersion } from './update-service';
+import {
+  MacosMaintenancePostponedError,
+  type DownloadedApplicationUpdate,
+} from './macos-owner-update-coordinator';
 
 export interface ApplicationUpdateBackend {
   checkForUpdates(): Promise<{ readonly version: string } | null>;
-  downloadUpdate(): Promise<void>;
+  downloadUpdate(): Promise<DownloadedApplicationUpdate | undefined>;
+  requestElevation?(): Promise<'accepted' | 'cancelled'>;
   quitAndInstall(): void;
   onProgress(listener: (percent: number) => void): () => void;
   onError(listener: () => void): () => void;
@@ -19,6 +24,7 @@ export interface ApplicationUpdateControllerOptions {
   readonly backend: ApplicationUpdateBackend | null;
   readonly publish: (state: ApplicationUpdateState) => void;
   readonly requestInstall: () => void;
+  readonly prepareInstall?: (download: DownloadedApplicationUpdate) => Promise<void>;
 }
 
 /** Owns the consent boundary between release discovery and installer execution. */
@@ -27,9 +33,12 @@ export class ApplicationUpdateController {
   readonly #backend: ApplicationUpdateBackend | null;
   readonly #publish: (state: ApplicationUpdateState) => void;
   readonly #requestInstall: () => void;
+  readonly #prepareInstall: ((download: DownloadedApplicationUpdate) => Promise<void>) | null;
   readonly #removeBackendListeners: (() => void)[] = [];
   #state: ApplicationUpdateState;
   #operation: Promise<void> | null = null;
+  #downloaded: { readonly version: string; readonly update: DownloadedApplicationUpdate } | null =
+    null;
   #disposed = false;
 
   constructor(options: ApplicationUpdateControllerOptions) {
@@ -37,6 +46,7 @@ export class ApplicationUpdateController {
     this.#backend = options.backend;
     this.#publish = options.publish;
     this.#requestInstall = options.requestInstall;
+    this.#prepareInstall = options.prepareInstall ?? null;
     this.#state = ApplicationUpdateStateSchema.parse({
       phase: options.backend === null ? 'unsupported' : 'idle',
       currentVersion: this.#currentVersion,
@@ -76,9 +86,10 @@ export class ApplicationUpdateController {
           this.#backend === null ? 'This build requires updates to be installed manually.' : null,
       });
     }
-    return this.#setState({
+    const availableVersion = normalizeVersion(result.latestVersion);
+    const state = this.#setState({
       phase: this.#backend === null ? 'unsupported' : 'available',
-      availableVersion: normalizeVersion(result.latestVersion),
+      availableVersion,
       releaseUrl: result.releaseUrl,
       percent: null,
       message:
@@ -86,6 +97,13 @@ export class ApplicationUpdateController {
           ? 'Install this release manually from its GitHub release page.'
           : null,
     });
+    if (this.#backend !== null && this.#operation === null) {
+      this.#setState({ phase: 'downloading', percent: 0, message: null });
+      this.#operation = this.#downloadAutomatically(availableVersion).finally(() => {
+        this.#operation = null;
+      });
+    }
+    return state;
   }
 
   apply(): ApplicationUpdateState {
@@ -99,8 +117,8 @@ export class ApplicationUpdateController {
       return this.#state;
     }
     const expectedVersion = this.#state.availableVersion;
-    this.#setState({ phase: 'downloading', percent: 0, message: null });
-    this.#operation = this.#downloadAndInstall(expectedVersion).finally(() => {
+    this.#setState({ phase: 'installing', percent: 100, message: null });
+    this.#operation = this.#prepareAndInstall(expectedVersion).finally(() => {
       this.#operation = null;
     });
     return this.#state;
@@ -120,24 +138,26 @@ export class ApplicationUpdateController {
     this.#backend?.dispose();
   }
 
-  async #downloadAndInstall(expectedVersion: string): Promise<void> {
+  async #downloadAutomatically(expectedVersion: string): Promise<void> {
     try {
       const backend = this.#backend;
       if (backend === null) throw new Error('The update backend is unavailable');
-      const update = await backend.checkForUpdates();
+      const checked = await backend.checkForUpdates();
       if (
         this.#disposed ||
-        update === null ||
-        normalizeVersion(update.version) !== expectedVersion
+        checked === null ||
+        normalizeVersion(checked.version) !== expectedVersion
       ) {
         throw new Error('The update metadata did not match the selected release');
       }
-      await backend.downloadUpdate();
+      const update = await backend.downloadUpdate();
       if (this.#isDisposed()) return;
-      this.#setState({ phase: 'installing', percent: 100, message: null });
-      this.#requestInstall();
+      if (update === undefined) throw new Error('The updater did not identify its candidate');
+      this.#downloaded = { version: expectedVersion, update };
+      this.#setState({ phase: 'available', percent: null, message: null });
     } catch {
       if (!this.#disposed) {
+        this.#downloaded = null;
         this.#setState({
           phase: 'error',
           percent: null,
@@ -147,8 +167,45 @@ export class ApplicationUpdateController {
     }
   }
 
+  async #prepareAndInstall(expectedVersion: string): Promise<void> {
+    try {
+      const downloaded = this.#downloaded;
+      if (downloaded?.version !== expectedVersion) {
+        throw new Error('The exact downloaded update identity is unavailable');
+      }
+      await this.#prepareInstall?.(downloaded.update);
+      if (!this.#installationStillActive()) return;
+      const elevation = await this.#backend?.requestElevation?.();
+      if (!this.#installationStillActive()) return;
+      if (elevation === 'cancelled') {
+        this.#setState({
+          phase: 'available',
+          percent: null,
+          message: 'Administrator approval was cancelled. The update remains available.',
+        });
+        return;
+      }
+      this.#requestInstall();
+    } catch (error: unknown) {
+      if (!this.#disposed) {
+        this.#setState({
+          phase: 'error',
+          percent: null,
+          message:
+            error instanceof MacosMaintenancePostponedError
+              ? error.message
+              : 'The update could not be prepared. Try again or use the release page.',
+        });
+      }
+    }
+  }
+
   #isDisposed(): boolean {
     return this.#disposed;
+  }
+
+  #installationStillActive(): boolean {
+    return !this.#disposed && this.#state.phase === 'installing';
   }
 
   #handleProgress(value: number): void {

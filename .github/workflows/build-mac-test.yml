@@ -1,4 +1,4 @@
-name: Build macOS test packages
+name: Build gated macOS diagnostic packages
 
 on:
   workflow_dispatch:
@@ -6,9 +6,106 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: macos-diagnostics
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: macOS ${{ matrix.arch }}
+  prepare:
+    name: Resolve trusted source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Require the canonical default branch
+        shell: bash
+        run: |
+          test "$GITHUB_REPOSITORY" = "gee666/talking-quill"
+          test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - id: identity
+        name: Freeze commit and version
+        shell: bash
+        run: |
+          commit="$(git rev-parse 'HEAD^{commit}')"
+          version="$(node -p "require('./package.json').version")"
+          test "$commit" = "$GITHUB_SHA"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'commit=%s\nversion=%s\n' "$commit" "$version" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Complete validation, security, and release audits
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm rust:fetch-targets
+      - run: pnpm validate:unsigned-release
+      - name: Install the pinned RustSec scanner
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
+        with:
+          tool: cargo-audit@0.22.2
+          fallback: none
+      - run: pnpm security:gate
+
+  owner-native-units:
+    name: Owner non-promotable test-seam units (${{ matrix.arch }})
+    needs: [prepare, validate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: [self-hosted, macOS, ARM64, talking-quill-permissioned]
+          - arch: x64
+            runner: [self-hosted, macOS, X64, talking-quill-permissioned]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - run: pnpm install --frozen-lockfile
+      - name: Compile owner units with non-promotable diagnostic seams
+        run: >-
+          cargo test --manifest-path helper/Cargo.toml --locked
+          -p talking-quill-keyboard-owner
+          --features transactional-shortcuts-dev --lib -- --nocapture
+
+  build-diagnostics:
+    name: Build fully gated macOS diagnostic (${{ matrix.arch }})
+    needs: [prepare, validate, owner-native-units]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -25,63 +122,48 @@ jobs:
       TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: none
       TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'
-
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: 11.17.0
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24.15.0
           cache: pnpm
-
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           target: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build application
-        run: pnpm --filter @talking-quill/app build
-
-      - name: Build native helper
-        run: node scripts/build-helper.mjs --platform darwin --arch ${{ matrix.arch }}
-
-      - name: Package unsigned application
-        working-directory: app
-        run: >-
-          pnpm exec electron-builder
-          --config ../build/electron-builder.yml
-          --mac dir
-          --${{ matrix.arch }}
-          -c.mac.sign=false
-
-      - name: Ad-hoc sign and verify
+      - run: pnpm install --frozen-lockfile
+      - name: Compile and run permission-free native units
         shell: bash
         run: |
+          target="${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}"
+          cargo check --manifest-path helper/Cargo.toml --locked --all-targets --target "$target"
+          cargo test --manifest-path helper/Cargo.toml --locked --all-targets
+          cargo test --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --all-targets --features transactional-shortcuts-dev
+          cargo clippy --manifest-path helper/Cargo.toml --locked -p talking-quill-keyboard-owner --all-targets --target "$target" --features transactional-shortcuts-dev -- -D warnings
+      - name: Build, package, sign, and inspect the application
+        shell: bash
+        run: |
+          pnpm --filter @talking-quill/app build
+          node scripts/build-helper.mjs --platform darwin --arch "${{ matrix.arch }}"
+          (cd app && pnpm exec electron-builder --config ../build/electron-builder.yml --mac dir --${{ matrix.arch }} -c.mac.sign=false)
           if [[ "${{ matrix.arch }}" == "arm64" ]]; then
             app_path="release/mac-arm64/Talking Quill.app"
+            package_root="release/mac-arm64"
           else
             app_path="release/mac/Talking Quill.app"
+            package_root="release/mac"
           fi
           codesign --force --deep --sign - --options runtime "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-
-      - name: Inspect packaged application
-        shell: bash
-        run: |
-          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            package_root="release/mac-arm64"
-          else
-            package_root="release/mac"
-          fi
           node scripts/inspect-package.mjs "$package_root"
-
-      - name: Create test ZIP and checksum
+      - name: Create, extract, inspect, and checksum the exact diagnostic archive
         shell: bash
         run: |
           if [[ "${{ matrix.arch }}" == "arm64" ]]; then
@@ -89,15 +171,21 @@ jobs:
           else
             app_path="release/mac/Talking Quill.app"
           fi
-          zip_path="release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip"
+          filename="Talking-Quill-${{ needs.prepare.outputs.version }}-mac-${{ matrix.arch }}-test.zip"
+          zip_path="release/$filename"
+          extracted="tmp/diagnostic-archive-${{ matrix.arch }}"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
-          shasum -a 256 "$zip_path" > "$zip_path.sha256"
-
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+          mkdir -p "$extracted"
+          ditto -x -k "$zip_path" "$extracted"
+          codesign --verify --deep --strict --verbose=2 "$extracted/Talking Quill.app"
+          node scripts/inspect-package.mjs "$extracted"
+          (cd release && shasum -a 256 "$filename" > "$filename.sha256" && shasum -a 256 -c "$filename.sha256")
+      - name: Upload only after validation and non-promotable diagnostic units pass
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: Talking-Quill-mac-${{ matrix.arch }}-test
+          name: Talking-Quill-mac-${{ matrix.arch }}-diagnostic
           path: |
-            release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip
-            release/Talking-Quill-0.0.3-mac-${{ matrix.arch }}-test.zip.sha256
+            release/Talking-Quill-${{ needs.prepare.outputs.version }}-mac-${{ matrix.arch }}-test.zip
+            release/Talking-Quill-${{ needs.prepare.outputs.version }}-mac-${{ matrix.arch }}-test.zip.sha256
           if-no-files-found: error
           retention-days: 14

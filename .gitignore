@@ -14,9 +14,11 @@ coverage/
 
 # Native build output
 helper/target/
+helper/**/target/
 app/native/
 
-# Local configuration and secrets
+# Local agent plans, configuration, and secrets
+.agent-plans/
 .env
 .env.*
 !.env.example

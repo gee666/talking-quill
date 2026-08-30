@@ -2,7 +2,13 @@ import { readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test';
-import { rendererPages, resetProfile } from './helpers';
+import {
+  rendererIsolation,
+  rendererPages,
+  resetProfile,
+  widgetIsVisible,
+  widgetPage,
+} from './helpers';
 
 const electronModule: unknown = createRequire(resolve('package.json'))('electron');
 if (typeof electronModule !== 'string') throw new Error('Electron executable is unavailable');
@@ -112,8 +118,7 @@ test('real Chromium fake media traverses capture, session, and widget with reset
     env: { ...process.env, NODE_ENV: 'test' },
   });
   try {
-    const { capture, main, widget } = await rendererPages(application);
-    await widget.emulateMedia({ reducedMotion: 'reduce' });
+    const { capture, main } = await rendererPages(application);
     await expect
       .poll(() => capture.evaluate(() => document.documentElement.dataset.ready))
       .toBe('true');
@@ -124,6 +129,30 @@ test('real Chromium fake media traverses capture, session, and widget with reset
       )
       .toBe('ready');
     await driverCall(application, 'activationComplete', [100]);
+    const widget = await widgetPage(application);
+    expect(await rendererIsolation(widget)).toEqual({
+      requireType: 'undefined',
+      processType: 'undefined',
+      bufferType: 'undefined',
+      moduleType: 'undefined',
+      localStorage: {},
+    });
+    expect(
+      await widget.evaluate(() => ({
+        main: Reflect.has(window, 'talkingQuill'),
+        capture: Reflect.has(window, 'talkingQuillCapture'),
+        keys: Object.keys(window.talkingQuillWidget),
+        frozen: Object.isFrozen(window.talkingQuillWidget),
+        rawIpc: typeof Reflect.get(globalThis, 'ipcRenderer'),
+      })),
+    ).toEqual({
+      main: false,
+      capture: false,
+      keys: ['ready', 'stop', 'cancel', 'setInteractive', 'onSessionChanged'],
+      frozen: true,
+      rawIpc: 'undefined',
+    });
+    await widget.emulateMedia({ reducedMotion: 'reduce' });
     await expect
       .poll(async () => (await snapshot(application)).session.phase)
       .toMatch(/recording/u);
@@ -137,7 +166,6 @@ test('real Chromium fake media traverses capture, session, and widget with reset
     ).toBe(true);
     await driverCall(application, 'key', ['escape']);
     await waitForPhase(application, 'cancelled');
-    await resetSession(application);
     await expect(meter).toHaveAttribute('aria-valuenow', '0');
     await expect(meter).toHaveAttribute('aria-valuetext', '0 percent, silent');
     await widget.reload();
@@ -145,6 +173,8 @@ test('real Chromium fake media traverses capture, session, and widget with reset
       'aria-valuenow',
       '0',
     );
+    await resetSession(application);
+    await expect.poll(() => widgetIsVisible(application)).toBe(false);
   } finally {
     await application.close();
   }
@@ -159,7 +189,7 @@ test('widget sizes keep DIP geometry, content, actions, and screenshots aligned'
     env: { ...process.env, NODE_ENV: 'test' },
   });
   try {
-    const { main, widget } = await rendererPages(application);
+    const { main } = await rendererPages(application);
     const sizes = [
       ['default', 360, 96],
       ['large', 440, 112],
@@ -172,6 +202,7 @@ test('widget sizes keep DIP geometry, content, actions, and screenshots aligned'
         size,
       );
       await beginExtended(application, sizes.findIndex(([candidate]) => candidate === size) + 1);
+      const widget = await widgetPage(application);
       const geometry = await application.evaluate(({ BrowserWindow, screen }) => {
         const window = BrowserWindow.getAllWindows().find(
           (candidate) => candidate.getTitle() === 'Talking Quill Widget',
@@ -187,6 +218,9 @@ test('widget sizes keep DIP geometry, content, actions, and screenshots aligned'
       expect(geometry.bounds.y + height).toBeLessThanOrEqual(
         geometry.workArea.y + geometry.workArea.height,
       );
+      await expect
+        .poll(() => widget.evaluate(() => ({ width: innerWidth, height: innerHeight })))
+        .toEqual({ width, height });
       const layout = await widget.evaluate(() => {
         const shell = document.querySelector<HTMLElement>('.widget-shell');
         if (shell === null) throw new Error('Widget shell unavailable');
@@ -236,6 +270,7 @@ test('widget sizes keep DIP geometry, content, actions, and screenshots aligned'
       await widget.getByRole('button', { name: 'Cancel dictation' }).click();
       await waitForPhase(application, 'cancelled');
       await resetSession(application);
+      await expect.poll(() => widgetIsVisible(application)).toBe(false);
     }
   } finally {
     await application.close();
@@ -251,7 +286,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     env: { ...process.env, NODE_ENV: 'test' },
   });
   try {
-    const { main, widget } = await rendererPages(application);
+    const { main } = await rendererPages(application);
     await main.getByRole('button', { name: 'Settings' }).click();
 
     // Renderer capture retains physical held-key order and leaves Tab navigation available.
@@ -291,6 +326,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
 
     // Quick trailing-silence submit. Actual injected PCM/RMS reaches the live widget meter.
     await beginQuick(application, 1);
+    let widget = await widgetPage(application);
     const widgetMeter = widget.getByRole('meter', { name: 'Microphone level' });
     await expect
       .poll(async () => Number(await widgetMeter.getAttribute('aria-valuenow')))
@@ -300,8 +336,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await waitForPhase(application, 'completed');
     expect((await snapshot(application)).insertion.targetText).toBe('deterministic transcript');
     await resetSession(application);
-    await expect(widgetMeter).toHaveAttribute('aria-valuenow', '0');
-    await expect(widgetMeter).toHaveAttribute('aria-valuetext', '0 percent, silent');
+    await expect.poll(() => widgetIsVisible(application)).toBe(false);
 
     // Quick Enter submit.
     await beginQuick(application, 2);
@@ -326,6 +361,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     // Extended pointer Stop keeps the target window's keyboard focus throughout.
     await driverCall(application, 'setTranscript', ['pointer-preserved target']);
     await beginExtended(application, 5);
+    widget = await widgetPage(application);
     const widgetGeometry = await application.evaluate(({ BrowserWindow, screen }) => {
       const window = BrowserWindow.getAllWindows().find(
         (candidate) => candidate.getTitle() === 'Talking Quill Widget',
@@ -342,7 +378,9 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     expect(widgetGeometry.bounds.x).toBeGreaterThanOrEqual(widgetGeometry.workArea.x);
     expect(widgetGeometry.bounds.y).toBeGreaterThanOrEqual(widgetGeometry.workArea.y);
     const stop = widget.getByRole('button', { name: 'Stop Extended Dictation' });
-    await expect(stop).toHaveAccessibleDescription(/global Enter to submit, Escape to cancel/i);
+    await expect(stop).toHaveAccessibleDescription(
+      /Press Enter or your dictation shortcut again to finish, Escape to cancel/i,
+    );
     await stop.hover();
     await expect
       .poll(() =>
@@ -373,6 +411,7 @@ test('Task 6 deterministic composition drives gestures, widget, insertion, and t
     await waitForPhase(application, 'cancelled');
     await resetSession(application);
     await beginExtended(application, 7);
+    widget = await widgetPage(application);
     const cancel = widget.getByRole('button', { name: 'Cancel dictation' });
     await cancel.hover();
     await cancel.click();

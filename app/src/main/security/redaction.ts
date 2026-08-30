@@ -2,7 +2,7 @@ import { isIP } from 'node:net';
 
 const REDACTED = '[REDACTED]';
 const SENSITIVE_KEY =
-  /(?:authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|token|secret|password|credential|body|transcript|prompt|input|output|response|endpoint|url|uri|host|hostname|address|\bip\b)/i;
+  /(?:authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|token|secret|password|credential|body|transcript|prompt|input|output|response|endpoint|instance[-_]?id|build[-_]?id|lease[-_]?epoch|url|uri|host|hostname|address|\bip\b)/i;
 const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>]+/gi;
 const BEARER_PATTERN = /\b(?:bearer|basic)\s+[a-z0-9._~+/=-]+/gi;
 const IPV4_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
@@ -19,6 +19,7 @@ export function redactText(value: string, secrets: readonly string[] = []): stri
     (left, right) => right.length - left.length,
   );
   for (const secret of orderedSecrets) redacted = redacted.split(secret).join(REDACTED);
+  if (/^\d+\.\d+\.\d+$/u.test(redacted)) return redacted;
   return redacted
     .replace(NETWORK_ERROR_HOST_PATTERN, '$1 [REDACTED]')
     .replace(URL_PATTERN, REDACTED)

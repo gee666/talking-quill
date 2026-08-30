@@ -278,7 +278,7 @@ describe('PiProvider prepared single-use RPC completion', () => {
   });
 
   it.each([
-    ['unsupported version', '0.84.3'],
+    ['unsupported version', '0.84.4'],
     ['RPC readiness failure', PI_RPC_PROTOCOL_VERSION],
   ])(
     'falls back exactly once to frozen print mode after %s before prompt write',
