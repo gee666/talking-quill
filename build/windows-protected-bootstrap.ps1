@@ -5,7 +5,9 @@ $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonA
 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 $bytes = New-Object byte[] 16
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-$leaf = Join-Path $programData ('.Talking Quill.Installer-' + (-join ($bytes | ForEach-Object { $_.ToString('x2') })))
+$runId = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+$leaf = Join-Path $programData ('.Talking Quill.Installer-' + $runId)
+$leafIdentity = $null
 $directoryAcl = New-Object Security.AccessControl.DirectorySecurity
 $directoryAcl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
 $directoryAcl.SetAccessRuleProtection($true, $false)
@@ -14,10 +16,10 @@ foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
     $directoryAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
         $identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
 }
-[IO.Directory]::CreateDirectory($leaf, $directoryAcl) | Out-Null
+$leafDirectory = [IO.Directory]::CreateDirectory($leaf, $directoryAcl)
+try {
 [Environment]::SetEnvironmentVariable('TEMP', $leaf, 'Process')
 [Environment]::SetEnvironmentVariable('TMP', $leaf, 'Process')
-try {
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -66,6 +68,30 @@ public static class TalkingQuillProtectedBootstrapNative
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(
+        string name, uint access, uint share, IntPtr security, uint creation,
+        uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        IntPtr file, out ByHandleFileInformation information);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        internal uint FileAttributes;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        internal uint VolumeSerialNumber;
+        internal uint FileSizeHigh;
+        internal uint FileSizeLow;
+        internal uint NumberOfLinks;
+        internal uint FileIndexHigh;
+        internal uint FileIndexLow;
+    }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool QueryFullProcessImageName(
@@ -161,6 +187,22 @@ public static class TalkingQuillProtectedBootstrapNative
         }
     }
 
+    public static string GetPathIdentity(string path)
+    {
+        IntPtr file = CreateFile(path, 0x80, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (file == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(file, out information))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            return information.VolumeSerialNumber.ToString("x8") + ":" +
+                information.FileIndexHigh.ToString("x8") +
+                information.FileIndexLow.ToString("x8");
+        }
+        finally { CloseHandle(file); }
+    }
+
     public static string JoinArguments(string[] arguments)
     {
         StringBuilder result = new StringBuilder();
@@ -200,6 +242,71 @@ public static class TalkingQuillProtectedBootstrapNative
     }
 }
 '@
+
+function Test-OwnedLeaf([string]$path, [string]$identity) {
+    try {
+        $fullPath = [IO.Path]::GetFullPath($path).TrimEnd('\')
+        if ([IO.Path]::GetDirectoryName($fullPath) -cne $programData -or
+            [IO.Path]::GetFileName($fullPath) -cnotmatch '^\.Talking Quill\.Installer-[0-9a-f]{32}$') { return $false }
+        $item = Get-Item -Force -LiteralPath $fullPath
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        if ([TalkingQuillProtectedBootstrapNative]::GetPathIdentity($fullPath) -cne $identity) {
+            return $false
+        }
+        $pending = New-Object Collections.Generic.Stack[string]
+        $pending.Push($fullPath)
+        while ($pending.Count -ne 0) {
+            foreach ($childItem in @(Get-ChildItem -Force -LiteralPath $pending.Pop())) {
+                if (($childItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    return $false
+                }
+                if ($childItem.PSIsContainer) { $pending.Push($childItem.FullName) }
+            }
+        }
+        $acl = Get-Acl -LiteralPath $fullPath
+        $allowed = @('S-1-5-18', 'S-1-5-32-544')
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+        return $acl.AreAccessRulesProtected -and $owner -in $allowed -and $rules.Count -eq 2 -and
+            @($rules | Where-Object {
+                $_.AccessControlType -ne 'Allow' -or $_.IdentityReference.Value -notin $allowed -or
+                $_.FileSystemRights -ne 'FullControl' -or
+                $_.InheritanceFlags -ne 'ContainerInherit, ObjectInherit' -or
+                $_.PropagationFlags -ne 'None'
+            }).Count -eq 0
+    } catch { return $false }
+}
+
+function Write-LeafManifest([string]$state, $childProcess) {
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        kind = 'talking-quill-protected-bootstrap'
+        runId = $runId
+        leafName = [IO.Path]::GetFileName($leaf)
+        identity = $leafIdentity
+        createdUtc = $script:createdUtc
+        bootstrapPid = $PID
+        bootstrapStartUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+        childPid = if ($null -eq $childProcess) { $null } else { $childProcess.Id }
+        childStartUtc = if ($null -eq $childProcess) { $null } else { $childProcess.StartTime.ToUniversalTime().ToString('o') }
+        state = $state
+    }
+    $pending = Join-Path $leaf '.talking-quill-bootstrap-manifest.pending'
+    $final = Join-Path $leaf '.talking-quill-bootstrap-manifest.json'
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($manifest | ConvertTo-Json -Compress))
+    $stream = New-Object IO.FileStream($pending, 'Create', 'Write', 'None', 4096, 'WriteThrough')
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    if ([IO.File]::Exists($final)) {
+        $previous = $final + '.previous'
+        [IO.File]::Replace($pending, $final, $previous)
+        [IO.File]::Delete($previous)
+    } else { [IO.File]::Move($pending, $final) }
+}
+
+$leafIdentity = [TalkingQuillProtectedBootstrapNative]::GetPathIdentity($leaf)
+$script:createdUtc = [DateTime]::UtcNow.ToString('o')
+Write-LeafManifest 'created' $null
 
 $parent = [TalkingQuillProtectedBootstrapNative]::ReadWaitingParent()
 $parentExecutable = $parent[0]
@@ -244,7 +351,7 @@ if (-not [string]::IsNullOrEmpty($nsisTail)) {
 if ($null -ne $protectedTemp) {
     $path = [IO.Path]::GetFullPath($protectedTemp)
     if ([IO.Path]::GetDirectoryName($path) -cne $programData -or
-        -not [IO.Path]::GetFileName($path).StartsWith('.Talking Quill.Installer-', [StringComparison]::Ordinal)) {
+        [IO.Path]::GetFileName($path) -cnotmatch '^\.Talking Quill\.Installer-[0-9a-f]{32}$') {
         exit 78
     }
     if (-not $path.Equals($inheritedTemp, [StringComparison]::Ordinal) -or
@@ -280,8 +387,37 @@ $start.UseShellExecute = $false
 $start.EnvironmentVariables['TEMP'] = $leaf
 $start.EnvironmentVariables['TMP'] = $leaf
 $child = [Diagnostics.Process]::Start($start)
+Write-LeafManifest 'running' $child
 $child.WaitForExit()
-exit $child.ExitCode
+$childExitCode = $child.ExitCode
+Write-LeafManifest 'completed' $child
+exit $childExitCode
+} catch {
+    [Console]::Error.WriteLine('Protected bootstrap failed: ' + $_.Exception.Message)
+    exit 78
 } finally {
-    Remove-Item -LiteralPath $leaf -Recurse -Force -ErrorAction SilentlyContinue
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (-not (Test-Path -LiteralPath $leaf)) { break }
+        if ($null -ne $leafIdentity) {
+            if (-not (Test-OwnedLeaf $leaf $leafIdentity)) {
+                [Console]::Error.WriteLine('Protected bootstrap refused to remove a leaf whose validated identity changed or contains a reparse point.')
+                break
+            }
+            Remove-Item -LiteralPath $leaf -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            try {
+                $fallbackPath = [IO.Path]::GetFullPath($leafDirectory.FullName).TrimEnd('\')
+                $fallbackItem = Get-Item -Force -LiteralPath $fallbackPath
+                if ([IO.Path]::GetDirectoryName($fallbackPath) -cne $programData -or
+                    [IO.Path]::GetFileName($fallbackPath) -cnotmatch '^\.Talking Quill\.Installer-[0-9a-f]{32}$' -or
+                    ($fallbackItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    @(Get-ChildItem -Force -LiteralPath $fallbackPath).Count -ne 0) { break }
+                [IO.Directory]::Delete($fallbackPath, $false)
+            } catch { }
+        }
+        if (Test-Path -LiteralPath $leaf) { Start-Sleep -Milliseconds 250 }
+    }
+    if (Test-Path -LiteralPath $leaf) {
+        [Console]::Error.WriteLine('Protected bootstrap could not remove its ProgramData leaf after bounded retries: ' + $leaf)
+    }
 }

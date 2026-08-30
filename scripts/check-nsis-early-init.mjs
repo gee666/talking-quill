@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import {
@@ -74,8 +75,20 @@ try {
     }
   }
   if (process.platform === 'win32') {
-    await runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot);
-    await runProtectedBootstrapIntegration(workDirectory, bootstrapPayload);
+    const startingResidue = await snapshotProtectedBootstrapResidue();
+    try {
+      await runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot);
+      await assertProtectedBootstrapResidueUnchanged(
+        startingResidue,
+        'compiled protected bootstrap runtime harness',
+      );
+      await runProtectedBootstrapIntegration(workDirectory, bootstrapPayload);
+    } finally {
+      await assertProtectedBootstrapResidueUnchanged(
+        startingResidue,
+        'complete protected bootstrap runtime harness',
+      );
+    }
   }
 } finally {
   await rm(workDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -92,10 +105,13 @@ async function writeFixtureBootstrapInclude(workDirectory, expectedNsisRoot) {
   const productionSource = await readFile(protectedBootstrapSourcePath, 'utf8');
   const expectedRootLine = "$expectedNsisRoot = Join-Path $nativeProgramFiles 'Talking Quill'";
   const fixtureRoot = expectedNsisRoot.replaceAll("'", "''");
-  const fixtureSource = productionSource.replace(
-    expectedRootLine,
-    `$expectedNsisRoot = '${fixtureRoot}'`,
-  );
+  const bootstrapErrorLog = join(workDirectory, 'bootstrap-errors.txt').replaceAll("'", "''");
+  const fixtureSource = productionSource
+    .replace(expectedRootLine, `$expectedNsisRoot = '${fixtureRoot}'`)
+    .replace(
+      "[Console]::Error.WriteLine('Protected bootstrap failed: ' + $_.Exception.Message)",
+      `[IO.File]::AppendAllText('${bootstrapErrorLog}', $_.Exception.ToString() + [Environment]::NewLine)`,
+    );
   if (fixtureSource === productionSource) {
     throw new Error('Protected bootstrap fixture root anchor is missing');
   }
@@ -152,10 +168,19 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
     const invocationArguments = [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'];
     let rawArguments = invocationArguments.map(quoteWindowsArgument).join(' ');
     if (label === 'uninstaller') rawArguments += ` _?=${nsisPath(uninstallerRoot)}`;
-    const result = spawnWithRawArguments(executable, rawArguments, {
-      ...process.env,
-      TQ_BOOTSTRAP_TEST_LOG: logPath,
-    });
+    const result = await runResidueCheckedCase(`compiled ${label} success`, () =>
+      spawnWithRawArguments(executable, rawArguments, {
+        ...process.env,
+        TQ_BOOTSTRAP_TEST_LOG: logPath,
+      }),
+    );
+    if (result.status !== 37) {
+      try {
+        result.stderr += `\n${await readFile(join(workDirectory, 'bootstrap-errors.txt'), 'utf8')}`;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
     requireStatus(result, 37, `compiled ${label} protected bootstrap`);
     requireForwardedNsisParameters(
       await readFile(logPath, 'utf8'),
@@ -177,9 +202,9 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
     caseName: 'malformed',
   });
 
-  const programData = process.env.ProgramData ?? String.raw`C:\ProgramData`;
+  const programData = nativeProgramDataPath();
   const reparseTarget = join(workDirectory, 'compiled-reparse-target');
-  const reparseLeaf = join(programData, `.Talking Quill.Installer-compiled-${process.pid}`);
+  const reparseLeaf = join(programData, `.Talking Quill.Harness-${randomHarnessSuffix()}`);
   await mkdir(reparseTarget);
   try {
     await symlink(reparseTarget, reparseLeaf, 'junction');
@@ -193,7 +218,7 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
       caseName: 'reparse',
     });
   } finally {
-    await rm(reparseLeaf, { recursive: false, force: true });
+    await removeHarnessReparseLeaf(reparseLeaf);
   }
 }
 
@@ -208,10 +233,11 @@ async function requireCompiledNsisTailRejection({ uninstaller, workDirectory, un
   ];
   for (const [index, tail] of rejected.entries()) {
     const logPath = join(workDirectory, `uninstaller-tail-${String(index)}.txt`);
-    const result = spawnWithRawArguments(
-      uninstaller,
-      `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(tail)}`,
-      { ...process.env, TQ_BOOTSTRAP_TEST_LOG: logPath },
+    const result = await runResidueCheckedCase(`forged NSIS tail ${String(index)}`, () =>
+      spawnWithRawArguments(uninstaller, `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(tail)}`, {
+        ...process.env,
+        TQ_BOOTSTRAP_TEST_LOG: logPath,
+      }),
     );
     requireStatus(result, 78, `compiled uninstaller forged _?= rejection ${String(index)}`);
     await requireMissing(logPath, 'compiled uninstaller reached runtime with forged _?=');
@@ -221,10 +247,11 @@ async function requireCompiledNsisTailRejection({ uninstaller, workDirectory, un
   try {
     await symlink(reparseTarget, uninstallerRoot, 'junction');
     const logPath = join(workDirectory, 'uninstaller-tail-reparse.txt');
-    const result = spawnWithRawArguments(
-      uninstaller,
-      `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(uninstallerRoot)}`,
-      { ...process.env, TQ_BOOTSTRAP_TEST_LOG: logPath },
+    const result = await runResidueCheckedCase('reparse NSIS tail', () =>
+      spawnWithRawArguments(uninstaller, `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(uninstallerRoot)}`, {
+        ...process.env,
+        TQ_BOOTSTRAP_TEST_LOG: logPath,
+      }),
     );
     requireStatus(result, 78, 'compiled uninstaller reparse _?= rejection');
     await requireMissing(logPath, 'compiled uninstaller reached runtime with reparse _?=');
@@ -263,11 +290,13 @@ async function requireCompiledTempRejection({
     if (label === 'uninstaller') {
       rawArguments += ` _?=${nsisPath(uninstallerRoot)}`;
     }
-    const result = spawnWithRawArguments(executable, rawArguments, {
-      ...process.env,
-      ...environment,
-      TQ_BOOTSTRAP_TEST_LOG: logPath,
-    });
+    const result = await runResidueCheckedCase(`compiled ${label} ${caseName} rejection`, () =>
+      spawnWithRawArguments(executable, rawArguments, {
+        ...process.env,
+        ...environment,
+        TQ_BOOTSTRAP_TEST_LOG: logPath,
+      }),
+    );
     requireStatus(result, 78, `compiled ${label} ${caseName} TEMP rejection`);
     await requireMissing(
       logPath,
@@ -407,17 +436,19 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     "/DELETEAPPDATA=O'Brien value",
     '/EXITCODE=37',
   ];
-  const success = spawnSync(executable, [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      TQ_BOOTSTRAP_TEST_COMMAND: command,
-      TQ_BOOTSTRAP_TEST_LOG: logPath,
-      TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
-    },
-    timeout: 60_000,
-    windowsHide: true,
-  });
+  const success = await runResidueCheckedCase('C# protected bootstrap success', () =>
+    spawnSync(executable, [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        TQ_BOOTSTRAP_TEST_COMMAND: command,
+        TQ_BOOTSTRAP_TEST_LOG: logPath,
+        TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
+      },
+      timeout: 60_000,
+      windowsHide: true,
+    }),
+  );
   if (success.error || success.status !== 37) {
     throw new Error(
       `protected bootstrap did not propagate fixture exit 37${success.error ? `: ${success.error.message}` : ''}\n${success.stdout ?? ''}\n${success.stderr ?? ''}`,
@@ -439,12 +470,14 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     throw new Error('protected bootstrap changed public argv or failed to set protected TEMP');
   }
 
-  const relativeNsisTail = spawnBootstrapFixture(
-    executable,
-    command,
-    powershell,
-    ['/TQELEVATEDBOOTSTRAP=1', '_?=..\\relative-uninstall-root'],
-    {},
+  const relativeNsisTail = await runResidueCheckedCase('relative NSIS tail rejection', () =>
+    spawnBootstrapFixture(
+      executable,
+      command,
+      powershell,
+      ['/TQELEVATEDBOOTSTRAP=1', '_?=..\\relative-uninstall-root'],
+      {},
+    ),
   );
   if (relativeNsisTail.status !== 78) {
     throw new Error(
@@ -452,38 +485,105 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     );
   }
 
-  const malformed = spawnBootstrapFixture(
-    executable,
-    command,
-    powershell,
-    ['/TQPROTECTEDTEMP=C:\\malformed'],
-    {
+  const malformed = await runResidueCheckedCase('malformed TEMP rejection', () =>
+    spawnBootstrapFixture(executable, command, powershell, ['/TQPROTECTEDTEMP=C:\\malformed'], {
       TEMP: String.raw`C:\malformed`,
       TMP: String.raw`C:\malformed`,
-    },
+    }),
   );
   if (malformed.status !== 78) {
     throw new Error(`protected bootstrap accepted malformed TEMP: ${String(malformed.status)}`);
   }
 
-  const programData = process.env.ProgramData ?? String.raw`C:\ProgramData`;
+  const programData = nativeProgramDataPath();
   const reparseTarget = join(fixtureDirectory, 'reparse-target');
-  const reparseLeaf = join(programData, `.Talking Quill.Installer-test-${process.pid}`);
+  const reparseLeaf = join(programData, `.Talking Quill.Harness-${randomHarnessSuffix()}`);
   await mkdir(reparseTarget);
   try {
     await symlink(reparseTarget, reparseLeaf, 'junction');
-    const reparse = spawnBootstrapFixture(
-      executable,
-      command,
-      powershell,
-      [`/TQPROTECTEDTEMP=${reparseLeaf}`],
-      { TEMP: reparseLeaf, TMP: reparseLeaf },
+    const reparse = await runResidueCheckedCase('reparse TEMP rejection', () =>
+      spawnBootstrapFixture(executable, command, powershell, [`/TQPROTECTEDTEMP=${reparseLeaf}`], {
+        TEMP: reparseLeaf,
+        TMP: reparseLeaf,
+      }),
     );
     if (reparse.status !== 78) {
       throw new Error(`protected bootstrap accepted reparse TEMP: ${String(reparse.status)}`);
     }
   } finally {
-    await rm(reparseLeaf, { recursive: false, force: true });
+    await removeHarnessReparseLeaf(reparseLeaf);
+  }
+}
+
+function nativeProgramDataPath() {
+  const result = spawnSync(
+    resolve(
+      process.env.WINDIR ?? String.raw`C:\Windows`,
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe',
+    ),
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      '[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)',
+    ],
+    { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+  );
+  requireSuccess(result, 'native ProgramData lookup');
+  const path = result.stdout.trim();
+  if (!/^[A-Za-z]:\\/u.test(path)) throw new Error('Native ProgramData lookup was malformed');
+  return path;
+}
+
+function randomHarnessSuffix() {
+  return randomBytes(16).toString('hex');
+}
+
+async function removeHarnessReparseLeaf(path) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      await rm(path, { recursive: false, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 19) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    }
+  }
+}
+
+async function runResidueCheckedCase(label, action) {
+  const starting = await snapshotProtectedBootstrapResidue();
+  try {
+    return await action();
+  } finally {
+    await assertProtectedBootstrapResidueUnchanged(starting, label);
+  }
+}
+
+async function snapshotProtectedBootstrapResidue() {
+  const programData = nativeProgramDataPath();
+  const names = (await readdir(programData)).filter((name) =>
+    /^\.Talking Quill\.(?:Installer|Harness)-[0-9a-f]{32}$/u.test(name),
+  );
+  return { programData, names: names.sort() };
+}
+
+async function assertProtectedBootstrapResidueUnchanged(starting, label) {
+  const ending = await snapshotProtectedBootstrapResidue();
+  if (
+    ending.programData.toLowerCase() !== starting.programData.toLowerCase() ||
+    JSON.stringify(ending.names) !== JSON.stringify(starting.names)
+  ) {
+    const before = new Set(starting.names);
+    const after = new Set(ending.names);
+    const added = ending.names.filter((name) => !before.has(name));
+    const removed = starting.names.filter((name) => !after.has(name));
+    throw new Error(
+      `${label} changed protected-bootstrap ProgramData residue: ${JSON.stringify({ added, removed })}`,
+    );
   }
 }
 

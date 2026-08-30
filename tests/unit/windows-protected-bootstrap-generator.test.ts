@@ -61,7 +61,7 @@ describe('Windows protected bootstrap generator', () => {
     );
   });
 
-  it('exposes check and write commands and keeps validation on check mode', async () => {
+  it('exposes check, write, and separate dry-run cleanup commands', async () => {
     const packageJson = JSON.parse(await readFile('package.json', 'utf8')) as {
       scripts: Record<string, string>;
     };
@@ -69,5 +69,35 @@ describe('Windows protected bootstrap generator', () => {
     expect(packageJson.scripts['nsis:bootstrap:check']).toContain('--check');
     expect(packageJson.scripts['nsis:compile-check']).toContain('nsis:bootstrap:check');
     expect(packageJson.scripts.validate).toContain('nsis:compile-check');
+
+    const cleanupCommand = packageJson.scripts['nsis:bootstrap:cleanup-stale'];
+    expect(cleanupCommand).toContain('cleanup-windows-protected-bootstrap-leaves.ps1');
+    expect(cleanupCommand).not.toContain('-Apply');
+    for (const [name, command] of Object.entries(packageJson.scripts)) {
+      if (name === 'nsis:bootstrap:cleanup-stale') continue;
+      expect(command).not.toContain('cleanup-windows-protected-bootstrap-leaves.ps1');
+    }
+  });
+
+  it('pins protected leaf identity, cleanup retries, manifests, and stale cleanup refusal policy', async () => {
+    const [bootstrap, cleanup, harness] = await Promise.all([
+      readFile('build/windows-protected-bootstrap.ps1', 'utf8'),
+      readFile('scripts/cleanup-windows-protected-bootstrap-leaves.ps1', 'utf8'),
+      readFile('scripts/check-nsis-early-init.mjs', 'utf8'),
+    ]);
+
+    expect(bootstrap).toContain("cnotmatch '^\\.Talking Quill\\.Installer-[0-9a-f]{32}$'");
+    expect(bootstrap).toContain('GetPathIdentity($leaf)');
+    expect(bootstrap).toContain("Write-LeafManifest 'created'");
+    expect(bootstrap).toContain('$attempt -lt 20');
+    expect(cleanup).toContain('[Environment+SpecialFolder]::CommonApplicationData');
+    expect(cleanup).toContain("'^\\.Talking Quill\\.(Installer|Harness)-([0-9a-f]{32})$'");
+    expect(cleanup).toContain("$status = 'recent'");
+    expect(cleanup).toContain("$status = 'live'");
+    expect(cleanup).toContain("throw 'unknown content'");
+    expect(cleanup).toContain('Test-ExactAcl');
+    expect(cleanup).toContain('reparse content');
+    expect(harness).toContain('assertProtectedBootstrapResidueUnchanged');
+    expect(harness).toContain('removeHarnessReparseLeaf');
   });
 });
