@@ -27,6 +27,9 @@ const [source, bootstrapPayloadInclude] = await Promise.all([
   checkProtectedBootstrapInclude(),
 ]);
 const bootstrapPayload = requireBootstrapPayload(bootstrapPayloadInclude);
+if ((source.match(/-WindowStyle Hidden/gu) ?? []).length !== 2) {
+  throw new Error('Both protected PowerShell bootstrap invocations must be hidden');
+}
 if (/-Command[^\r\n]*"\s+"\$[R0-9]/u.test(source)) {
   throw new Error(
     'Protected bootstrap must not append runtime arguments after PowerShell -Command',
@@ -74,6 +77,7 @@ try {
         `${mode} early-init macro compile failed${result.error ? `: ${result.error.message}` : ''}${detail ? `\n${detail}` : ''}`,
       );
     }
+    await requireGuiSubsystem(outputPath, `${mode} NSIS outer`);
   }
   if (process.platform === 'win32') {
     windowsJobSupervisor = await buildWindowsJobSupervisor(workDirectory);
@@ -105,6 +109,22 @@ try {
   }
 } finally {
   await rm(workDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+async function requireGuiSubsystem(path, label) {
+  const bytes = await readFile(path);
+  if (bytes.length < 96 || bytes.readUInt16LE(0) !== 0x5a4d) {
+    throw new Error(`${label} is not a PE executable`);
+  }
+  const pe = bytes.readUInt32LE(0x3c);
+  const subsystemOffset = pe + 24 + 68;
+  if (
+    subsystemOffset + 2 > bytes.length ||
+    bytes.readUInt32LE(pe) !== 0x0000_4550 ||
+    bytes.readUInt16LE(subsystemOffset) !== 2
+  ) {
+    throw new Error(`${label} must retain the Windows GUI subsystem`);
+  }
 }
 
 async function buildWindowsJobSupervisor(workDirectory) {

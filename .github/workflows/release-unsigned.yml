@@ -88,11 +88,22 @@ jobs:
     name: Validate source
     runs-on: windows-latest
     timeout-minutes: 90
+    outputs:
+      release_commit: ${{ steps.source.outputs.commit }}
+      release_tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Resolve immutable source identity
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "commit=$(git rev-parse HEAD^{commit})" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: 11.17.0
@@ -100,6 +111,9 @@ jobs:
         with:
           node-version: 24.15.0
           cache: pnpm
+      - name: Require clean coordinated release source
+        shell: bash
+        run: node scripts/release-source-preflight.mjs "$(node -p "'v' + require('./app/package.json').version")"
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           components: rustfmt, clippy
@@ -132,6 +146,8 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       TALKING_QUILL_REQUIRE_CLEAN_SOURCE: '1'
+      TALKING_QUILL_RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
+      TALKING_QUILL_RELEASE_TREE: ${{ needs.validate.outputs.release_tree }}
       TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: nsis
       TALKING_QUILL_PACKAGE_TARGET: win
@@ -147,8 +163,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ needs.validate.outputs.release_commit }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Verify immutable source checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^{commit})" = "${{ needs.validate.outputs.release_commit }}"
+          test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: 11.17.0
@@ -211,7 +233,7 @@ jobs:
 
   lifecycle:
     name: Verify preserved Windows ${{ matrix.arch }} lifecycle
-    needs: package
+    needs: [validate, package]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -227,8 +249,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ needs.validate.outputs.release_commit }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Verify immutable source checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^{commit})" = "${{ needs.validate.outputs.release_commit }}"
+          test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-${{ matrix.arch }}-validated-nsis
@@ -258,10 +286,20 @@ jobs:
 
   assemble:
     name: Checksum preserved Windows x64 installer
-    needs: [package, lifecycle]
+    needs: [validate, package, lifecycle]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.validate.outputs.release_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify immutable source checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^{commit})" = "${{ needs.validate.outputs.release_commit }}"
+          test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-x64-validated-nsis
@@ -289,15 +327,33 @@ jobs:
           node --input-type=module - <<'NODE'
           import fs from 'node:fs';
           import crypto from 'node:crypto';
-          import { sealReleaseManifest } from './scripts/release-manifest.mjs';
+          import { validateArtifactProvenanceManifest } from './scripts/artifact-provenance.mjs';
+          import { sealReleaseManifest, validateReleaseManifest } from './scripts/release-manifest.mjs';
           const directory = 'release-artifacts';
           const manifestPath = `${directory}/release-manifest.json`;
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          const manifest = validateReleaseManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
+          const provenance = ['arm64', 'x64'].map((arch) => {
+            const name = `provenance-win-${arch}.json`;
+            const value = JSON.parse(fs.readFileSync(`${directory}/${name}`, 'utf8'));
+            validateArtifactProvenanceManifest(value);
+            const installer = `Talking-Quill-${manifest.version}-win-${arch}.exe`;
+            const final = value.entries.filter(({ role }) => role === 'final-artifact');
+            const bytes = fs.readFileSync(`${directory}/${installer}`);
+            const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+            if (value.sourceCommit !== manifest.sourceCommit || value.sourceTree !== manifest.sourceTree ||
+                value.package.version !== manifest.version || value.package.platform !== 'win' ||
+                value.package.arch !== arch || final.length !== 1 ||
+                final[0].path.split('/').at(-1) !== installer || final[0].sha256 !== sha256) {
+              throw new Error(`Downloaded ${arch} provenance does not match its exact installer and source`);
+            }
+            return { name, platform: 'win', arch, sourceTree: value.sourceTree,
+              sourceTreeSha256: value.sourceTreeSha256 };
+          });
+          if (new Set(provenance.map(({ sourceTreeSha256 }) => sourceTreeSha256)).size !== 1) {
+            throw new Error('Architecture provenance source-tree hashes disagree');
+          }
           manifest.architecture = 'x64+arm64';
-          manifest.provenance = ['arm64', 'x64'].map((arch) => ({
-            name: `provenance-win-${arch}.json`, platform: 'win', arch,
-            sourceTreeSha256: manifest.provenance[0].sourceTreeSha256,
-          }));
+          manifest.provenance = provenance;
           manifest.assets = fs.readdirSync(directory).filter((name) => name !== 'release-manifest.json').sort().map((name) => {
             const bytes = fs.readFileSync(`${directory}/${name}`);
             return { name, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };

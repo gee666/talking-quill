@@ -55,7 +55,7 @@ Var TalkingQuillSecureTemp
     StrCpy $R2 79
     ; The static bootstrap reads this waiting NSIS parent through native process
     ; APIs. No caller-controlled value is interpolated into PowerShell source.
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
     IfErrors 0 +3
       SetErrorLevel 79
       Quit
@@ -65,7 +65,7 @@ Var TalkingQuillSecureTemp
 
   ClearErrors
   StrCpy $R2 78
-  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
   IfErrors 0 +2
     StrCpy $R2 78
   ${If} $R2 != 0

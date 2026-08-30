@@ -29,10 +29,16 @@ if (forbiddenEnvironment.length > 0) {
 }
 
 await validatePackageElectronBuilderConfigs();
+cleanPriorProvenance();
 cleanTargetArtifacts();
 run('scripts/generate-notices.mjs', ['--check']);
 run('scripts/model-manifest.mjs', ['--check']);
 run('scripts/nsis-uninstall-policy.mjs', []);
+
+function cleanPriorProvenance() {
+  rmSync(resolve(root, 'artifact-provenance.json'), { force: true });
+  rmSync(resolve(root, 'tmp', 'artifact-provenance.json.pending'), { force: true });
+}
 
 function cleanTargetArtifacts() {
   const release = resolve(root, 'release');

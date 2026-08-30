@@ -2,6 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
+import { currentSourceIdentity } from './source-identity.mjs';
 
 export const RELEASE_PACKAGE_METADATA_NAME = 'keyboard-owner-release-v1.json';
 const HEX_32 = /^[0-9a-f]{64}$/u;
@@ -34,11 +35,13 @@ export async function createPackageReleaseMetadata({
   packageRoot,
   predecessor = readPackagePredecessor(process.env, platform, architecture),
   releaseBuildDigest,
+  sourceIdentity = currentSourceIdentity(),
   outerIdentity,
   freshInstall = process.env.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1',
   packageMode = process.env.TALKING_QUILL_PACKAGE_MODE ?? (freshInstall ? 'fresh' : 'update'),
 }) {
   requireIdentity(version, platform, architecture);
+  requireSourceIdentity(sourceIdentity);
   const layout = ROLE_LAYOUT[platform];
   const roles = await Promise.all(
     layout.map(async ([role, path, suppressionCapable]) => ({
@@ -63,6 +66,8 @@ export async function createPackageReleaseMetadata({
     architecture,
     ownerMode: 'local-unsigned-enabled',
     packageMode,
+    sourceCommit: sourceIdentity.sourceCommit,
+    sourceTree: sourceIdentity.sourceTree,
     roles,
     predecessor,
     ...(platform === 'mac' ? { outerIdentity } : {}),
@@ -234,6 +239,8 @@ export function validatePackageReleaseMetadata(value) {
       'architecture',
       'ownerMode',
       'packageMode',
+      'sourceCommit',
+      'sourceTree',
       'roles',
       'predecessor',
       'outerIdentity',
@@ -248,6 +255,7 @@ export function validatePackageReleaseMetadata(value) {
     throw new Error('Package fresh-install marker is invalid');
   }
   requireIdentity(value.version, value.platform, value.architecture);
+  requireSourceIdentity({ sourceCommit: value.sourceCommit, sourceTree: value.sourceTree });
   requireDigest(value.releaseBuildDigest, 'release build digest');
   requireDigest(value.packageLayoutDigest, 'package layout digest');
   if (value.ownerMode !== 'local-unsigned-enabled') {
@@ -319,6 +327,8 @@ export function validatePackageReleaseMetadata(value) {
       architecture: value.architecture,
       ownerMode: value.ownerMode,
       packageMode: value.packageMode,
+      sourceCommit: value.sourceCommit,
+      sourceTree: value.sourceTree,
       roles: value.roles,
       predecessor: value.predecessor,
       ...(value.platform === 'mac' ? { outerIdentity: value.outerIdentity } : {}),
@@ -362,12 +372,17 @@ export function verifyMatchingPackageReleaseMetadataBytes(expectedBytes, actualB
 
 export async function verifySerializedPackageReleaseMetadata(metadataPath, packageRoot, expected) {
   const metadata = validatePackageReleaseMetadata(JSON.parse(await readFile(metadataPath, 'utf8')));
+  const sourceIdentity = currentSourceIdentity();
   if (
     metadata.version !== expected.version ||
     metadata.platform !== expected.platform ||
-    metadata.architecture !== expected.architecture
+    metadata.architecture !== expected.architecture ||
+    metadata.sourceCommit !== sourceIdentity.sourceCommit ||
+    metadata.sourceTree !== sourceIdentity.sourceTree
   ) {
-    throw new Error('Serialized package release identity does not match the package target');
+    throw new Error(
+      'Serialized package release identity does not match the package target or source',
+    );
   }
   for (const role of metadata.roles) {
     const path = resolve(packageRoot, role.path);
@@ -394,6 +409,8 @@ export function createUpdaterReleaseBinding(metadata, packageSha256) {
     architecture: metadata.architecture,
     ownerMode: metadata.ownerMode,
     packageMode: metadata.packageMode,
+    sourceCommit: metadata.sourceCommit,
+    sourceTree: metadata.sourceTree,
     releaseBuildDigest: metadata.releaseBuildDigest,
     packageLayoutDigest: metadata.packageLayoutDigest,
     packageSha256,
@@ -461,6 +478,8 @@ function digestCanonicalIdentity(identity) {
     ['architecture', identity.architecture],
     ['ownerMode', identity.ownerMode],
     ['packageMode', identity.packageMode],
+    ['sourceCommit', identity.sourceCommit],
+    ['sourceTree', identity.sourceTree],
   ]) {
     frame(hash, name, value);
   }
@@ -545,6 +564,16 @@ function requireIdentity(version, platform, architecture) {
 }
 function requireDigest(value, name) {
   if (!HEX_32.test(value ?? '')) throw new Error(`${name} must be lowercase SHA-256`);
+}
+function requireSourceIdentity(value) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    !/^[0-9a-f]{40}$/u.test(value.sourceCommit ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(value.sourceTree ?? '')
+  ) {
+    throw new Error('Package source commit and tree identity are invalid');
+  }
 }
 function exactKeys(value, allowed, name) {
   const expected = new Set(allowed);

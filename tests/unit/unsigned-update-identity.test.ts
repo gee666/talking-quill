@@ -9,6 +9,8 @@ const identity = {
   architecture: 'arm64',
   ownerMode: 'local-unsigned-enabled',
   packageMode: 'update',
+  sourceCommit: 'a'.repeat(40),
+  sourceTree: 'b'.repeat(40),
   releaseBuildDigest: digest('a'),
   packageLayoutDigest: digest('b'),
   packageSha256: digest('c'),

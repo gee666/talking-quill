@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -58,6 +58,13 @@ jobs:
           if (-not $env:ACCEPTANCE_BUNDLE_URL.StartsWith('https://')) { throw 'Acceptance bundle URL must use HTTPS.' }
           if ($env:ACCEPTANCE_BUNDLE_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Acceptance bundle SHA-256 is invalid.' }
           node scripts/verify-windows-acceptance-authorization.mjs
+          $sourceRevision = node -e "const e=JSON.parse(Buffer.from(process.env.ACCEPTANCE_BUNDLE_AUTHORIZATION,'base64url')); process.stdout.write(e.payload.sourceRevision)"
+          if ($sourceRevision -cnotmatch '^[0-9a-f]{40}$') { throw 'Signed acceptance source revision is invalid.' }
+          git checkout --detach $sourceRevision
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -cne $sourceRevision) { throw 'Runner checkout does not match the signed acceptance source revision.' }
+          $env:ACCEPTANCE_SOURCE_REVISION = $head
+          node scripts/verify-windows-acceptance-authorization.mjs
           New-Item -ItemType Directory -Force tmp/windows-installed-acceptance | Out-Null
           $bundle = (Resolve-Path tmp/windows-installed-acceptance).Path + '\frozen-acceptance.zip'
           Invoke-WebRequest -Uri $env:ACCEPTANCE_BUNDLE_URL -OutFile $bundle
@@ -66,6 +73,7 @@ jobs:
           Expand-Archive -LiteralPath $bundle -DestinationPath tmp/windows-installed-acceptance/frozen -Force
           if (-not (Test-Path -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json)) { throw 'Frozen acceptance evidence input is missing.' }
           $evidenceInput = Get-Content -Raw -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json | ConvertFrom-Json
+          if (-not $head.StartsWith([string]$evidenceInput.acceptance.sourceRevision)) { throw 'Acceptance bundle evidence source revision does not match checkout HEAD.' }
           $env:ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL = [string]$evidenceInput.acceptance.manifestPublicKeySpkiBase64url
           node scripts/verify-windows-acceptance-authorization.mjs
       - name: Execute installed acceptance matrix

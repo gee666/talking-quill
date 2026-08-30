@@ -45,7 +45,7 @@ function fixture(overrides: Partial<AcceptanceRunRequestPayload> = {}) {
     sourceRevision: SOURCE_REVISION,
     buildId: BUILD_ID,
     architecture: 'x64',
-    packageVersion: '0.0.68',
+    packageVersion: '0.0.69',
     releaseBuildDigest: '55'.repeat(32),
     packageLayoutDigest: '66'.repeat(32),
     ownerManifestSha256: '77'.repeat(32),

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dump, load } from 'js-yaml';
 import {
@@ -9,6 +9,7 @@ import {
   RELEASE_PACKAGE_METADATA_NAME,
   validatePackageReleaseMetadata,
 } from './release-package-metadata.mjs';
+import { verifyArtifactProvenanceManifest } from './artifact-provenance.mjs';
 
 async function main() {
   const [platform, arch] = process.argv.slice(2).filter((value) => value !== '--');
@@ -18,6 +19,7 @@ async function main() {
   const root = resolve(import.meta.dirname, '..');
   const release = resolve(root, 'release');
   const output = resolve(root, 'tmp', 'release-upload');
+  const pendingOutput = resolve(root, 'tmp', `release-upload.pending-${String(process.pid)}`);
   const manifest = JSON.parse(await readFile(resolve(root, 'app/package.json'), 'utf8'));
   const version = manifest.version;
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/u.test(version)) {
@@ -44,6 +46,18 @@ async function main() {
   const packageMetadata = validatePackageReleaseMetadata(
     JSON.parse(await readFile(packageMetadataPath, 'utf8')),
   );
+  const provenance = await verifyArtifactProvenanceManifest();
+  const provenanceRoot = relative(root, packageRoot).replaceAll('\\', '/');
+  if (
+    provenance.package.version !== version ||
+    provenance.package.platform !== platform ||
+    provenance.package.arch !== arch ||
+    provenance.package.root !== provenanceRoot ||
+    packageMetadata.sourceCommit !== provenance.sourceCommit ||
+    packageMetadata.sourceTree !== provenance.sourceTree
+  ) {
+    throw new Error('Artifact provenance does not match the package selected for staging.');
+  }
   if (
     packageMetadata.version !== version ||
     packageMetadata.platform !== platform ||
@@ -67,34 +81,48 @@ async function main() {
     releaseBinding,
   });
   await requireFile(resolve(release, blockmapName));
-  await requireFile(resolve(root, 'artifact-provenance.json'));
   for (const name of finalNames) await requireFile(resolve(release, name));
 
-  await rm(output, { recursive: true, force: true });
-  await mkdir(output, { recursive: true });
+  await rm(pendingOutput, { recursive: true, force: true });
+  await mkdir(pendingOutput, { recursive: true });
   for (const name of [...finalNames, blockmapName]) {
-    await copyFile(resolve(release, name), resolve(output, name));
+    await copyFile(resolve(release, name), resolve(pendingOutput, name));
   }
   await writeFile(
-    resolve(output, channelMetadataName),
+    resolve(pendingOutput, channelMetadataName),
     dump(channelMetadata, { lineWidth: 120 }),
     'utf8',
   );
   await writeFile(
-    resolve(output, `release-identity-${platform}-${arch}.json`),
+    resolve(pendingOutput, `release-identity-${platform}-${arch}.json`),
     `${JSON.stringify(releaseBinding, null, 2)}\n`,
     'utf8',
   );
   await copyFile(
     resolve(root, 'artifact-provenance.json'),
-    resolve(output, `provenance-${platform}-${arch}.json`),
+    resolve(pendingOutput, `provenance-${platform}-${arch}.json`),
   );
   if (platform === 'win') {
     await copyFile(
       resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt'),
-      resolve(output, 'THIRD_PARTY_NOTICES.txt'),
+      resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt'),
     );
   }
+  const finalEntries = provenance.entries.filter(({ role }) => role === 'final-artifact');
+  if (
+    JSON.stringify(finalEntries.map(({ path }) => basename(path)).sort()) !==
+    JSON.stringify([...finalNames].sort())
+  ) {
+    throw new Error('Provenance final-artifact inventory does not match staged release files.');
+  }
+  for (const entry of finalEntries) {
+    const name = basename(entry.path);
+    if ((await fileEvidence(resolve(pendingOutput, name))).sha256 !== entry.sha256) {
+      throw new Error(`Staged artifact differs from provenance: ${name}`);
+    }
+  }
+  await rm(output, { recursive: true, force: true });
+  await rename(pendingOutput, output);
   console.log(
     `Staged unsigned ${platform}/${arch} release payload, blockmap, updater channel, notices, and provenance.`,
   );

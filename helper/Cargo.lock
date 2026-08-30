@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-common-e2e"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "serde_json",
  "talking-quill-helper",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-helper"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "core-foundation-sys",
  "crossbeam-channel",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-keyboard-core"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "proptest",
  "serde",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-keyboard-owner"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "core-foundation-sys",
  "crossbeam-channel",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-owner-protocol"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "getrandom 0.4.3",
  "hkdf",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "talking-quill-windows-owner-ipc"
-version = "0.0.68"
+version = "0.0.69"
 dependencies = [
  "getrandom 0.4.3",
  "serde",

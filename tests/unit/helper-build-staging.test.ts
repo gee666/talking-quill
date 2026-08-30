@@ -7,9 +7,12 @@ import {
   MACOS_SERVICE_BRIDGE_MARKER,
   OWNER_LOCAL_ENABLED_MARKER,
   OWNER_SAFE_DISABLED_MARKER,
+  SOURCE_COMMIT_MARKER,
+  SOURCE_TREE_MARKER,
   WINDOWS_UPDATE_PRIMARY_KEY_MARKER,
   nativeRoleLayout,
   verifyCompleteNativeRoleInventory,
+  verifyNativeSourceIdentity,
   verifyStagedNativeRoleSet,
 } from '../../scripts/helper-build-contract.mjs';
 import { replaceNativeRoleDirectory } from '../../scripts/native-staging.mjs';
@@ -201,6 +204,37 @@ describe('R9 role-separated native staging contract', () => {
     await expect(
       verifyStagedNativeRoleSet(root, { platform: 'darwin', architecture: arch }),
     ).resolves.toBeUndefined();
+  });
+
+  it('rejects native bytes built from another source commit or tree', async () => {
+    const path = resolve(root, 'source-bound.exe');
+    const identity = { sourceCommit: 'a'.repeat(40), sourceTree: 'b'.repeat(40) };
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path,
+      Buffer.concat([
+        SOURCE_COMMIT_MARKER,
+        Buffer.from(identity.sourceCommit),
+        SOURCE_TREE_MARKER,
+        Buffer.from(identity.sourceTree),
+      ]),
+    );
+    await expect(verifyNativeSourceIdentity(path, identity)).resolves.toBeUndefined();
+    await expect(
+      verifyNativeSourceIdentity(path, { ...identity, sourceTree: 'c'.repeat(40) }),
+    ).rejects.toThrow('source tree does not match');
+    await writeFile(
+      path,
+      Buffer.concat([
+        Buffer.alloc(SOURCE_COMMIT_MARKER.length - 1),
+        Buffer.from(identity.sourceCommit),
+        SOURCE_TREE_MARKER,
+        Buffer.from(identity.sourceTree),
+      ]),
+    );
+    await expect(verifyNativeSourceIdentity(path, identity)).rejects.toThrow(
+      'source commit does not match',
+    );
   });
 
   it('requires every assigned package role to be in the recognized native inventory', async () => {

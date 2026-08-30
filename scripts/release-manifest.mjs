@@ -37,6 +37,7 @@ export function validateReleaseManifest(value) {
       'tag',
       'version',
       'sourceCommit',
+      'sourceTree',
       'platform',
       'architecture',
       'promotable',
@@ -65,6 +66,7 @@ function validateReleaseManifestBody(value) {
       'tag',
       'version',
       'sourceCommit',
+      'sourceTree',
       'platform',
       'architecture',
       'promotable',
@@ -82,6 +84,7 @@ function validateReleaseManifestBody(value) {
     !/^\d+\.\d+\.\d+$/u.test(value.version ?? '') ||
     value.tag !== `v${value.version}` ||
     !/^[0-9a-f]{40}$/u.test(value.sourceCommit ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(value.sourceTree ?? '') ||
     value.platform !== 'win' ||
     !ARCHITECTURES.has(value.architecture) ||
     value.promotable !== true ||
@@ -101,10 +104,12 @@ function validateReleaseManifestBody(value) {
   );
   validateEntries(
     value.provenance,
-    ['name', 'platform', 'arch', 'sourceTreeSha256'],
+    ['name', 'platform', 'arch', 'sourceTree', 'sourceTreeSha256'],
     (entry) =>
       entry.platform === 'win' &&
       ['x64', 'arm64'].includes(entry.arch) &&
+      entry.sourceTree === value.sourceTree &&
+      /^[0-9a-f]{40}$/u.test(entry.sourceTree ?? '') &&
       HEX.test(entry.sourceTreeSha256 ?? ''),
     'provenance',
   );

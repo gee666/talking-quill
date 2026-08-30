@@ -5,6 +5,16 @@ use std::process::ExitCode;
 #[cfg(target_os = "macos")]
 #[used]
 static MACOS_BUILD_VARIANT: &str = env!("TALKING_QUILL_MACOS_BUILD_VARIANT");
+#[used]
+static SOURCE_COMMIT_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_COMMIT=",
+    env!("TALKING_QUILL_SOURCE_COMMIT")
+);
+#[used]
+static SOURCE_TREE_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_TREE=",
+    env!("TALKING_QUILL_SOURCE_TREE")
+);
 
 use serde::Serialize;
 use talking_quill_keyboard_owner::{
@@ -40,6 +50,8 @@ struct BuildInfo {
 }
 
 fn main() -> ExitCode {
+    std::hint::black_box(SOURCE_COMMIT_MARKER);
+    std::hint::black_box(SOURCE_TREE_MARKER);
     let mut arguments = std::env::args_os();
     let _executable = arguments.next();
     let first = arguments.next();

@@ -536,7 +536,7 @@ mod tests {
         let mut value = serde_json::json!({
             "schemaVersion": 1,
             "kind": "talking-quill-local-owner-release",
-            "version": "0.0.68",
+            "version": "0.0.69",
             "platform": "win",
             "architecture": architecture,
             "ownerMode": "local-unsigned-enabled",

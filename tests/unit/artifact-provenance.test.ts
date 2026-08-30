@@ -54,6 +54,9 @@ describe('canonical artifact provenance manifest', { timeout: 15_000 }, () => {
 
     const manifest = await writeManifest();
     await expect(verifyArtifactProvenanceManifest()).resolves.toEqual(manifest);
+    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.sourceCommit).toMatch(/^[0-9a-f]{40}$/u);
+    expect(manifest.sourceTree).toMatch(/^[0-9a-f]{40}$/u);
     expect(manifest.package).toEqual({
       version: sourceVersion,
       platform: 'win',
@@ -81,6 +84,18 @@ describe('canonical artifact provenance manifest', { timeout: 15_000 }, () => {
     await expect(verifyArtifactProvenanceManifest()).rejects.toThrow(
       'stale for the current source commit',
     );
+  });
+
+  it('rejects a checkout that differs from the expected release tree', async () => {
+    await writeManifest();
+    process.env.TALKING_QUILL_RELEASE_TREE = '0'.repeat(40);
+    try {
+      await expect(verifyArtifactProvenanceManifest()).rejects.toThrow(
+        'does not match TALKING_QUILL_RELEASE_TREE',
+      );
+    } finally {
+      delete process.env.TALKING_QUILL_RELEASE_TREE;
+    }
   });
 
   it('rejects stale or substituted source-tree provenance', async () => {

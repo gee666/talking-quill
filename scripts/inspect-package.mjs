@@ -34,6 +34,7 @@ import {
   verifyCompleteNativeRoleInventory,
   verifyHelperBuildContract,
   verifyMacosServiceBridgeBuildContract,
+  verifyNativeSourceIdentity,
   verifyOwnerBuildContract,
 } from './helper-build-contract.mjs';
 import { inspectNativeTree, readNativeArchitectures } from './native-architecture.mjs';
@@ -47,6 +48,7 @@ import {
   verifyMatchingPackageReleaseMetadataBytes,
   verifySerializedPackageReleaseMetadata,
 } from './release-package-metadata.mjs';
+import { currentSourceIdentity } from './source-identity.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -82,6 +84,7 @@ const packageRoot = resolve(invocationDirectory, packageArgument ?? 'release/win
 process.chdir(repositoryRoot);
 const appManifest = JSON.parse(await readFile(resolve('app/package.json'), 'utf8'));
 const expectedVersion = appManifest.version;
+const sourceIdentity = currentSourceIdentity({ repositoryRoot });
 if (typeof expectedVersion !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/u.test(expectedVersion)) {
   throw new Error('Application package version is invalid');
 }
@@ -201,6 +204,7 @@ if (isMacBundle && (helperMetadata.mode & 0o111) === 0) {
   throw new Error('macOS native helper is not executable');
 }
 await verifyHelperBuildContract(helper, { windows: !isMacBundle });
+await verifyNativeSourceIdentity(helper, sourceIdentity);
 if (macosOwnerPackage) {
   if (!isMacBundle) throw new Error('The keyboard-owner package mode is macOS-only');
   const owner = resolve(
@@ -217,8 +221,10 @@ if (macosOwnerPackage) {
     throw new Error('Nested keyboard owner is not a non-empty executable regular file');
   }
   await verifyOwnerBuildContract(owner);
+  await verifyNativeSourceIdentity(owner, sourceIdentity);
   const bridge = resolve(macBundle, 'Contents/MacOS/talking-quill-macos-service-bridge');
   await verifyMacosServiceBridgeBuildContract(bridge);
+  await verifyNativeSourceIdentity(bridge, sourceIdentity);
   await verifyCompleteNativeRoleInventory(
     unpackedNativeEntries.map((entry) => resolve(packageRoot, entry.path)),
     [helper, owner, bridge],
@@ -267,7 +273,9 @@ if (macosOwnerPackage) {
 }
 if (!isMacBundle) {
   const windowsRoleDirectory = resolve(resources, 'helper');
-  await verifyOwnerBuildContract(resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe'));
+  const windowsOwner = resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe');
+  await verifyOwnerBuildContract(windowsOwner);
+  await verifyNativeSourceIdentity(windowsOwner, sourceIdentity);
   await verifyCompleteNativeRoleInventory(
     unpackedNativeEntries.map((entry) => resolve(packageRoot, entry.path)),
     [helper, resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe')],
@@ -520,6 +528,7 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
   const extractedHelper = requiredNativePaths[1];
   if (extractedHelper === undefined) throw new Error('Extracted helper path is unavailable');
   await verifyHelperBuildContract(extractedHelper, { windows: !mac });
+  await verifyNativeSourceIdentity(extractedHelper, sourceIdentity);
   if (mac && macosOwnerPackage) {
     const extractedOwner = resolve(
       root,
@@ -530,7 +539,9 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
       'Talking Quill.app/Contents/MacOS/talking-quill-macos-service-bridge',
     );
     await verifyOwnerBuildContract(extractedOwner);
+    await verifyNativeSourceIdentity(extractedOwner, sourceIdentity);
     await verifyMacosServiceBridgeBuildContract(extractedBridge);
+    await verifyNativeSourceIdentity(extractedBridge, sourceIdentity);
     const extractedInventory = await inspectNativeTree(root, {
       platform: 'mac',
       architecture: expectedArch,
@@ -543,7 +554,9 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
   }
   if (!mac) {
     const roleDirectory = resolve(extractedResources, 'helper');
-    await verifyOwnerBuildContract(resolve(roleDirectory, 'talking-quill-keyboard-owner.exe'));
+    const extractedOwner = resolve(roleDirectory, 'talking-quill-keyboard-owner.exe');
+    await verifyOwnerBuildContract(extractedOwner);
+    await verifyNativeSourceIdentity(extractedOwner, sourceIdentity);
     const extractedInventory = await inspectNativeTree(root, {
       platform: 'win',
       architecture: expectedArch,

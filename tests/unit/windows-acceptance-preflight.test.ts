@@ -68,7 +68,7 @@ function fixture(
     appAsar: { path: 'resources/app.asar', bytes: 1, sha256: appAsarSha256 },
     metadataIdentity: { path: 'candidate.json', bytes: 1, sha256: ownerManifestSha256 },
     metadata: {
-      version: '0.0.68',
+      version: '0.0.69',
       releaseBuildDigest,
       packageLayoutDigest,
       roles: [

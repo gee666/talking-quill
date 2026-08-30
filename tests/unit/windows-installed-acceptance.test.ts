@@ -419,7 +419,7 @@ describe('installed Windows acceptance executor', () => {
   it('rehashes each frozen installer immediately before the production upgrade spawns it', async () => {
     const calls: string[] = [];
     const metadata = {
-      version: '0.0.68',
+      version: '0.0.69',
       architecture: 'x64',
       releaseBuildDigest: '11'.repeat(32),
       packageLayoutDigest: '11'.repeat(32),

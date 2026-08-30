@@ -30,6 +30,8 @@ export interface PackageReleaseMetadata {
   readonly architecture: ReleaseArchitecture;
   readonly ownerMode: 'local-unsigned-enabled';
   readonly packageMode: 'fresh' | 'update';
+  readonly sourceCommit: string;
+  readonly sourceTree: string;
   readonly roles: readonly ReleaseRole[];
   readonly predecessor: ReleasePredecessor | null;
   readonly outerIdentity?: MacosOuterIdentity | null;
@@ -52,6 +54,7 @@ export function createPackageReleaseMetadata(options: {
   readonly packageRoot: string;
   readonly predecessor?: ReleasePredecessor | null;
   readonly releaseBuildDigest?: string;
+  readonly sourceIdentity?: { readonly sourceCommit: string; readonly sourceTree: string };
   readonly outerIdentity?: MacosOuterIdentity | null;
   readonly freshInstall?: boolean;
   readonly packageMode?: 'fresh' | 'update';
@@ -100,6 +103,8 @@ export function createUpdaterReleaseBinding(
   readonly platform: ReleasePlatform;
   readonly architecture: ReleaseArchitecture;
   readonly packageMode: 'update';
+  readonly sourceCommit: string;
+  readonly sourceTree: string;
   readonly releaseBuildDigest: string;
   readonly packageLayoutDigest: string;
   readonly packageSha256: string;

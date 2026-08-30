@@ -15,9 +15,14 @@ if (args.length !== 2) throw new Error('Usage: assemble-release <tag> <artifact-
 const { tag, version } = parseReleaseTag(args[0]);
 const directory = resolve(args[1]);
 const checkedOutCommit = git(['rev-parse', 'HEAD^{commit}']).trim();
+const checkedOutTree = git(['rev-parse', 'HEAD^{tree}']).trim();
 const commit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? checkedOutCommit;
+const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? checkedOutTree;
 if (!/^[0-9a-f]{40}$/u.test(commit) || commit !== checkedOutCommit) {
   throw new Error('Release source commit is invalid or does not match the checkout.');
+}
+if (!/^[0-9a-f]{40}$/u.test(sourceTree) || sourceTree !== checkedOutTree) {
+  throw new Error('Release source tree is invalid or does not match the checkout.');
 }
 
 const architecture = process.env.TALKING_QUILL_PACKAGE_ARCH ?? 'x64';
@@ -54,6 +59,7 @@ const finalEntry = provenance.entries.filter((entry) => entry.role === 'final-ar
 const sourceTreeSha256 = await currentSourceTreeHash();
 if (
   provenance.sourceCommit !== commit ||
+  provenance.sourceTree !== sourceTree ||
   provenance.sourceTreeSha256 !== sourceTreeSha256 ||
   provenance.package.version !== version ||
   provenance.package.platform !== 'win' ||
@@ -99,6 +105,7 @@ const manifest = sealReleaseManifest({
   tag,
   version,
   sourceCommit: commit,
+  sourceTree,
   platform: 'win',
   architecture,
   promotable: true,
@@ -113,6 +120,7 @@ const manifest = sealReleaseManifest({
       name: provenanceName,
       platform: 'win',
       arch: architecture,
+      sourceTree,
       sourceTreeSha256,
     },
   ],

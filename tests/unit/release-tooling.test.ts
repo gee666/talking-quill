@@ -13,6 +13,10 @@ const commit = execFileSync('git', ['rev-parse', 'HEAD^{commit}'], {
   cwd: root,
   encoding: 'utf8',
 }).trim();
+const sourceTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
+  cwd: root,
+  encoding: 'utf8',
+}).trim();
 const sourceTreeSha256 = await currentSourceTreeHash();
 
 beforeEach(() => {
@@ -30,6 +34,7 @@ describe('active release tooling', () => {
       tag: 'v1.0.0',
       version: '1.0.0',
       sourceCommit: commit,
+      sourceTree,
       platform: 'win',
       architecture: 'x64',
       promotable: true,
@@ -40,6 +45,7 @@ describe('active release tooling', () => {
           name: 'provenance-win-x64.json',
           platform: 'win',
           arch: 'x64',
+          sourceTree,
           sourceTreeSha256: 'a'.repeat(64),
         },
       ],
@@ -165,8 +171,9 @@ function createAssemblyFixture(): void {
   writeFileSync(
     resolve(fixture, 'provenance-win-x64.json'),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceCommit: commit,
+      sourceTree,
       sourceTreeSha256,
       package: {
         version: '1.0.0',

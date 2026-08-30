@@ -25,6 +25,7 @@ describe('Windows native release workflow', () => {
   it('runs the complete validation, audit, formatting, clippy, security, and source-independence gates', () => {
     const validate = section('validate', 'package');
     expect(validate).toContain('fetch-depth: 0');
+    expect(validate).toContain('release-source-preflight.mjs');
     expect(validate).toContain('pnpm rust:fetch-targets');
     expect(validate).toContain('pnpm validate:unsigned-release');
     expect(validate).toContain('cargo-audit@0.22.2');
@@ -84,7 +85,7 @@ describe('Windows native release workflow', () => {
     expect(packageJob).toContain('tmp/release-upload/provenance-win-${{ matrix.arch }}.json');
     expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
     expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
-    expect(stageScript).toContain("resolve(output, 'THIRD_PARTY_NOTICES.txt')");
+    expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
     expect(packageJob).toContain('name: windows-${{ matrix.arch }}-validated-nsis');
     const lifecycle = section('lifecycle', 'assemble');
     expect(lifecycle).toContain(
@@ -103,6 +104,9 @@ describe('Windows native release workflow', () => {
     expect(assemble).toContain('join(",") !== "gateway,owner"');
     expect(assemble).toContain('value.predecessor === null');
     expect(assemble).toContain('cp preserved/x64/tmp/release-upload/release-manifest.json');
+    expect(assemble).toContain('validateArtifactProvenanceManifest(value)');
+    expect(assemble).toContain('value.sourceCommit !== manifest.sourceCommit');
+    expect(assemble).toContain('Architecture provenance source-tree hashes disagree');
   });
 
   it('pins every workflow action to its reviewed commit', () => {

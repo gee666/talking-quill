@@ -1,4 +1,5 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { verifyWindowsAcceptanceAuthorization } from '../../scripts/verify-windows-acceptance-authorization.mjs';
 
@@ -16,6 +17,13 @@ function canonical(value: unknown): string {
 }
 
 describe('Windows acceptance bundle authorization', () => {
+  it('checks out and re-verifies the source revision carried by the signed bundle authorization', () => {
+    const workflow = readFileSync('.github/workflows/windows-installed-acceptance.yml', 'utf8');
+    expect(workflow).toContain('git checkout --detach $sourceRevision');
+    expect(workflow).toContain('if ($head -cne $sourceRevision)');
+    expect(workflow).toContain('$env:ACCEPTANCE_SOURCE_REVISION = $head');
+    expect(workflow.match(/verify-windows-acceptance-authorization\.mjs/gu)).toHaveLength(3);
+  });
   it('requires a pinned P-256 signature bound to URL, digest, architecture, and time', () => {
     const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const manifestKeys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -25,6 +33,7 @@ describe('Windows acceptance bundle authorization', () => {
       bundleUrl: 'https://artifacts.example/frozen.zip',
       bundleSha256: '11'.repeat(32),
       architecture: 'x64',
+      sourceRevision: 'ab'.repeat(20),
       manifestPublicKeySpkiBase64url: manifestKeys.publicKey
         .export({ format: 'der', type: 'spki' })
         .toString('base64url'),

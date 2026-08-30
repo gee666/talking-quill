@@ -3,6 +3,7 @@
 use std::path::Path;
 
 fn main() {
+    talking_quill_helper::retain_source_identity();
     let os_arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
     #[cfg(all(windows, feature = "windows-installed-acceptance"))]
     if os_arguments.get(1).is_some_and(|value| {

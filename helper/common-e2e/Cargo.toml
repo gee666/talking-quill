@@ -1,6 +1,6 @@
 [package]
 name = "talking-quill-common-e2e"
-version = "0.0.68"
+version = "0.0.69"
 edition = "2024"
 rust-version = "1.97.1"
 publish = false

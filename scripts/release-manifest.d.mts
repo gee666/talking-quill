@@ -7,6 +7,7 @@ export interface ReleaseManifestProvenance {
   readonly name: string;
   readonly platform: 'win';
   readonly arch: 'x64' | 'arm64';
+  readonly sourceTree: string;
   readonly sourceTreeSha256: string;
 }
 export interface ReleaseManifestBody {
@@ -15,6 +16,7 @@ export interface ReleaseManifestBody {
   readonly tag: string;
   readonly version: string;
   readonly sourceCommit: string;
+  readonly sourceTree: string;
   readonly platform: 'win';
   readonly architecture: 'x64' | 'arm64' | 'x64+arm64';
   readonly promotable: true;

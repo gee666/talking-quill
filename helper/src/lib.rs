@@ -12,6 +12,22 @@ pub mod macos_service_bridge;
 #[cfg(target_os = "macos")]
 #[used]
 static MACOS_BUILD_VARIANT: &str = env!("TALKING_QUILL_MACOS_BUILD_VARIANT");
+#[used]
+static SOURCE_COMMIT_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_COMMIT=",
+    env!("TALKING_QUILL_SOURCE_COMMIT")
+);
+#[used]
+static SOURCE_TREE_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_TREE=",
+    env!("TALKING_QUILL_SOURCE_TREE")
+);
+
+pub fn retain_source_identity() {
+    std::hint::black_box(SOURCE_COMMIT_MARKER);
+    std::hint::black_box(SOURCE_TREE_MARKER);
+}
+
 pub mod owned_tree;
 pub mod owner;
 pub mod protocol;

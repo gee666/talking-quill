@@ -81,6 +81,28 @@ describe('Windows protected bootstrap generator', () => {
     }
   });
 
+  it('keeps bootstrap consoles hidden and provides a bounded interactive installer UI probe', async () => {
+    const [installer, smoke, packageManifest] = await Promise.all([
+      readFile('build/installer.nsh', 'utf8'),
+      readFile('scripts/windows-installer-ui-smoke.ps1', 'utf8'),
+      readFile('package.json', 'utf8'),
+    ]);
+    expect(installer.match(/-WindowStyle Hidden/gu)).toHaveLength(2);
+    expect(installer).toContain('ExecShellWait "runas"');
+    expect(installer).toContain('SW_SHOWNORMAL');
+    expect(smoke).toContain('silentMode = $false');
+    expect(smoke).toContain("subsystem = 'windows-gui'");
+    expect(smoke).toContain('PostMessage($observed.Handle, 0x0010');
+    expect(smoke).toContain('windows-job-object-supervisor.cs');
+    expect(smoke).toContain('Protected bootstrap residue changed during UI smoke');
+    expect(smoke).toContain('Installer UI process did not exit within the cancellation bound');
+    expect(smoke).toContain('Installer mutated machine installation state before UI cancellation');
+    const manifest = JSON.parse(packageManifest) as { scripts: Record<string, string> };
+    expect(manifest.scripts['smoke:installer:interactive']).toContain(
+      'windows-installer-ui-smoke.ps1',
+    );
+  });
+
   it('pins protected leaf identity, cleanup retries, manifests, and stale cleanup refusal policy', async () => {
     const [bootstrap, cleanup, harness, supervisor] = await Promise.all([
       readFile('build/windows-protected-bootstrap.ps1', 'utf8'),

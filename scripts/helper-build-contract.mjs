@@ -3,6 +3,8 @@ import { join } from 'node:path';
 
 import { readNativeArchitectures } from './native-architecture.mjs';
 
+export const SOURCE_COMMIT_MARKER = Buffer.from('TALKING_QUILL_SOURCE_COMMIT=', 'ascii');
+export const SOURCE_TREE_MARKER = Buffer.from('TALKING_QUILL_SOURCE_TREE=', 'ascii');
 export const WINDOWS_TEST_PHYSICAL_MARKER = 0x5451_5445_5354_0008n;
 export const WINDOWS_UPDATE_PRIMARY_KEY_MARKER = Buffer.from(
   'TALKING_QUILL_WINDOWS_UPDATE_PRIMARY_KEY_V1=',
@@ -165,6 +167,27 @@ export async function verifyCompleteNativeRoleInventory(paths, assignedRolePaths
     }
   }
   await verifyExactlyOneSuppressionCapableExecutable(paths);
+}
+
+export async function verifyNativeSourceIdentity(path, identity) {
+  const executable = await readFile(path);
+  for (const [marker, expected, label] of [
+    [SOURCE_COMMIT_MARKER, identity.sourceCommit, 'commit'],
+    [SOURCE_TREE_MARKER, identity.sourceTree, 'tree'],
+  ]) {
+    const offset = executable.indexOf(marker);
+    if (offset < 0) {
+      throw new Error(
+        `Native artifact source ${label} does not match the current checkout: ${path}`,
+      );
+    }
+    const value = executable.subarray(offset + marker.length, offset + marker.length + 40);
+    if (executable.indexOf(marker, offset + 1) >= 0 || value.toString('ascii') !== expected) {
+      throw new Error(
+        `Native artifact source ${label} does not match the current checkout: ${path}`,
+      );
+    }
+  }
 }
 
 export async function verifyExactlyOneSuppressionCapableExecutable(paths) {

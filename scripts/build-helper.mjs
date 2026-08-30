@@ -1,16 +1,25 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { nativeRoleLayout, verifyStagedNativeRoleSet } from './helper-build-contract.mjs';
+import {
+  nativeRoleLayout,
+  verifyNativeSourceIdentity,
+  verifyStagedNativeRoleSet,
+} from './helper-build-contract.mjs';
 import { replaceNativeRoleDirectory } from './native-staging.mjs';
 import { windowsUpdatePublicKeyIdentity } from './release-package-metadata.mjs';
+import { currentSourceIdentity } from './source-identity.mjs';
+import { verifyCoordinatedVersions } from './release-version-policy.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const options = parseOptions(process.argv.slice(2));
+const sourceIdentity = currentSourceIdentity({ repositoryRoot });
+process.env.TALKING_QUILL_SOURCE_COMMIT = sourceIdentity.sourceCommit;
+process.env.TALKING_QUILL_SOURCE_TREE = sourceIdentity.sourceTree;
 const platform = normalizePlatform(options.platform ?? process.platform);
 const architecture = normalizeArchitecture(options.architecture ?? process.arch);
 const acceptanceBuildEnvironment = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
@@ -55,7 +64,7 @@ if (platform === 'win32') windowsUpdatePublicKeyIdentity();
 const target = rustTarget(platform, architecture);
 const cargo = resolveRustTool('cargo');
 const rustup = resolveRustTool('rustup');
-await verifyVersions();
+await verifyCoordinatedVersions(repositoryRoot);
 run(rustup, ['target', 'add', target]);
 
 // Build each trust role explicitly. The gateway package has no owner feature;
@@ -87,6 +96,11 @@ try {
   }
   // Verify all bytes before replacing the previous coherent role set.
   await verifyStagedNativeRoleSet(stagingDirectory, { platform, architecture });
+  await Promise.all(
+    nativeRoleLayout(platform).map((role) =>
+      verifyNativeSourceIdentity(join(stagingDirectory, role.name), sourceIdentity),
+    ),
+  );
   await replaceNativeRoleDirectory({
     appDirectory: join(repositoryRoot, 'app'),
     stagingDirectory,
@@ -173,26 +187,6 @@ function run(command, arguments_) {
   if (result.status !== 0) {
     throw new Error(
       `${basename(command)} ${arguments_.join(' ')} failed with ${String(result.status)}`,
-    );
-  }
-}
-
-async function packageVersion(path) {
-  const manifest = JSON.parse(await readFile(path, 'utf8'));
-  if (typeof manifest.version !== 'string') throw new Error(`Missing version in ${path}`);
-  return manifest.version;
-}
-
-async function verifyVersions() {
-  const [rootVersion, appVersion, cargoManifest] = await Promise.all([
-    packageVersion(join(repositoryRoot, 'package.json')),
-    packageVersion(join(repositoryRoot, 'app', 'package.json')),
-    readFile(join(repositoryRoot, 'helper', 'Cargo.toml'), 'utf8'),
-  ]);
-  const helperVersion = /^version\s*=\s*"([^"]+)"/m.exec(cargoManifest)?.[1];
-  if (helperVersion === undefined || rootVersion !== appVersion || appVersion !== helperVersion) {
-    throw new Error(
-      `Application/helper version mismatch (root=${rootVersion}, app=${appVersion}, helper=${String(helperVersion)})`,
     );
   }
 }

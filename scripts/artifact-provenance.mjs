@@ -14,6 +14,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { currentSourceIdentity } from './source-identity.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const artifactProvenanceManifestPath = resolve(repositoryRoot, 'artifact-provenance.json');
@@ -33,9 +34,14 @@ export async function writeArtifactProvenanceManifest(options) {
     ...entry,
     role: 'package-file',
   }));
+  const source = currentSourceIdentity({
+    repositoryRoot,
+    requireClean: process.env.NODE_ENV !== 'test',
+  });
   const manifest = {
-    schemaVersion: 1,
-    sourceCommit: currentCommit(),
+    schemaVersion: 2,
+    sourceCommit: source.sourceCommit,
+    sourceTree: source.sourceTree,
     sourceTreeSha256: await currentSourceTreeHash(),
     package: { ...identity, root: packageRootPath },
     entries: [...packageFiles, ...artifacts].sort(compareEntries),
@@ -61,8 +67,12 @@ export async function verifyArtifactProvenanceManifest() {
     throw new Error('Artifact provenance manifest is not valid JSON');
   }
   validateArtifactProvenanceManifest(manifest);
-  if (manifest.sourceCommit !== currentCommit()) {
+  const sourceIdentity = currentSourceIdentity({ repositoryRoot });
+  if (manifest.sourceCommit !== sourceIdentity.sourceCommit) {
     throw new Error('Artifact provenance manifest is stale for the current source commit');
+  }
+  if (manifest.sourceTree !== sourceIdentity.sourceTree) {
+    throw new Error('Artifact provenance manifest is stale for the current Git tree');
   }
   if (manifest.sourceTreeSha256 !== (await currentSourceTreeHash())) {
     throw new Error('Artifact provenance manifest is stale for the current source tree');
@@ -256,9 +266,11 @@ export function validateArtifactProvenanceManifest(manifest) {
   if (
     manifest === null ||
     typeof manifest !== 'object' ||
-    manifest.schemaVersion !== 1 ||
+    manifest.schemaVersion !== 2 ||
     typeof manifest.sourceCommit !== 'string' ||
     !/^[0-9a-f]{40}$/u.test(manifest.sourceCommit) ||
+    typeof manifest.sourceTree !== 'string' ||
+    !/^[0-9a-f]{40}$/u.test(manifest.sourceTree) ||
     typeof manifest.sourceTreeSha256 !== 'string' ||
     !/^[0-9a-f]{64}$/u.test(manifest.sourceTreeSha256) ||
     manifest.package === null ||
@@ -355,23 +367,6 @@ export async function currentSourceTreeHash() {
     hash.update('\0');
   }
   return hash.digest('hex');
-}
-
-function currentCommit() {
-  const result = spawnSync('git', ['rev-parse', 'HEAD'], {
-    cwd: repositoryRoot,
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
-  const commit = result.stdout.trim();
-  if (result.status !== 0 || !/^[0-9a-f]{40}$/u.test(commit)) {
-    throw new Error('Unable to bind artifact provenance to the current source commit');
-  }
-  const expectedCommit = process.env.TALKING_QUILL_RELEASE_COMMIT;
-  if (expectedCommit !== undefined && commit !== expectedCommit) {
-    throw new Error('Artifact provenance checkout does not match the resolved release commit');
-  }
-  return commit;
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {

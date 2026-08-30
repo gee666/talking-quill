@@ -3,6 +3,7 @@ const SERVICE_BRIDGE_ROLE_MARKER: &str =
 
 #[cfg(target_os = "macos")]
 fn main() {
+    talking_quill_helper::retain_source_identity();
     std::hint::black_box(SERVICE_BRIDGE_ROLE_MARKER);
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
@@ -99,6 +100,7 @@ unsafe extern "C" {
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
+    talking_quill_helper::retain_source_identity();
     std::hint::black_box(SERVICE_BRIDGE_ROLE_MARKER);
     std::process::exit(69);
 }

@@ -7,7 +7,7 @@ import {
 } from '../../app/src/main/info/windows-update-launch';
 
 const candidate = {
-  version: '0.0.68',
+  version: '0.0.69',
   platform: 'win' as const,
   architecture: 'x64' as const,
   ownerMode: 'local-unsigned-enabled' as const,

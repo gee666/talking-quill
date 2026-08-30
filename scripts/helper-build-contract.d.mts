@@ -1,3 +1,5 @@
+export const SOURCE_COMMIT_MARKER: Buffer;
+export const SOURCE_TREE_MARKER: Buffer;
 export const WINDOWS_TEST_PHYSICAL_MARKER: bigint;
 export const WINDOWS_UPDATE_PRIMARY_KEY_MARKER: Buffer;
 export const RETIRED_WINDOWS_UPDATE_BRIDGE_KEY_MARKER: Buffer;
@@ -24,6 +26,10 @@ export function verifyMacosServiceBridgeBuildContract(path: string): Promise<voi
 export function verifyCompleteNativeRoleInventory(
   paths: readonly string[],
   assignedRolePaths: readonly string[],
+): Promise<void>;
+export function verifyNativeSourceIdentity(
+  path: string,
+  identity: { readonly sourceCommit: string; readonly sourceTree: string },
 ): Promise<void>;
 export function verifyExactlyOneSuppressionCapableExecutable(
   paths: readonly string[],

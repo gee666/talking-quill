@@ -44,6 +44,10 @@ export function parseUnsignedUpdateIdentity(
     candidate.architecture !== architecture ||
     candidate.ownerMode !== 'local-unsigned-enabled' ||
     candidate.packageMode !== 'update' ||
+    typeof candidate.sourceCommit !== 'string' ||
+    !/^[0-9a-f]{40}$/u.test(candidate.sourceCommit) ||
+    typeof candidate.sourceTree !== 'string' ||
+    !/^[0-9a-f]{40}$/u.test(candidate.sourceTree) ||
     !digest(candidate.releaseBuildDigest) ||
     !digest(candidate.packageLayoutDigest) ||
     !digest(candidate.packageSha256) ||

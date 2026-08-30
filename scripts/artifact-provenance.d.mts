@@ -17,8 +17,9 @@ export interface ArtifactProvenanceLink {
   readonly target: string;
 }
 export interface ArtifactProvenanceManifest {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly sourceCommit: string;
+  readonly sourceTree: string;
   readonly sourceTreeSha256: string;
   readonly package: ArtifactIdentity & { readonly root: string };
   readonly entries: readonly (ArtifactProvenanceFile | ArtifactProvenanceLink)[];

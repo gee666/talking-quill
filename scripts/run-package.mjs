@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { currentSourceIdentity } from './source-identity.mjs';
 
 export const CANONICAL_PACKAGE_TARGETS = Object.freeze(['win', 'win-arm64']);
 
@@ -131,11 +132,18 @@ function main() {
 
 export function createProductionEnvironment(plan, sourceEnvironment = process.env) {
   const acceptance = plan.acceptance === true;
+  const sourceIdentity = currentSourceIdentity({
+    environment: sourceEnvironment,
+    requireClean: process.env.NODE_ENV !== 'test',
+  });
   return Object.fromEntries(
     Object.entries({
       ...sourceEnvironment,
       CSC_IDENTITY_AUTO_DISCOVERY: 'false',
       TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
+      TALKING_QUILL_REQUIRE_CLEAN_SOURCE: '1',
+      TALKING_QUILL_RELEASE_COMMIT: sourceIdentity.sourceCommit,
+      TALKING_QUILL_RELEASE_TREE: sourceIdentity.sourceTree,
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: plan.artifactRequirement,
       TALKING_QUILL_PACKAGE_TARGET: plan.platform,
       TALKING_QUILL_PACKAGE_ARCH: plan.architecture,

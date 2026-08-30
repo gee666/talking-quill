@@ -1,6 +1,34 @@
-use std::env;
+use std::{env, process::Command};
 
 fn main() {
+    for name in ["TALKING_QUILL_SOURCE_COMMIT", "TALKING_QUILL_SOURCE_TREE"] {
+        println!("cargo:rerun-if-env-changed={name}");
+        let revision = if name.ends_with("COMMIT") {
+            "HEAD^{commit}"
+        } else {
+            "HEAD^{tree}"
+        };
+        let value = env::var(name).unwrap_or_else(|_| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", revision])
+                    .output()
+                    .expect("git source identity is required")
+                    .stdout,
+            )
+            .expect("git output must be UTF-8")
+            .trim()
+            .to_owned()
+        });
+        assert!(
+            value.len() == 40
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "source identity must be a lowercase full Git object ID"
+        );
+        println!("cargo:rustc-env={name}={value}");
+    }
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_LOCAL_UNSIGNED_OWNER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TRANSACTIONAL_SHORTCUTS_DEV");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_WINDOWS_NATIVE_TEST_INPUT");
