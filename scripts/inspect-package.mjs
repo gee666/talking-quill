@@ -14,6 +14,7 @@ import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { extractFile, listPackage, statFile } from '@electron/asar';
+import { extractRegularAsarFiles } from './asar-entry-inspection.mjs';
 import { FuseV1Options, getCurrentFuseWire } from '@electron/fuses';
 import {
   discoverFinalArtifactNames,
@@ -122,50 +123,8 @@ const testHarnessMarkers = [
   'task6-test-composition',
   'source-test-dialogs',
 ];
-for (const entry of asarEntries) {
-  const stat = statFile(asarPath, entry.replaceAll('/', sep), false);
-  if (stat.files !== undefined || stat.unpacked === true) continue;
-  const bytes = extractFile(asarPath, entry.replaceAll('/', sep));
-  if (canonicalPackage) assertNoForbiddenProductionMarkers(`app.asar/${entry}`, bytes);
-  validateSecretContent(entry, bytes.toString('latin1'));
-  if (isTextRuntimePath(entry)) {
-    const source = bytes.toString('utf8');
-    validateRuntimeContent(entry, source);
-    if (/\.(?:c?js|mjs)$/u.test(entry)) {
-      for (const marker of testHarnessMarkers) {
-        if (source.includes(marker)) {
-          throw new Error(`Packaged production graph contains test marker ${marker} in ${entry}`);
-        }
-      }
-    }
-  }
-}
-const packagedBootstrap = extractFile(
-  asarPath,
-  'out/workers/whisper-bootstrap.cjs'.replaceAll('/', sep),
-).toString('utf8');
-const packagedPayload = extractFile(
-  asarPath,
-  'out/workers/whisper-payload.cjs'.replaceAll('/', sep),
-).toString('utf8');
-const guardInstallation = packagedBootstrap.indexOf('installWorkerNetworkGuard();');
-const payloadLoad = packagedBootstrap.indexOf('("./whisper-payload.cjs")');
-if (guardInstallation < 0 || payloadLoad <= guardInstallation) {
-  throw new Error('Packaged Whisper bootstrap does not guard the production payload.');
-}
-for (const forbidden of ['@huggingface/transformers', 'onnxruntime-node', 'zod']) {
-  if (packagedBootstrap.includes(forbidden)) {
-    throw new Error(`Packaged Whisper bootstrap contains ${forbidden}.`);
-  }
-}
-if (!packagedPayload.includes('onnxruntime-node')) {
-  throw new Error('Packaged Whisper payload does not load ONNX Runtime.');
-}
-for (const entry of asarEntries) {
-  if (entry.length > 0 && 'link' in statFile(asarPath, entry.replaceAll('/', sep))) {
-    throw new Error(`ASAR symlink is not allowed: ${entry}`);
-  }
-}
+inspectAsarContent(asarPath, asarEntries, 'app.asar');
+validatePackagedWhisper(asarPath);
 const nativeEntries = [
   'node_modules/better-sqlite3/build/Release/better_sqlite3.node',
   `node_modules/onnxruntime-node/bin/napi-v3/${boundPlatform === 'mac' ? 'darwin' : 'win32'}/${boundArch}/onnxruntime_binding.node`,
@@ -643,18 +602,51 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
     platform: mac ? 'mac' : 'win',
     architecture: expectedArch,
   });
-  for (const entry of entries) {
-    const metadata = statFile(extractedAsar, entry.replaceAll('/', sep));
-    if (entry.length > 0 && 'link' in metadata) {
-      throw new Error(`Extracted final artifact contains an ASAR link: ${entry}`);
-    }
-    const bytes = extractFile(extractedAsar, entry.replaceAll('/', sep));
+  inspectAsarContent(extractedAsar, entries, 'extracted app.asar', 'Extracted final artifact ASAR');
+  validatePackagedWhisper(extractedAsar);
+}
+
+function inspectAsarContent(archivePath, entries, packageLabel, policyLabel = 'ASAR') {
+  for (const { entry, bytes } of extractRegularAsarFiles(archivePath, entries, policyLabel)) {
     if (canonicalPackage) {
-      assertNoForbiddenProductionMarkers(`extracted app.asar/${entry}`, bytes);
+      assertNoForbiddenProductionMarkers(`${packageLabel}/${entry}`, bytes);
     }
-    if (isTextRuntimePath(entry)) {
-      validateRuntimeContent(entry, bytes.toString('utf8'));
+    validateSecretContent(entry, bytes.toString('latin1'));
+    if (!isTextRuntimePath(entry)) continue;
+    const source = bytes.toString('utf8');
+    validateRuntimeContent(entry, source);
+    if (!/\.(?:c?js|mjs)$/u.test(entry)) continue;
+    for (const marker of testHarnessMarkers) {
+      if (source.includes(marker)) {
+        throw new Error(`Packaged production graph contains test marker ${marker} in ${entry}`);
+      }
     }
+  }
+}
+
+function validatePackagedWhisper(archivePath) {
+  const packagedBootstrap = extractFile(
+    archivePath,
+    'out/workers/whisper-bootstrap.cjs'.replaceAll('/', sep),
+    false,
+  ).toString('utf8');
+  const packagedPayload = extractFile(
+    archivePath,
+    'out/workers/whisper-payload.cjs'.replaceAll('/', sep),
+    false,
+  ).toString('utf8');
+  const guardInstallation = packagedBootstrap.indexOf('installWorkerNetworkGuard();');
+  const payloadLoad = packagedBootstrap.indexOf('("./whisper-payload.cjs")');
+  if (guardInstallation < 0 || payloadLoad <= guardInstallation) {
+    throw new Error('Packaged Whisper bootstrap does not guard the production payload.');
+  }
+  for (const forbidden of ['@huggingface/transformers', 'onnxruntime-node', 'zod']) {
+    if (packagedBootstrap.includes(forbidden)) {
+      throw new Error(`Packaged Whisper bootstrap contains ${forbidden}.`);
+    }
+  }
+  if (!packagedPayload.includes('onnxruntime-node')) {
+    throw new Error('Packaged Whisper payload does not load ONNX Runtime.');
   }
 }
 
