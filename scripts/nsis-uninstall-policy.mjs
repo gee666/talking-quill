@@ -231,6 +231,10 @@ export function validateNsisUninstallPolicy({
     !protectedBootstrap.includes('QueryFullProcessImageName') ||
     !protectedBootstrap.includes("StartsWith('/TQPROTECTEDTEMP='") ||
     !protectedBootstrap.includes('JoinArguments($childArguments)') ||
+    !protectedBootstrap.includes('LastIndexOf(" _?=", StringComparison.Ordinal)') ||
+    !protectedBootstrap.includes('[Microsoft.Win32.RegistryView]::Registry64') ||
+    !protectedBootstrap.includes("Join-Path $nativeProgramFiles 'Talking Quill'") ||
+    !protectedBootstrap.includes('$start.Arguments += \' \' + $nsisTail') ||
     !protectedBootstrap.includes('FileAttributes]::ReparsePoint') ||
     !protectedBootstrap.includes('SetAccessRuleProtection($true, $false)') ||
     !protectedBootstrap.includes("SetEnvironmentVariable('TEMP', $leaf, 'Process')") ||

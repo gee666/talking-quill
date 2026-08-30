@@ -974,6 +974,16 @@ describe('packaged runtime allowlist', () => {
       validateNsisUninstallPolicy({
         custom,
         ...pinned,
+        protectedBootstrap: protectedBootstrap.replace(
+          '[Microsoft.Win32.RegistryView]::Registry64',
+          '[Microsoft.Win32.RegistryView]::Default',
+        ),
+      }),
+    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
+    expect(() =>
+      validateNsisUninstallPolicy({
+        custom,
+        ...pinned,
         uninstaller: uninstaller.replace(
           '!ifmacrondef customUnInstall',
           '!ifmacrondef removedCustomUnInstall',

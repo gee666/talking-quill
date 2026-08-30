@@ -122,18 +122,26 @@ public static class TalkingQuillProtectedBootstrapNative
                 string commandLine = Marshal.PtrToStringUni(
                     nativeCommand.Buffer,
                     nativeCommand.Length / 2);
+                int nsisTailOffset = commandLine.LastIndexOf(" _?=", StringComparison.Ordinal);
+                string nsisTail = String.Empty;
+                if (nsisTailOffset >= 0)
+                {
+                    nsisTail = commandLine.Substring(nsisTailOffset + 1);
+                    commandLine = commandLine.Substring(0, nsisTailOffset);
+                }
                 int count;
                 IntPtr argv = CommandLineToArgvW(commandLine, out count);
                 if (argv == IntPtr.Zero || count < 1 || count > 4096)
                     throw new Win32Exception(Marshal.GetLastWin32Error());
                 try
                 {
-                    string[] result = new string[count + 1];
+                    string[] result = new string[count + 2];
                     result[0] = image.ToString();
+                    result[1] = nsisTail;
                     for (int index = 0; index < count; index++)
                     {
                         IntPtr value = Marshal.ReadIntPtr(argv, index * IntPtr.Size);
-                        result[index + 1] = Marshal.PtrToStringUni(value);
+                        result[index + 2] = Marshal.PtrToStringUni(value);
                     }
                     return result;
                 }
@@ -195,7 +203,8 @@ public static class TalkingQuillProtectedBootstrapNative
 
 $parent = [TalkingQuillProtectedBootstrapNative]::ReadWaitingParent()
 $parentExecutable = $parent[0]
-$parentArguments = @($parent[2..($parent.Length - 1)])
+$nsisTail = $parent[1]
+$parentArguments = @($parent[3..($parent.Length - 1)])
 $publicArguments = [Collections.Generic.List[string]]::new()
 $protectedTemp = $null
 $elevatedMarker = $false
@@ -217,6 +226,21 @@ foreach ($argument in $parentArguments) {
     $publicArguments.Add($argument)
 }
 
+if (-not [string]::IsNullOrEmpty($nsisTail)) {
+    $nativeProgramFilesKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64).OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion', $false)
+    if ($null -eq $nativeProgramFilesKey -or $nsisTail.Length -le 3) { exit 78 }
+    try { $nativeProgramFiles = [string]$nativeProgramFilesKey.GetValue('ProgramFilesDir') }
+    finally { $nativeProgramFilesKey.Dispose() }
+    $expectedNsisRoot = Join-Path $nativeProgramFiles 'Talking Quill'
+    $nsisRoot = [IO.Path]::GetFullPath($nsisTail.Substring(3)).TrimEnd('\')
+    if (-not $nsisRoot.Equals($expectedNsisRoot, [StringComparison]::OrdinalIgnoreCase)) { exit 78 }
+    $nsisRootItem = Get-Item -Force -LiteralPath $nsisRoot
+    if (-not $nsisRootItem.PSIsContainer -or
+        ($nsisRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 78 }
+}
 if ($null -ne $protectedTemp) {
     $path = [IO.Path]::GetFullPath($protectedTemp)
     if ([IO.Path]::GetDirectoryName($path) -cne $programData -or
@@ -251,6 +275,7 @@ $start = New-Object Diagnostics.ProcessStartInfo
 $start.FileName = $parentExecutable
 $start.Arguments = [TalkingQuillProtectedBootstrapNative]::JoinArguments($childArguments) +
     ' /TQPROTECTEDTEMP=' + [TalkingQuillProtectedBootstrapNative]::JoinArguments(@($leaf))
+if (-not [string]::IsNullOrEmpty($nsisTail)) { $start.Arguments += ' ' + $nsisTail }
 $start.UseShellExecute = $false
 $start.EnvironmentVariables['TEMP'] = $leaf
 $start.EnvironmentVariables['TMP'] = $leaf

@@ -1,8 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { gzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+
+import {
+  checkProtectedBootstrapInclude,
+  protectedBootstrapSourcePath,
+  renderProtectedBootstrapInclude,
+} from './windows-protected-bootstrap-generator.mjs';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
 const temporaryRoot = resolve(repositoryRoot, 'tmp');
@@ -14,23 +19,12 @@ const { getMakeNsisPath } = electronBuilderRequire(
 );
 
 const installerInclude = resolve(repositoryRoot, 'build', 'installer.nsh');
-const bootstrapSourcePath = resolve(repositoryRoot, 'build', 'windows-protected-bootstrap.ps1');
-const bootstrapPayloadPath = resolve(
-  repositoryRoot,
-  'build',
-  'windows-protected-bootstrap-encoded.nsh',
-);
-const projectDirectory = resolve(repositoryRoot, 'app');
 const makeNsisArguments = ['-WX', '-V2', '-NOCD'];
-const [source, bootstrapSource, bootstrapPayloadInclude] = await Promise.all([
+const [source, bootstrapPayloadInclude] = await Promise.all([
   readFile(installerInclude, 'utf8'),
-  readFile(bootstrapSourcePath),
-  readFile(bootstrapPayloadPath, 'utf8'),
+  checkProtectedBootstrapInclude(),
 ]);
 const bootstrapPayload = requireBootstrapPayload(bootstrapPayloadInclude);
-if (gzipSync(bootstrapSource, { level: 9 }).toString('base64') !== bootstrapPayload) {
-  throw new Error('Static protected bootstrap payload is stale');
-}
 if (/-Command[^\r\n]*"\s+"\$[R0-9]/u.test(source)) {
   throw new Error(
     'Protected bootstrap must not append runtime arguments after PowerShell -Command',
@@ -49,11 +43,21 @@ if (!source.includes('${If} $TEMP != $R1')) {
 await mkdir(temporaryRoot, { recursive: true });
 const workDirectory = await mkdtemp(join(temporaryRoot, 'nsis-early-init-'));
 try {
+  const uninstallerRoot = join(workDirectory, 'Program Files fixture root');
+  await mkdir(uninstallerRoot);
+  const fixtureProjectDirectory = await writeFixtureBootstrapInclude(
+    workDirectory,
+    uninstallerRoot,
+  );
   const makensis = await getMakeNsisPath(undefined);
   for (const mode of ['installer', 'uninstaller']) {
     const scriptPath = join(workDirectory, `${mode}.nsi`);
     const outputPath = join(workDirectory, `${mode}-macro-check.exe`);
-    await writeFile(scriptPath, macroCompileScript({ mode, outputPath }), 'utf8');
+    await writeFile(
+      scriptPath,
+      macroCompileScript({ mode, outputPath, projectDirectory: fixtureProjectDirectory }),
+      'utf8',
+    );
 
     const result = spawnSync(makensis.path, [...makeNsisArguments, scriptPath], {
       cwd: appBuilderRoot,
@@ -70,11 +74,45 @@ try {
     }
   }
   if (process.platform === 'win32') {
-    await runCompiledNsisRuntimeHarness(workDirectory);
+    await runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot);
     await runProtectedBootstrapIntegration(workDirectory, bootstrapPayload);
   }
 } finally {
   await rm(workDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+async function writeFixtureBootstrapInclude(workDirectory, expectedNsisRoot) {
+  const projectRoot = join(workDirectory, 'fixture-project');
+  const projectDirectory = join(projectRoot, 'app');
+  const buildDirectory = join(projectRoot, 'build');
+  await Promise.all([
+    mkdir(projectDirectory, { recursive: true }),
+    mkdir(buildDirectory, { recursive: true }),
+  ]);
+  const productionSource = await readFile(protectedBootstrapSourcePath, 'utf8');
+  const expectedRootLine = "$expectedNsisRoot = Join-Path $nativeProgramFiles 'Talking Quill'";
+  const fixtureRoot = expectedNsisRoot.replaceAll("'", "''");
+  const fixtureSource = productionSource.replace(
+    expectedRootLine,
+    `$expectedNsisRoot = '${fixtureRoot}'`,
+  );
+  if (fixtureSource === productionSource) {
+    throw new Error('Protected bootstrap fixture root anchor is missing');
+  }
+  const [installValidation, cleanupFixture] = await Promise.all([
+    readFile(resolve(repositoryRoot, 'build', 'installer-install-validation.nsh')),
+    readFile(resolve(repositoryRoot, 'build', 'windows-personal-machine-cleanup.ps1')),
+  ]);
+  await Promise.all([
+    writeFile(
+      join(buildDirectory, 'windows-protected-bootstrap-encoded.nsh'),
+      renderProtectedBootstrapInclude(fixtureSource),
+      'utf8',
+    ),
+    writeFile(join(buildDirectory, 'installer-install-validation.nsh'), installValidation),
+    writeFile(join(buildDirectory, 'windows-personal-machine-cleanup.ps1'), cleanupFixture),
+  ]);
+  return projectDirectory;
 }
 
 function requireBootstrapPayload(source) {
@@ -85,40 +123,250 @@ function requireBootstrapPayload(source) {
   return match[1];
 }
 
-async function runCompiledNsisRuntimeHarness(workDirectory) {
-  const logPath = join(workDirectory, 'compiled-nsis-runtime.txt');
-  const environment = { ...process.env, TQ_BOOTSTRAP_TEST_LOG: logPath };
-  const publicArguments = ['/S', '--uninstall', "--fixture-path=C:\\A path\\O'Brien\\payload.exe"];
-  const bootstrapMarker = '/TQELEVATEDBOOTSTRAP=1';
+async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
   const installer = join(workDirectory, 'installer-macro-check.exe');
-  const installed = spawnSync(
-    installer,
-    [...publicArguments, "/DELETEAPPDATA=O'Brien value", bootstrapMarker],
-    {
+  const uninstallerWriter = join(workDirectory, 'uninstaller-macro-check.exe');
+  const uninstaller = join(workDirectory, 'unused-uninstaller.exe');
+  requireStatus(
+    spawnSync(uninstallerWriter, ['/S'], {
       encoding: 'utf8',
-      env: environment,
       timeout: 60_000,
       windowsHide: true,
-    },
+    }),
+    0,
+    'compiled uninstaller fixture writer',
   );
-  requireStatus(installed, 37, 'compiled installer protected bootstrap');
-  requireForwardedNsisParameters(await readFile(logPath, 'utf8'), true);
+  await readFile(uninstaller);
+
+  const publicArguments = [
+    '/S',
+    '--uninstall',
+    "--fixture-path=C:\\A path\\O'Brien\\payload.exe",
+    '--uninstall-note=remove user data',
+  ];
+  for (const [label, executable] of [
+    ['installer', installer],
+    ['uninstaller', uninstaller],
+  ]) {
+    const logPath = join(workDirectory, `${label}-runtime.txt`);
+    const invocationArguments = [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'];
+    let rawArguments = invocationArguments.map(quoteWindowsArgument).join(' ');
+    if (label === 'uninstaller') rawArguments += ` _?=${nsisPath(uninstallerRoot)}`;
+    const result = spawnWithRawArguments(executable, rawArguments, {
+      ...process.env,
+      TQ_BOOTSTRAP_TEST_LOG: logPath,
+    });
+    requireStatus(result, 37, `compiled ${label} protected bootstrap`);
+    requireForwardedNsisParameters(
+      await readFile(logPath, 'utf8'),
+      publicArguments,
+      label,
+      uninstallerRoot,
+    );
+  }
+
+  await requireCompiledNsisTailRejection({ uninstaller, workDirectory, uninstallerRoot });
+
+  await requireCompiledTempRejection({
+    installer,
+    uninstaller,
+    workDirectory,
+    uninstallerRoot,
+    arguments_: ['/TQELEVATEDBOOTSTRAP=1', String.raw`/TQPROTECTEDTEMP=C:\malformed`],
+    environment: { TEMP: String.raw`C:\malformed`, TMP: String.raw`C:\malformed` },
+    caseName: 'malformed',
+  });
+
+  const programData = process.env.ProgramData ?? String.raw`C:\ProgramData`;
+  const reparseTarget = join(workDirectory, 'compiled-reparse-target');
+  const reparseLeaf = join(programData, `.Talking Quill.Installer-compiled-${process.pid}`);
+  await mkdir(reparseTarget);
+  try {
+    await symlink(reparseTarget, reparseLeaf, 'junction');
+    await requireCompiledTempRejection({
+      installer,
+      uninstaller,
+      workDirectory,
+      uninstallerRoot,
+      arguments_: ['/TQELEVATEDBOOTSTRAP=1', `/TQPROTECTEDTEMP=${reparseLeaf}`],
+      environment: { TEMP: reparseLeaf, TMP: reparseLeaf },
+      caseName: 'reparse',
+    });
+  } finally {
+    await rm(reparseLeaf, { recursive: false, force: true });
+  }
 }
 
-function requireForwardedNsisParameters(parameters, expectDeleteArgument) {
-  const expectedFragments = ['/S', '--uninstall', "O'Brien"];
-  if (expectDeleteArgument) expectedFragments.push('/DELETEAPPDATA=');
-  for (const expected of expectedFragments) {
-    if (!parameters.includes(expected)) {
-      throw new Error(`compiled NSIS bootstrap dropped public argument fragment: ${expected}`);
+async function requireCompiledNsisTailRejection({ uninstaller, workDirectory, uninstallerRoot }) {
+  const unrelated = join(workDirectory, 'unrelated-uninstall-root');
+  const reparseTarget = join(workDirectory, 'uninstaller-root-reparse-target');
+  await Promise.all([mkdir(unrelated), mkdir(reparseTarget)]);
+  const rejected = [
+    unrelated,
+    `${uninstallerRoot}\\..\\unrelated-uninstall-root`,
+    `${uninstallerRoot}-alternate`,
+  ];
+  for (const [index, tail] of rejected.entries()) {
+    const logPath = join(workDirectory, `uninstaller-tail-${String(index)}.txt`);
+    const result = spawnWithRawArguments(
+      uninstaller,
+      `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(tail)}`,
+      { ...process.env, TQ_BOOTSTRAP_TEST_LOG: logPath },
+    );
+    requireStatus(result, 78, `compiled uninstaller forged _?= rejection ${String(index)}`);
+    await requireMissing(logPath, 'compiled uninstaller reached runtime with forged _?=');
+  }
+
+  await rm(uninstallerRoot, { recursive: true });
+  try {
+    await symlink(reparseTarget, uninstallerRoot, 'junction');
+    const logPath = join(workDirectory, 'uninstaller-tail-reparse.txt');
+    const result = spawnWithRawArguments(
+      uninstaller,
+      `/TQELEVATEDBOOTSTRAP=1 _?=${nsisPath(uninstallerRoot)}`,
+      { ...process.env, TQ_BOOTSTRAP_TEST_LOG: logPath },
+    );
+    requireStatus(result, 78, 'compiled uninstaller reparse _?= rejection');
+    await requireMissing(logPath, 'compiled uninstaller reached runtime with reparse _?=');
+  } finally {
+    await rm(uninstallerRoot, { recursive: false, force: true });
+    await mkdir(uninstallerRoot);
+  }
+}
+
+async function requireMissing(path, message) {
+  try {
+    await readFile(path);
+    throw new Error(message);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function requireCompiledTempRejection({
+  installer,
+  uninstaller,
+  workDirectory,
+  uninstallerRoot,
+  arguments_,
+  environment,
+  caseName,
+}) {
+  for (const [label, executable] of [
+    ['installer', installer],
+    ['uninstaller', uninstaller],
+  ]) {
+    const logPath = join(workDirectory, `${label}-${caseName}.txt`);
+    const [elevatedMarker, protectedMarker] = arguments_;
+    const protectedPath = protectedMarker.slice('/TQPROTECTEDTEMP='.length);
+    let rawArguments = `${quoteWindowsArgument(elevatedMarker)} /TQPROTECTEDTEMP=${quoteWindowsArgument(protectedPath)}`;
+    if (label === 'uninstaller') {
+      rawArguments += ` _?=${nsisPath(uninstallerRoot)}`;
+    }
+    const result = spawnWithRawArguments(executable, rawArguments, {
+      ...process.env,
+      ...environment,
+      TQ_BOOTSTRAP_TEST_LOG: logPath,
+    });
+    requireStatus(result, 78, `compiled ${label} ${caseName} TEMP rejection`);
+    await requireMissing(
+      logPath,
+      `compiled ${label} reached runtime after ${caseName} TEMP rejection`,
+    );
+  }
+}
+
+function requireForwardedNsisParameters(evidence, publicArguments, label, uninstallerRoot) {
+  const [temp, tmp, instDir, ...parameterLines] = evidence.split(/\r?\n/u);
+  let parameters = parameterLines.join('\n');
+  const nsisTail = parameters.lastIndexOf(' _?=');
+  if (nsisTail >= 0) parameters = parameters.slice(0, nsisTail);
+  const observed = parseWindowsCommandLine(`fixture.exe ${parameters}`).slice(1);
+  const publicObserved = observed.filter(
+    (argument) =>
+      !argument.toUpperCase().startsWith('/TQELEVATEDBOOTSTRAP=') &&
+      !argument.toUpperCase().startsWith('/TQPROTECTEDTEMP=') &&
+      !argument.startsWith('_?='),
+  );
+  const elevated = observed.filter(
+    (argument) => argument.toUpperCase() === '/TQELEVATEDBOOTSTRAP=1',
+  );
+  const protectedMarkers = observed.filter((argument) =>
+    argument.toUpperCase().startsWith('/TQPROTECTEDTEMP='),
+  );
+  if (
+    temp === undefined ||
+    tmp === undefined ||
+    temp !== tmp ||
+    (label === 'uninstaller' && instDir?.toLowerCase() !== uninstallerRoot.toLowerCase()) ||
+    JSON.stringify(publicObserved) !== JSON.stringify(publicArguments) ||
+    elevated.length !== 1 ||
+    protectedMarkers.length !== 1 ||
+    protectedMarkers[0]?.slice('/TQPROTECTEDTEMP='.length) !== temp
+  ) {
+    throw new Error(
+      `compiled ${label} bootstrap changed argv or protected TEMP: ${JSON.stringify({ temp, tmp, instDir, observed, publicObserved })}`,
+    );
+  }
+}
+
+function spawnWithRawArguments(executable, rawArguments, environment) {
+  return spawnSync(executable, [rawArguments], {
+    encoding: 'utf8',
+    env: environment,
+    timeout: 60_000,
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+  });
+}
+
+function quoteWindowsArgument(argument) {
+  if (argument !== '' && !/[\s"]/u.test(argument)) return argument;
+  let rendered = '"';
+  let slashes = 0;
+  for (const character of argument) {
+    if (character === '\\') {
+      slashes++;
+    } else if (character === '"') {
+      rendered += '\\'.repeat(slashes * 2 + 1) + '"';
+      slashes = 0;
+    } else {
+      rendered += '\\'.repeat(slashes) + character;
+      slashes = 0;
     }
   }
-  if (
-    parameters.match(/\/TQELEVATEDBOOTSTRAP=1/giu)?.length !== 1 ||
-    !parameters.includes('/TQPROTECTEDTEMP=')
-  ) {
-    throw new Error('compiled NSIS bootstrap marker forwarding is invalid');
+  return `${rendered}${'\\'.repeat(slashes * 2)}"`;
+}
+
+function parseWindowsCommandLine(commandLine) {
+  const arguments_ = [];
+  let offset = 0;
+  while (offset < commandLine.length) {
+    while (offset < commandLine.length && /[ \t]/u.test(commandLine[offset])) offset++;
+    if (offset === commandLine.length) break;
+    let argument = '';
+    let quoted = false;
+    while (offset < commandLine.length) {
+      let slashes = 0;
+      while (commandLine[offset] === '\\') {
+        slashes++;
+        offset++;
+      }
+      if (commandLine[offset] === '"') {
+        argument += '\\'.repeat(Math.floor(slashes / 2));
+        if (slashes % 2 === 1) argument += '"';
+        else quoted = !quoted;
+        offset++;
+        continue;
+      }
+      argument += '\\'.repeat(slashes);
+      if (offset === commandLine.length || (!quoted && /[ \t]/u.test(commandLine[offset]))) break;
+      argument += commandLine[offset];
+      offset++;
+    }
+    arguments_.push(argument);
   }
+  return arguments_;
 }
 
 async function runProtectedBootstrapIntegration(workDirectory, payload) {
@@ -189,6 +437,19 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     !observedArguments.at(-1)?.startsWith('/TQPROTECTEDTEMP=')
   ) {
     throw new Error('protected bootstrap changed public argv or failed to set protected TEMP');
+  }
+
+  const relativeNsisTail = spawnBootstrapFixture(
+    executable,
+    command,
+    powershell,
+    ['/TQELEVATEDBOOTSTRAP=1', '_?=..\\relative-uninstall-root'],
+    {},
+  );
+  if (relativeNsisTail.status !== 78) {
+    throw new Error(
+      `protected bootstrap accepted relative NSIS tail: ${String(relativeNsisTail.status)}`,
+    );
   }
 
   const malformed = spawnBootstrapFixture(
@@ -308,7 +569,7 @@ internal static class BootstrapFixture
 }`;
 }
 
-function macroCompileScript({ mode, outputPath }) {
+function macroCompileScript({ mode, outputPath, projectDirectory }) {
   const uninstall = mode === 'uninstaller';
   return `Unicode true
 Name "Talking Quill early-init ${mode} check"
@@ -342,14 +603,15 @@ Function .onUserAbort
 FunctionEnd`;
 }
 
-function runtimeEvidenceSection() {
+function runtimeEvidenceSection({ quit = false } = {}) {
   return `  ReadEnvStr $R8 "TQ_BOOTSTRAP_TEST_LOG"
+  ReadEnvStr $R6 "TMP"
   \${GetParameters} $R9
   FileOpen $R7 "$R8" w
-  FileWrite $R7 "$R9"
+  FileWrite $R7 "$TEMP$\\r$\\n$R6$\\r$\\n$INSTDIR$\\r$\\n$R9"
   FileClose $R7
   SetErrorLevel 37
-`;
+${quit ? '  Quit\n' : ''}`;
 }
 
 function uninstallerOuterContext() {
@@ -362,7 +624,7 @@ ${runtimeEvidenceSection()}SectionEnd
 Function un.onInit
   !insertmacro customUnEarlyInit
   !insertmacro customUnInit
-FunctionEnd`;
+${runtimeEvidenceSection({ quit: true })}FunctionEnd`;
 }
 
 function nsisPath(path) {

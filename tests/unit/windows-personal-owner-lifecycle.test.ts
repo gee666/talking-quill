@@ -77,6 +77,10 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(bootstrap).toContain('NtQueryInformationProcess');
     expect(bootstrap).toContain('CommandLineToArgvW');
     expect(bootstrap).toContain('QueryFullProcessImageName');
+    expect(bootstrap).toContain('LastIndexOf(" _?=", StringComparison.Ordinal)');
+    expect(bootstrap).toContain('[Microsoft.Win32.RegistryView]::Registry64');
+    expect(bootstrap).toContain("Join-Path $nativeProgramFiles 'Talking Quill'");
+    expect(bootstrap).toContain("$start.Arguments += ' ' + $nsisTail");
     expect(installer).toContain('talking-quill-installer-lifecycle.exe');
     expect(installer).not.toContain('File /oname=$PLUGINSDIR\\talking-quill-machine-cleanup.ps1');
     expect(lifecycle).toContain('FOLDERID_ProgramFiles');
