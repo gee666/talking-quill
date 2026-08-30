@@ -394,6 +394,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
           'Win32_System_Diagnostics_ToolHelp',
           'Win32_System_IO',
           'Win32_System_Pipes',
+          'Win32_System_Registry',
           'Win32_System_RemoteDesktop',
           'Win32_System_SystemInformation',
           'Win32_System_Threading',

@@ -157,6 +157,26 @@ impl InstalledRelease {
             || manifest.version.len() > 64
             || !valid_source_identity(&manifest.source_commit)
             || !valid_source_identity(&manifest.source_tree)
+            || gateway
+                .source_identity
+                .as_ref()
+                .map(|value| value.commit.as_str())
+                != Some(manifest.source_commit.as_str())
+            || owner
+                .source_identity
+                .as_ref()
+                .map(|value| value.commit.as_str())
+                != Some(manifest.source_commit.as_str())
+            || gateway
+                .source_identity
+                .as_ref()
+                .map(|value| value.tree.as_str())
+                != Some(manifest.source_tree.as_str())
+            || owner
+                .source_identity
+                .as_ref()
+                .map(|value| value.tree.as_str())
+                != Some(manifest.source_tree.as_str())
             || manifest.roles.len() != 2
             || manifest.update.channel != format!("latest-{architecture}")
             || manifest.update.payload != "nsis"
@@ -518,7 +538,7 @@ fn encode_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::FileIdentity;
+    use crate::peer::{FileIdentity, SourceIdentity};
 
     fn facts(role: &str, pid: u32, image: u8) -> PeerFacts {
         PeerFacts {
@@ -537,6 +557,10 @@ mod tests {
                 file_index: u64::from(pid),
             },
             image_sha256: [image; 32],
+            source_identity: Some(SourceIdentity {
+                commit: "11".repeat(20),
+                tree: "22".repeat(20),
+            }),
         }
     }
 

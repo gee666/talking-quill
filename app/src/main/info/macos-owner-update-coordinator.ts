@@ -23,6 +23,8 @@ export interface DownloadedApplicationUpdate {
     readonly architecture: 'x64' | 'arm64';
     readonly ownerMode: 'local-unsigned-enabled';
     readonly packageMode: 'update';
+    readonly sourceCommit: string;
+    readonly sourceTree: string;
     readonly releaseBuildDigest: string;
     readonly packageLayoutDigest: string;
     readonly packageSha256: string;
@@ -794,6 +796,8 @@ export function validateMacosReplacementIdentity(input: {
     metadata.platform !== identity.platform ||
     metadata.architecture !== identity.architecture ||
     metadata.ownerMode !== identity.ownerMode ||
+    metadata.sourceCommit !== identity.sourceCommit ||
+    metadata.sourceTree !== identity.sourceTree ||
     metadata.releaseBuildDigest !== identity.releaseBuildDigest ||
     metadata.packageLayoutDigest !== identity.packageLayoutDigest ||
     JSON.stringify(metadata.roles) !== JSON.stringify(identity.roles) ||

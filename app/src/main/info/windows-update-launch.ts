@@ -9,6 +9,8 @@ export interface WindowsUpdateCandidateIdentity {
   readonly architecture: 'x64' | 'arm64';
   readonly ownerMode: 'local-unsigned-enabled';
   readonly packageMode: 'update';
+  readonly sourceCommit: string;
+  readonly sourceTree: string;
   readonly releaseBuildDigest: string;
   readonly packageSha256: string;
   readonly packageLayoutDigest: string;
@@ -36,7 +38,7 @@ export interface WindowsUpdateCandidateIdentity {
 }
 
 export function buildWindowsElevationLaunch(
-  systemRoot: string,
+  _systemRoot: string,
   installedBootstrapPath: string,
   installerPath: string,
   sha256: string,
@@ -53,24 +55,13 @@ export function buildWindowsElevationLaunch(
   ) {
     throw new Error('Invalid downloaded Windows installer identity');
   }
-  const encodedBootstrap = Buffer.from(installedBootstrapPath, 'utf16le').toString('base64');
   const request = Buffer.from(
     JSON.stringify({ version: 2, installerPath, sha256, candidate }),
     'utf8',
   ).toString('base64');
-  const encodedArgument = Buffer.from(
-    `--windows-update-bootstrap-v2=${request}`,
-    'utf16le',
-  ).toString('base64');
-  const script = [
-    `$bootstrap=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedBootstrap}'))`,
-    `$argument=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedArgument}'))`,
-    '$p=Start-Process -FilePath $bootstrap -ArgumentList $argument -Verb RunAs -PassThru -ErrorAction Stop',
-    'if($p.Id -le 0){exit 3}',
-  ].join(';');
   return {
-    executable: `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
-    arguments: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    executable: installedBootstrapPath,
+    arguments: [`--windows-update-bootstrap-v2=${request}`],
   };
 }
 
@@ -85,6 +76,8 @@ function isValidCandidate(candidate: WindowsUpdateCandidateIdentity): boolean {
     (architecture === 'x64' || architecture === 'arm64') &&
     candidate.ownerMode === 'local-unsigned-enabled' &&
     candidate.packageMode === 'update' &&
+    /^[0-9a-f]{40}$/u.test(candidate.sourceCommit) &&
+    /^[0-9a-f]{40}$/u.test(candidate.sourceTree) &&
     digest(candidate.packageSha256) &&
     candidate.channel === `latest-${architecture}` &&
     candidate.transactionBinding === 'source-target-package-sha256-v1' &&

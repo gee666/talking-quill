@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use talking_quill_owner_protocol::{Bytes32, OrderedTransport, OwnerSessionCodec};
 use thiserror::Error;
@@ -132,6 +132,13 @@ pub trait AuthenticatedConnectionSource: fmt::Debug {
     /// retaining the singleton as an orphan.
     fn permanently_exhausted(&self) -> bool {
         false
+    }
+
+    /// Bounds only the interval before the first authenticated controller.
+    /// Once authentication succeeds, reconnect behavior remains stable for the
+    /// rest of the process lifetime.
+    fn initial_authentication_grace(&self) -> Option<Duration> {
+        None
     }
 
     /// Close the discoverable endpoint, cancel and join every accepted
@@ -386,6 +393,7 @@ where
     fatal_recovery: bool,
     singleton_held: bool,
     retain_singleton_until_exit: bool,
+    initial_authentication_deadline: Option<Instant>,
     poll_interval: Duration,
 }
 
@@ -419,6 +427,9 @@ where
         if !singleton.try_acquire()? {
             return Err(RuntimeError::SingletonBusy);
         }
+        let initial_authentication_deadline = source
+            .initial_authentication_grace()
+            .and_then(|grace| Instant::now().checked_add(grace));
         Ok(Self {
             server,
             source,
@@ -432,6 +443,7 @@ where
             fatal_recovery: false,
             singleton_held: true,
             retain_singleton_until_exit: false,
+            initial_authentication_deadline,
             poll_interval: DEFAULT_POLL_INTERVAL,
         })
     }
@@ -504,7 +516,10 @@ where
                         connection.transport,
                         connection.codec,
                     ) {
-                        Ok(()) => self.connections.push(id),
+                        Ok(()) => {
+                            self.connections.push(id);
+                            self.initial_authentication_deadline = None;
+                        }
                         Err(ServerError::ConnectionCapacity) => {
                             // Reject only this fully authenticated peer. Existing
                             // authorities and their pending flushes remain live.
@@ -521,6 +536,17 @@ where
             && !self.server.has_connection_capacity()
         {
             backpressured = true;
+        }
+
+        if !self.shutdown_requested
+            && self.connections.is_empty()
+            && self
+                .initial_authentication_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.initial_authentication_deadline = None;
+            self.request_shutdown();
+            progress = true;
         }
 
         let mut retained = Vec::with_capacity(self.connections.len());
@@ -729,21 +755,27 @@ where
             Ok(server)
         })();
         match setup {
-            Ok(server) => Ok(Self {
-                server,
-                source,
-                signals,
-                singleton,
-                connections: Vec::new(),
-                next_connection_id: 1,
-                shutdown_requested: false,
-                orphaned_authority: false,
-                terminal_incomplete_shutdown: false,
-                fatal_recovery: false,
-                singleton_held: true,
-                retain_singleton_until_exit: false,
-                poll_interval: DEFAULT_POLL_INTERVAL,
-            }),
+            Ok(server) => {
+                let initial_authentication_deadline = source
+                    .initial_authentication_grace()
+                    .and_then(|grace| Instant::now().checked_add(grace));
+                Ok(Self {
+                    server,
+                    source,
+                    signals,
+                    singleton,
+                    connections: Vec::new(),
+                    next_connection_id: 1,
+                    shutdown_requested: false,
+                    orphaned_authority: false,
+                    terminal_incomplete_shutdown: false,
+                    fatal_recovery: false,
+                    singleton_held: true,
+                    retain_singleton_until_exit: false,
+                    initial_authentication_deadline,
+                    poll_interval: DEFAULT_POLL_INTERVAL,
+                })
+            }
             Err(error) => {
                 let native_startup_failed = matches!(error, RuntimeError::NativeStartup);
                 let shutdown = source.shutdown_endpoint();
@@ -1346,6 +1378,66 @@ mod tests {
         assert_eq!(polls.load(Ordering::Acquire), before);
         assert_eq!(runtime.source.pending.len(), 1);
         assert_eq!(runtime.source.peers.len(), 9);
+    }
+
+    #[derive(Debug)]
+    struct GraceSource {
+        pending: Option<AuthenticatedConnection>,
+        grace: Duration,
+    }
+
+    impl AuthenticatedConnectionSource for GraceSource {
+        fn poll_authenticated(
+            &mut self,
+        ) -> Result<Option<AuthenticatedConnection>, ConnectionSourceError> {
+            Ok(self.pending.take())
+        }
+
+        fn initial_authentication_grace(&self) -> Option<Duration> {
+            Some(self.grace)
+        }
+
+        fn shutdown_endpoint(&mut self) -> Result<(), ConnectionSourceError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn initial_authentication_grace_retires_an_unclaimed_owner() {
+        let singleton = Arc::new(AtomicBool::new(false));
+        let mut runtime = OwnerRuntime::from_parts(
+            server(14),
+            GraceSource {
+                pending: None,
+                grace: Duration::ZERO,
+            },
+            Signals(VecDeque::new()),
+            SharedSingleton(Arc::clone(&singleton), false),
+        )
+        .unwrap();
+        assert_eq!(runtime.step().unwrap(), RuntimeStep::Exit);
+        assert!(!singleton.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn first_authentication_permanently_cancels_initial_grace() {
+        let mut source = capacity_source(15, 1);
+        let connection = source.pending.pop_front().unwrap();
+        let _peer = source.peers.pop().unwrap();
+        let singleton = Arc::new(AtomicBool::new(false));
+        let mut runtime = OwnerRuntime::from_parts(
+            server(15),
+            GraceSource {
+                pending: Some(connection),
+                grace: Duration::ZERO,
+            },
+            Signals(VecDeque::new()),
+            SharedSingleton(singleton, false),
+        )
+        .unwrap();
+        assert_eq!(runtime.step().unwrap(), RuntimeStep::Progress);
+        assert!(runtime.initial_authentication_deadline.is_none());
+        assert_ne!(runtime.step().unwrap(), RuntimeStep::Exit);
     }
 
     #[derive(Debug)]

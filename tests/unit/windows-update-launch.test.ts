@@ -12,6 +12,8 @@ const candidate = {
   architecture: 'x64' as const,
   ownerMode: 'local-unsigned-enabled' as const,
   packageMode: 'update' as const,
+  sourceCommit: '88'.repeat(20),
+  sourceTree: '99'.repeat(20),
   releaseBuildDigest: '11'.repeat(32),
   packageLayoutDigest: '22'.repeat(32),
   packageSha256: 'ab'.repeat(32),
@@ -57,28 +59,10 @@ describe('Windows elevated updater launch', () => {
       candidate,
     );
     expect(launch.executable).toBe(
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'C:\\Program Files\\Talking Quill\\resources\\helper\\talking-quill-helper.exe',
     );
-    expect(launch.arguments).toEqual([
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      expect.stringContaining('-Verb RunAs -PassThru -ErrorAction Stop'),
-    ]);
-    const script = launch.arguments.at(-1) ?? '';
-    expect(script).not.toContain('C:\\Updates\\Talking Quill.exe');
-    expect(script).not.toContain('C:\\Program Files\\Talking Quill');
-    expect(script).not.toContain(hash);
-    expect(script).toContain('$bootstrap=');
-    expect(script).toContain('$argument=');
-    expect(launch.arguments).not.toContain('-File');
-    expect(script).not.toMatch(/Set-Content|Out-File|WriteAllText|\.ps1/iu);
-
-    const encoded = /\$argument=.*FromBase64String\('([^']+)'\)/u.exec(script)?.[1];
-    expect(encoded).toBeDefined();
-    const argument = Buffer.from(encoded ?? '', 'base64').toString('utf16le');
+    expect(launch.arguments).toHaveLength(1);
+    const argument = launch.arguments[0] ?? '';
     expect(argument).toMatch(/^--windows-update-bootstrap-v2=/u);
     expect(
       JSON.parse(
@@ -178,7 +162,9 @@ describe('Windows elevated updater launch', () => {
       ...candidate,
       predecessor: { ...candidate.predecessor, gatewaySha256: 'ff'.repeat(31) },
     },
-  ])('rejects a hostile candidate identity %# before invoking PowerShell', (changed) => {
+    { ...candidate, sourceCommit: '0'.repeat(39) },
+    { ...candidate, sourceTree: 'A'.repeat(40) },
+  ])('rejects a hostile candidate identity %# before invoking the native bootstrap', (changed) => {
     expect(() =>
       buildWindowsElevationLaunch(
         'C:\\Windows',

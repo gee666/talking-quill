@@ -2,15 +2,16 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -23,14 +24,14 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_SHARE_READ, GetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
     PROCESS_INFORMATION, QueryFullProcessImageNameW, ResumeThread, STARTUPINFOW, TerminateProcess,
     WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    SHGetKnownFolderPath, ShellExecuteExW,
 };
 
 #[used]
@@ -65,6 +66,8 @@ struct UpdateCandidate {
     architecture: String,
     owner_mode: String,
     package_mode: String,
+    source_commit: String,
+    source_tree: String,
     release_build_digest: String,
     package_layout_digest: String,
     package_sha256: String,
@@ -110,6 +113,8 @@ struct InstalledManifest {
     version: String,
     platform: String,
     architecture: String,
+    source_commit: String,
+    source_tree: String,
     release_build_digest: String,
     roles: Vec<UpdateRole>,
 }
@@ -129,10 +134,16 @@ pub fn run_from_argument(argument: &std::ffi::OsStr) -> i32 {
 }
 
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
+    let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if argument.starts_with("--windows-update-bootstrap-v2=") && !is_elevated() {
+        return launch_elevated_bootstrap(argument).map(|()| 0);
+    }
     if !is_elevated() {
         return Err(EXIT_NOT_ELEVATED);
     }
-    let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if let Some(encoded) = argument.strip_prefix("--windows-update-cleanup-v1=") {
+        return run_native_cleanup(encoded).map(|()| 0);
+    }
     if argument.starts_with("--windows-update-bootstrap-v2=") {
         return stage_bootstrap(argument).map(|()| 0);
     }
@@ -146,6 +157,65 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         schedule_staged_cleanup();
     }
     result
+}
+
+fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
+    let executable = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let verb = wide_nul(Path::new("runas"))?;
+    let file = wide_nul(&executable)?;
+    let parameters = wide_nul(Path::new(argument))?;
+    let mut execute = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: 1,
+        ..unsafe { std::mem::zeroed() }
+    };
+    if unsafe { ShellExecuteExW(&mut execute) } == 0 || execute.hProcess.is_null() {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    unsafe { CloseHandle(execute.hProcess) };
+    Ok(())
+}
+
+fn run_native_cleanup(encoded: &str) -> Result<(), i32> {
+    let bytes = decode_base64(encoded)?;
+    let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| EXIT_INVALID_REQUEST)?);
+    let program_data = known_folder(&FOLDERID_ProgramData)?;
+    if path
+        .parent()
+        .is_none_or(|parent| !paths_equal(parent, &program_data))
+        || path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_none_or(|name| {
+                !name.starts_with(".Talking Quill.update-bootstrap-")
+                    || name.len() != ".Talking Quill.update-bootstrap-".len() + 16
+            })
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    for _ in 0..120 {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    || metadata.file_attributes()
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0 =>
+            {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(EXIT_LAUNCH_FAILED)
 }
 
 fn execute_staged_request(encoded: &str) -> Result<u32, i32> {
@@ -334,6 +404,10 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
         || candidate.channel != format!("latest-{}", candidate.architecture)
         || candidate.transaction_binding != "source-target-package-sha256-v1"
         || candidate.version.is_empty()
+        || !valid_source_identity(&candidate.source_commit)
+        || !valid_source_identity(&candidate.source_tree)
+        || !valid_source_identity(&installed.source_commit)
+        || !valid_source_identity(&installed.source_tree)
         || candidate.release_build_digest == installed.release_build_digest
         || !digest(&candidate.release_build_digest)
         || !digest(&candidate.package_layout_digest)
@@ -445,6 +519,13 @@ fn decode_hex_bytes(value: &str, expected: usize) -> Result<Vec<u8>, i32> {
         .collect()
 }
 
+fn valid_source_identity(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn canonical_candidate_layout(candidate: &UpdateCandidate) -> Result<String, i32> {
     let mut hash = Sha256::new();
     hash.update(b"talking-quill/package-layout/v1\0");
@@ -454,6 +535,8 @@ fn canonical_candidate_layout(candidate: &UpdateCandidate) -> Result<String, i32
         ("architecture", candidate.architecture.as_str()),
         ("ownerMode", candidate.owner_mode.as_str()),
         ("packageMode", candidate.package_mode.as_str()),
+        ("sourceCommit", candidate.source_commit.as_str()),
+        ("sourceTree", candidate.source_tree.as_str()),
     ] {
         hash_identity_field(&mut hash, name, value)?;
     }
@@ -740,31 +823,39 @@ fn launch_verified_installer(
 }
 
 fn spawn_staged_cleanup(directory: &Path) {
-    let mut system = [0u16; 32_768];
-    let length = unsafe { GetSystemDirectoryW(system.as_mut_ptr(), system.len() as u32) };
-    if length == 0 || length as usize >= system.len() {
-        return;
-    }
-    let Ok(system) = String::from_utf16(&system[..length as usize]) else {
+    let Ok(installed) = known_folder(&FOLDERID_ProgramFiles).map(|program_files| {
+        program_files.join("Talking Quill/resources/helper/talking-quill-helper.exe")
+    }) else {
         return;
     };
-    let script = format!(
-        "$p='{}';for($i=0;$i-lt 120;$i++){{Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue;if(-not(Test-Path -LiteralPath $p)){{exit 0}};Start-Sleep -Milliseconds 500}};exit 1",
-        directory.display()
-    );
-    let _ = std::process::Command::new(
-        Path::new(&system).join("WindowsPowerShell\\v1.0\\powershell.exe"),
-    )
-    .args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        &script,
-    ])
-    .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-    .spawn();
+    let encoded = encode_base64(directory.to_string_lossy().as_bytes());
+    let _ = std::process::Command::new(installed)
+        .arg(format!("--windows-update-cleanup-v1={encoded}"))
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .spawn();
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let value = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        output.push(ALPHABET[((value >> 18) & 63) as usize] as char);
+        output.push(ALPHABET[((value >> 12) & 63) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[((value >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(value & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn verify_suspended_process(
@@ -913,6 +1004,8 @@ mod tests {
             architecture: "x64".into(),
             owner_mode: "local-unsigned-enabled".into(),
             package_mode: "update".into(),
+            source_commit: "66".repeat(20),
+            source_tree: "77".repeat(20),
             release_build_digest: String::new(),
             package_layout_digest: String::new(),
             package_sha256: "aa".repeat(32),
@@ -952,7 +1045,7 @@ mod tests {
     fn candidate_role_and_predecessor_layout_matches_the_javascript_contract() {
         assert_eq!(
             canonical_candidate_layout(&candidate()).unwrap(),
-            "d904aa3b21e22b684512153bf874cecfe7abac386039e5b7016a57fba063154d"
+            "77976155fb7b3d468eafa5bd2d5efc8419a969f09df0fe17e69ba08dde2d4892"
         );
     }
 

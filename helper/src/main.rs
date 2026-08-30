@@ -16,6 +16,18 @@ fn main() {
         ));
     }
     #[cfg(windows)]
+    if os_arguments.len() == 2
+        && os_arguments
+            .get(1)
+            .is_some_and(|value| value == "--windows-helper-harness-v1")
+    {
+        if let Err(error) = talking_quill_helper::windows_harness::run_serialized() {
+            talking_quill_helper::report_run_error(&error);
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(windows)]
     if os_arguments.get(1).is_some_and(|value| {
         value
             .to_string_lossy()
@@ -34,6 +46,9 @@ fn main() {
                 || value
                     .to_string_lossy()
                     .starts_with("--windows-update-bootstrap-staged-v2=")
+                || value
+                    .to_string_lossy()
+                    .starts_with("--windows-update-cleanup-v1=")
         })
     {
         std::process::exit(talking_quill_helper::windows_update::run_from_argument(

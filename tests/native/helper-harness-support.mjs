@@ -1,7 +1,10 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import {
+  SOURCE_COMMIT_MARKER,
+  SOURCE_TREE_MARKER,
   nativeRoleLayout,
   verifyNativeSourceIdentity,
   verifyStagedNativeRoleSet,
@@ -9,8 +12,8 @@ import {
 import {
   RELEASE_PACKAGE_METADATA_NAME,
   createPackageReleaseMetadata,
+  validatePackageReleaseMetadata,
 } from '../../scripts/release-package-metadata.mjs';
-import { currentSourceIdentity } from '../../scripts/source-identity.mjs';
 
 export const FAILURE_CLEANUP_REQUESTS = Object.freeze([
   Object.freeze(['session.set_capture', Object.freeze({ mode: 'off' })]),
@@ -36,39 +39,107 @@ export async function prepareHelperHarnessExecutable({
     return { executable: helper, cleanup: async () => undefined, staged: false };
   }
 
-  const sourceIdentity = currentSourceIdentity({ repositoryRoot, requireClean: true });
   await verifyStagedNativeRoleSet(sourceDirectory, { platform, architecture });
-  for (const role of nativeRoleLayout(platform)) {
-    await verifyNativeSourceIdentity(join(sourceDirectory, role.name), sourceIdentity);
-  }
 
-  const packageRoot = resolve(repositoryRoot, 'tmp', `helper-harness-runtime-${processId}`);
-  const helperDirectory = join(packageRoot, 'resources', 'helper');
-  await rm(packageRoot, { recursive: true, force: true });
-  await mkdir(helperDirectory, { recursive: true });
-  for (const role of nativeRoleLayout(platform)) {
-    await copyFile(join(sourceDirectory, role.name), join(helperDirectory, role.name));
-  }
-  const packageJson = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
-  const metadata = await createPackageReleaseMetadata({
-    version: packageJson.version,
-    platform: 'win',
-    architecture,
-    packageRoot,
-    predecessor: null,
-    sourceIdentity,
-    freshInstall: true,
-    packageMode: 'fresh',
-  });
-  await writeFile(
-    join(packageRoot, 'resources', RELEASE_PACKAGE_METADATA_NAME),
-    `${JSON.stringify(metadata)}\n`,
-    { encoding: 'utf8', mode: 0o600 },
+  const random = randomUUID();
+  const packageRoot = resolve(
+    repositoryRoot,
+    'tmp',
+    `helper-harness-runtime-${processId}-${random}`,
   );
-  return {
-    executable: join(helperDirectory, 'talking-quill-helper.exe'),
-    staged: true,
-    cleanup: () =>
+  const pendingRoot = `${packageRoot}.pending`;
+  const pendingHelperDirectory = join(pendingRoot, 'resources', 'helper');
+  try {
+    await mkdir(pendingHelperDirectory, { recursive: true });
+    const layout = nativeRoleLayout(platform);
+    const retained = [];
+    let sourceIdentity;
+    try {
+      for (const role of layout) {
+        retained.push(await open(join(sourceDirectory, role.name), 'r'));
+      }
+      for (const [index, role] of layout.entries()) {
+        const bytes = await retained[index].readFile();
+        const identity = retainedSourceIdentity(bytes, role.name);
+        if (sourceIdentity === undefined) sourceIdentity = identity;
+        else if (
+          identity.sourceCommit !== sourceIdentity.sourceCommit ||
+          identity.sourceTree !== sourceIdentity.sourceTree
+        ) {
+          throw new Error('Retained gateway and owner source identities differ');
+        }
+        await writeFile(join(pendingHelperDirectory, role.name), bytes, {
+          flag: 'wx',
+          mode: 0o700,
+        });
+      }
+    } finally {
+      await Promise.all(retained.map((handle) => handle.close()));
+    }
+    if (sourceIdentity === undefined) throw new Error('Native harness role set is empty');
+    await verifyStagedNativeRoleSet(pendingHelperDirectory, { platform, architecture });
+    for (const role of nativeRoleLayout(platform)) {
+      await verifyNativeSourceIdentity(join(pendingHelperDirectory, role.name), sourceIdentity);
+    }
+    const packageJson = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
+    const metadata = await createPackageReleaseMetadata({
+      version: packageJson.version,
+      platform: 'win',
+      architecture,
+      packageRoot: pendingRoot,
+      predecessor: null,
+      sourceIdentity,
+      freshInstall: true,
+      packageMode: 'fresh',
+    });
+    const metadataPath = join(pendingRoot, 'resources', RELEASE_PACKAGE_METADATA_NAME);
+    await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    const serialized = await readFile(metadataPath);
+    const reparsed = validatePackageReleaseMetadata(JSON.parse(serialized.toString('utf8')));
+    if (`${JSON.stringify(reparsed)}\n` !== serialized.toString('utf8')) {
+      throw new Error('Serialized harness package metadata is not canonical');
+    }
+    for (const role of reparsed.roles) {
+      const bytes = await readFile(join(pendingRoot, role.path));
+      if (createHash('sha256').update(bytes).digest('hex') !== role.sha256) {
+        throw new Error(`Serialized harness role hash mismatch: ${role.role}`);
+      }
+    }
+    await rename(pendingRoot, packageRoot);
+    return {
+      executable: join(packageRoot, 'resources', 'helper', 'talking-quill-helper.exe'),
+      staged: true,
+      cleanup: () =>
+        rm(packageRoot, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 }),
+    };
+  } catch (error) {
+    await Promise.all([
+      rm(pendingRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
       rm(packageRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
-  };
+    ]);
+    throw error;
+  }
+}
+
+function retainedSourceIdentity(bytes, role) {
+  const identity = {};
+  for (const [marker, field, label] of [
+    [SOURCE_COMMIT_MARKER, 'sourceCommit', 'commit'],
+    [SOURCE_TREE_MARKER, 'sourceTree', 'tree'],
+  ]) {
+    const offset = bytes.indexOf(marker);
+    const value = bytes.subarray(offset + marker.length, offset + marker.length + 40);
+    if (
+      offset < 0 ||
+      bytes.indexOf(marker, offset + 1) >= 0 ||
+      !/^[0-9a-f]{40}$/u.test(value.toString('ascii'))
+    ) {
+      throw new Error(`Retained ${role} source ${label} marker is invalid`);
+    }
+    identity[field] = value.toString('ascii');
+  }
+  return identity;
 }

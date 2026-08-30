@@ -37,6 +37,8 @@ pub mod protocol;
 ))]
 pub mod windows_acceptance_launcher;
 #[cfg(windows)]
+pub mod windows_harness;
+#[cfg(windows)]
 pub mod windows_installer;
 #[cfg(windows)]
 pub mod windows_update;

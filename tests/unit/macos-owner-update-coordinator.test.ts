@@ -164,6 +164,8 @@ describe('macOS replacement outer identity', () => {
     architecture: 'x64' as const,
     ownerMode: 'local-unsigned-enabled' as const,
     packageMode: 'update' as const,
+    sourceCommit: '51'.repeat(20),
+    sourceTree: '52'.repeat(20),
     releaseBuildDigest: target.releaseBuildDigest,
     packageLayoutDigest: '31'.repeat(32),
     packageSha256: '32'.repeat(32),
@@ -187,6 +189,8 @@ describe('macOS replacement outer identity', () => {
     platform: identity.platform,
     architecture: identity.architecture,
     ownerMode: identity.ownerMode,
+    sourceCommit: identity.sourceCommit,
+    sourceTree: identity.sourceTree,
     releaseBuildDigest: identity.releaseBuildDigest,
     packageLayoutDigest: identity.packageLayoutDigest,
     roles,
@@ -253,6 +257,19 @@ describe('macOS replacement outer identity', () => {
         identity,
         archiveSha256: identity.packageSha256,
         packageMetadata: { ...packageMetadata, packageLayoutDigest: 'ee'.repeat(32) },
+        source,
+        target,
+        expectedArchitecture: 'x64',
+      }),
+    ).toThrow('complete macOS artifact');
+  });
+
+  it('rejects package metadata with different embedded source provenance', () => {
+    expect(() =>
+      validateMacosReplacementIdentity({
+        identity,
+        archiveSha256: identity.packageSha256,
+        packageMetadata: { ...packageMetadata, sourceTree: 'ff'.repeat(20) },
         source,
         target,
         expectedArchitecture: 'x64',

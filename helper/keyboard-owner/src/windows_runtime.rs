@@ -169,11 +169,10 @@ mod tests {
     const FIXTURE_TEST: &str = "windows_runtime::tests::singleton_subprocess_fixture";
 
     fn singleton_test_name(label: &str) -> String {
-        format!(
-            "Local\\TalkingQuill.KeyboardOwner.Test.{}.{}",
-            std::process::id(),
-            label
-        )
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).expect("test namespace randomness");
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("Local\\TalkingQuill.KeyboardOwner.Test.{suffix}.{label}")
     }
 
     fn run_contender(name: &str, expected: &str) {

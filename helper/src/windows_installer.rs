@@ -149,6 +149,8 @@ struct Manifest {
     architecture: String,
     owner_mode: String,
     package_mode: String,
+    source_commit: String,
+    source_tree: String,
     roles: Vec<Role>,
     predecessor: Option<Predecessor>,
     fresh_install: Option<bool>,
@@ -1380,6 +1382,8 @@ fn verify_candidate(
         || manifest.owner_mode != "local-unsigned-enabled"
         || !matches!(manifest.package_mode.as_str(), "fresh" | "update")
         || manifest.version.is_empty()
+        || !valid_source_identity(&manifest.source_commit)
+        || !valid_source_identity(&manifest.source_tree)
         || !matches!(manifest.architecture.as_str(), "x64" | "arm64")
         || manifest.roles.len() != 2
         || (expected_fresh_install
@@ -1437,6 +1441,8 @@ fn verify_installed_candidate(install: &Path, expected: &Manifest) -> Result<(),
         || installed.architecture != expected.architecture
         || installed.owner_mode != expected.owner_mode
         || installed.package_mode != expected.package_mode
+        || installed.source_commit != expected.source_commit
+        || installed.source_tree != expected.source_tree
         || installed.release_build_digest != expected.release_build_digest
         || installed.package_layout_digest != expected.package_layout_digest
         || canonical_layout(&installed)? != installed.package_layout_digest
@@ -1485,6 +1491,8 @@ fn canonical_layout(manifest: &Manifest) -> Result<String, i32> {
         ("architecture", manifest.architecture.as_str()),
         ("ownerMode", manifest.owner_mode.as_str()),
         ("packageMode", manifest.package_mode.as_str()),
+        ("sourceCommit", manifest.source_commit.as_str()),
+        ("sourceTree", manifest.source_tree.as_str()),
     ] {
         frame(&mut hash, name, value)?;
     }
@@ -1529,6 +1537,13 @@ fn canonical_layout(manifest: &Manifest) -> Result<String, i32> {
         frame(&mut hash, "freshInstall", "true")?;
     }
     Ok(hex_digest(hash.finalize().as_slice()))
+}
+
+fn valid_source_identity(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn frame(hash: &mut Sha256, name: &str, value: &str) -> Result<(), i32> {
@@ -1798,6 +1813,8 @@ mod tests {
                 architecture: "x64".into(),
                 owner_mode: "local-unsigned-enabled".into(),
                 package_mode: "update".into(),
+                source_commit: "11".repeat(20),
+                source_tree: "22".repeat(20),
                 roles: vec![
                     Role {
                         role: "gateway".into(),

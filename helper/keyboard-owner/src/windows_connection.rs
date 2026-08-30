@@ -34,6 +34,7 @@ use crate::state::OwnerInstanceId;
 
 const HANDSHAKE_QUEUE: usize = 4;
 const ENDPOINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const INITIAL_AUTHENTICATION_GRACE: Duration = Duration::from_secs(8);
 #[cfg(windows)]
 const PRIVATE_PIPE_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -200,6 +201,10 @@ impl AuthenticatedConnectionSource for WindowsNamedPipeConnectionSource {
             Ok(WorkerResult::Rejected) | Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err(ConnectionSourceError),
         }
+    }
+
+    fn initial_authentication_grace(&self) -> Option<Duration> {
+        Some(INITIAL_AUTHENTICATION_GRACE)
     }
 
     fn shutdown_endpoint(&mut self) -> Result<(), ConnectionSourceError> {

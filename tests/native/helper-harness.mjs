@@ -25,12 +25,16 @@ const preparedHelper = await prepareHelperHarnessExecutable({
   repositoryRoot,
 });
 
-const child = spawn(preparedHelper.executable, [], {
-  stdio: ['pipe', 'pipe', 'inherit'],
-  shell: false,
-  windowsHide: false,
-  env: { ...process.env, NO_COLOR: '1' },
-});
+const child = spawn(
+  preparedHelper.executable,
+  preparedHelper.staged ? ['--windows-helper-harness-v1'] : [],
+  {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    shell: false,
+    windowsHide: false,
+    env: { ...process.env, NO_COLOR: '1' },
+  },
+);
 const childExit = new Promise((resolveExit, reject) => {
   child.once('error', reject);
   child.once('exit', (code) => {
@@ -81,6 +85,7 @@ child.stdout.on('data', (chunk) => {
 });
 
 let protocolInitialized = false;
+let authenticatedOwnerInstance = null;
 let plannedShutdown = false;
 let initializeResponseComplete;
 const initializeResponse = new Promise((resolveResponse) => {
@@ -90,6 +95,7 @@ let runError;
 try {
   const initialized = await request('initialize', { protocolVersion: 10 });
   validateKeyboardOwnerSnapshot(initialized.keyboardOwner);
+  authenticatedOwnerInstance = initialized.keyboardOwner.instanceId;
   validateKeyboardCaptureCapability(initialized.keyboardCapture, initialized.keyboardOwner);
   if (preparedHelper.staged && !initialized.keyboardOwner.authenticated) {
     throw new Error('Staged Windows helper did not authenticate its provenance-bound owner');
@@ -157,20 +163,25 @@ try {
   if (!plannedShutdown && child.exitCode === null) {
     await cleanupFailedHarness();
   }
-  const childExited = await waitForChildExit(3_000);
-  if (childExited) {
+  let childExited = await waitForChildExit(3_000);
+  if (!childExited && preparedHelper.staged) {
+    try {
+      await cleanupWithFreshGateway(preparedHelper.executable, authenticatedOwnerInstance);
+    } catch (error) {
+      runError ??= error;
+    }
+    childExited = await waitForChildExit(3_000);
+  }
+  if (!childExited) {
+    runError ??= new Error(
+      'Helper remained alive after fresh authenticated cleanup; retaining its process and staged package',
+    );
+  } else {
     try {
       await preparedHelper.cleanup();
     } catch (error) {
       runError ??= error;
     }
-  } else {
-    child.stdin.destroy();
-    child.stdout.destroy();
-    child.unref();
-    runError ??= new Error(
-      'Helper remained alive after cleanup requests; it was detached without force-killing its unknown-neutral owner',
-    );
   }
 }
 if (runError !== undefined) throw runError;
@@ -213,6 +224,96 @@ async function cleanupFailedHarness() {
     sendWithoutWaiting(method, params);
   }
   child.stdin.end();
+}
+
+async function cleanupWithFreshGateway(executable, expectedOwnerInstance) {
+  const cleanup = spawn(executable, [], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    shell: false,
+    windowsHide: false,
+    env: { ...process.env, NO_COLOR: '1' },
+  });
+  cleanup.stdin.on('error', () => undefined);
+  let bytes = Buffer.alloc(0);
+  let id = 1;
+  const requests = new Map();
+  const exit = new Promise((resolveExit, rejectExit) => {
+    cleanup.once('error', rejectExit);
+    cleanup.once('exit', (code) => {
+      const error =
+        code === 0 ? null : new Error(`cleanup gateway exited with code ${String(code)}`);
+      for (const request of requests.values()) {
+        request.reject(error ?? new Error('cleanup gateway exited before responding'));
+      }
+      requests.clear();
+      if (error === null) resolveExit();
+      else rejectExit(error);
+    });
+  });
+  void exit.catch(() => undefined);
+  cleanup.stdout.on('data', (chunk) => {
+    bytes = Buffer.concat([bytes, chunk]);
+    while (bytes.length >= 4) {
+      const length = bytes.readUInt32BE(0);
+      if (length === 0 || length > 16 * 1024 || bytes.length < length + 4) return;
+      const message = JSON.parse(bytes.subarray(4, length + 4).toString('utf8'));
+      bytes = bytes.subarray(length + 4);
+      if (!('id' in message)) continue;
+      const pendingRequest = requests.get(message.id);
+      if (pendingRequest === undefined) throw new Error('Unknown cleanup gateway response');
+      requests.delete(message.id);
+      if ('error' in message) pendingRequest.reject(new Error(message.error.message));
+      else pendingRequest.resolve(message.result);
+    }
+  });
+  const requestCleanup = (method, params) => {
+    const requestId = id++;
+    const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params }));
+    const frame = Buffer.allocUnsafe(payload.length + 4);
+    frame.writeUInt32BE(payload.length, 0);
+    payload.copy(frame, 4);
+    return new Promise((resolveRequest, rejectRequest) => {
+      const timeout = setTimeout(() => {
+        requests.delete(requestId);
+        rejectRequest(new Error(`fresh cleanup ${method} timed out`));
+      }, 3_000);
+      requests.set(requestId, {
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolveRequest(value);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          rejectRequest(error);
+        },
+      });
+      cleanup.stdin.write(frame, (error) => {
+        if (error) rejectRequest(error);
+      });
+    });
+  };
+
+  try {
+    const initialized = await requestCleanup('initialize', { protocolVersion: 10 });
+    validateKeyboardOwnerSnapshot(initialized.keyboardOwner);
+    if (
+      expectedOwnerInstance !== null &&
+      initialized.keyboardOwner.instanceId !== expectedOwnerInstance
+    ) {
+      throw new Error('Fresh cleanup gateway authenticated a different owner instance');
+    }
+    for (const [method, params] of FAILURE_CLEANUP_REQUESTS) {
+      await requestCleanup(method, params);
+    }
+    if (!(await Promise.race([exit.then(() => true), delay(3_000).then(() => false)]))) {
+      throw new Error('Fresh cleanup gateway did not exit after planned neutral shutdown');
+    }
+    await exit;
+  } catch (error) {
+    cleanup.stdin.end();
+    await Promise.race([exit.catch(() => undefined), delay(3_000)]);
+    throw error;
+  }
 }
 
 function validateKeyboardOwnerSnapshot(owner) {
