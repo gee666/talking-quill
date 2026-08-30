@@ -153,15 +153,9 @@ import type { InstalledObservationRequest } from './acceptance/installed-observa
   );
   output = replaceExact(
     output,
-    `        if (machineQuitRequested) {
-          application.quit();
-          return;
-        }
+    `        await application.start();
         if (restoreRequested !== null) application.handleApplicationActivation(restoreRequested);`,
-    `        if (machineQuitRequested) {
-          application.quit();
-          return;
-        }
+    `        await application.start();
         if (options.installedObservation !== undefined) {
           try {
             await application.runInstalledAcceptance(options.installedObservation);

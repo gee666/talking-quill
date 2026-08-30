@@ -13,6 +13,55 @@ function deferred() {
 }
 
 describe('atomic reset preparation', () => {
+  it('bounds a hanging journal prepare by the original deadline', async () => {
+    vi.useFakeTimers();
+    const onAbort = vi.fn();
+    const startedAt = Date.now();
+    const preparation = prepareResetSafely({
+      journal: {
+        prepareReset: () => new Promise<void>(() => undefined),
+        cancelPreparedReset: vi.fn(),
+      },
+      quiesce: vi.fn(),
+      criticalSteps: [],
+      deadline: startedAt + 100,
+      onAbort,
+    });
+
+    const rejection = expect(preparation).rejects.toBeInstanceOf(ResetPreparationError);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(onAbort).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejection;
+    expect(Date.now()).toBe(startedAt + 100);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(false, startedAt + 100);
+    vi.useRealTimers();
+  });
+
+  it('bounds hanging journal cancellation without replacing the reset deadline', async () => {
+    vi.useFakeTimers();
+    const onAbort = vi.fn();
+    const startedAt = Date.now();
+    const preparation = prepareResetSafely({
+      journal: {
+        prepareReset: () => Promise.reject(new Error('prepare failed')),
+        cancelPreparedReset: () => new Promise<void>(() => undefined),
+      },
+      quiesce: vi.fn(),
+      criticalSteps: [],
+      deadline: startedAt + 100,
+      onAbort,
+    });
+
+    const rejection = expect(preparation).rejects.toBeInstanceOf(ResetPreparationError);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(onAbort).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejection;
+    expect(Date.now()).toBe(startedAt + 100);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(false, startedAt + 100);
+    vi.useRealTimers();
+  });
   it('quits and relaunches without reset when journal preparation fails after quiesce', async () => {
     const order: string[] = [];
     const onAbort = vi.fn();
@@ -37,12 +86,12 @@ describe('atomic reset preparation', () => {
             },
           },
         ],
-        timeoutMs: 100,
+        deadline: Date.now() + 100,
         onAbort,
       }),
     ).rejects.toBeInstanceOf(ResetPreparationError);
     expect(order).toEqual(['quiesce', 'journal', 'cancel-journal']);
-    expect(onAbort).toHaveBeenCalledExactlyOnceWith(true);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(true, expect.any(Number));
   });
 
   it('does not acknowledge and preserves dependency order until critical drains settle', async () => {
@@ -69,7 +118,7 @@ describe('atomic reset preparation', () => {
           },
         },
       ],
-      timeoutMs: 1_000,
+      deadline: Date.now() + 1_000,
       onAbort: vi.fn(),
     }).then(() => {
       settled = true;
@@ -93,7 +142,7 @@ describe('atomic reset preparation', () => {
           { name: 'producer', run: () => Promise.reject(new Error('still active')) },
           { name: 'store', run: store },
         ],
-        timeoutMs: 100,
+        deadline: Date.now() + 100,
         onAbort: vi.fn(),
       }),
     ).rejects.toMatchObject({
@@ -112,14 +161,14 @@ describe('atomic reset preparation', () => {
         criticalSteps: [
           { name: 'settings', run: async () => Promise.reject(new Error('flush failed')) },
         ],
-        timeoutMs: 100,
+        deadline: Date.now() + 100,
         onAbort,
       }),
     ).rejects.toMatchObject({
       diagnostics: [{ phase: 'shutdown', step: 'settings', outcome: 'rejected' }],
     });
     expect(cancel).toHaveBeenCalledOnce();
-    expect(onAbort).toHaveBeenCalledExactlyOnceWith(true);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(true, expect.any(Number));
   });
 
   it('preserves drain diagnostics when journal cancellation also fails', async () => {
@@ -131,7 +180,7 @@ describe('atomic reset preparation', () => {
       },
       quiesce: vi.fn(),
       criticalSteps: [{ name: 'settings', run: () => Promise.reject(new Error('flush failed')) }],
-      timeoutMs: 100,
+      deadline: Date.now() + 100,
       onAbort,
     });
 
@@ -147,6 +196,6 @@ describe('atomic reset preparation', () => {
       { phase: 'shutdown', step: 'settings', outcome: 'rejected' },
     ]);
     expect(rejection.cause).toBeInstanceOf(AggregateError);
-    expect(onAbort).toHaveBeenCalledExactlyOnceWith(false);
+    expect(onAbort).toHaveBeenCalledExactlyOnceWith(false, expect.any(Number));
   });
 });

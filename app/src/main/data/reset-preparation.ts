@@ -13,8 +13,8 @@ export interface ResetPreparationOptions {
   readonly journal: ResetJournalOwner;
   readonly quiesce: () => void;
   readonly criticalSteps: readonly LifecycleStep[];
-  readonly timeoutMs: number;
-  readonly onAbort: (restartWithoutReset: boolean) => void;
+  readonly deadline: number;
+  readonly onAbort: (restartWithoutReset: boolean, deadline: number) => void;
 }
 
 export class ResetPreparationError extends Error {
@@ -32,31 +32,50 @@ export class ResetPreparationError extends Error {
 export async function prepareResetSafely(options: ResetPreparationOptions): Promise<void> {
   try {
     options.quiesce();
-    await options.journal.prepareReset();
-    // Ordering is a security boundary: producers stop before backing stores flush/close. The
-    // lifecycle runner preserves caller order while sharing one deadline across every transition.
-    const diagnostics = await runBoundedLifecycle(
+    const journalDiagnostics = await runBoundedLifecycle(
       'shutdown',
-      options.criticalSteps,
-      options.timeoutMs,
-      { stopOnFailure: true },
+      [{ name: 'reset-journal-prepare', run: () => options.journal.prepareReset() }],
+      undefined,
+      { deadline: options.deadline, stopOnFailure: true },
     );
+    if (journalDiagnostics.length > 0) {
+      throw new ResetPreparationError(
+        'Application data reset preparation failed.',
+        journalDiagnostics,
+      );
+    }
+    // Ordering is a security boundary: producers stop before backing stores flush/close. The
+    // lifecycle runner preserves caller order while sharing the reset's original deadline.
+    const diagnostics = await runBoundedLifecycle('shutdown', options.criticalSteps, undefined, {
+      deadline: options.deadline,
+      stopOnFailure: true,
+    });
     if (diagnostics.length > 0) {
       throw new ResetPreparationError('Critical reset drain did not complete.', diagnostics);
     }
   } catch (error: unknown) {
     let restartWithoutReset = false;
     const cleanupErrors: unknown[] = [];
-    try {
-      await options.journal.cancelPreparedReset();
+    const cancellationDiagnostics = await runBoundedLifecycle(
+      'shutdown',
+      [{ name: 'reset-journal-cancel', run: () => options.journal.cancelPreparedReset() }],
+      undefined,
+      { deadline: options.deadline, stopOnFailure: true },
+    );
+    if (cancellationDiagnostics.length === 0) {
       restartWithoutReset = true;
-    } catch (cleanupError: unknown) {
-      cleanupErrors.push(cleanupError);
+    } else {
+      cleanupErrors.push(
+        new ResetPreparationError(
+          'Reset journal cancellation did not complete.',
+          cancellationDiagnostics,
+        ),
+      );
     }
     try {
       // The process is already atomically quiesced. It must terminate even if journal cleanup
       // failed; relaunch is safe only after the journal is definitely absent.
-      options.onAbort(restartWithoutReset);
+      options.onAbort(restartWithoutReset, options.deadline);
     } catch (abortError: unknown) {
       cleanupErrors.push(abortError);
     }

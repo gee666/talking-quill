@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   StartupCancelledError,
   StartupCleanupStack,
-  armAbsoluteShutdownWatchdog,
   createFatalStartupReport,
   reportLifecycleDiagnostics,
   runBoundedLifecycle,
@@ -137,39 +136,19 @@ describe('application lifecycle hardening', () => {
     expect(calls).toEqual(['producer', 'dependent']);
   });
 
-  it('forces process shutdown at the absolute deadline and supports settled cancellation', async () => {
-    vi.useFakeTimers();
-    const forceQuit = vi.fn();
-    const deadline = Date.now() + 100;
-    await vi.advanceTimersByTimeAsync(80);
-    const watchdog = armAbsoluteShutdownWatchdog(deadline, forceQuit);
-
-    await vi.advanceTimersByTimeAsync(19);
-    expect(forceQuit).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(forceQuit).toHaveBeenCalledOnce();
-
-    const cancelledForceQuit = vi.fn();
-    const cancelled = armAbsoluteShutdownWatchdog(Date.now() + 100, cancelledForceQuit);
-    cancelled.cancel();
-    await vi.advanceTimersByTimeAsync(100);
-    expect(cancelledForceQuit).not.toHaveBeenCalled();
-    watchdog.cancel();
-  });
-
-  it('routes failed reset aborts through the canonical watchdog quit path', () => {
+  it('routes failed reset aborts through the bounded Electron quit path', () => {
     const source = readFileSync('app/src/main/app/application.ts', 'utf8');
     const abortStart = source.indexOf('  #abortAfterFailedReset(');
     const abortEnd = source.indexOf('#acknowledgeDataReset(', abortStart);
     const abortMethod = source.slice(abortStart, abortEnd);
-    const requestStart = source.indexOf('#requestQuit(options:');
+    const requestStart = source.indexOf('  #requestQuit(\n');
     const requestEnd = source.indexOf('handleBeforeQuit(', requestStart);
     const requestMethod = source.slice(requestStart, requestEnd);
 
-    expect(abortMethod).toContain('this.#requestQuit({ skipDependentShutdown: true })');
+    expect(abortMethod).toContain('this.#requestQuit({ deadline, skipDependentShutdown: true })');
     expect(abortMethod).not.toMatch(/app\.(?:quit|exit)\(/u);
-    expect(requestMethod).toContain('armAbsoluteShutdownWatchdog');
-    expect(source.match(/app\.exit\(/gu)).toHaveLength(1);
+    expect(requestMethod).toContain('createBoundedElectronQuit');
+    expect(source).not.toMatch(/app\.exit\(/u);
   });
 
   it('honors an absolute deadline that started before lifecycle draining', async () => {

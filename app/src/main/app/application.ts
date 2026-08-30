@@ -72,8 +72,6 @@ import { getTrustedCaptureDocument, secureSession } from '../security/session-po
 import {
   StartupCancelledError,
   StartupCleanupStack,
-  type AbsoluteShutdownWatchdog,
-  armAbsoluteShutdownWatchdog,
   type LifecycleProgress,
   type LifecycleStep,
   reportLifecycleDiagnostics,
@@ -81,6 +79,7 @@ import {
   runSynchronousLifecycle,
 } from './lifecycle';
 import { AppStateService } from './app-state-service';
+import { createBoundedElectronQuit, type BoundedElectronQuit } from './electron-quit';
 import { LaunchAtLoginService } from './launch-at-login-service';
 import { ModelRuntimeCoordinator } from './model-runtime-coordinator';
 import { createProviderRuntime } from './provider-runtime';
@@ -134,7 +133,8 @@ export class TalkingQuillApplication {
   #startPromise: Promise<void> | null = null;
   #quitPromise: Promise<void> | null = null;
   #quitDeadline = 0;
-  #quitWatchdog: AbsoluteShutdownWatchdog | null = null;
+  #boundedQuit: BoundedElectronQuit | null = null;
+  #resetDeadline: number | null = null;
   #settingsFlush: Promise<void> | null = null;
   #vaultFlush: Promise<void> | null = null;
   #shutdownProgress: LifecycleProgress | null = null;
@@ -810,28 +810,35 @@ export class TalkingQuillApplication {
     // This synchronous gate runs before the first await. It removes every mutating IPC handler and
     // aborts provider/session work; only the typed, role-authorized one-time acknowledgement stays.
     this.#resetPending = true;
+    const deadline = Date.now() + LIFECYCLE_TIMEOUT_MS;
+    this.#resetDeadline = deadline;
     const acknowledgementToken = randomUUID();
     this.#resetAcknowledgementToken = acknowledgementToken;
     await prepareResetSafely({
       journal: this.#dataLifecycle,
       quiesce: () => this.#quiesce(true),
       criticalSteps: this.#createDrainSteps(['data:reset-all']),
-      timeoutMs: LIFECYCLE_TIMEOUT_MS,
-      onAbort: (restartWithoutReset) => this.#abortAfterFailedReset(restartWithoutReset),
+      deadline,
+      onAbort: (restartWithoutReset, abortDeadline) =>
+        this.#abortAfterFailedReset(restartWithoutReset, abortDeadline),
     });
     if (!this.#resetRestartScheduled) {
       this.#resetRestartScheduled = true;
-      // Bound the renderer paint/ack window. Relaunch is forced even if the renderer is hung.
-      setTimeout(() => this.#completeResetRelaunch(), RESET_ACKNOWLEDGEMENT_TIMEOUT_MS);
+      // Keep the renderer paint/ack window inside the reset deadline. Relaunch is forced even if
+      // the renderer is hung.
+      setTimeout(
+        () => this.#completeResetRelaunch(),
+        Math.max(0, Math.min(RESET_ACKNOWLEDGEMENT_TIMEOUT_MS, deadline - Date.now())),
+      );
     }
     return acknowledgementToken;
   }
 
-  #abortAfterFailedReset(restartWithoutReset: boolean): void {
-    // A timed-out producer may still be executing. The shared quit deadline remains the final
+  #abortAfterFailedReset(restartWithoutReset: boolean, deadline: number): void {
+    // A timed-out producer may still be executing. The reset deadline remains the final
     // cancellation edge and prevents Chromium or an audio driver from holding the process open.
     if (restartWithoutReset) app.relaunch({ args: process.argv.slice(1) });
-    this.#requestQuit({ skipDependentShutdown: true });
+    this.#requestQuit({ deadline, skipDependentShutdown: true });
   }
 
   #acknowledgeDataReset(token: string): void {
@@ -843,11 +850,17 @@ export class TalkingQuillApplication {
   }
 
   #completeResetRelaunch(): void {
-    if (this.#dataLifecycle?.resetPrepared !== true || !this.#resetRestartScheduled) return;
+    if (
+      this.#dataLifecycle?.resetPrepared !== true ||
+      !this.#resetRestartScheduled ||
+      this.#resetDeadline === null
+    ) {
+      return;
+    }
     this.#resetRestartScheduled = false;
     this.#resetAcknowledgementToken = null;
     app.relaunch({ args: process.argv.slice(1) });
-    this.quit();
+    this.#requestQuit({ deadline: this.#resetDeadline });
   }
 
   #requestUpdateInstall(): void {
@@ -856,15 +869,19 @@ export class TalkingQuillApplication {
     this.quit();
   }
 
-  quit(): void {
-    this.#requestQuit();
+  quit(deadline?: number): void {
+    const effectiveDeadline = deadline ?? this.#resetDeadline;
+    if (effectiveDeadline === null) this.#requestQuit();
+    else this.#requestQuit({ deadline: effectiveDeadline });
   }
 
-  #requestQuit(options: { readonly skipDependentShutdown?: boolean } = {}): void {
+  #requestQuit(
+    options: { readonly deadline?: number; readonly skipDependentShutdown?: boolean } = {},
+  ): void {
     if (options.skipDependentShutdown === true) this.#skipDependentShutdown = true;
     if (this.#quitPromise !== null) return;
     this.#lifecycle = 'stopping';
-    this.#quitDeadline = Date.now() + LIFECYCLE_TIMEOUT_MS;
+    this.#quitDeadline = options.deadline ?? Date.now() + LIFECYCLE_TIMEOUT_MS;
     void this.#diagnostics
       ?.record('application.stopping', { component: 'application', outcome: 'requested' })
       .catch(() => undefined);
@@ -877,9 +894,10 @@ export class TalkingQuillApplication {
     this.#vaultFlush = this.#vault?.flush() ?? Promise.resolve();
     void this.#settingsFlush.catch(() => undefined);
     void this.#vaultFlush.catch(() => undefined);
-    this.#quitWatchdog = armAbsoluteShutdownWatchdog(this.#quitDeadline, () =>
-      this.#forceQuitAtDeadline(),
-    );
+    this.#boundedQuit = createBoundedElectronQuit(app, this.#quitDeadline, {
+      fallbackExitCode: 1,
+      onDeadline: () => this.#forceQuitAtDeadline(),
+    });
     this.#quitPromise = this.#drainBeforeQuit();
   }
 
@@ -970,18 +988,14 @@ export class TalkingQuillApplication {
       step: this.#shutdownProgress?.step ?? 'startup-settlement',
       pendingIpc: this.#ipc?.pendingChannels().slice(0, 16) ?? [],
     });
-    this.#finishQuit(1);
+    this.shutdown();
   }
 
   #finishQuit(exitCode: number): void {
     if (this.#processExitRequested) return;
     this.#processExitRequested = true;
-    if (this.#quitWatchdog !== null) {
-      this.#quitWatchdog.cancel();
-      this.#quitWatchdog = null;
-    }
-    this.shutdown();
-    app.exit(exitCode);
+    this.#quitAllowed = true;
+    this.#boundedQuit?.request(exitCode);
   }
 
   async #waitForStartupSettlement(): Promise<boolean> {

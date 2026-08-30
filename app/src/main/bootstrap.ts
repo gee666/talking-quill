@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { APP_ID, APP_NAME } from '../shared/constants/app';
 import { TalkingQuillApplication, type TalkingQuillApplicationOptions } from './app/application';
 import { classifyWindowsLoginStartArguments } from './app/launch-at-login-service';
+import { createBoundedElectronQuit, type BoundedElectronQuit } from './app/electron-quit';
 import { StartupCancelledError, createFatalStartupReport } from './app/lifecycle';
 import { resolveSignedInWindowsUserDataTarget } from './app/windows-uninstall-target';
 import { registerPrivilegedScheme } from './security/protocol';
@@ -14,6 +15,8 @@ import { consumeUninstallResetChallenge } from './data/uninstall-reset-challenge
 import { validateUninstallResetTarget } from './app/runtime-path-policy';
 import { resolveOwnedTreeRemovalExecutable } from './helper';
 import { createNativeOwnedTreeRemoval } from './data/native-owned-tree-removal';
+const BOOTSTRAP_QUIT_TIMEOUT_MS = 15_000;
+
 export interface MainBootstrapOptions {
   readonly userDataPath?: string;
   readonly isolatedInstance?: boolean;
@@ -76,12 +79,18 @@ export function startMain(options: MainBootstrapOptions = {}): void {
   let application: TalkingQuillApplication | null = null;
   let restoreRequested: 'second_instance' | 'os_activate' | null = null;
   let machineQuitRequested = process.argv.includes('--talking-quill-request-machine-quit');
+  let machineQuitDeadline = machineQuitRequested ? Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS : null;
+  let bootstrapQuit: BoundedElectronQuit | null = null;
+  const requestBootstrapQuit = (deadline: number, exitCode = 0) => {
+    bootstrapQuit ??= createBoundedElectronQuit(app, deadline, { fallbackExitCode: exitCode });
+    bootstrapQuit.request(exitCode);
+  };
 
   if (!hasLock) {
     // Never reset stores while an interactive instance may still own them. The uninstaller checks
     // this nonzero exit and stops rather than claiming deletion.
-    if (uninstallResetChallenge !== null) app.exit(2);
-    else app.quit();
+    const deadline = Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS;
+    requestBootstrapQuit(deadline, uninstallResetChallenge === null ? 0 : 2);
   } else {
     const requestRestore = (source: 'second_instance' | 'os_activate') => {
       if (application === null) restoreRequested = source;
@@ -99,8 +108,9 @@ export function startMain(options: MainBootstrapOptions = {}): void {
       if (loginStart === 'invalid') return;
       if (commandLine.includes('--talking-quill-request-machine-quit')) {
         machineQuitRequested = true;
-        if (application === null) app.quit();
-        else application.quit();
+        machineQuitDeadline ??= Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS;
+        if (application === null) requestBootstrapQuit(machineQuitDeadline);
+        else application.quit(machineQuitDeadline);
         return;
       }
       requestRestore('second_instance');
@@ -167,15 +177,16 @@ export function startMain(options: MainBootstrapOptions = {}): void {
           app.exit(0);
           return;
         }
+        if (machineQuitRequested) {
+          machineQuitDeadline ??= Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS;
+          requestBootstrapQuit(machineQuitDeadline);
+          return;
+        }
         application = new TalkingQuillApplication({
           ...options.application,
           windowsLoginStart,
         });
         await application.start();
-        if (machineQuitRequested) {
-          application.quit();
-          return;
-        }
         if (restoreRequested !== null) application.handleApplicationActivation(restoreRequested);
       })
       .catch((error: unknown) => {
