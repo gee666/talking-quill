@@ -1,8 +1,9 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createPackageWithOptions } from '@electron/asar';
 import { afterEach, describe, expect, it } from 'vitest';
 import { verifyTargetNativeOnnxArchitecture } from '../../scripts/packaged-asar-structure.mjs';
+import { validateAsarEntries } from '../../scripts/package-policy.mjs';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 const roots: string[] = [];
@@ -18,6 +19,27 @@ afterEach(async () => {
 });
 
 describe('post-pack target-native ONNX gate', () => {
+  it('diagnoses the attempt-13 archive from its generated header and config', async () => {
+    const fixture = resolve('tests/fixtures/after-pack/attempt-13');
+    const [headerBytes, debugConfig] = await Promise.all([
+      readFile(resolve(fixture, 'app.asar-header.json'), 'utf8'),
+      readFile(resolve(fixture, 'builder-debug.yml'), 'utf8'),
+    ]);
+    const header = JSON.parse(headerBytes) as AsarHeader;
+    const entries = headerEntries(header);
+    const nodeModulePatterns = debugConfig.split('  nodeModuleFilePatterns:\n')[1] ?? '';
+
+    expect(debugConfig).toContain('node_modules/onnxruntime-node/bin/napi-v3/win32/x64/**/*');
+    expect(nodeModulePatterns).toContain("- '!node_modules/onnxruntime-node/bin/napi-v3/**/*'");
+    expect(nodeModulePatterns).not.toContain(
+      'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
+    );
+    expect(entries).not.toContain('node_modules/onnxruntime-node/bin/napi-v3/win32');
+    expect(() => validateAsarEntries(entries, { platform: 'win', architecture: 'x64' })).toThrow(
+      'Required ONNX runtime path is missing: node_modules/onnxruntime-node/bin/napi-v3/win32/x64/DirectML.dll',
+    );
+  });
+
   it.each(tuples)(
     'accepts only a matching %s/%s package image',
     async (platform, directory, architecture) => {
@@ -45,6 +67,27 @@ describe('post-pack target-native ONNX gate', () => {
     ).rejects.toThrow('Post-pack ONNX native is not unpacked');
   });
 });
+
+interface AsarHeaderEntry {
+  files?: Record<string, AsarHeaderEntry>;
+}
+
+interface AsarHeader {
+  files: Record<string, AsarHeaderEntry>;
+}
+
+function headerEntries(header: AsarHeader): string[] {
+  const entries: string[] = [];
+  const visit = (files: Record<string, AsarHeaderEntry>, parent: string) => {
+    for (const [name, metadata] of Object.entries(files)) {
+      const entry = parent === '' ? name : `${parent}/${name}`;
+      entries.push(entry);
+      if (metadata.files !== undefined) visit(metadata.files, entry);
+    }
+  };
+  visit(header.files, '');
+  return entries;
+}
 
 async function nativeFixture(
   platform: 'win32' | 'darwin',

@@ -1,0 +1,1316 @@
+{
+  "files": {
+    "out": {
+      "files": {
+        "main": {
+          "files": {
+            "index.js": {
+              "size": 1935145,
+              "offset": "0",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "2b4f1846821e855df78ac2870946f02b7f62ddf8a7c8d4721cdc7fd4849a329a",
+                "blockSize": 4194304,
+                "blocks": ["2b4f1846821e855df78ac2870946f02b7f62ddf8a7c8d4721cdc7fd4849a329a"]
+              }
+            }
+          }
+        },
+        "preload": {
+          "files": {
+            "capture.js": {
+              "size": 245874,
+              "offset": "1935145",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "9a4ce778add548b6eed0466d9b21b12baf52d9cd0f648305a778a7570da7436b",
+                "blockSize": 4194304,
+                "blocks": ["9a4ce778add548b6eed0466d9b21b12baf52d9cd0f648305a778a7570da7436b"]
+              }
+            },
+            "main.js": {
+              "size": 252541,
+              "offset": "2181019",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "a3478258ab8afec73aacfd358ce7215dbbfe31f93faa499fcf8cc7fe0136faa7",
+                "blockSize": 4194304,
+                "blocks": ["a3478258ab8afec73aacfd358ce7215dbbfe31f93faa499fcf8cc7fe0136faa7"]
+              }
+            },
+            "widget.js": {
+              "size": 245706,
+              "offset": "2433560",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "3cb49aafcabdb3a39b105c67a65ef491eeaf16e16fe157e27dc0cc08203b48e5",
+                "blockSize": 4194304,
+                "blocks": ["3cb49aafcabdb3a39b105c67a65ef491eeaf16e16fe157e27dc0cc08203b48e5"]
+              }
+            }
+          }
+        },
+        "renderer": {
+          "files": {
+            "assets": {
+              "files": {
+                "Dialog-CUoRkolB.js": {
+                  "size": 1894,
+                  "offset": "2679266",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "ae5288b70b7b663b361951e7ff3f3af319fad26f39bb481b25188d266de12c2d",
+                    "blockSize": 4194304,
+                    "blocks": ["ae5288b70b7b663b361951e7ff3f3af319fad26f39bb481b25188d266de12c2d"]
+                  }
+                },
+                "HistoryScreen-ABHLhhm8.js": {
+                  "size": 13768,
+                  "offset": "2681160",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "27a634528c0f5cbed4b08a0729d280bc6b82c03e7fcd881050225b2275120798",
+                    "blockSize": 4194304,
+                    "blocks": ["27a634528c0f5cbed4b08a0729d280bc6b82c03e7fcd881050225b2275120798"]
+                  }
+                },
+                "InfoScreen-CrbH1Wgj.js": {
+                  "size": 14666,
+                  "offset": "2694928",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8cb5c9023e2414a5365ecbca83e2224bbb13fe885e6c2a3a3f5903a47213c282",
+                    "blockSize": 4194304,
+                    "blocks": ["8cb5c9023e2414a5365ecbca83e2224bbb13fe885e6c2a3a3f5903a47213c282"]
+                  }
+                },
+                "SettingsScreen-CmdvOyG3.js": {
+                  "size": 74267,
+                  "offset": "2709594",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8b0c152da3a66b7f398128f98cc5abff20fd45003e2c13d3a4206f823b739a18",
+                    "blockSize": 4194304,
+                    "blocks": ["8b0c152da3a66b7f398128f98cc5abff20fd45003e2c13d3a4206f823b739a18"]
+                  }
+                },
+                "SmartProcessingSection-CaW13ctg.js": {
+                  "size": 125624,
+                  "offset": "2783861",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "2759be6cd4527d19196f548b593d992c9abdfe0f24fcc5c8d92f26b0afc1dc82",
+                    "blockSize": 4194304,
+                    "blocks": ["2759be6cd4527d19196f548b593d992c9abdfe0f24fcc5c8d92f26b0afc1dc82"]
+                  }
+                },
+                "UpdateDialog-Cl_g9cVM.js": {
+                  "size": 3658,
+                  "offset": "2909485",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "33e0ee89f8dce0434d3fd12ce6e88e40d4181a434fd7048fa97523436de62f99",
+                    "blockSize": 4194304,
+                    "blocks": ["33e0ee89f8dce0434d3fd12ce6e88e40d4181a434fd7048fa97523436de62f99"]
+                  }
+                },
+                "anthropic-DaNdIlYK.png": {
+                  "size": 11892,
+                  "offset": "2913143",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "f5b832918f4634716206a12e22b0a5679ac5f1740a8e993b999d3eb04e943b85",
+                    "blockSize": 4194304,
+                    "blocks": ["f5b832918f4634716206a12e22b0a5679ac5f1740a8e993b999d3eb04e943b85"]
+                  }
+                },
+                "apipie-BAHuF3lT.png": {
+                  "size": 14798,
+                  "offset": "2925035",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "72329feddd2a3223f89c62db204bf641377bda549c40bd3d2d09b4fb6aa5765b",
+                    "blockSize": 4194304,
+                    "blocks": ["72329feddd2a3223f89c62db204bf641377bda549c40bd3d2d09b4fb6aa5765b"]
+                  }
+                },
+                "audio-DfH9ZTiv.js": {
+                  "size": 2591,
+                  "offset": "2939833",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8f43454de9d8981cf6875c1526ab28e418ff7b473955e816db37ce6fd88949f3",
+                    "blockSize": 4194304,
+                    "blocks": ["8f43454de9d8981cf6875c1526ab28e418ff7b473955e816db37ce6fd88949f3"]
+                  }
+                },
+                "azure-DUh8n09S.png": {
+                  "size": 34705,
+                  "offset": "2942424",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "0b70cf5b364ac3257fedf3d8290e7718aecd74ac9fc74e3b7511d736f113d1b6",
+                    "blockSize": 4194304,
+                    "blocks": ["0b70cf5b364ac3257fedf3d8290e7718aecd74ac9fc74e3b7511d736f113d1b6"]
+                  }
+                },
+                "bedrock-DIBNR_M1.png": {
+                  "size": 57786,
+                  "offset": "2977129",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "eb5d2fdefb02a76ccda8ead5e1f1890f83501615de27113f891103676fb239cd",
+                    "blockSize": 4194304,
+                    "blocks": ["eb5d2fdefb02a76ccda8ead5e1f1890f83501615de27113f891103676fb239cd"]
+                  }
+                },
+                "capture-DK4WV3-_.js": {
+                  "size": 36504,
+                  "offset": "3034915",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "74d67b297e8a5ae30038959038b1c5417790fbea726007f3e8ab10d8790d899d",
+                    "blockSize": 4194304,
+                    "blocks": ["74d67b297e8a5ae30038959038b1c5417790fbea726007f3e8ab10d8790d899d"]
+                  }
+                },
+                "capture.worklet-BmFU0mLe.js": {
+                  "size": 9802,
+                  "offset": "3071419",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "5415b1c474c49925836cf6714f39169b7cfbb5bebdbb92bc435dc62140b8b31b",
+                    "blockSize": 4194304,
+                    "blocks": ["5415b1c474c49925836cf6714f39169b7cfbb5bebdbb92bc435dc62140b8b31b"]
+                  }
+                },
+                "cerebras-BFl9qBYD.png": {
+                  "size": 28486,
+                  "offset": "3081221",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "d5bc9c0b120424cf57bb0ca0498a17af71b1269b6ff17c3a2c56a9c5903d6b3f",
+                    "blockSize": 4194304,
+                    "blocks": ["d5bc9c0b120424cf57bb0ca0498a17af71b1269b6ff17c3a2c56a9c5903d6b3f"]
+                  }
+                },
+                "cohere-CVStgEuL.png": {
+                  "size": 142073,
+                  "offset": "3109707",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "14e85cd1b0be617db63843e97f9501e24f9ace1dcbf8228e629388b72c91103d",
+                    "blockSize": 4194304,
+                    "blocks": ["14e85cd1b0be617db63843e97f9501e24f9ace1dcbf8228e629388b72c91103d"]
+                  }
+                },
+                "cometapi-HD8TprBO.png": {
+                  "size": 20342,
+                  "offset": "3251780",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "19db3237c9ca518e7f5b0bf831bb74603c41e7b03b3fc375d40685a71ab4e754",
+                    "blockSize": 4194304,
+                    "blocks": ["19db3237c9ca518e7f5b0bf831bb74603c41e7b03b3fc375d40685a71ab4e754"]
+                  }
+                },
+                "deepseek-NVhhZvs2.png": {
+                  "size": 30205,
+                  "offset": "3272122",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "58153e0400f5312323a36895d84f717cada9a98e8a4facac0ba2116ce004b399",
+                    "blockSize": 4194304,
+                    "blocks": ["58153e0400f5312323a36895d84f717cada9a98e8a4facac0ba2116ce004b399"]
+                  }
+                },
+                "docker-model-runner-NttLLqJ0.png": {
+                  "size": 8676,
+                  "offset": "3302327",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8e3244e4bb1ababee1bd623f84049b703a8735609dda57e32421a103a8b77ed4",
+                    "blockSize": 4194304,
+                    "blocks": ["8e3244e4bb1ababee1bd623f84049b703a8735609dda57e32421a103a8b77ed4"]
+                  }
+                },
+                "fireworksai-DW-yWmYC.jpeg": {
+                  "size": 3795,
+                  "offset": "3311003",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8a234fe1b19af1910c35163c21d2350506f73cae8de6279f336a8dd04ed5ddc9",
+                    "blockSize": 4194304,
+                    "blocks": ["8a234fe1b19af1910c35163c21d2350506f73cae8de6279f336a8dd04ed5ddc9"]
+                  }
+                },
+                "foundry-local-h5WJjPZ5.png": {
+                  "size": 18705,
+                  "offset": "3314798",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "633c8a45a9654d2997fbf198ad7cbed11364b35871a9669838124af098190ed8",
+                    "blockSize": 4194304,
+                    "blocks": ["633c8a45a9654d2997fbf198ad7cbed11364b35871a9669838124af098190ed8"]
+                  }
+                },
+                "gemini-CzVnuhQv.png": {
+                  "size": 26348,
+                  "offset": "3333503",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e28c949adfc20f612e3f15323acb2cf3b728a5cbed4c60c9500bb710021af053",
+                    "blockSize": 4194304,
+                    "blocks": ["e28c949adfc20f612e3f15323acb2cf3b728a5cbed4c60c9500bb710021af053"]
+                  }
+                },
+                "generic-openai-Bfn6fjlF.png": {
+                  "size": 29556,
+                  "offset": "3359851",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e1f6304f93660fb1dc450878728dc28d9aa1e0e626a8dca0786c0a1b3eaf8597",
+                    "blockSize": 4194304,
+                    "blocks": ["e1f6304f93660fb1dc450878728dc28d9aa1e0e626a8dca0786c0a1b3eaf8597"]
+                  }
+                },
+                "giteeai-C66hc2eY.png": {
+                  "size": 5765,
+                  "offset": "3389407",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e7f0dad0a43aeb2c26ccc0747c655c5342c166e02ec240f2b1a342a5dca526f7",
+                    "blockSize": 4194304,
+                    "blocks": ["e7f0dad0a43aeb2c26ccc0747c655c5342c166e02ec240f2b1a342a5dca526f7"]
+                  }
+                },
+                "groq-B7FOL990.png": {
+                  "size": 1450,
+                  "offset": "3395172",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "c14139144903cfc7e4dce92f642bb1f5bbf6341dcdd7eb0a0d3b02a5f6025e78",
+                    "blockSize": 4194304,
+                    "blocks": ["c14139144903cfc7e4dce92f642bb1f5bbf6341dcdd7eb0a0d3b02a5f6025e78"]
+                  }
+                },
+                "koboldcpp-C_hj5o6l.png": {
+                  "size": 7110,
+                  "offset": "3396622",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "70f72787b711dffc7859f18600504780a4d605120ccdc4397e2b7fd3aae2b79d",
+                    "blockSize": 4194304,
+                    "blocks": ["70f72787b711dffc7859f18600504780a4d605120ccdc4397e2b7fd3aae2b79d"]
+                  }
+                },
+                "lemonade-CFX97CAc.png": {
+                  "size": 85586,
+                  "offset": "3403732",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "009bc495f02e146ffef2f939a5add08de3c262a787bde7a48a4e728e1dcfa03b",
+                    "blockSize": 4194304,
+                    "blocks": ["009bc495f02e146ffef2f939a5add08de3c262a787bde7a48a4e728e1dcfa03b"]
+                  }
+                },
+                "litellm-DEVL6Lna.png": {
+                  "size": 50535,
+                  "offset": "3489318",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "d731f9e65442e5b3cbbcb34fc60f89637589be5c1930d966c31dac8d00c30b1d",
+                    "blockSize": 4194304,
+                    "blocks": ["d731f9e65442e5b3cbbcb34fc60f89637589be5c1930d966c31dac8d00c30b1d"]
+                  }
+                },
+                "lmstudio-CXdIWNE1.png": {
+                  "size": 77912,
+                  "offset": "3539853",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "172a598a13302b217afbf58cfb2dbb5cda8951198dc921792a4d930ee3413fc8",
+                    "blockSize": 4194304,
+                    "blocks": ["172a598a13302b217afbf58cfb2dbb5cda8951198dc921792a4d930ee3413fc8"]
+                  }
+                },
+                "localai-DuZeVF-M.jpeg": {
+                  "size": 177825,
+                  "offset": "3617765",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "8a3d8735362b3b3fcb8d4b7902b09156ac3aa94d62e6c165c1519b2dde492c6e",
+                    "blockSize": 4194304,
+                    "blocks": ["8a3d8735362b3b3fcb8d4b7902b09156ac3aa94d62e6c165c1519b2dde492c6e"]
+                  }
+                },
+                "logo-dark-7mBd15Yz.png": {
+                  "size": 196269,
+                  "offset": "3795590",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e582c2ac93d63333be20be3f3d213b697cfd9ea226074683209d6d5d9e354b4a",
+                    "blockSize": 4194304,
+                    "blocks": ["e582c2ac93d63333be20be3f3d213b697cfd9ea226074683209d6d5d9e354b4a"]
+                  }
+                },
+                "logo-light-BMDkIEi2.png": {
+                  "size": 163330,
+                  "offset": "3991859",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "654ab7842ac6b6c79cd15ed19f3402dd739c683fc92b12026b7574df0a927c79",
+                    "blockSize": 4194304,
+                    "blocks": ["654ab7842ac6b6c79cd15ed19f3402dd739c683fc92b12026b7574df0a927c79"]
+                  }
+                },
+                "main-BSG3bS8Y.js": {
+                  "size": 97089,
+                  "offset": "4155189",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "374feb0bd70b732922774ac8e40703927b5385b385e4bded327c37010a9d656e",
+                    "blockSize": 4194304,
+                    "blocks": ["374feb0bd70b732922774ac8e40703927b5385b385e4bded327c37010a9d656e"]
+                  }
+                },
+                "main-Clzc47Oc.css": {
+                  "size": 26537,
+                  "offset": "4252278",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "1e60132f48b9cde8f73b16a2e1f3a815eb50064ab7c8b3112e7cbcb97ee8977e",
+                    "blockSize": 4194304,
+                    "blocks": ["1e60132f48b9cde8f73b16a2e1f3a815eb50064ab7c8b3112e7cbcb97ee8977e"]
+                  }
+                },
+                "minimax-BnZUq7Aw.png": {
+                  "size": 33591,
+                  "offset": "4278815",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "71aa6d6c865c41665681deb1047dc71da1405ef087442b449f1fcf8cba518b71",
+                    "blockSize": 4194304,
+                    "blocks": ["71aa6d6c865c41665681deb1047dc71da1405ef087442b449f1fcf8cba518b71"]
+                  }
+                },
+                "mistral-usKmnrZw.jpeg": {
+                  "size": 4542,
+                  "offset": "4312406",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "7617df594a20598dd536ca2d8bfd3dc4c61582576b8f4a001c122c0e25f1ee88",
+                    "blockSize": 4194304,
+                    "blocks": ["7617df594a20598dd536ca2d8bfd3dc4c61582576b8f4a001c122c0e25f1ee88"]
+                  }
+                },
+                "moonshotai-dH9pTPEQ.png": {
+                  "size": 52334,
+                  "offset": "4316948",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "df8f99700b245d10599c098e53b25ce29e0af060841df0067a8ee1c4303fac80",
+                    "blockSize": 4194304,
+                    "blocks": ["df8f99700b245d10599c098e53b25ce29e0af060841df0067a8ee1c4303fac80"]
+                  }
+                },
+                "novita-Bkcnypd7.png": {
+                  "size": 2778,
+                  "offset": "4369282",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "45ebc2fa1414e0b1a3e2065edfd34deed59dd8e5ad17ce3c74668b7fce0d9432",
+                    "blockSize": 4194304,
+                    "blocks": ["45ebc2fa1414e0b1a3e2065edfd34deed59dd8e5ad17ce3c74668b7fce0d9432"]
+                  }
+                },
+                "nvidia-nim-D03VC0Nx.png": {
+                  "size": 25969,
+                  "offset": "4372060",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "43bb33af82aa0529fb2458acd866ee6a40a3effda54173587262119b621a4d8f",
+                    "blockSize": 4194304,
+                    "blocks": ["43bb33af82aa0529fb2458acd866ee6a40a3effda54173587262119b621a4d8f"]
+                  }
+                },
+                "ollama-Mem9sQ4L.png": {
+                  "size": 23630,
+                  "offset": "4398029",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "7dea0e3d9333a4e131d16c8af4f0c25a1c2bfb6a9f05baa9efcb8d9dfd114094",
+                    "blockSize": 4194304,
+                    "blocks": ["7dea0e3d9333a4e131d16c8af4f0c25a1c2bfb6a9f05baa9efcb8d9dfd114094"]
+                  }
+                },
+                "omlx-7jGxYvyd.png": {
+                  "size": 15408,
+                  "offset": "4421659",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "230d72a561e1384cc2d3a4a64b23bd70a301f38328917cafd3c5f1af2fa59e53",
+                    "blockSize": 4194304,
+                    "blocks": ["230d72a561e1384cc2d3a4a64b23bd70a301f38328917cafd3c5f1af2fa59e53"]
+                  }
+                },
+                "openai-BIqiJDWu.png": {
+                  "size": 22744,
+                  "offset": "4437067",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "702c1dd3d2231a61286977bded865bca4e31f5193ed71cf54bd48364a1da6b99",
+                    "blockSize": 4194304,
+                    "blocks": ["702c1dd3d2231a61286977bded865bca4e31f5193ed71cf54bd48364a1da6b99"]
+                  }
+                },
+                "openrouter-CAtNZSln.jpeg": {
+                  "size": 6366,
+                  "offset": "4459811",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "6bdb8156eab82c0bbcd5f0a0c49b49c156e85a01d4eb67d803a6c0470e5d75e7",
+                    "blockSize": 4194304,
+                    "blocks": ["6bdb8156eab82c0bbcd5f0a0c49b49c156e85a01d4eb67d803a6c0470e5d75e7"]
+                  }
+                },
+                "perplexity-Cv9s1dsH.png": {
+                  "size": 15863,
+                  "offset": "4466177",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "916ad5d0a4cc13c81b79db4e8773eb879b6763917438e76ef7d8b14ede4b3201",
+                    "blockSize": 4194304,
+                    "blocks": ["916ad5d0a4cc13c81b79db4e8773eb879b6763917438e76ef7d8b14ede4b3201"]
+                  }
+                },
+                "pi-d-K6Kxu-.png": {
+                  "size": 2276,
+                  "offset": "4482040",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "45b7fd96dcc776930849c96ff64929c3f6900687de292975348012088da27447",
+                    "blockSize": 4194304,
+                    "blocks": ["45b7fd96dcc776930849c96ff64929c3f6900687de292975348012088da27447"]
+                  }
+                },
+                "ppio-DcmtDNxC.png": {
+                  "size": 3590,
+                  "offset": "4484316",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "1e0534249e28837d3d97e6b3ca1f73c47647360107d4961b4149c9cd1ab57bd5",
+                    "blockSize": 4194304,
+                    "blocks": ["1e0534249e28837d3d97e6b3ca1f73c47647360107d4961b4149c9cd1ab57bd5"]
+                  }
+                },
+                "privatemode-7Ux3GEM-.png": {
+                  "size": 6874,
+                  "offset": "4487906",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "3a2f473118cb37867dc131d45cd886cd3b2e8160479b426fc15041d83f45c24e",
+                    "blockSize": 4194304,
+                    "blocks": ["3a2f473118cb37867dc131d45cd886cd3b2e8160479b426fc15041d83f45c24e"]
+                  }
+                },
+                "sambanova-BSsrO9uf.png": {
+                  "size": 49974,
+                  "offset": "4494780",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "051712d1345f2663dcef0b85f3d42f1f5cd46b345ecf9a662a2cd21e4d824144",
+                    "blockSize": 4194304,
+                    "blocks": ["051712d1345f2663dcef0b85f3d42f1f5cd46b345ecf9a662a2cd21e4d824144"]
+                  }
+                },
+                "schemas-G67fsBGN.js": {
+                  "size": 146420,
+                  "offset": "4544754",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "13c891b263d60786f14bbea4916a7195fde93bbc0c4de61205a339b261e9b47c",
+                    "blockSize": 4194304,
+                    "blocks": ["13c891b263d60786f14bbea4916a7195fde93bbc0c4de61205a339b261e9b47c"]
+                  }
+                },
+                "text-generation-webui-D_G_l62H.png": {
+                  "size": 262819,
+                  "offset": "4691174",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "fa5373ee2a282305d037e358da7b26204ac832dcce70c567d2cd280cbda6c972",
+                    "blockSize": 4194304,
+                    "blocks": ["fa5373ee2a282305d037e358da7b26204ac832dcce70c567d2cd280cbda6c972"]
+                  }
+                },
+                "theme-C21b5j07.css": {
+                  "size": 20992,
+                  "offset": "4953993",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e4b66ecd68e01b103d70182b6b94e99a51f009a3be29d780e863806d7c1bdfdd",
+                    "blockSize": 4194304,
+                    "blocks": ["e4b66ecd68e01b103d70182b6b94e99a51f009a3be29d780e863806d7c1bdfdd"]
+                  }
+                },
+                "theme-D8M5mLIC.js": {
+                  "size": 559827,
+                  "offset": "4974985",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "073dca5e779294b7497aed98c9e2c50dce71090d56a8a0b69474ab6b79bbddac",
+                    "blockSize": 4194304,
+                    "blocks": ["073dca5e779294b7497aed98c9e2c50dce71090d56a8a0b69474ab6b79bbddac"]
+                  }
+                },
+                "togetherai-BT4fyOVY.png": {
+                  "size": 8356,
+                  "offset": "5534812",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "23bbd12be937fc78eaa8bde0249637f6dccc6ff2a3a4420eaf7e6fa2480c22e2",
+                    "blockSize": 4194304,
+                    "blocks": ["23bbd12be937fc78eaa8bde0249637f6dccc6ff2a3a4420eaf7e6fa2480c22e2"]
+                  }
+                },
+                "widget-BmTeztsb.js": {
+                  "size": 13010,
+                  "offset": "5543168",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "160f0c85f2e95f8454fb2e20495154d4e8483624edc7c5c2b924428e9dadfe1f",
+                    "blockSize": 4194304,
+                    "blocks": ["160f0c85f2e95f8454fb2e20495154d4e8483624edc7c5c2b924428e9dadfe1f"]
+                  }
+                },
+                "widget-Dxh2bDsR.css": {
+                  "size": 2865,
+                  "offset": "5556178",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "cb97e19db6cb3754435662ae83a516b4d8262f1fab66ae9addb214517a13d03c",
+                    "blockSize": 4194304,
+                    "blocks": ["cb97e19db6cb3754435662ae83a516b4d8262f1fab66ae9addb214517a13d03c"]
+                  }
+                },
+                "xai-BkeRlGad.png": {
+                  "size": 14108,
+                  "offset": "5559043",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "63836ddf885a087d34713ea612cae8a46b22857441c115da176359c3e2d64f15",
+                    "blockSize": 4194304,
+                    "blocks": ["63836ddf885a087d34713ea612cae8a46b22857441c115da176359c3e2d64f15"]
+                  }
+                },
+                "zai-DtohRIi0.png": {
+                  "size": 8024,
+                  "offset": "5573151",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "b3a70c42724d642a77ccce42ab25d3e80feb4a8072fdbd532d173dc6ac7898eb",
+                    "blockSize": 4194304,
+                    "blocks": ["b3a70c42724d642a77ccce42ab25d3e80feb4a8072fdbd532d173dc6ac7898eb"]
+                  }
+                }
+              }
+            },
+            "capture": {
+              "files": {
+                "index.html": {
+                  "size": 676,
+                  "offset": "5581175",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "27d77fe6f9e945eda931f02cf502c27cddda5dee18d94bcdda1f22c473dd0e22",
+                    "blockSize": 4194304,
+                    "blocks": ["27d77fe6f9e945eda931f02cf502c27cddda5dee18d94bcdda1f22c473dd0e22"]
+                  }
+                }
+              }
+            },
+            "main": {
+              "files": {
+                "index.html": {
+                  "size": 987,
+                  "offset": "5581851",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "a038a1859d4f7231a3b3c616bff423a9577a383d4ea55b8a62c375108c99e637",
+                    "blockSize": 4194304,
+                    "blocks": ["a038a1859d4f7231a3b3c616bff423a9577a383d4ea55b8a62c375108c99e637"]
+                  }
+                }
+              }
+            },
+            "widget": {
+              "files": {
+                "index.html": {
+                  "size": 878,
+                  "offset": "5582838",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "a146eda4e9dd83e4b8bc4db85d4a641eb654667bd7bec3cbb474c644f41ce70e",
+                    "blockSize": 4194304,
+                    "blocks": ["a146eda4e9dd83e4b8bc4db85d4a641eb654667bd7bec3cbb474c644f41ce70e"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "workers": {
+          "files": {
+            "whisper-bootstrap.cjs": {
+              "size": 17166,
+              "offset": "5583716",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "cf629f5e23c956ce3225cb962f2100f809a7e3b214326c6573d98149d53bb7c9",
+                "blockSize": 4194304,
+                "blocks": ["cf629f5e23c956ce3225cb962f2100f809a7e3b214326c6573d98149d53bb7c9"]
+              }
+            },
+            "whisper-payload.cjs": {
+              "size": 1665474,
+              "offset": "5600882",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "9fc418e59541d1c601d72d7b67dab4d2d2a3a6fb535ecf2a39ada76a33276e7c",
+                "blockSize": 4194304,
+                "blocks": ["9fc418e59541d1c601d72d7b67dab4d2d2a3a6fb535ecf2a39ada76a33276e7c"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "package.json": {
+      "size": 495,
+      "offset": "7266356",
+      "integrity": {
+        "algorithm": "SHA256",
+        "hash": "9e19e6811ce2eb6186f7cee3b1a1b19988a5e31ba7490ea701252ee32261c83a",
+        "blockSize": 4194304,
+        "blocks": ["9e19e6811ce2eb6186f7cee3b1a1b19988a5e31ba7490ea701252ee32261c83a"]
+      }
+    },
+    "node_modules": {
+      "files": {
+        "better-sqlite3": {
+          "files": {
+            "LICENSE": {
+              "size": 1078,
+              "offset": "7266851",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "09856b52897c91ab67e7456ef43067019f31dfd3b87fda72e655736b1ebdee55",
+                "blockSize": 4194304,
+                "blocks": ["09856b52897c91ab67e7456ef43067019f31dfd3b87fda72e655736b1ebdee55"]
+              }
+            },
+            "lib": {
+              "files": {
+                "database.js": {
+                  "size": 4149,
+                  "offset": "7267929",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "02ea23bdd23d7ac5de0675a2f32fc686e76d5c6a32bd3e3891f360e72e07f61f",
+                    "blockSize": 4194304,
+                    "blocks": ["02ea23bdd23d7ac5de0675a2f32fc686e76d5c6a32bd3e3891f360e72e07f61f"]
+                  }
+                },
+                "index.js": {
+                  "size": 110,
+                  "offset": "7272078",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "82db11c4ee43a41d859988c5db42c3771dff565371f94bacbd1e4d8d6ceb47cd",
+                    "blockSize": 4194304,
+                    "blocks": ["82db11c4ee43a41d859988c5db42c3771dff565371f94bacbd1e4d8d6ceb47cd"]
+                  }
+                },
+                "methods": {
+                  "files": {
+                    "aggregate.js": {
+                      "size": 1932,
+                      "offset": "7272188",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "e9f74eb919ec93fe089c95ddf25a98f1f631c80418fa34fb2346ca1bc29f1b82",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "e9f74eb919ec93fe089c95ddf25a98f1f631c80418fa34fb2346ca1bc29f1b82"
+                        ]
+                      }
+                    },
+                    "backup.js": {
+                      "size": 2380,
+                      "offset": "7274120",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "ea29d34992bb02e006d0fdeda9675ac5d2bb227aaf57468decd997e9fc9c7dbf",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "ea29d34992bb02e006d0fdeda9675ac5d2bb227aaf57468decd997e9fc9c7dbf"
+                        ]
+                      }
+                    },
+                    "function.js": {
+                      "size": 1396,
+                      "offset": "7276500",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "f431d49303b8bbdc044b1f1b455bdad21fc9b74b007de0acb22f08f25b4febd3",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "f431d49303b8bbdc044b1f1b455bdad21fc9b74b007de0acb22f08f25b4febd3"
+                        ]
+                      }
+                    },
+                    "inspect.js": {
+                      "size": 174,
+                      "offset": "7277896",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "4975a78daee850adee62ba98719d0f223819a0ec135a07c0e302994bd8dbff61",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "4975a78daee850adee62ba98719d0f223819a0ec135a07c0e302994bd8dbff61"
+                        ]
+                      }
+                    },
+                    "pragma.js": {
+                      "size": 536,
+                      "offset": "7278070",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "8b1c54475bd4340b15e25c50d53d06308be65f8f919ecbe4aa9d285ca859ad5a",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "8b1c54475bd4340b15e25c50d53d06308be65f8f919ecbe4aa9d285ca859ad5a"
+                        ]
+                      }
+                    },
+                    "serialize.js": {
+                      "size": 625,
+                      "offset": "7278606",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "7a10ee5c2735384b7f0c361811bc6d017db29f62b203fd3c68a35f667e2c2605",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "7a10ee5c2735384b7f0c361811bc6d017db29f62b203fd3c68a35f667e2c2605"
+                        ]
+                      }
+                    },
+                    "table.js": {
+                      "size": 7144,
+                      "offset": "7279231",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "97c42d9ded1aa96c7d916b5b92f96b4e59581d50eaf629cd2c7afb78ff26a9ea",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "97c42d9ded1aa96c7d916b5b92f96b4e59581d50eaf629cd2c7afb78ff26a9ea"
+                        ]
+                      }
+                    },
+                    "transaction.js": {
+                      "size": 2792,
+                      "offset": "7286375",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "bc8624a3ef689d8f78e5669020ad121e17acbc93b1d5ee5afe26860b1084c66c",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "bc8624a3ef689d8f78e5669020ad121e17acbc93b1d5ee5afe26860b1084c66c"
+                        ]
+                      }
+                    },
+                    "wrappers.js": {
+                      "size": 1145,
+                      "offset": "7289167",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "a150a6271d23f4e5f8953b129f370ff096c7cdc4b812afbf080a6cf4ab741bcf",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "a150a6271d23f4e5f8953b129f370ff096c7cdc4b812afbf080a6cf4ab741bcf"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "sqlite-error.js": {
+                  "size": 717,
+                  "offset": "7290312",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "2582d61c27680dead168543f392eb102be621dfbef282a4ca4c7c21aa5e7c75d",
+                    "blockSize": 4194304,
+                    "blocks": ["2582d61c27680dead168543f392eb102be621dfbef282a4ca4c7c21aa5e7c75d"]
+                  }
+                },
+                "util.js": {
+                  "size": 331,
+                  "offset": "7291029",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "92b2e39e2151b43a2252e10b6d6de876ecaf0008336a4fa1dfe1317b20f1916f",
+                    "blockSize": 4194304,
+                    "blocks": ["92b2e39e2151b43a2252e10b6d6de876ecaf0008336a4fa1dfe1317b20f1916f"]
+                  }
+                }
+              }
+            },
+            "package.json": {
+              "size": 945,
+              "offset": "7291360",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "35f5841195912569932e7816ca09d03f6567a9c37a6668d4fdd450314d46e24b",
+                "blockSize": 4194304,
+                "blocks": ["35f5841195912569932e7816ca09d03f6567a9c37a6668d4fdd450314d46e24b"]
+              }
+            },
+            "build": {
+              "files": {
+                "Release": {
+                  "files": {
+                    "better_sqlite3.node": {
+                      "size": 1900544,
+                      "unpacked": true,
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "a3074069fe2f4edafc8c7e0ff17adfd3c1e297c1c54288bf4ffcf50f5adfef00",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "a3074069fe2f4edafc8c7e0ff17adfd3c1e297c1c54288bf4ffcf50f5adfef00"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "bindings": {
+          "files": {
+            "LICENSE.md": {
+              "size": 1108,
+              "offset": "7292305",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "85fde19744c84cfacb04aed732c0392ba221231b26090d3271d2ed865bfc0792",
+                "blockSize": 4194304,
+                "blocks": ["85fde19744c84cfacb04aed732c0392ba221231b26090d3271d2ed865bfc0792"]
+              }
+            },
+            "bindings.js": {
+              "size": 5986,
+              "offset": "7293413",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "8e32a0d37f20bd6f7d5bdbf99d041aa27be47cbbe5172ac13ebf7380a10b3bf6",
+                "blockSize": 4194304,
+                "blocks": ["8e32a0d37f20bd6f7d5bdbf99d041aa27be47cbbe5172ac13ebf7380a10b3bf6"]
+              }
+            },
+            "package.json": {
+              "size": 472,
+              "offset": "7299399",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "cee937d6f0ef6b0c6cd0200cf70e868c36583bd9759da6fe34b38c2045f77e39",
+                "blockSize": 4194304,
+                "blocks": ["cee937d6f0ef6b0c6cd0200cf70e868c36583bd9759da6fe34b38c2045f77e39"]
+              }
+            }
+          }
+        },
+        "file-uri-to-path": {
+          "files": {
+            "LICENSE": {
+              "size": 1083,
+              "offset": "7299871",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "75070206e4ee2a749be52444cecc05101ca8d314c9d6d335ff914046cbf086a0",
+                "blockSize": 4194304,
+                "blocks": ["75070206e4ee2a749be52444cecc05101ca8d314c9d6d335ff914046cbf086a0"]
+              }
+            },
+            "index.js": {
+              "size": 1723,
+              "offset": "7300954",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "e62293e871bdd5a7449ff3c7956c9536ec1d2ea7369461de77322b5256bb93e7",
+                "blockSize": 4194304,
+                "blocks": ["e62293e871bdd5a7449ff3c7956c9536ec1d2ea7369461de77322b5256bb93e7"]
+              }
+            },
+            "package.json": {
+              "size": 505,
+              "offset": "7302677",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "4f5e1422fe14c36ceed42f77b90cd53d2ef0506e866880f4704459a2b79a75fb",
+                "blockSize": 4194304,
+                "blocks": ["4f5e1422fe14c36ceed42f77b90cd53d2ef0506e866880f4704459a2b79a75fb"]
+              }
+            }
+          }
+        },
+        "onnxruntime-common": {
+          "files": {
+            "dist": {
+              "files": {
+                "cjs": {
+                  "files": {
+                    "backend-impl.js": {
+                      "size": 5608,
+                      "offset": "7303182",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "3d25321895995f7e9480570b9a88f121049adf152e1829d0ecb11218da02d487",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "3d25321895995f7e9480570b9a88f121049adf152e1829d0ecb11218da02d487"
+                        ]
+                      }
+                    },
+                    "backend.js": {
+                      "size": 433,
+                      "offset": "7308790",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "325aaee7a2649ea27629666f3ca01c0d80b9751e704ce502e43a8352390749b4",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "325aaee7a2649ea27629666f3ca01c0d80b9751e704ce502e43a8352390749b4"
+                        ]
+                      }
+                    },
+                    "env-impl.js": {
+                      "size": 969,
+                      "offset": "7309223",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "35cd8cac33973538eab471b68622c86c35a6896f4307d1a74c9ca0eda7abbac6",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "35cd8cac33973538eab471b68622c86c35a6896f4307d1a74c9ca0eda7abbac6"
+                        ]
+                      }
+                    },
+                    "env.js": {
+                      "size": 366,
+                      "offset": "7310192",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "22c7647f8ca1c1b83b437a92b95fee1457fcb72866fa029616b8f146dc609be8",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "22c7647f8ca1c1b83b437a92b95fee1457fcb72866fa029616b8f146dc609be8"
+                        ]
+                      }
+                    },
+                    "index.js": {
+                      "size": 1955,
+                      "offset": "7310558",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "d7dd6cc9790e87299099fcd1b0ccb4969c01591d7eec0383a1c64dbea133dd1a",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "d7dd6cc9790e87299099fcd1b0ccb4969c01591d7eec0383a1c64dbea133dd1a"
+                        ]
+                      }
+                    },
+                    "inference-session-impl.js": {
+                      "size": 8574,
+                      "offset": "7312513",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "c22095b969a6e4e7c3f0c4361b903f32d343ee6a91c92dd3ebdefe94dc0cf54f",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "c22095b969a6e4e7c3f0c4361b903f32d343ee6a91c92dd3ebdefe94dc0cf54f"
+                        ]
+                      }
+                    },
+                    "inference-session.js": {
+                      "size": 467,
+                      "offset": "7321087",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "458be26f316c5068d32a56ddbc30ca0aa687c636e079b3d161a69f0f14a683f1",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "458be26f316c5068d32a56ddbc30ca0aa687c636e079b3d161a69f0f14a683f1"
+                        ]
+                      }
+                    },
+                    "onnx-model.js": {
+                      "size": 211,
+                      "offset": "7321554",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "667f5fdac4b6df25e17f8a864d4dc619507f541f9fa0aafb6d3572fcca1e25e5",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "667f5fdac4b6df25e17f8a864d4dc619507f541f9fa0aafb6d3572fcca1e25e5"
+                        ]
+                      }
+                    },
+                    "onnx-value.js": {
+                      "size": 211,
+                      "offset": "7321765",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "8446854766f4955ce438a7338216f49223767ecc508bb502b73a3dc1a1f1998e",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "8446854766f4955ce438a7338216f49223767ecc508bb502b73a3dc1a1f1998e"
+                        ]
+                      }
+                    },
+                    "package.json": {
+                      "size": 20,
+                      "offset": "7321976",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "091a04fa67c7907b98e106fcff8b964e13129754fce72d24f3025b97c4887fa3",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "091a04fa67c7907b98e106fcff8b964e13129754fce72d24f3025b97c4887fa3"
+                        ]
+                      }
+                    },
+                    "tensor-conversion-impl.js": {
+                      "size": 8153,
+                      "offset": "7321996",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "c99276518d66de5826798a3c488166ed827fcd0db2372ca3ace06338cef27e5a",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "c99276518d66de5826798a3c488166ed827fcd0db2372ca3ace06338cef27e5a"
+                        ]
+                      }
+                    },
+                    "tensor-conversion.js": {
+                      "size": 218,
+                      "offset": "7330149",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "28cc462d4a9ea556ecc86c0e6d16a51d61b58d5bc5b4b7b48976b14bc8035bdc",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "28cc462d4a9ea556ecc86c0e6d16a51d61b58d5bc5b4b7b48976b14bc8035bdc"
+                        ]
+                      }
+                    },
+                    "tensor-factory-impl.js": {
+                      "size": 11656,
+                      "offset": "7330367",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "a3204838a2c14416e4e61c968dc17c663ab3c9b8b2c4a8b7f2a1c5b06e3e5173",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "a3204838a2c14416e4e61c968dc17c663ab3c9b8b2c4a8b7f2a1c5b06e3e5173"
+                        ]
+                      }
+                    },
+                    "tensor-factory.js": {
+                      "size": 215,
+                      "offset": "7342023",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "13b8d735350b828a49bda8aeec50b1dac888cf42268006efc4312f50a88b6906",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "13b8d735350b828a49bda8aeec50b1dac888cf42268006efc4312f50a88b6906"
+                        ]
+                      }
+                    },
+                    "tensor-impl-type-mapping.js": {
+                      "size": 2995,
+                      "offset": "7342238",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "333110edbbffdb7575ea340cb341bcaf691862d6594a649db28097f7d8cb19b7",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "333110edbbffdb7575ea340cb341bcaf691862d6594a649db28097f7d8cb19b7"
+                        ]
+                      }
+                    },
+                    "tensor-impl.js": {
+                      "size": 16458,
+                      "offset": "7345233",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "11645352ba5d08971344717d3339f86aac560f84f29229b2ebe07f1ec8aa8905",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "11645352ba5d08971344717d3339f86aac560f84f29229b2ebe07f1ec8aa8905"
+                        ]
+                      }
+                    },
+                    "tensor-utils-impl.js": {
+                      "size": 2213,
+                      "offset": "7361691",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "e7b1db989d33d54bdd1807b080a0989ff0b10d5f7dd8c93b92bbf293103aa4d5",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "e7b1db989d33d54bdd1807b080a0989ff0b10d5f7dd8c93b92bbf293103aa4d5"
+                        ]
+                      }
+                    },
+                    "tensor-utils.js": {
+                      "size": 213,
+                      "offset": "7363904",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "d3f577e90dc2257c72ac728e5e6355c34af0342d971158d9f22b69d22aa97b8d",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "d3f577e90dc2257c72ac728e5e6355c34af0342d971158d9f22b69d22aa97b8d"
+                        ]
+                      }
+                    },
+                    "tensor.js": {
+                      "size": 393,
+                      "offset": "7364117",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "9097114de356750f36f28776fa6ccd08d13694f0f9aac9e7669c30b6c43153f7",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "9097114de356750f36f28776fa6ccd08d13694f0f9aac9e7669c30b6c43153f7"
+                        ]
+                      }
+                    },
+                    "trace.js": {
+                      "size": 1783,
+                      "offset": "7364510",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "f7b21eb2aa4c44bf85274c58b803ae49689a929911e103297fb26220e39e11e6",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "f7b21eb2aa4c44bf85274c58b803ae49689a929911e103297fb26220e39e11e6"
+                        ]
+                      }
+                    },
+                    "type-helper.js": {
+                      "size": 212,
+                      "offset": "7366293",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "7f786da8d2a611ad751c70a74edf4d9acfccd26be8e5c6b1cb730f982892bf32",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "7f786da8d2a611ad751c70a74edf4d9acfccd26be8e5c6b1cb730f982892bf32"
+                        ]
+                      }
+                    },
+                    "version.js": {
+                      "size": 361,
+                      "offset": "7366505",
+                      "integrity": {
+                        "algorithm": "SHA256",
+                        "hash": "e6d53dc54d8afbb5330bac1dfd244ca3ee41538cb9f878b8599a9063f194a2d6",
+                        "blockSize": 4194304,
+                        "blocks": [
+                          "e6d53dc54d8afbb5330bac1dfd244ca3ee41538cb9f878b8599a9063f194a2d6"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "package.json": {
+              "size": 453,
+              "offset": "7366866",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "26662a1122783057199d4ad85ab59f6ea9cdfacb54ea29168e5f8c070c4d258f",
+                "blockSize": 4194304,
+                "blocks": ["26662a1122783057199d4ad85ab59f6ea9cdfacb54ea29168e5f8c070c4d258f"]
+              }
+            }
+          }
+        },
+        "onnxruntime-node": {
+          "files": {
+            "dist": {
+              "files": {
+                "backend.js": {
+                  "size": 4013,
+                  "offset": "7367319",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "35e464b195c0e9d32c6c789664f83e6104b2eacb19cbe342c7fa7da0b163db41",
+                    "blockSize": 4194304,
+                    "blocks": ["35e464b195c0e9d32c6c789664f83e6104b2eacb19cbe342c7fa7da0b163db41"]
+                  }
+                },
+                "binding.js": {
+                  "size": 1507,
+                  "offset": "7371332",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "266a182fa5802f8f76c93979663eb572e0164577f4f59bd70bbb92c4accb83aa",
+                    "blockSize": 4194304,
+                    "blocks": ["266a182fa5802f8f76c93979663eb572e0164577f4f59bd70bbb92c4accb83aa"]
+                  }
+                },
+                "index.js": {
+                  "size": 1602,
+                  "offset": "7372839",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "019eb02133b94b1f7fdf2d89eb93b590ce1288d271f7b280647fb3978e6391fa",
+                    "blockSize": 4194304,
+                    "blocks": ["019eb02133b94b1f7fdf2d89eb93b590ce1288d271f7b280647fb3978e6391fa"]
+                  }
+                },
+                "version.js": {
+                  "size": 361,
+                  "offset": "7374441",
+                  "integrity": {
+                    "algorithm": "SHA256",
+                    "hash": "e6d53dc54d8afbb5330bac1dfd244ca3ee41538cb9f878b8599a9063f194a2d6",
+                    "blockSize": 4194304,
+                    "blocks": ["e6d53dc54d8afbb5330bac1dfd244ca3ee41538cb9f878b8599a9063f194a2d6"]
+                  }
+                }
+              }
+            },
+            "package.json": {
+              "size": 839,
+              "offset": "7374802",
+              "integrity": {
+                "algorithm": "SHA256",
+                "hash": "43d124c649514cab27f91fc3227c361dab2809d415eab8f371f958167bacdddc",
+                "blockSize": 4194304,
+                "blocks": ["43d124c649514cab27f91fc3227c361dab2809d415eab8f371f958167bacdddc"]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

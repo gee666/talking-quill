@@ -72,10 +72,17 @@ afterSign: after-sign.cjs
 artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}
 win:
   icon: icon.png
+  # electron-builder copies only FileSet filters into its dependency matcher.
   files:
-    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*
+    - from: .
+      filter:
+        - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/DirectML.dll
+        - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/onnxruntime.dll
+        - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/onnxruntime_binding.node
   asarUnpack:
-    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*
+    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/DirectML.dll
+    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/onnxruntime.dll
+    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/onnxruntime_binding.node
   requestedExecutionLevel: asInvoker
   signExts:
     - .exe
@@ -98,9 +105,13 @@ nsis:
 mac:
   icon: icon.png
   files:
-    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*
+    - from: .
+      filter:
+        - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/libonnxruntime.1.21.0.dylib
+        - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/onnxruntime_binding.node
   asarUnpack:
-    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*
+    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/libonnxruntime.1.21.0.dylib
+    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/onnxruntime_binding.node
   sign: ../build/mac-sign.cjs
   hardenedRuntime: true
   gatekeeperAssess: false

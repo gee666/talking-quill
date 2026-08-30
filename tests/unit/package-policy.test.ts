@@ -56,6 +56,23 @@ function isTargetOnnxNativePath(
   return path.includes(`/napi-v3/${nativePlatform}/${architecture}/`);
 }
 
+const require = createRequire(import.meta.url);
+const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
+const { getNodeModuleFileMatcher } = electronBuilderRequire(
+  'app-builder-lib/out/fileMatcher.js',
+) as {
+  getNodeModuleFileMatcher(
+    appDir: string,
+    destination: string,
+    macroExpander: (pattern: string) => string,
+    platformConfig: MutableMatcherOwner,
+    packager: {
+      config: MutableMatcherOwner;
+      debugLogger: { isEnabled: boolean; add(): void };
+    },
+  ): { patterns: string[] };
+};
+
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
 const mergedMasterRendererAssets = [
@@ -261,10 +278,19 @@ describe('packaged runtime allowlist', () => {
     expect(() =>
       validateAsarEntries([...entries, samePlatformOtherArchitecture], { platform, architecture }),
     ).toThrow(`Unexpected ASAR entries: ${samePlatformOtherArchitecture}`);
+    const nativeRoot = `node_modules/onnxruntime-node/bin/napi-v3/${platform === 'mac' ? 'darwin' : 'win32'}`;
+    expect(() =>
+      validateAsarEntries(
+        entries.filter(
+          (entry) => entry !== nativeRoot && entry !== `${nativeRoot}/${architecture}`,
+        ),
+        { platform, architecture },
+      ),
+    ).not.toThrow();
     const nativeLibrary =
       platform === 'mac'
-        ? `node_modules/onnxruntime-node/bin/napi-v3/darwin/${architecture}/libonnxruntime.1.21.0.dylib`
-        : `node_modules/onnxruntime-node/bin/napi-v3/win32/${architecture}/onnxruntime.dll`;
+        ? `${nativeRoot}/${architecture}/libonnxruntime.1.21.0.dylib`
+        : `${nativeRoot}/${architecture}/onnxruntime.dll`;
     expect(() =>
       validateAsarEntries(
         entries.filter((entry) => entry !== nativeLibrary),
@@ -420,6 +446,35 @@ describe('packaged runtime allowlist', () => {
       expect(() =>
         validateElectronBuilderOnnxConfig(config, { platform, architecture }),
       ).not.toThrow();
+
+      const matcher = getNodeModuleFileMatcher(
+        resolve('app'),
+        resolve('release', 'fixture'),
+        (pattern) => pattern.replaceAll('${arch}', architecture),
+        config[platform] as MutableMatcherOwner,
+        {
+          config,
+          debugLogger: { isEnabled: false, add() {} },
+        },
+      );
+      const nativePatterns = matcher.patterns.filter((pattern) =>
+        pattern.includes('onnxruntime-node/bin/napi-v3'),
+      );
+      const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
+      const architectureRoot = `node_modules/onnxruntime-node/bin/napi-v3/${nativePlatform}/${architecture}`;
+      expect(nativePatterns).toEqual([
+        '!node_modules/onnxruntime-node/bin/napi-v3/**/*',
+        ...(platform === 'mac'
+          ? [
+              `${architectureRoot}/libonnxruntime.1.21.0.dylib`,
+              `${architectureRoot}/onnxruntime_binding.node`,
+            ]
+          : [
+              `${architectureRoot}/DirectML.dll`,
+              `${architectureRoot}/onnxruntime.dll`,
+              `${architectureRoot}/onnxruntime_binding.node`,
+            ]),
+      ]);
     },
   );
 

@@ -132,7 +132,11 @@ export const ONNX_RUNTIME_PATHS = Object.freeze([
   'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
   'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
 ]);
-function requiredOnnxRuntimePaths(target) {
+const ONNX_NATIVE_ROOT = 'node_modules/onnxruntime-node/bin/napi-v3/';
+const ONNX_NATIVE_LEAF_PATTERN =
+  /^node_modules\/onnxruntime-node\/bin\/napi-v3\/(?:darwin|linux|win32)\/(?:arm64|x64)\/.+/u;
+
+function targetOnnxRuntimePaths(target) {
   if (target === undefined) return ONNX_RUNTIME_PATHS;
   if (
     !['win', 'mac'].includes(target.platform) ||
@@ -141,30 +145,37 @@ function requiredOnnxRuntimePaths(target) {
     throw new Error('ONNX runtime target must specify win|mac and x64|arm64');
   }
   const platform = target.platform === 'mac' ? 'darwin' : 'win32';
-  const binaryRoot = 'node_modules/onnxruntime-node/bin/napi-v3/';
-  const platformRoot = `${binaryRoot}${platform}`;
+  const platformRoot = `${ONNX_NATIVE_ROOT}${platform}`;
   const architectureRoot = `${platformRoot}/${target.architecture}`;
   return ONNX_RUNTIME_PATHS.filter(
     (entry) =>
-      !entry.startsWith(binaryRoot) ||
+      !entry.startsWith(ONNX_NATIVE_ROOT) ||
       entry === platformRoot ||
       entry === architectureRoot ||
       entry.startsWith(`${architectureRoot}/`),
   );
 }
 
-const ONNX_NATIVE_ROOT = 'node_modules/onnxruntime-node/bin/napi-v3/';
+function requiredOnnxRuntimePaths(target) {
+  return targetOnnxRuntimePaths(target).filter(
+    (entry) => !entry.startsWith(ONNX_NATIVE_ROOT) || ONNX_NATIVE_LEAF_PATTERN.test(entry),
+  );
+}
+
 export const ONNX_BUILDER_NATIVE_INVENTORY = Object.freeze(
-  ONNX_RUNTIME_PATHS.filter((entry) =>
-    /^node_modules\/onnxruntime-node\/bin\/napi-v3\/(?:darwin|linux|win32)\/(?:arm64|x64)\/.+/u.test(
-      entry,
-    ),
-  ),
+  ONNX_RUNTIME_PATHS.filter((entry) => ONNX_NATIVE_LEAF_PATTERN.test(entry)),
 );
 const ONNX_BUILDER_ROOT_EXCLUSION = `!${ONNX_NATIVE_ROOT}**/*`;
-const ONNX_BUILDER_TARGET_PATTERN = Object.freeze({
-  win: 'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*',
-  mac: 'node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*',
+const ONNX_BUILDER_TARGET_PATTERNS = Object.freeze({
+  win: Object.freeze([
+    `${ONNX_NATIVE_ROOT}win32/\${arch}/DirectML.dll`,
+    `${ONNX_NATIVE_ROOT}win32/\${arch}/onnxruntime.dll`,
+    `${ONNX_NATIVE_ROOT}win32/\${arch}/onnxruntime_binding.node`,
+  ]),
+  mac: Object.freeze([
+    `${ONNX_NATIVE_ROOT}darwin/\${arch}/libonnxruntime.1.21.0.dylib`,
+    `${ONNX_NATIVE_ROOT}darwin/\${arch}/onnxruntime_binding.node`,
+  ]),
 });
 
 export function validateElectronBuilderOnnxConfig(config, target) {
@@ -184,24 +195,53 @@ export function validateElectronBuilderOnnxConfig(config, target) {
 
   assertOnlyOnnxBuilderPatterns(config.files, 'files', [ONNX_BUILDER_ROOT_EXCLUSION], true);
   assertOnlyOnnxBuilderPatterns(config.asarUnpack, 'asarUnpack', [], false);
-  const targetPattern = ONNX_BUILDER_TARGET_PATTERN[target.platform];
+  const targetPatterns = ONNX_BUILDER_TARGET_PATTERNS[target.platform];
   assertOnlyOnnxBuilderPatterns(
     platformConfig.files,
     `${target.platform}.files`,
-    [targetPattern],
-    false,
+    targetPatterns,
+    true,
   );
+  assertExactOnnxBuilderFileSet(platformConfig.files, `${target.platform}.files`, targetPatterns);
   assertOnlyOnnxBuilderPatterns(
     platformConfig.asarUnpack,
     `${target.platform}.asarUnpack`,
-    [targetPattern],
+    targetPatterns,
     false,
   );
 
-  const expanded = targetPattern.replace('${arch}', target.architecture);
   const expectedPlatform = target.platform === 'mac' ? 'darwin' : 'win32';
-  if (!expanded.includes(`/napi-v3/${expectedPlatform}/${target.architecture}/`)) {
+  if (
+    targetPatterns.some(
+      (pattern) =>
+        !pattern
+          .replace('${arch}', target.architecture)
+          .includes(`/napi-v3/${expectedPlatform}/${target.architecture}/`),
+    )
+  ) {
     throw new Error('electron-builder ONNX target pattern does not resolve to the target tuple');
+  }
+}
+
+function assertExactOnnxBuilderFileSet(value, field, expected) {
+  const candidates = Array.isArray(value) ? value : [value];
+  const fileSets = candidates.filter(
+    (candidate) =>
+      candidate !== null &&
+      typeof candidate === 'object' &&
+      (candidate.from === undefined || candidate.from === '.') &&
+      candidate.to === undefined &&
+      Array.isArray(candidate.filter) &&
+      candidate.filter.some(
+        (pattern) => typeof pattern === 'string' && isOnnxBuilderPattern(pattern),
+      ),
+  );
+  if (
+    fileSets.length !== 1 ||
+    fileSets[0].filter.length !== expected.length ||
+    fileSets[0].filter.some((pattern, index) => pattern !== expected[index])
+  ) {
+    throw new Error(`Unexpected electron-builder ONNX FileSet in ${field}`);
   }
 }
 
@@ -249,7 +289,7 @@ function collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet) {
       hasOnnxNativeReference(filter)
     );
   });
-  if (fileSetMentionsOnnx && (!allowDefaultFileSet || from !== '' || to !== '')) {
+  if (fileSetMentionsOnnx && (!allowDefaultFileSet || !['', '.'].includes(from) || to !== '')) {
     throw new Error(`Unexpected electron-builder ONNX FileSet in ${field}`);
   }
   collectOnnxBuilderPatterns(value.filter, field, found, allowDefaultFileSet);
@@ -457,7 +497,7 @@ const PLATFORM_RESOURCE_PATHS = Object.freeze({
 
 export function validateAsarEntries(entries, target) {
   const normalized = entries.map(normalizePackagePath);
-  const allowedOnnxRuntimePaths = new Set(requiredOnnxRuntimePaths(target));
+  const allowedOnnxRuntimePaths = new Set(targetOnnxRuntimePaths(target));
   const unexpected = normalized.filter(
     (entry) =>
       entry.length > 0 &&
