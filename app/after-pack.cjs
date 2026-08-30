@@ -1,4 +1,4 @@
-const { existsSync, readdirSync, rmSync } = require('node:fs');
+const { existsSync, readdirSync } = require('node:fs');
 const { chmod, lstat, readFile, writeFile } = require('node:fs/promises');
 const { createHash, createPrivateKey, sign } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
@@ -38,8 +38,6 @@ module.exports = async function hardenElectron(context) {
           `${product}${context.electronPlatformName === 'win32' ? '.exe' : ''}`,
         );
 
-  pruneOnnxRuntime(context);
-
   await flipFuses(executable, {
     version: FuseVersion.V1,
     [FuseV1Options.RunAsNode]: false,
@@ -54,6 +52,7 @@ module.exports = async function hardenElectron(context) {
     await scanCanonicalRuntime(context, executable);
   }
   await writeWindowsAcceptanceManifest(context, executable);
+  await verifyPackagedStructure(context);
 };
 
 async function scanCanonicalRuntime(context, executable, additionalPaths = []) {
@@ -179,40 +178,9 @@ function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function pruneOnnxRuntime(context) {
-  const archNames = new Map([
-    [1, 'x64'],
-    [3, 'arm64'],
-  ]);
-  const expectedArch = archNames.get(context.arch);
-  const expectedPlatform = context.electronPlatformName;
-  if (expectedArch === undefined || !['win32', 'darwin'].includes(expectedPlatform)) {
-    throw new Error(`Unsupported ONNX package target: ${expectedPlatform}/${String(context.arch)}`);
-  }
-  const root = join(
-    context.appOutDir,
-    context.electronPlatformName === 'darwin'
-      ? `${context.packager.appInfo.productFilename}.app/Contents/Resources`
-      : 'resources',
-    'app.asar.unpacked',
-    'node_modules',
-    'onnxruntime-node',
-    'bin',
-    'napi-v3',
-  );
-  if (!existsSync(root)) throw new Error(`Packaged ONNX runtime is missing: ${root}`);
-  for (const platform of readdirSync(root, { withFileTypes: true })) {
-    const platformPath = join(root, platform.name);
-    if (!platform.isDirectory() || platform.name !== expectedPlatform) {
-      rmSync(platformPath, { recursive: true, force: true });
-      continue;
-    }
-    for (const arch of readdirSync(platformPath, { withFileTypes: true })) {
-      if (!arch.isDirectory() || arch.name !== expectedArch) {
-        rmSync(join(platformPath, arch.name), { recursive: true, force: true });
-      }
-    }
-  }
+async function verifyPackagedStructure(context) {
+  const { verifyPackagedAsarStructure } = await import('../scripts/packaged-asar-structure.mjs');
+  await verifyPackagedAsarStructure(context);
 }
 
 async function verifyArchitecture(executable, platform, arch) {

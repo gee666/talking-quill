@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { lstat, mkdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import { resolve } from 'node:path';
@@ -103,55 +103,58 @@ describe('ASAR regular-file inspection', () => {
   describe.each([
     ['directory package', 'directory', 'ASAR'],
     ['final artifact', 'final', 'Extracted final artifact ASAR'],
-  ])('%s pruned metadata', (_kind, fixture, label) => {
-    const windowsX64 = { targetPlatform: 'win', targetArchitecture: 'x64' } as const;
-
-    it('allows an absent allowlisted Darwin ONNX binary in a Windows package', async () => {
-      const root = await fixtureRoot(`asar-${fixture}-darwin`);
-      const archive = resolve(root, 'missing-darwin.asar');
-      const entry = 'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/onnxruntime_binding.node';
-      await writeAsar(archive, { size: 0, unpacked: true }, Buffer.alloc(0), entry);
-
-      expect([
-        ...extractRegularAsarFiles(archive, normalizedEntries(archive), label, windowsX64),
-      ]).toEqual([]);
-    });
-
-    it('rejects an absent Windows ONNX binary in a Windows package', async () => {
-      const root = await fixtureRoot(`asar-${fixture}-windows`);
-      const archive = resolve(root, 'missing-windows.asar');
-      const entry = 'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node';
-      await writeAsar(archive, { size: 0, unpacked: true }, Buffer.alloc(0), entry);
-
-      expect(() => [
-        ...extractRegularAsarFiles(archive, normalizedEntries(archive), label, windowsX64),
-      ]).toThrow(`${label} unpacked regular file is missing: ${entry}`);
-    });
-
-    it('rejects an absent app-owned unpacked runtime file', async () => {
-      const root = await fixtureRoot(`asar-${fixture}-app`);
-      const archive = resolve(root, 'missing-app.asar');
-      const entry = 'out/workers/app-runtime.node';
+  ])('%s strict unpacked matching', (_kind, fixture, label) => {
+    it.each([
+      [
+        'foreign ONNX',
+        'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/onnxruntime_binding.node',
+      ],
+      [
+        'current ONNX',
+        'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
+      ],
+      ['app-owned', 'out/workers/app-runtime.node'],
+    ])('rejects stale missing %s metadata', async (_entryKind, entry) => {
+      const root = await fixtureRoot(
+        `asar-${fixture}-${_entryKind.toLowerCase().replaceAll(' ', '-')}`,
+      );
+      const archive = resolve(root, 'missing-unpacked.asar');
       await writeAsar(archive, { size: 0, unpacked: true }, Buffer.alloc(0), entry);
 
       expect(() => [
-        ...extractRegularAsarFiles(archive, normalizedEntries(archive), label, windowsX64),
+        ...extractRegularAsarFiles(archive, normalizedEntries(archive), label),
       ]).toThrow(`${label} unpacked regular file is missing: ${entry}`);
     });
   });
 
-  it('rejects an unrecognized foreign-platform ONNX omission', async () => {
-    const root = await fixtureRoot('asar-unrecognized-foreign');
-    const archive = resolve(root, 'missing-foreign.asar');
-    const entry = 'node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/unexpected.node';
-    await writeAsar(archive, { size: 0, unpacked: true }, Buffer.alloc(0), entry);
+  it('rejects a linked app.asar.unpacked root', async () => {
+    const root = await fixtureRoot('asar-linked-root');
+    const archive = resolve(root, 'linked-root.asar');
+    const physical = resolve(root, 'physical');
+    await writeAsar(archive, { size: 0, unpacked: true }, Buffer.alloc(0));
+    await mkdir(physical);
+    await writeFile(resolve(physical, 'broken.bin'), Buffer.alloc(0));
+    await symlink(
+      physical,
+      `${archive}.unpacked`,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
-    expect(() => [
-      ...extractRegularAsarFiles(archive, normalizedEntries(archive), 'ASAR', {
-        targetPlatform: 'win',
-        targetArchitecture: 'x64',
-      }),
-    ]).toThrow(`ASAR unpacked regular file is missing: ${entry}`);
+    expect(() => [...extractRegularAsarFiles(archive, normalizedEntries(archive))]).toThrow(
+      'ASAR unpacked root is not a physical directory',
+    );
+  });
+
+  it('rejects a physical unpacked file without matching ASAR metadata', async () => {
+    const root = await fixtureRoot('asar-extra-physical');
+    const archive = resolve(root, 'extra-physical.asar');
+    await writeAsar(archive, { offset: '0', size: 0 }, Buffer.alloc(0));
+    await mkdir(resolve(`${archive}.unpacked`, 'out'), { recursive: true });
+    await writeFile(resolve(`${archive}.unpacked`, 'out', 'extra.node'), Buffer.alloc(0));
+
+    expect(() => [...extractRegularAsarFiles(archive, normalizedEntries(archive))]).toThrow(
+      'ASAR contains an unexpected unpacked physical file: out/extra.node',
+    );
   });
 
   it('rejects malformed non-boolean unpacked metadata', async () => {

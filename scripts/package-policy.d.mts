@@ -41,6 +41,7 @@ export function validateFinalArtifactInspection(
 ): void;
 export function validatePhysicalEntries(entries: readonly string[]): void;
 export interface PackageEntryOptions {
+  readonly architecture?: 'x64' | 'arm64';
   readonly macosOwner?: boolean;
   readonly windowsInstalledAcceptance?: boolean;
 }

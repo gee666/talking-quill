@@ -128,9 +128,9 @@ const commonResources = [
   'helper',
 ];
 
-const validResources = (target: 'win' | 'mac') => {
+const validResources = (target: 'win' | 'mac', architecture: 'x64' | 'arm64' = 'x64') => {
   const platform = target === 'mac' ? 'darwin' : 'win32';
-  const architectureRoot = `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${platform}/x64`;
+  const architectureRoot = `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${architecture}`;
   return [
     ...commonResources,
     `app.asar.unpacked/node_modules/onnxruntime-node/bin/napi-v3/${platform}`,
@@ -186,6 +186,24 @@ describe('packaged runtime allowlist', () => {
   ] as const)('requires only the selected %s/%s ONNX native payload', (platform, architecture) => {
     const entries = asarForTarget(platform, architecture);
     expect(() => validateAsarEntries(entries, { platform, architecture })).not.toThrow();
+    expect(() =>
+      validateResourceEntries(validResources(platform, architecture), platform, { architecture }),
+    ).not.toThrow();
+    const otherArchitecture = architecture === 'x64' ? 'arm64' : 'x64';
+    expect(() =>
+      validateResourceEntries(validResources(platform, otherArchitecture), platform, {
+        architecture,
+      }),
+    ).toThrow('Unexpected packaged resources');
+    const foreignPlatform = platform === 'win' ? 'darwin' : 'win32';
+    const foreignEntry = `node_modules/onnxruntime-node/bin/napi-v3/${foreignPlatform}/${architecture}`;
+    expect(() =>
+      validateAsarEntries([...entries, foreignEntry], { platform, architecture }),
+    ).toThrow(`Unexpected ASAR entries: ${foreignEntry}`);
+    const samePlatformOtherArchitecture = `node_modules/onnxruntime-node/bin/napi-v3/${platform === 'mac' ? 'darwin' : 'win32'}/${otherArchitecture}`;
+    expect(() =>
+      validateAsarEntries([...entries, samePlatformOtherArchitecture], { platform, architecture }),
+    ).toThrow(`Unexpected ASAR entries: ${samePlatformOtherArchitecture}`);
     const nativeLibrary =
       platform === 'mac'
         ? `node_modules/onnxruntime-node/bin/napi-v3/darwin/${architecture}/libonnxruntime.1.21.0.dylib`

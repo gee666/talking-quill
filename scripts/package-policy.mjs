@@ -126,8 +126,6 @@ export const ONNX_RUNTIME_PATHS = Object.freeze([
   'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
   'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node',
 ]);
-const ONNX_RUNTIME_EXACT_PATHS = new Set(ONNX_RUNTIME_PATHS);
-
 function requiredOnnxRuntimePaths(target) {
   if (target === undefined) return ONNX_RUNTIME_PATHS;
   if (
@@ -315,13 +313,14 @@ const PLATFORM_RESOURCE_PATHS = Object.freeze({
 
 export function validateAsarEntries(entries, target) {
   const normalized = entries.map(normalizePackagePath);
+  const allowedOnnxRuntimePaths = new Set(requiredOnnxRuntimePaths(target));
   const unexpected = normalized.filter(
     (entry) =>
       entry.length > 0 &&
       !ASAR_EXACT_FILES.has(entry) &&
       !OUT_EXACT_PATHS.has(entry) &&
       !isAllowedRendererAsset(entry) &&
-      !ONNX_RUNTIME_EXACT_PATHS.has(entry),
+      !allowedOnnxRuntimePaths.has(entry),
   );
   assertSafePaths(normalized);
   if (unexpected.length > 0) {
@@ -552,12 +551,30 @@ export function validateResourceEntries(entries, target, options = {}) {
     throw new Error(`Unknown packaged resource target: ${String(target)}`);
   }
   const normalized = entries.map(normalizePackagePath);
+  const targetArchitecture = options.architecture;
+  if (targetArchitecture !== undefined && !['x64', 'arm64'].includes(targetArchitecture)) {
+    throw new Error(`Unknown packaged resource architecture: ${String(targetArchitecture)}`);
+  }
+  const targetOnnxResources =
+    targetArchitecture === undefined
+      ? ONNX_RESOURCE_PATHS[target]
+      : ONNX_RESOURCE_PATHS[target].filter(
+          (entry) =>
+            !entry.startsWith(
+              `${ONNX_RESOURCE_PREFIX}/${target === 'mac' ? 'darwin' : 'win32'}/`,
+            ) ||
+            entry ===
+              `${ONNX_RESOURCE_PREFIX}/${target === 'mac' ? 'darwin' : 'win32'}/${targetArchitecture}` ||
+            entry.startsWith(
+              `${ONNX_RESOURCE_PREFIX}/${target === 'mac' ? 'darwin' : 'win32'}/${targetArchitecture}/`,
+            ),
+        );
   const allowed = new Set([
     ...COMMON_RESOURCE_PATHS,
     ...(options.macosOwner === true ? MAC_OWNER_RESOURCE_PATHS : []),
     ...(options.windowsInstalledAcceptance === true ? ['windows-installed-acceptance-v1.txt'] : []),
     ...PLATFORM_RESOURCE_PATHS[target],
-    ...ONNX_RESOURCE_PATHS[target],
+    ...targetOnnxResources,
   ]);
   assertSafePaths(normalized);
   const unexpected = normalized.filter(
@@ -594,6 +611,11 @@ export function validateResourceEntries(entries, target, options = {}) {
   if (architectures.length !== 1) {
     throw new Error(
       `Required ONNX resource architecture count is not one: ${architectures.length}`,
+    );
+  }
+  if (targetArchitecture !== undefined && architectures[0] !== targetArchitecture) {
+    throw new Error(
+      `Required ONNX resource architecture is ${architectures[0]}, expected ${targetArchitecture}`,
     );
   }
   const architectureRoot = `${platformRoot}/${architectures[0]}`;

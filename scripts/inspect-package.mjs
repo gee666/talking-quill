@@ -137,6 +137,7 @@ for (const nativeEntry of nativeEntries) {
 }
 const resourceEntries = await walkResources(resources);
 validateResourceEntries(resourceEntries, isMacBundle ? 'mac' : 'win', {
+  architecture: boundArch,
   macosOwner: macosOwnerPackage,
   windowsInstalledAcceptance,
 });
@@ -593,6 +594,7 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
   }
   const extractedResourceEntries = await walkResources(extractedResources);
   validateResourceEntries(extractedResourceEntries, mac ? 'mac' : 'win', {
+    architecture: expectedArch,
     macosOwner: macosOwnerPackage,
     windowsInstalledAcceptance,
   });
@@ -607,10 +609,7 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
 }
 
 function inspectAsarContent(archivePath, entries, packageLabel, policyLabel = 'ASAR') {
-  for (const { entry, bytes } of extractRegularAsarFiles(archivePath, entries, policyLabel, {
-    targetPlatform: boundPlatform,
-    targetArchitecture: boundArch,
-  })) {
+  for (const { entry, bytes } of extractRegularAsarFiles(archivePath, entries, policyLabel)) {
     if (canonicalPackage) {
       assertNoForbiddenProductionMarkers(`${packageLabel}/${entry}`, bytes);
     }

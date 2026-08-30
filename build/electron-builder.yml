@@ -68,6 +68,7 @@ extraResources:
       - talking-quill-keyboard-owner.exe
 npmRebuild: true
 buildDependenciesFromSource: false
+beforePack: before-pack.cjs
 afterPack: after-pack.cjs
 afterSign: after-sign.cjs
 artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}
