@@ -127,8 +127,11 @@ impl TransactionObservability {
                 .unwrap_or(MAX_OBSERVABILITY_COUNTER)
                 .min(MAX_OBSERVABILITY_COUNTER);
             add_atomic(&self.modifier_wait_duration_ms_total, elapsed);
+            // Publish the total before the maximum. AcqRel also carries the
+            // total associated with an earlier, larger maximum through later
+            // fetch_max calls from other native writers.
             self.modifier_wait_duration_ms_max
-                .fetch_max(elapsed, Ordering::Relaxed);
+                .fetch_max(elapsed, Ordering::AcqRel);
         });
     }
 
@@ -211,6 +214,8 @@ impl TransactionObservability {
                 continue;
             }
             let reason = |reason: CancelReason| load(&self.cancellation_reasons[reason.index()]);
+            let (modifier_wait_duration_ms_total, modifier_wait_duration_ms_max) =
+                self.load_modifier_wait_durations_after_max(|| {});
             let snapshot = TransactionObservabilitySnapshot {
                 transactions: TransactionCounters {
                     started: load(&self.started),
@@ -265,8 +270,8 @@ impl TransactionObservability {
                 },
                 native_paste: NativePasteCounters {
                     target_validation_fallbacks: load(&self.target_validation_fallbacks),
-                    modifier_wait_duration_ms_total: load(&self.modifier_wait_duration_ms_total),
-                    modifier_wait_duration_ms_max: load(&self.modifier_wait_duration_ms_max),
+                    modifier_wait_duration_ms_total,
+                    modifier_wait_duration_ms_max,
                     modifier_timeouts: load(&self.modifier_timeouts),
                     shutdown_ownership_deadlines: load(&self.shutdown_ownership_deadlines),
                 },
@@ -275,6 +280,20 @@ impl TransactionObservability {
                 return snapshot;
             }
         }
+    }
+
+    fn load_modifier_wait_durations_after_max(&self, after_max: impl FnOnce()) -> (u64, u64) {
+        // The maximum is the publication edge for this related pair. Reading
+        // it first means a concurrent writer can only make the following total
+        // newer. Acquire pairs with record_modifier_wait's AcqRel fetch_max,
+        // so a maximum already observed always carries its contributing total.
+        let maximum = self
+            .modifier_wait_duration_ms_max
+            .load(Ordering::Acquire)
+            .min(MAX_OBSERVABILITY_COUNTER);
+        after_max();
+        let total = load(&self.modifier_wait_duration_ms_total);
+        (total, maximum)
     }
 }
 
@@ -548,22 +567,106 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_native_wait_reads_preserve_total_maximum_invariants() {
+    fn native_wait_snapshot_derives_pair_across_a_forced_concurrent_update() {
         let observability = Arc::new(TransactionObservability::new());
+        observability.record_modifier_wait(Duration::from_millis(10));
         let writer = Arc::clone(&observability);
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let finished = Arc::new(std::sync::Barrier::new(2));
+        let writer_start = Arc::clone(&start);
+        let writer_finished = Arc::clone(&finished);
         let thread = std::thread::spawn(move || {
-            for duration in 1..=10_000 {
-                writer.record_modifier_wait(Duration::from_millis(duration));
-            }
+            writer_start.wait();
+            writer.record_modifier_wait(Duration::from_millis(100));
+            writer_finished.wait();
         });
 
-        while !thread.is_finished() {
+        let (total, maximum) = observability.load_modifier_wait_durations_after_max(|| {
+            start.wait();
+            finished.wait();
+        });
+        thread.join().unwrap();
+
+        assert_eq!(maximum, 10);
+        assert_eq!(total, 110);
+        assert!(maximum <= total);
+        let current = observability.snapshot().native_paste;
+        assert_eq!(current.modifier_wait_duration_ms_max, 100);
+        assert_eq!(current.modifier_wait_duration_ms_total, 110);
+    }
+
+    #[test]
+    fn concurrent_native_wait_reads_preserve_total_maximum_invariants() {
+        const WRITERS: u64 = 4;
+        const WAITS_PER_WRITER: u64 = 2_500;
+
+        let observability = Arc::new(TransactionObservability::new());
+        let start = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
+        let finish = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
+        let completed = Arc::new(AtomicU64::new(0));
+        let threads = (0..WRITERS)
+            .map(|writer_index| {
+                let writer = Arc::clone(&observability);
+                let start = Arc::clone(&start);
+                let finish = Arc::clone(&finish);
+                let completed = Arc::clone(&completed);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for duration in 1..=WAITS_PER_WRITER {
+                        writer.record_modifier_wait(Duration::from_millis(duration + writer_index));
+                    }
+                    completed.fetch_add(1, Ordering::Release);
+                    finish.wait();
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+
+        while completed.load(Ordering::Acquire) != WRITERS {
             let snapshot = observability.snapshot().native_paste;
             assert!(
-                snapshot.modifier_wait_duration_ms_max <= snapshot.modifier_wait_duration_ms_total
+                snapshot.modifier_wait_duration_ms_max <= snapshot.modifier_wait_duration_ms_total,
+                "maximum {} exceeded total {}",
+                snapshot.modifier_wait_duration_ms_max,
+                snapshot.modifier_wait_duration_ms_total
             );
         }
-        thread.join().unwrap();
+        finish.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let snapshot = observability.snapshot().native_paste;
+
+        let expected_total = WRITERS * WAITS_PER_WRITER * (WAITS_PER_WRITER + 1) / 2
+            + WAITS_PER_WRITER * WRITERS * (WRITERS - 1) / 2;
+        assert_eq!(snapshot.modifier_wait_duration_ms_total, expected_total);
+        assert_eq!(
+            snapshot.modifier_wait_duration_ms_max,
+            WAITS_PER_WRITER + WRITERS - 1
+        );
+    }
+
+    #[test]
+    fn native_wait_total_and_maximum_saturate_without_breaking_invariant() {
+        let observability = TransactionObservability::new();
+        observability
+            .modifier_wait_duration_ms_total
+            .store(MAX_OBSERVABILITY_COUNTER - 5, Ordering::Relaxed);
+        observability
+            .modifier_wait_duration_ms_max
+            .store(5, Ordering::Relaxed);
+
+        observability.record_modifier_wait(Duration::MAX);
+
+        let snapshot = observability.snapshot().native_paste;
+        assert_eq!(
+            snapshot.modifier_wait_duration_ms_total,
+            MAX_OBSERVABILITY_COUNTER
+        );
+        assert_eq!(
+            snapshot.modifier_wait_duration_ms_max,
+            MAX_OBSERVABILITY_COUNTER
+        );
     }
 
     #[test]
