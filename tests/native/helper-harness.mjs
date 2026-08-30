@@ -720,10 +720,13 @@ function request(method, params) {
   requestSequence.push(method);
   const { id, frame } = requestFrame(method, params);
   return new Promise((resolveRequest, reject) => {
-    const timeout = setTimeout(() => {
-      if (method !== 'initialize') pending.delete(id);
-      reject(new Error(`${method} timed out`));
-    }, 3_000);
+    const timeout = setTimeout(
+      () => {
+        if (method !== 'initialize') pending.delete(id);
+        reject(new Error(`${method} timed out`));
+      },
+      method === 'initialize' ? 12_000 : 3_000,
+    );
     pending.set(id, {
       resolve: (value) => {
         clearTimeout(timeout);
