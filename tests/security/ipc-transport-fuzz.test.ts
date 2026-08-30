@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { describe, expect, it } from 'vitest';
 import { WindowRoleRegistry } from '../../app/src/main/app/window-role-registry';
@@ -62,14 +63,12 @@ function eventFor(
   } = {},
 ): IpcMainInvokeEvent {
   const frame = { url };
-  const sender = {
+  const sender = Object.assign(new EventEmitter(), {
     id,
     mainFrame: options.subframe === true ? { url } : frame,
     isDestroyed: () => options.destroyed === true,
-    once: () => undefined,
-    off: () => undefined,
     send: options.send ?? (() => undefined),
-  };
+  });
   return { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent;
 }
 

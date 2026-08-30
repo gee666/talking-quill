@@ -159,7 +159,7 @@ describe('application lifecycle hardening', () => {
     await vi.advanceTimersByTimeAsync(11);
     await expect(
       runBoundedLifecycle('shutdown', [{ name: 'late', run }], 5_000, { deadline }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([{ phase: 'shutdown', step: 'late', outcome: 'timed-out' }]);
     expect(run).not.toHaveBeenCalled();
   });
 

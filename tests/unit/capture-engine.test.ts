@@ -550,6 +550,21 @@ describe('CaptureEngine', () => {
     expect(systemTrack.stop).toHaveBeenCalledOnce();
   });
 
+  it('does not let a native AudioContext close stall capture IPC shutdown', async () => {
+    const track = new FakeTrack('stuck-context');
+    const test = harness({
+      getUserMedia: () => Promise.resolve(stream(track)),
+      closeAudioContext: () => new Promise<void>(() => undefined),
+    });
+    await test.engine.start(null);
+    await test.engine.activate();
+
+    await expect(test.engine.stop()).resolves.toBeUndefined();
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(test.port.close).toHaveBeenCalledOnce();
+    expect(test.contextClose).toHaveBeenCalledOnce();
+  });
+
   it('does not let a delayed failure teardown stop a newer capture', async () => {
     const firstClose = deferred<undefined>();
     let closeCount = 0;

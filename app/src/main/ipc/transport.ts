@@ -23,7 +23,14 @@ export interface IpcMainRegistrar {
 export interface IpcTransportLifecycle {
   stopAccepting(preservedChannels?: readonly InvokeChannel[]): void;
   drain(excludedChannels?: readonly InvokeChannel[]): Promise<void>;
+  pendingChannels(): readonly InvokeChannel[];
   dispose(): void;
+}
+
+interface ActiveInvocation {
+  readonly channel: InvokeChannel;
+  readonly invalidate: () => void;
+  readonly dispose: () => void;
 }
 
 export function registerIpcTransport(
@@ -32,7 +39,7 @@ export function registerIpcTransport(
   registrar: IpcMainRegistrar = ipcMain,
 ): IpcTransportLifecycle {
   const channels = Object.keys(invokeRegistry) as InvokeChannel[];
-  const active = new Map<Promise<unknown>, InvokeChannel>();
+  const active = new Map<Promise<unknown>, ActiveInvocation>();
   const acceptingChannels = new Set<InvokeChannel>(channels);
   let disposed = false;
   for (const channel of channels) {
@@ -52,16 +59,22 @@ export function registerIpcTransport(
       registrar.removeHandler(channel);
       acceptingChannels.delete(channel);
     }
+    for (const invocation of active.values()) {
+      if (!preserved.has(invocation.channel)) invocation.invalidate();
+    }
   };
   return {
     stopAccepting,
     async drain(excludedChannels = []) {
       const excluded = new Set(excludedChannels);
-      let pending = [...active].filter(([, channel]) => !excluded.has(channel));
+      let pending = [...active].filter(([, value]) => !excluded.has(value.channel));
       while (pending.length > 0) {
         await Promise.allSettled(pending.map(([invocation]) => invocation));
-        pending = [...active].filter(([, channel]) => !excluded.has(channel));
+        pending = [...active].filter(([, value]) => !excluded.has(value.channel));
       }
+    },
+    pendingChannels() {
+      return Object.freeze([...new Set([...active.values()].map(({ channel }) => channel))]);
     },
     dispose() {
       if (disposed) return;
@@ -75,12 +88,13 @@ function registerChannel<Channel extends InvokeChannel>(
   channel: Channel,
   roles: WindowRoleRegistry,
   handlers: Pick<InvokeHandlerMap, Channel>,
-  active: Map<Promise<unknown>, InvokeChannel>,
+  active: Map<Promise<unknown>, ActiveInvocation>,
   isAccepting: () => boolean,
   registrar: IpcMainRegistrar,
 ): void {
   const contract = invokeRegistry[channel];
   registrar.handle(channel, (event: IpcMainInvokeEvent, input: unknown) => {
+    const invalidation = createInvocationInvalidation(event.sender);
     const invocation = invokeChannel(
       channel,
       event,
@@ -89,9 +103,15 @@ function registerChannel<Channel extends InvokeChannel>(
       roles,
       handlers,
       isAccepting,
+      invalidation.context,
     );
-    active.set(invocation, channel);
+    active.set(invocation, {
+      channel,
+      invalidate: invalidation.invalidate,
+      dispose: invalidation.dispose,
+    });
     const remove = (): void => {
+      active.get(invocation)?.dispose();
       active.delete(invocation);
     };
     void invocation.then(remove, remove);
@@ -107,6 +127,7 @@ async function invokeChannel<Channel extends InvokeChannel>(
   roles: WindowRoleRegistry,
   handlers: Pick<InvokeHandlerMap, Channel>,
   isAccepting: () => boolean,
+  context: ReturnType<typeof createInvocationInvalidation>['context'],
 ): Promise<WireResponse<Channel>> {
   try {
     if (!isAccepting()) {
@@ -116,7 +137,6 @@ async function invokeChannel<Channel extends InvokeChannel>(
       });
     }
     authorize(event, allowedRoles, roles);
-    const context = createContext(event);
     const request = invokeRegistry[channel].request.parse(input) as InvokeRequest<Channel>;
     const output = await handlers[channel](request, context);
     const parsedResponse = invokeRegistry[channel].response.safeParse(output);
@@ -154,10 +174,42 @@ function authorize(
   });
 }
 
-function createContext(event: IpcMainInvokeEvent) {
+function createInvocationInvalidation(sender: IpcMainInvokeEvent['sender']) {
+  const listeners = new Set<() => void>();
+  let active = true;
+  const invalidate = (): void => {
+    if (!active) return;
+    active = false;
+    removeSenderInvalidation();
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // Cancellation of one operation must not block the remaining owners.
+      }
+    }
+    listeners.clear();
+  };
+  const removeSenderInvalidation = subscribeToRendererInvalidation(sender, invalidate);
   return {
-    webContentsId: event.sender.id,
-    onDestroyed: (listener: () => void) => subscribeToRendererInvalidation(event.sender, listener),
+    context: {
+      webContentsId: sender.id,
+      onDestroyed(listener: () => void) {
+        if (!active) {
+          listener();
+          return () => undefined;
+        }
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    invalidate,
+    dispose: () => {
+      if (!active) return;
+      active = false;
+      removeSenderInvalidation();
+      listeners.clear();
+    },
   } as const;
 }
 

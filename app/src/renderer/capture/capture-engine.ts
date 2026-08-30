@@ -539,7 +539,10 @@ export class CaptureEngine {
       active.worklet.port.close();
       stopStream(active.microphone.stream);
       if (active.systemStream !== null) stopStream(active.systemStream);
-      return active.context.close().catch(() => undefined);
+      // Chromium has already lost every input and worklet reference at this point. Some native
+      // audio drivers never settle AudioContext.close(), so it cannot be the capture IPC ack edge.
+      void active.context.close().catch(() => undefined);
+      return Promise.resolve();
     })();
     return active.releasePromise;
   }

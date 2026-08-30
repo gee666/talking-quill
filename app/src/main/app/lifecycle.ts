@@ -14,6 +14,12 @@ export interface LifecycleStep {
   readonly run: () => void | Promise<void>;
 }
 
+export interface LifecycleProgress {
+  readonly phase: LifecyclePhase;
+  readonly step: string;
+  readonly state: 'started' | 'fulfilled' | LifecycleOutcome;
+}
+
 export interface SynchronousLifecycleStep {
   readonly name: string;
   readonly run: () => void;
@@ -68,14 +74,29 @@ export async function runBoundedLifecycle(
   phase: LifecyclePhase,
   steps: readonly LifecycleStep[],
   timeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
-  options: { readonly stopOnFailure?: boolean; readonly deadline?: number } = {},
+  options: {
+    readonly stopOnFailure?: boolean;
+    readonly deadline?: number;
+    readonly onProgress?: (progress: LifecycleProgress) => void;
+  } = {},
 ): Promise<readonly LifecycleDiagnostic[]> {
   const diagnostics: LifecycleDiagnostic[] = [];
   const deadline = options.deadline ?? Date.now() + Math.max(1, timeoutMs);
   for (const step of steps) {
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
+    if (remainingMs <= 0) {
+      const diagnostic = { phase, step: step.name, outcome: 'timed-out' as const };
+      diagnostics.push(diagnostic);
+      options.onProgress?.({ ...diagnostic, state: 'timed-out' });
+      break;
+    }
+    options.onProgress?.({ phase, step: step.name, state: 'started' });
     const outcome = await settleBounded(step.run, remainingMs);
+    options.onProgress?.({
+      phase,
+      step: step.name,
+      state: outcome ?? 'fulfilled',
+    });
     if (outcome !== null) {
       diagnostics.push({ phase, step: step.name, outcome });
       // A rejected task has settled and cannot race later cleanup. A timed-out task is still

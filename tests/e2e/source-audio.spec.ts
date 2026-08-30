@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { _electron as electron, expect, test } from '@playwright/test';
 import { SETTINGS_SCHEMA_VERSION } from '../../app/src/shared/schemas/settings';
-import { rendererPages, resetProfile } from './helpers';
+import { closeSourceApplication, rendererPages, resetProfile } from './helpers';
 
 const electronModule: unknown = createRequire(resolve('package.json'))('electron');
 const electronExecutable = readElectronExecutable(electronModule);
@@ -15,7 +15,7 @@ function readElectronExecutable(value: unknown): string {
 }
 
 async function launch(profile: string, useFakePermissionUi = true) {
-  return electron.launch({
+  const application = await electron.launch({
     executablePath: electronExecutable,
     args: [
       resolve('app'),
@@ -26,6 +26,8 @@ async function launch(profile: string, useFakePermissionUi = true) {
     ],
     env: { ...process.env, NODE_ENV: 'test' },
   });
+  application.process().stderr?.on('data', (chunk: Buffer) => process.stderr.write(chunk));
+  return application;
 }
 
 interface ReturnedStreamSummary {
@@ -235,7 +237,7 @@ test('real Chromium fake audio reaches the worklet meter and releases every trac
     expect(summary.tracks).toHaveLength(summary.streamCount);
     expect(summary.tracks.every((tracks) => tracks.every((state) => state === 'ended'))).toBe(true);
   } finally {
-    await application.close();
+    await closeSourceApplication(application, 'real Chromium source-audio closure');
   }
 });
 
@@ -260,6 +262,6 @@ test('Electron policy denial does not masquerade as Windows privacy denial', asy
     );
     await expect(main.getByRole('button', { name: 'Open microphone settings' })).not.toBeVisible();
   } finally {
-    await application.close();
+    await closeSourceApplication(application, 'denied source-audio closure');
   }
 });

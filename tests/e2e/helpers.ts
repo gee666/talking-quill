@@ -3,6 +3,8 @@ import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
 import { resolve } from 'node:path';
 import type { ElectronApplication, Page } from '@playwright/test';
 
+const APPLICATION_SHUTDOWN_DIAGNOSTIC_TIMEOUT_MS = 20_000;
+
 export async function resetProfile(name: string): Promise<string> {
   const profile = await resetFreshProfile(name);
   const settings = structuredClone(DEFAULT_SETTINGS);
@@ -21,6 +23,71 @@ export async function resetFreshProfile(name: string): Promise<string> {
   await rm(profile, { recursive: true, force: true, maxRetries: 3 });
   await mkdir(profile, { recursive: true });
   return profile;
+}
+
+export async function closeSourceApplication(
+  application: ElectronApplication,
+  label: string,
+): Promise<void> {
+  let closedNormally = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const readyDeadline = Date.now() + 10_000;
+    while (
+      !(await application.evaluate(
+        () => typeof Reflect.get(globalThis, '__talkingQuillRequestQuit') === 'function',
+      ))
+    ) {
+      if (Date.now() >= readyDeadline) {
+        throw new Error('Source application did not finish startup');
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const closed = application.waitForEvent('close', { timeout: 0 });
+    await application.evaluate(() => {
+      const requestQuit = Reflect.get(globalThis, '__talkingQuillRequestQuit') as () => void;
+      requestQuit();
+    });
+    await Promise.race([
+      closed,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} exceeded the production shutdown deadline`)),
+          APPLICATION_SHUTDOWN_DIAGNOSTIC_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    closedNormally = true;
+  } catch (error: unknown) {
+    const diagnostics = await Promise.race([
+      application.evaluate(({ BrowserWindow }) => ({
+        progress: Reflect.get(globalThis, '__talkingQuillShutdownProgress') as unknown,
+        windows: BrowserWindow.getAllWindows().map((window) => ({
+          title: window.getTitle(),
+          destroyed: window.isDestroyed(),
+          webContentsDestroyed: window.webContents.isDestroyed(),
+        })),
+      })),
+      new Promise<{ readonly progress: string; readonly windows: readonly [] }>((resolveWait) => {
+        setTimeout(
+          () => resolveWait({ progress: 'main process unresponsive', windows: [] }),
+          1_000,
+        );
+      }),
+    ]).catch(() => ({ progress: 'main process unavailable', windows: [] }));
+    throw new Error(`${String(error)}; shutdown diagnostics: ${JSON.stringify(diagnostics)}`);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (!closedNormally) await forceCloseSourceApplication(application);
+  }
+}
+
+async function forceCloseSourceApplication(application: ElectronApplication): Promise<void> {
+  const closing = application.close().catch(() => undefined);
+  await Promise.race([closing, new Promise((resolveWait) => setTimeout(resolveWait, 1_000))]);
+  const child = application.process();
+  if (child.exitCode === null && child.signalCode === null) child.kill();
+  await Promise.race([closing, new Promise((resolveWait) => setTimeout(resolveWait, 1_000))]);
 }
 
 export async function rendererPages(application: ElectronApplication) {

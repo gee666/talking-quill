@@ -72,6 +72,7 @@ import { getTrustedCaptureDocument, secureSession } from '../security/session-po
 import {
   StartupCancelledError,
   StartupCleanupStack,
+  type LifecycleProgress,
   type LifecycleStep,
   reportLifecycleDiagnostics,
   runBoundedLifecycle,
@@ -131,6 +132,9 @@ export class TalkingQuillApplication {
   #startPromise: Promise<void> | null = null;
   #quitPromise: Promise<void> | null = null;
   #quitDeadline = 0;
+  #settingsFlush: Promise<void> | null = null;
+  #vaultFlush: Promise<void> | null = null;
+  #shutdownProgress: LifecycleProgress | null = null;
   #lifecycle: ApplicationLifecycle = 'new';
   #quitAllowed = false;
   #shutdownComplete = false;
@@ -141,6 +145,7 @@ export class TalkingQuillApplication {
   #updateInstallRequested = false;
   #showMainWhenReady = false;
   #applicationActivationSequence = 0;
+  readonly #testQuitRequest = () => this.quit();
 
   constructor(options: TalkingQuillApplicationOptions = {}) {
     this.#windowsLoginStart = options.windowsLoginStart === true;
@@ -715,6 +720,9 @@ export class TalkingQuillApplication {
       }
       this.#assertStartupActive();
       this.#lifecycle = 'running';
+      if (process.env.NODE_ENV === 'test') {
+        Reflect.set(globalThis, '__talkingQuillRequestQuit', this.#testQuitRequest);
+      }
       const localUpdate = process.argv.find((argument) =>
         argument.startsWith('--update-local-owner='),
       );
@@ -855,6 +863,14 @@ export class TalkingQuillApplication {
       .catch(() => undefined);
     this.#startupAbort.abort();
     this.#quiesce();
+    // Start durable barriers before a broken renderer IPC, audio driver, or helper can consume the
+    // remaining process deadline. The ordered drain below still awaits these same promises at the
+    // normal settings and vault steps.
+    this.#settingsFlush = this.#settings?.flush() ?? Promise.resolve();
+    this.#vaultFlush = this.#vault?.flush() ?? Promise.resolve();
+    void this.#settingsFlush.catch(() => undefined);
+    void this.#vaultFlush.catch(() => undefined);
+    setTimeout(() => this.#forceQuitAtDeadline(), Math.max(1, this.#quitDeadline - Date.now()));
     this.#quitPromise = this.#drainBeforeQuit();
   }
 
@@ -888,6 +904,9 @@ export class TalkingQuillApplication {
     ]);
     reportLifecycleDiagnostics(diagnostics);
     this.#clearOwnedReferences();
+    if (Reflect.get(globalThis, '__talkingQuillRequestQuit') === this.#testQuitRequest) {
+      Reflect.deleteProperty(globalThis, '__talkingQuillRequestQuit');
+    }
     this.#lifecycle = 'stopped';
   }
 
@@ -904,7 +923,10 @@ export class TalkingQuillApplication {
       'shutdown',
       this.#createDrainSteps(),
       LIFECYCLE_TIMEOUT_MS,
-      { deadline: this.#quitDeadline },
+      {
+        deadline: this.#quitDeadline,
+        onProgress: (progress) => this.#observeShutdownProgress(progress),
+      },
     );
     if (diagnostics.some(({ outcome }) => outcome === 'timed-out')) {
       this.#skipDependentShutdown = true;
@@ -920,7 +942,29 @@ export class TalkingQuillApplication {
         this.#updateInstallRequested = false;
       }
     }
-    app.quit();
+    // All application-owned producers and durable stores have settled. Do not hand control back
+    // to Chromium's graceful audio teardown, which can wait forever in a native driver.
+    this.shutdown();
+    app.exit(diagnostics.some(({ outcome }) => outcome === 'timed-out') ? 1 : 0);
+  }
+
+  #observeShutdownProgress(progress: LifecycleProgress): void {
+    this.#shutdownProgress = progress;
+    if (process.env.NODE_ENV === 'test') {
+      const snapshot = Object.freeze({ ...progress });
+      Reflect.set(globalThis, '__talkingQuillShutdownProgress', snapshot);
+      console.error('Talking Quill shutdown progress', snapshot);
+    }
+  }
+
+  #forceQuitAtDeadline(): void {
+    this.#skipDependentShutdown = true;
+    console.error('Talking Quill shutdown deadline expired', {
+      step: this.#shutdownProgress?.step ?? 'startup-settlement',
+      pendingIpc: this.#ipc?.pendingChannels().slice(0, 16) ?? [],
+    });
+    this.shutdown();
+    app.exit(1);
   }
 
   async #waitForStartupSettlement(): Promise<boolean> {
@@ -971,8 +1015,18 @@ export class TalkingQuillApplication {
         helper:
           this.#helper === null ? null : { stop: () => this.#stopHelperAndDrainDiagnostics() },
         history: this.#history,
-        settings: this.#settings,
-        vault: this.#vault,
+        settings:
+          this.#settings === null
+            ? null
+            : {
+                flush: () => settlePersistenceFlush(this.#settingsFlush, this.#settings?.flush()),
+              },
+        vault:
+          this.#vault === null
+            ? null
+            : {
+                flush: () => settlePersistenceFlush(this.#vaultFlush, this.#vault?.flush()),
+              },
         diagnostics: this.#diagnostics,
       },
       excludedIpcChannels,
@@ -1036,6 +1090,8 @@ export class TalkingQuillApplication {
     this.#applicationUpdates = null;
     this.#diagnostics = null;
     this.#dataLifecycle = null;
+    this.#settingsFlush = null;
+    this.#vaultFlush = null;
     this.#runtimeDisposers.length = 0;
   }
 
@@ -1106,6 +1162,20 @@ export class TalkingQuillApplication {
       },
     });
   }
+}
+
+async function settlePersistenceFlush(
+  early: Promise<void> | null,
+  final: Promise<void> | undefined,
+): Promise<void> {
+  const outcomes = await Promise.allSettled([
+    early ?? Promise.resolve(),
+    final ?? Promise.resolve(),
+  ]);
+  const failure = outcomes.find(
+    (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+  );
+  if (failure !== undefined) throw failure.reason;
 }
 
 function localMacosUpdate(archive: string): DownloadedApplicationUpdate {

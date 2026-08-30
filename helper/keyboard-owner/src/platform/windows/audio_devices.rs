@@ -654,7 +654,10 @@ fn finish_worker(
     completion: &Receiver<Result<(), PlatformError>>,
     timeout: Duration,
 ) -> Result<(), PlatformError> {
-    let result = match completion.recv_timeout(timeout) {
+    let deadline = std::time::Instant::now() + timeout;
+    let result = match completion
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+    {
         Ok(result) => result,
         Err(_) => {
             // Never join a worker which may be blocked in an audio driver or
@@ -663,6 +666,13 @@ fn finish_worker(
             return Err(PlatformError::ThreadStopped);
         }
     };
+    while !thread.is_finished() && std::time::Instant::now() < deadline {
+        thread::yield_now();
+    }
+    if !thread.is_finished() {
+        drop(thread);
+        return Err(PlatformError::ThreadStopped);
+    }
     if thread.join().is_err() {
         Err(PlatformError::ThreadStopped)
     } else {
@@ -1158,6 +1168,24 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(finish_worker(blocked, &completion_rx, Duration::from_millis(1)).is_err());
         assert!(started.elapsed() < Duration::from_millis(25));
+
+        let (completion_tx, completion_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        let signalled_but_running = thread::spawn(move || {
+            let _ = completion_tx.send(Ok(()));
+            let _ = release_rx.recv();
+        });
+        let started = std::time::Instant::now();
+        assert!(
+            finish_worker(
+                signalled_but_running,
+                &completion_rx,
+                Duration::from_millis(1)
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_millis(25));
+        let _ = release_tx.send(());
 
         let (completion_tx, completion_rx) = bounded(1);
         let completed = thread::spawn(move || {
