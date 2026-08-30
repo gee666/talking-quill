@@ -1,5 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -8,12 +9,26 @@ interface Target {
   architecture: 'x64' | 'arm64';
 }
 
+interface OnnxConfig {
+  files: string[];
+  asarUnpack: string[];
+}
+
+interface BeforePackContext {
+  electronPlatformName: string;
+  arch: number;
+  packager: { config: OnnxConfig };
+}
+
 const onnxPolicy = require('../../app/onnx-target-policy.cjs') as {
   ONNX_NATIVE_PATTERN: string;
   applyTargetNativeOnnxPolicy(config: Record<string, unknown>, target: Target): string;
   electronBuilderTarget(context: { electronPlatformName: string; arch: number }): Target;
   targetNativeOnnxPattern(target: Target): string;
 };
+const beforePack = require('../../app/before-pack.cjs') as (
+  context: BeforePackContext,
+) => Promise<void>;
 
 const tuples = [
   ['win32', 'x64', 1],
@@ -22,20 +37,32 @@ const tuples = [
   ['darwin', 'arm64', 3],
 ] as const;
 
+function targetContext(platform: string, arch: number): BeforePackContext {
+  return {
+    electronPlatformName: platform,
+    arch,
+    packager: {
+      config: {
+        files: ['package.json', onnxPolicy.ONNX_NATIVE_PATTERN],
+        asarUnpack: ['native.node', onnxPolicy.ONNX_NATIVE_PATTERN],
+      },
+    },
+  };
+}
+
 describe('electron-builder target-native ONNX policy', () => {
-  it.each(tuples)('selects only %s/%s before ASAR creation', (platform, architecture, arch) => {
-    const target = onnxPolicy.electronBuilderTarget({ electronPlatformName: platform, arch });
-    const config = {
-      files: ['package.json', onnxPolicy.ONNX_NATIVE_PATTERN],
-      asarUnpack: ['native.node', onnxPolicy.ONNX_NATIVE_PATTERN],
-    };
+  it.each(tuples)(
+    'selects only %s/%s through the beforePack hook',
+    async (platform, architecture, arch) => {
+      const context = targetContext(platform, arch);
+      const selected = onnxPolicy.targetNativeOnnxPattern({ platform, architecture });
 
-    const selected = onnxPolicy.applyTargetNativeOnnxPolicy(config, target);
+      await beforePack(context);
 
-    expect(selected).toBe(onnxPolicy.targetNativeOnnxPattern({ platform, architecture }));
-    expect(config.files).toEqual(['package.json', selected]);
-    expect(config.asarUnpack).toEqual(['native.node', selected]);
-  });
+      expect(context.packager.config.files).toEqual(['package.json', selected]);
+      expect(context.packager.config.asarUnpack).toEqual(['native.node', selected]);
+    },
+  );
 
   it('uses the builder target tuple during a cross-build instead of the host tuple', () => {
     const crossTarget = process.platform === 'win32' ? ['darwin', 3] : ['win32', 1];
@@ -66,13 +93,12 @@ describe('electron-builder target-native ONNX policy', () => {
     ).toThrow('files is missing its ONNX native selector');
   });
 
-  it('pins package hooks around ASAR creation in the installed builder', () => {
-    const source = readFileSync(require.resolve('app-builder-lib/out/platformPackager.js'), 'utf8');
-    expect(source.indexOf('emitBeforePack')).toBeGreaterThanOrEqual(0);
-    expect(source.indexOf('emitBeforePack')).toBeLessThan(source.indexOf('getFileMatchersOptions'));
-    expect(source.indexOf('emitBeforePack')).toBeLessThan(source.indexOf('computeAsarOptions'));
-    expect(source.indexOf('emitAfterPack')).toBeGreaterThan(source.indexOf('copyAppFiles'));
-    expect(source.indexOf('emitAfterPack')).toBeLessThan(source.indexOf('sanityCheckPackage'));
+  it('keeps the beforePack hook wired in electron-builder configuration', () => {
+    const builder = readFileSync('build/electron-builder.yml', 'utf8');
+    const configuredPath = /^beforePack: (.+)$/mu.exec(builder)?.[1];
+
+    expect(configuredPath).toBe('before-pack.cjs');
+    expect(existsSync(resolve('app', configuredPath ?? 'missing'))).toBe(true);
   });
 
   it('keeps afterPack as a read-only ONNX structural gate', () => {

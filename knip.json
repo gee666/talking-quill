@@ -13,6 +13,7 @@
     "app": {
       "entry": [
         "electron.vite.config.ts",
+        "before-pack.cjs",
         "after-pack.cjs",
         "after-pack-macos-owner.cjs",
         "after-sign.cjs",
