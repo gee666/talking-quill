@@ -37,7 +37,7 @@
     "network:capture:status": "node scripts/os-packet-capture.mjs --status",
     "nsis:bootstrap:check": "node scripts/windows-protected-bootstrap-generator.mjs --check",
     "nsis:bootstrap:write": "node scripts/windows-protected-bootstrap-generator.mjs --write",
-    "nsis:bootstrap:cleanup-stale": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/cleanup-windows-protected-bootstrap-leaves.ps1",
+    "nsis:bootstrap:cleanup-stale": "node scripts/run-windows-bootstrap-cleanup.mjs",
     "nsis:compile-check": "pnpm nsis:bootstrap:check && node scripts/check-nsis-early-init.mjs",
     "security:dependencies": "node scripts/audit-node-production.mjs && node scripts/audit-rust.mjs",
     "security:history": "node scripts/secret-history-scan.mjs",

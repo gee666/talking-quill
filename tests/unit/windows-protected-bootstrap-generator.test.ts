@@ -71,8 +71,10 @@ describe('Windows protected bootstrap generator', () => {
     expect(packageJson.scripts.validate).toContain('nsis:compile-check');
 
     const cleanupCommand = packageJson.scripts['nsis:bootstrap:cleanup-stale'];
-    expect(cleanupCommand).toContain('cleanup-windows-protected-bootstrap-leaves.ps1');
-    expect(cleanupCommand).not.toContain('-Apply');
+    expect(cleanupCommand).toBe('node scripts/run-windows-bootstrap-cleanup.mjs');
+    const cleanupRunner = await readFile('scripts/run-windows-bootstrap-cleanup.mjs', 'utf8');
+    expect(cleanupRunner).toContain('cleanup-windows-protected-bootstrap-leaves.ps1');
+    expect(cleanupRunner).not.toContain("'-Apply'");
     for (const [name, command] of Object.entries(packageJson.scripts)) {
       if (name === 'nsis:bootstrap:cleanup-stale') continue;
       expect(command).not.toContain('cleanup-windows-protected-bootstrap-leaves.ps1');
