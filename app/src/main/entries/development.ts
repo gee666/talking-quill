@@ -35,7 +35,7 @@ if (visibleNonce !== undefined) {
   startMain({ userDataPath: resolve(visibleProfile) });
 } else {
   startMain({
-    ...(profile === undefined ? {} : { userDataPath: resolve(profile), isolatedInstance: true }),
+    ...(profile === undefined ? {} : { userDataPath: resolve(profile) }),
   });
 }
 

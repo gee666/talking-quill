@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import configFactory from '../../app/electron.vite.config';
 
@@ -24,6 +26,12 @@ describe('main entry build configuration', () => {
     expect(entry('development')).toMatch(/entries[\\/]development\.ts$/u);
     expect(config.renderer?.plugins).toEqual([]);
     expect(config.preload?.build?.emptyOutDir).toBe(false);
+  });
+
+  it('keeps isolated source profiles on the single-instance lock path', () => {
+    const developmentEntry = readFileSync(resolve('app/src/main/entries/development.ts'), 'utf8');
+    expect(developmentEntry).toContain('{ userDataPath: resolve(profile) }');
+    expect(developmentEntry).not.toContain('isolatedInstance: true');
   });
 
   it('builds only the canonical main entry for production', () => {
