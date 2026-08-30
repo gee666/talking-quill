@@ -2,7 +2,19 @@ import { extractFile, getRawHeader, statFile } from '@electron/asar';
 import { lstatSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
-export function* extractRegularAsarFiles(archivePath, entries, label = 'ASAR') {
+const ONNX_NATIVE_FILENAMES = Object.freeze({
+  darwin: new Set(['libonnxruntime.1.21.0.dylib', 'onnxruntime_binding.node']),
+  linux: new Set([
+    'libonnxruntime.so.1',
+    'libonnxruntime.so.1.21.0',
+    'libonnxruntime_providers_shared.so',
+    'onnxruntime_binding.node',
+  ]),
+  win32: new Set(['DirectML.dll', 'onnxruntime.dll', 'onnxruntime_binding.node']),
+});
+const TARGET_ASAR_PLATFORM = Object.freeze({ mac: 'darwin', win: 'win32' });
+
+export function* extractRegularAsarFiles(archivePath, entries, label = 'ASAR', options = {}) {
   const archiveSize = BigInt(statSync(archivePath).size);
   const dataOffset = BigInt(8 + getRawHeader(archivePath).headerSize);
   for (const entry of entries) {
@@ -30,6 +42,15 @@ export function* extractRegularAsarFiles(archivePath, entries, label = 'ASAR') {
       try {
         physicalMetadata = lstatSync(resolve(`${archivePath}.unpacked`, archiveEntry));
       } catch (error) {
+        if (
+          isAllowedPrunedOnnxNative(
+            entry,
+            options.targetPlatform,
+            options.targetArchitecture,
+            error,
+          )
+        )
+          continue;
         throw new Error(`${label} unpacked regular file is missing: ${entry}`, { cause: error });
       }
       if (
@@ -54,6 +75,25 @@ export function* extractRegularAsarFiles(archivePath, entries, label = 'ASAR') {
     }
     yield { entry, bytes, metadata };
   }
+}
+
+// after-pack.cjs prunes ONNX binaries after electron-builder has written the ASAR header.
+// The stale unpacked metadata is valid only for a known binary outside the package target.
+function isAllowedPrunedOnnxNative(entry, targetPlatform, targetArchitecture, error) {
+  if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') return false;
+  const currentAsarPlatform = TARGET_ASAR_PLATFORM[targetPlatform];
+  if (currentAsarPlatform === undefined || !['arm64', 'x64'].includes(targetArchitecture ?? ''))
+    return false;
+  const match =
+    /^node_modules\/onnxruntime-node\/bin\/napi-v3\/(darwin|linux|win32)\/(arm64|x64)\/([^/]+)$/u.exec(
+      entry,
+    );
+  if (match === null) return false;
+  const [, asarPlatform, architecture, filename] = match;
+  return (
+    (asarPlatform !== currentAsarPlatform || architecture !== targetArchitecture) &&
+    ONNX_NATIVE_FILENAMES[asarPlatform].has(filename)
+  );
 }
 
 function asarEntryKind(metadata) {

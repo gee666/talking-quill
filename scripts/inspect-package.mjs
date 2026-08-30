@@ -607,7 +607,10 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
 }
 
 function inspectAsarContent(archivePath, entries, packageLabel, policyLabel = 'ASAR') {
-  for (const { entry, bytes } of extractRegularAsarFiles(archivePath, entries, policyLabel)) {
+  for (const { entry, bytes } of extractRegularAsarFiles(archivePath, entries, policyLabel, {
+    targetPlatform: boundPlatform,
+    targetArchitecture: boundArch,
+  })) {
     if (canonicalPackage) {
       assertNoForbiddenProductionMarkers(`${packageLabel}/${entry}`, bytes);
     }
