@@ -1,4 +1,4 @@
-import { execFile, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 
 export interface ChildProcessExitAdapter {
@@ -12,6 +12,25 @@ export interface ChildProcessExitTimeouts {
   readonly initialMs: number;
   readonly gracefulMs: number;
   readonly forcedMs: number;
+}
+
+export interface ChildProcessExitAdapterOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly ownsProcessGroup?: boolean;
+  readonly killProcess?: (pid: number, signal: 'SIGKILL') => void;
+  readonly forceKillWindowsTree?: (pid: number) => Promise<void>;
+}
+
+export function sourceE2EChildSpawnOptions(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): SpawnOptions {
+  return {
+    stdio: 'ignore',
+    windowsHide: true,
+    env: environment,
+    ...(platform === 'win32' ? {} : { detached: true }),
+  };
 }
 
 const defaultTimeouts: ChildProcessExitTimeouts = {
@@ -65,12 +84,17 @@ export async function waitForChildExit(
   );
 }
 
-export function createChildProcessExitAdapter(child: ChildProcess): ChildProcessExitAdapter {
+export function createChildProcessExitAdapter(
+  child: ChildProcess,
+  options: ChildProcessExitAdapterOptions = {},
+): ChildProcessExitAdapter {
+  let exited = child.exitCode !== null || child.signalCode !== null;
   let resolveExit: (() => void) | undefined;
   const exitPromise = new Promise<void>((resolveWait) => {
     resolveExit = resolveWait;
   });
   const onExit = () => {
+    exited = true;
     child.removeListener('error', onError);
     resolveExit?.();
   };
@@ -97,17 +121,35 @@ export function createChildProcessExitAdapter(child: ChildProcess): ChildProcess
       return exited;
     },
     requestKill: () => child.kill(),
-    forceKillTree: () => forceKillTree(child),
+    forceKillTree: () => forceKillTree(child, () => exited, options),
   };
 }
 
-async function forceKillTree(child: ChildProcess): Promise<void> {
-  if (process.platform !== 'win32') {
-    if (!child.kill('SIGKILL')) throw new Error('SIGKILL request was rejected');
-    return;
-  }
+async function forceKillTree(
+  child: ChildProcess,
+  hasExited: () => boolean,
+  options: ChildProcessExitAdapterOptions,
+): Promise<void> {
+  // Do not signal a numeric PID after exit observation. The OS may already have reused it.
+  if (hasExited() || child.exitCode !== null || child.signalCode !== null) return;
   const pid = child.pid;
   if (pid === undefined) throw new Error('Child process ID is unavailable');
+  const platform = options.platform ?? process.platform;
+  if (platform === 'win32') {
+    await (options.forceKillWindowsTree ?? forceKillWindowsTree)(pid);
+    return;
+  }
+  if (options.ownsProcessGroup !== true || pid <= 1 || pid === process.pid) {
+    throw new Error('Refusing to signal a process group not owned by this E2E child');
+  }
+  try {
+    (options.killProcess ?? process.kill)(-pid, 'SIGKILL');
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
+async function forceKillWindowsTree(pid: number): Promise<void> {
   const taskkill = resolve(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
   await new Promise<void>((resolveKill, reject) => {
     execFile(

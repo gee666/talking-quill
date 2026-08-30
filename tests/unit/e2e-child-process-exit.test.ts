@@ -1,11 +1,26 @@
+import { type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createChildProcessExitAdapter,
+  sourceE2EChildSpawnOptions,
   waitForChildExit,
   type ChildProcessExitAdapter,
   type ChildProcessExitTimeouts,
 } from '../e2e/child-process-exit';
 
 const timeouts: ChildProcessExitTimeouts = { initialMs: 10, gracefulMs: 2, forcedMs: 2 };
+
+function childProcess(pid = 4321): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperties(child, {
+    pid: { value: pid },
+    exitCode: { value: null, writable: true },
+    signalCode: { value: null, writable: true },
+  });
+  child.kill = vi.fn(() => true);
+  return child;
+}
 
 function processAdapter(exitResults: readonly boolean[], forceFailure?: Error) {
   const remaining = [...exitResults];
@@ -24,6 +39,62 @@ function processAdapter(exitResults: readonly boolean[], forceFailure?: Error) {
 }
 
 describe('source E2E child process teardown', () => {
+  it('starts POSIX children in an owned process group without changing Windows spawning', () => {
+    expect(sourceE2EChildSpawnOptions({}, 'linux')).toMatchObject({
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    expect(sourceE2EChildSpawnOptions({}, 'win32')).not.toHaveProperty('detached');
+  });
+
+  it('force-terminates the owned POSIX group so descendants receive the signal', async () => {
+    const child = childProcess();
+    const killProcess = vi.fn();
+    const adapter = createChildProcessExitAdapter(child, {
+      platform: 'linux',
+      ownsProcessGroup: true,
+      killProcess,
+    });
+
+    await adapter.forceKillTree();
+
+    expect(killProcess).toHaveBeenCalledOnce();
+    expect(killProcess).toHaveBeenCalledWith(-4321, 'SIGKILL');
+  });
+
+  it('does not signal an exited group whose PID may have been reused', async () => {
+    const child = childProcess();
+    const killProcess = vi.fn();
+    const adapter = createChildProcessExitAdapter(child, {
+      platform: 'linux',
+      ownsProcessGroup: true,
+      killProcess,
+    });
+    child.emit('exit', 0, null);
+
+    await adapter.forceKillTree();
+
+    expect(killProcess).not.toHaveBeenCalled();
+  });
+
+  it('keeps Windows forced teardown on the exact taskkill tree path', async () => {
+    const child = childProcess();
+    const forceKillWindowsTree = vi.fn(() => Promise.resolve());
+    const killProcess = vi.fn();
+    const adapter = createChildProcessExitAdapter(child, {
+      platform: 'win32',
+      forceKillWindowsTree,
+      killProcess,
+    });
+
+    await adapter.forceKillTree();
+
+    expect(forceKillWindowsTree).toHaveBeenCalledOnce();
+    expect(forceKillWindowsTree).toHaveBeenCalledWith(4321);
+    expect(killProcess).not.toHaveBeenCalled();
+  });
+
   it('waits for confirmed exit after a graceful timeout kill', async () => {
     const process = processAdapter([false, true]);
 

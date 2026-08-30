@@ -11,7 +11,11 @@ import {
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
-import { createChildProcessExitAdapter, waitForChildExit } from './child-process-exit';
+import {
+  createChildProcessExitAdapter,
+  sourceE2EChildSpawnOptions,
+  waitForChildExit,
+} from './child-process-exit';
 import { rendererIsolation, rendererPages, resetProfile } from './helpers';
 
 const electronModule: unknown = createRequire(resolve('package.json'))('electron');
@@ -289,13 +293,14 @@ test('secure window roles, navigation, close lifecycle, and persistence', async 
   const secondInstance = spawn(
     electronExecutable,
     [resolve('app'), `--talking-quill-user-data=${profile}`],
-    {
-      stdio: 'ignore',
-      windowsHide: true,
-      env: { ...process.env, NODE_ENV: 'test' },
-    },
+    sourceE2EChildSpawnOptions({ ...process.env, NODE_ENV: 'test' }),
   );
-  await waitForChildExit(createChildProcessExitAdapter(secondInstance), 'Second source instance');
+  await waitForChildExit(
+    createChildProcessExitAdapter(secondInstance, {
+      ownsProcessGroup: process.platform !== 'win32',
+    }),
+    'Second source instance',
+  );
   await expect
     .poll(() =>
       application.evaluate(({ BrowserWindow }) =>
