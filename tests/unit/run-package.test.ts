@@ -127,6 +127,8 @@ describe('package orchestration', () => {
     ]);
     expect(orchestrator).not.toContain('prepackage-check.mjs');
     expect(orchestrator).not.toContain('package:inspect');
+    expect(orchestrator).toContain("runNode('scripts/run-windows-installer-ui-smoke.mjs'");
+    expect(orchestrator.indexOf('runNode(')).toBeGreaterThan(orchestrator.indexOf('runPnpm('));
     for (const [command] of Object.values(expectedPlans)) {
       expect(appManifest.scripts[command]).toContain('scripts/prepackage-check.mjs');
       expect(appManifest.scripts[command]).toContain('scripts/inspect-package.mjs');

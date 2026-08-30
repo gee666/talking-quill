@@ -51,7 +51,7 @@
     "test:helper:common-e2e": "pnpm test:helper:owner-common",
     "test:helper:harness": "node tests/native/helper-harness.mjs",
     "test:helper:manual": "node tests/native/helper-harness.mjs --interactive",
-    "smoke:installer:interactive": "pwsh -NoProfile -File scripts/windows-installer-ui-smoke.ps1",
+    "smoke:installer:interactive": "node scripts/run-windows-installer-ui-smoke.mjs --arch x64",
     "lint:helper": "cargo clippy --manifest-path helper/Cargo.toml --locked --all-targets -- -D warnings",
     "format:helper": "cargo fmt --manifest-path helper/Cargo.toml --all -- --check",
     "dead-code": "knip --config knip.json",

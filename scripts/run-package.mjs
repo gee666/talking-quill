@@ -118,6 +118,9 @@ function main() {
   let failure = null;
   try {
     runPnpm(pnpmCli, plan.pnpmArguments, environment);
+    if (plan.platform === 'win' && plan.artifactRequirement === 'nsis') {
+      runNode('scripts/run-windows-installer-ui-smoke.mjs', environment);
+    }
   } catch (error) {
     failure = error;
   } finally {
@@ -162,6 +165,16 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
         (acceptance || !/^TALKING_QUILL_.*ACCEPTANCE/u.test(name)),
     ),
   );
+}
+
+function runNode(script, environment) {
+  const result = spawnSync(process.execPath, [script], {
+    cwd: resolve(fileURLToPath(new URL('..', import.meta.url))),
+    stdio: 'inherit',
+    env: environment,
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error(`${script} failed`);
 }
 
 function runPnpm(pnpmCli, arguments_, environment) {

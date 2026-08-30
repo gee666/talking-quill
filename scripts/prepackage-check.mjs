@@ -38,6 +38,9 @@ run('scripts/nsis-uninstall-policy.mjs', []);
 function cleanPriorProvenance() {
   rmSync(resolve(root, 'artifact-provenance.json'), { force: true });
   rmSync(resolve(root, 'tmp', 'artifact-provenance.json.pending'), { force: true });
+  for (const arch of ['x64', 'arm64']) {
+    rmSync(resolve(root, 'tmp', `windows-installer-ui-smoke-${arch}.json`), { force: true });
+  }
 }
 
 function cleanTargetArtifacts() {

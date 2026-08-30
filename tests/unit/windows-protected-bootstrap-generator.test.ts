@@ -82,24 +82,42 @@ describe('Windows protected bootstrap generator', () => {
   });
 
   it('keeps bootstrap consoles hidden and provides a bounded interactive installer UI probe', async () => {
-    const [installer, smoke, packageManifest] = await Promise.all([
+    const [installer, smoke, observer, packageManifest] = await Promise.all([
       readFile('build/installer.nsh', 'utf8'),
       readFile('scripts/windows-installer-ui-smoke.ps1', 'utf8'),
+      readFile('scripts/windows-installer-ui-observer.cs', 'utf8'),
       readFile('package.json', 'utf8'),
     ]);
     expect(installer.match(/-WindowStyle Hidden/gu)).toHaveLength(2);
     expect(installer).toContain('ExecShellWait "runas"');
     expect(installer).toContain('SW_SHOWNORMAL');
-    expect(smoke).toContain('silentMode = $false');
-    expect(smoke).toContain("subsystem = 'windows-gui'");
-    expect(smoke).toContain('PostMessage($observed.Handle, 0x0010');
-    expect(smoke).toContain('windows-job-object-supervisor.cs');
-    expect(smoke).toContain('Protected bootstrap residue changed during UI smoke');
-    expect(smoke).toContain('Installer UI process did not exit within the cancellation bound');
-    expect(smoke).toContain('Installer mutated machine installation state before UI cancellation');
+    expect(installer.match(/ExecShellWait "open" "\$SYSDIR\\WindowsPowerShell/gu)).toHaveLength(2);
+    expect(installer.match(/SW_HIDE \$R2/gu)).toHaveLength(2);
+    const protectedMacro = installer.slice(
+      installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
+      installer.indexOf(
+        '!macroend',
+        installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
+      ),
+    );
+    expect(protectedMacro).not.toMatch(/\bExecWait\b/u);
+    expect(smoke).toContain('/target:winexe');
+    expect(smoke).toContain('windows-installer-ui-observer.cs');
+    expect(observer).toContain('SampleIntervalMs = 5');
+    expect(observer).toContain('SetWinEventHook');
+    expect(observer).toContain('Win32_ProcessStartTrace');
+    expect(observer).toContain('RelevantProcesses.ContainsKey(process.ParentPid)');
+    expect(observer).toContain('RegNotifyChangeKeyValue');
+    expect(observer).toContain('RegistryHive.CurrentUser');
+    expect(observer).toContain('Path.GetTempPath()');
+    expect(observer).toContain('ConsoleWindowClass');
+    expect(observer).toContain('WM_COMMAND/IDCANCEL');
+    expect(observer).toContain('activeProcessesAfterTeardown');
+    expect(observer).toContain('noDurableInstallMutation');
+    expect(observer).not.toContain('cancelledBeforeMutation');
     const manifest = JSON.parse(packageManifest) as { scripts: Record<string, string> };
     expect(manifest.scripts['smoke:installer:interactive']).toContain(
-      'windows-installer-ui-smoke.ps1',
+      'run-windows-installer-ui-smoke.mjs',
     );
   });
 
@@ -114,6 +132,8 @@ describe('Windows protected bootstrap generator', () => {
     expect(bootstrap).toContain("cnotmatch '^\\.Talking Quill\\.Installer-[0-9a-f]{32}$'");
     expect(bootstrap).toContain('GetPathIdentity($leaf)');
     expect(bootstrap).toContain("Write-LeafManifest 'created'");
+    expect(bootstrap).toContain('TerminateWaitingInstallerParents');
+    expect(bootstrap).toContain("'.talking-quill-bootstrap-validated'");
     expect(bootstrap).toContain('$attempt -lt 20');
     expect(cleanup).toContain('[Environment+SpecialFolder]::CommonApplicationData');
     expect(cleanup).toContain("'^\\.Talking Quill\\.(Installer|Harness)-([0-9a-f]{32})$'");

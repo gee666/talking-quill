@@ -24,6 +24,8 @@ const stale = [
   'release',
   'tmp/release-upload',
   'tmp/artifact-provenance.json.pending',
+  'tmp/windows-installer-ui-smoke-x64.json',
+  'tmp/windows-installer-ui-smoke-arm64.json',
   ...pendingStaging,
 ].filter((path) => existsSync(resolve(root, path)));
 if (stale.length > 0)

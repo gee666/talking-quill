@@ -74,6 +74,8 @@ jobs:
             test -f "release-artifacts/latest-$arch.yml"
             test -f "release-artifacts/release-identity-win-$arch.json"
             test -f "release-artifacts/provenance-win-$arch.json"
+            test -f "release-artifacts/windows-installer-ui-smoke-$arch.json"
+            node scripts/windows-installer-ui-evidence.mjs --evidence "release-artifacts/windows-installer-ui-smoke-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch.exe" --provenance "release-artifacts/provenance-win-$arch.json" --arch "$arch"
             grep -q 'talkingQuillRelease:' "release-artifacts/latest-$arch.yml"
             ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
           done

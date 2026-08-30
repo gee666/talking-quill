@@ -199,6 +199,8 @@ jobs:
       # Invoke the app package command directly. It builds and inspects the NSIS
       # before any source-test ABI restoration or installed lifecycle work.
       - run: pnpm --filter @talking-quill/app ${{ matrix.package_script }}
+      - name: Gate exact installer through interactive GUI cancellation smoke
+        run: node scripts/run-windows-installer-ui-smoke.mjs --arch ${{ matrix.arch }} --output tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json
       # Canonical staging binds the exact installer bytes to the two-role
       # talkingQuillRelease identity and copies the matching provenance.
       - name: Authorize updater metadata and stage exact payload
@@ -215,10 +217,10 @@ jobs:
           node scripts/assemble-release.mjs "$tag" tmp/release-upload
       # Preserve the fully assembled candidate immediately. Later lifecycle
       # failures cannot delete or replace this workflow artifact.
-      - name: Upload staged native NSIS immediately
+      - name: Upload exact NSIS candidate and mandatory GUI smoke evidence
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-validated-nsis
+          name: windows-${{ matrix.arch }}-exact-nsis-candidate
           path: |
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe.blockmap
@@ -227,6 +229,7 @@ jobs:
             tmp/release-upload/provenance-win-${{ matrix.arch }}.json
             tmp/release-upload/THIRD_PARTY_NOTICES.txt
             tmp/release-upload/release-manifest.json
+            tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json
             release/${{ matrix.unpacked }}/**
           if-no-files-found: error
           retention-days: 14
@@ -259,8 +262,14 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-${{ matrix.arch }}-validated-nsis
+          name: windows-${{ matrix.arch }}-exact-nsis-candidate
           path: preserved
+      - name: Revalidate mandatory installer GUI smoke evidence before installation
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe)
+          if ($installers.Count -ne 1) { throw 'Expected one exact installer for GUI smoke validation.' }
+          node scripts/windows-installer-ui-evidence.mjs --evidence preserved/tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json --installer $installers[0].FullName --provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}.json --arch ${{ matrix.arch }}
       - run: node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked --root preserved/release/${{ matrix.unpacked }}
       - name: Install exact authenticated predecessor, then update candidate
         shell: pwsh
@@ -302,11 +311,11 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-x64-validated-nsis
+          name: windows-x64-exact-nsis-candidate
           path: preserved/x64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-arm64-validated-nsis
+          name: windows-arm64-exact-nsis-candidate
           path: preserved/arm64
       - name: Assemble immutable native release files
         shell: bash
@@ -314,7 +323,11 @@ jobs:
           set -euo pipefail
           mkdir -p release-artifacts
           for arch in x64 arm64; do
-            cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch.exe release-artifacts/
+            installer=(preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch.exe)
+            test "${#installer[@]}" -eq 1
+            node scripts/windows-installer-ui-evidence.mjs --evidence preserved/$arch/tmp/windows-installer-ui-smoke-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch.json --arch "$arch"
+            cp preserved/$arch/tmp/windows-installer-ui-smoke-$arch.json release-artifacts/
+            cp "${installer[0]}" release-artifacts/
             cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch.exe.blockmap release-artifacts/
             cp preserved/$arch/tmp/release-upload/latest-$arch.yml release-artifacts/
             cp preserved/$arch/tmp/release-upload/release-identity-win-$arch.json release-artifacts/

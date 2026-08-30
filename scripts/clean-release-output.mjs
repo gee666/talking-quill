@@ -11,6 +11,8 @@ for (const path of [
   'release',
   'tmp/release-upload',
   'tmp/artifact-provenance.json.pending',
+  'tmp/windows-installer-ui-smoke-x64.json',
+  'tmp/windows-installer-ui-smoke-arm64.json',
   ...pendingStaging
     .filter((name) => name.startsWith('release-upload.pending-'))
     .map((name) => `tmp/${name}`),

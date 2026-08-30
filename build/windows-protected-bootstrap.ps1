@@ -69,6 +69,12 @@ public static class TalkingQuillProtectedBootstrapNative
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateFile(
         string name, uint access, uint share, IntPtr security, uint creation,
@@ -185,6 +191,60 @@ public static class TalkingQuillProtectedBootstrapNative
         {
             CloseHandle(parent);
         }
+    }
+
+    public static void TerminateWaitingInstallerParents(
+        string expectedExecutable, string outerWindow, int exitCode)
+    {
+        ProcessBasicInformation basic = new ProcessBasicInformation();
+        int returned;
+        int status = NtQueryInformationProcess(
+            System.Diagnostics.Process.GetCurrentProcess().Handle,
+            0,
+            ref basic,
+            Marshal.SizeOf(typeof(ProcessBasicInformation)),
+            out returned);
+        if (status != 0 || basic.ParentProcessId == IntPtr.Zero)
+            throw new InvalidOperationException("The waiting bootstrap parent is unavailable.");
+        uint parentPid = unchecked((uint)basic.ParentProcessId.ToInt64());
+        IntPtr parent = OpenProcess(0x1001, false, parentPid);
+        if (parent == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            if (!ImageEquals(parent, expectedExecutable))
+                throw new InvalidOperationException("The waiting bootstrap parent image changed.");
+            if (!String.IsNullOrEmpty(outerWindow))
+            {
+                long rawWindow;
+                if (!Int64.TryParse(outerWindow, out rawWindow) || rawWindow == 0)
+                    throw new InvalidOperationException("The outer installer window is malformed.");
+                uint outerPid;
+                if (GetWindowThreadProcessId(new IntPtr(rawWindow), out outerPid) == 0 ||
+                    outerPid == 0 || outerPid == parentPid)
+                    throw new InvalidOperationException("The outer installer window owner is invalid.");
+                IntPtr outer = OpenProcess(0x1001, false, outerPid);
+                if (outer == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+                try
+                {
+                    if (!ImageEquals(outer, expectedExecutable))
+                        throw new InvalidOperationException("The outer installer image changed.");
+                    if (!TerminateProcess(outer, unchecked((uint)exitCode)))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                finally { CloseHandle(outer); }
+            }
+            if (!TerminateProcess(parent, unchecked((uint)exitCode)))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        finally { CloseHandle(parent); }
+    }
+
+    private static bool ImageEquals(IntPtr process, string expected)
+    {
+        StringBuilder image = new StringBuilder(32768);
+        int imageLength = image.Capacity;
+        return QueryFullProcessImageName(process, 0, image, ref imageLength) &&
+            image.ToString().Equals(expected, StringComparison.OrdinalIgnoreCase);
     }
 
     public static string GetPathIdentity(string path)
@@ -314,7 +374,27 @@ $nsisTail = $parent[1]
 $parentArguments = @($parent[3..($parent.Length - 1)])
 $publicArguments = [Collections.Generic.List[string]]::new()
 $protectedTemp = $null
+$outerWindow = $null
 $elevatedMarker = $false
+$script:completionExitCode = $null
+$script:completionParentExecutable = $null
+$script:completionOuterWindow = $null
+$rawProtectedMarkers = @($parentArguments | Where-Object {
+    $_.StartsWith('/TQPROTECTEDTEMP=', [StringComparison]::OrdinalIgnoreCase)
+})
+if ($rawProtectedMarkers.Count -eq 0) {
+    $rawOuterMarkers = @($parentArguments | Where-Object {
+        $_.StartsWith('/TQOUTERWINDOW=', [StringComparison]::OrdinalIgnoreCase)
+    })
+    $script:completionExitCode = 78
+    $script:completionParentExecutable = $parentExecutable
+    if ($rawOuterMarkers.Count -eq 1) {
+        $candidateOuterWindow = $rawOuterMarkers[0].Substring('/TQOUTERWINDOW='.Length)
+        if ($candidateOuterWindow -cmatch '^[1-9][0-9]{0,19}$') {
+            $script:completionOuterWindow = $candidateOuterWindow
+        }
+    }
+}
 foreach ($argument in $parentArguments) {
     if ($argument.Equals('/TQELEVATEDBOOTSTRAP=1', [StringComparison]::OrdinalIgnoreCase)) {
         if ($elevatedMarker) { throw 'The elevated bootstrap marker is duplicated.' }
@@ -328,6 +408,12 @@ foreach ($argument in $parentArguments) {
         if ($null -ne $protectedTemp) { throw 'The protected TEMP marker is duplicated.' }
         $protectedTemp = $argument.Substring('/TQPROTECTEDTEMP='.Length)
         if ([string]::IsNullOrEmpty($protectedTemp)) { throw 'The protected TEMP marker is empty.' }
+        continue
+    }
+    if ($argument.StartsWith('/TQOUTERWINDOW=', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($null -ne $outerWindow) { throw 'The outer window marker is duplicated.' }
+        $outerWindow = $argument.Substring('/TQOUTERWINDOW='.Length)
+        if ($outerWindow -cnotmatch '^[1-9][0-9]{0,19}$') { throw 'The outer window marker is malformed.' }
         continue
     }
     $publicArguments.Add($argument)
@@ -355,7 +441,8 @@ if ($null -ne $protectedTemp) {
         exit 78
     }
     if (-not $path.Equals($inheritedTemp, [StringComparison]::Ordinal) -or
-        -not $path.Equals($inheritedTmp, [StringComparison]::Ordinal)) {
+        -not $path.Equals($inheritedTmp, [StringComparison]::Ordinal) -or
+        $null -ne $outerWindow) {
         exit 78
     }
     $item = Get-Item -Force -LiteralPath $path
@@ -372,6 +459,10 @@ if ($null -ne $protectedTemp) {
         }).Count -ne 0) {
         exit 78
     }
+    [IO.File]::WriteAllText(
+        (Join-Path $path '.talking-quill-bootstrap-validated'),
+        'talking-quill-protected-bootstrap-validated-v1',
+        (New-Object Text.UTF8Encoding($false)))
     exit 0
 }
 
@@ -391,6 +482,9 @@ Write-LeafManifest 'running' $child
 $child.WaitForExit()
 $childExitCode = $child.ExitCode
 Write-LeafManifest 'completed' $child
+$script:completionExitCode = $childExitCode
+$script:completionParentExecutable = $parentExecutable
+$script:completionOuterWindow = $outerWindow
 exit $childExitCode
 } catch {
     [Console]::Error.WriteLine('Protected bootstrap failed: ' + $_.Exception.Message)
@@ -419,5 +513,15 @@ exit $childExitCode
     }
     if (Test-Path -LiteralPath $leaf) {
         [Console]::Error.WriteLine('Protected bootstrap could not remove its ProgramData leaf after bounded retries: ' + $leaf)
+    }
+    if ($null -ne $script:completionExitCode) {
+        try {
+            [TalkingQuillProtectedBootstrapNative]::TerminateWaitingInstallerParents(
+                $script:completionParentExecutable,
+                $script:completionOuterWindow,
+                $script:completionExitCode)
+        } catch {
+            [Console]::Error.WriteLine('Protected bootstrap could not propagate the exact installer exit code: ' + $_.Exception.Message)
+        }
     }
 }

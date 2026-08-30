@@ -22,13 +22,36 @@ const { getMakeNsisPath } = electronBuilderRequire(
 const installerInclude = resolve(repositoryRoot, 'build', 'installer.nsh');
 const makeNsisArguments = ['-WX', '-V2', '-NOCD'];
 let windowsJobSupervisor;
-const [source, bootstrapPayloadInclude] = await Promise.all([
+const [source, bootstrapPayloadInclude, bootstrapSource] = await Promise.all([
   readFile(installerInclude, 'utf8'),
   checkProtectedBootstrapInclude(),
+  readFile(resolve(repositoryRoot, 'build', 'windows-protected-bootstrap.ps1'), 'utf8'),
 ]);
 const bootstrapPayload = requireBootstrapPayload(bootstrapPayloadInclude);
-if ((source.match(/-WindowStyle Hidden/gu) ?? []).length !== 2) {
-  throw new Error('Both protected PowerShell bootstrap invocations must be hidden');
+const protectedMacro = source.slice(
+  source.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
+  source.indexOf('!macroend', source.indexOf('!macro TalkingQuillProtectedEarlyBootstrap')),
+);
+if (
+  (protectedMacro.match(/ExecShellWait "open" "\$SYSDIR\\WindowsPowerShell/gu) ?? []).length !==
+    2 ||
+  (protectedMacro.match(/-WindowStyle Hidden/gu) ?? []).length !== 2 ||
+  (protectedMacro.match(/SW_HIDE \$R2/gu) ?? []).length !== 2 ||
+  /\bExecWait\b/u.test(protectedMacro)
+) {
+  throw new Error(
+    'Protected PowerShell bootstrap must use two plugin-free hidden ExecShellWait calls',
+  );
+}
+if (
+  !source.includes('/TQOUTERWINDOW=$HWNDPARENT') ||
+  !source.includes('.talking-quill-bootstrap-validated') ||
+  !bootstrapSource.includes('TerminateWaitingInstallerParents') ||
+  !bootstrapSource.includes("'.talking-quill-bootstrap-validated'")
+) {
+  throw new Error(
+    'Protected ShellExecute bootstrap must propagate exact exit codes and authenticate validation completion',
+  );
 }
 if (/-Command[^\r\n]*"\s+"\$[R0-9]/u.test(source)) {
   throw new Error(

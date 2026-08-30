@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
+const publishWorkflow = readFileSync('.github/workflows/publish-local-owner.yml', 'utf8');
 const stageScript = readFileSync('scripts/stage-unsigned-release.mjs', 'utf8');
 const approvedActions = new Set([
   'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
@@ -73,11 +74,15 @@ describe('Windows native release workflow', () => {
     expect(cleanTree).toBeGreaterThan(-1);
     expect(dependencyInstall).toBeGreaterThan(cleanTree);
     const packageCommand = packageJob.indexOf('package:win');
+    const smokeCommand = packageJob.indexOf('run-windows-installer-ui-smoke.mjs');
     const stageCommand = packageJob.indexOf('stage-unsigned-release.mjs win ${{ matrix.arch }}');
     const assembleCommand = packageJob.indexOf('node scripts/assemble-release.mjs');
-    const immediateUpload = packageJob.indexOf('name: Upload staged native NSIS immediately');
+    const immediateUpload = packageJob.indexOf(
+      'name: Upload exact NSIS candidate and mandatory GUI smoke evidence',
+    );
     expect(packageCommand).toBeGreaterThan(-1);
-    expect(stageCommand).toBeGreaterThan(packageCommand);
+    expect(smokeCommand).toBeGreaterThan(packageCommand);
+    expect(stageCommand).toBeGreaterThan(smokeCommand);
     expect(assembleCommand).toBeGreaterThan(stageCommand);
     expect(immediateUpload).toBeGreaterThan(assembleCommand);
     expect(packageJob).toContain('tmp/release-upload/latest-${{ matrix.arch }}.yml');
@@ -86,20 +91,31 @@ describe('Windows native release workflow', () => {
     expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
     expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
     expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
-    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-validated-nsis');
+    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-candidate');
+    expect(packageJob).toContain('tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json');
     const lifecycle = section('lifecycle', 'assemble');
     expect(lifecycle).toContain(
       'windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked',
     );
-    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-validated-nsis');
+    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-nsis-candidate');
+    const evidenceValidation = lifecycle.indexOf('windows-installer-ui-evidence.mjs');
+    const predecessorInstall = lifecycle.indexOf('Start-Process -FilePath $predecessor');
+    expect(evidenceValidation).toBeGreaterThan(-1);
+    expect(predecessorInstall).toBeGreaterThan(evidenceValidation);
     expect(lifecycle).toContain('Start-Process -FilePath $predecessor');
     expect(lifecycle).toContain('PREDECESSOR_INSTALLER_SHA256');
     expect(lifecycle).toContain('Start-Process -FilePath $installers[0].FullName');
     expect(lifecycle).toContain('--mode installed --root');
     expect(lifecycle).toContain('Uninstall Talking Quill.exe');
     const assemble = section('assemble');
-    expect(assemble).toContain('windows-x64-validated-nsis');
-    expect(assemble).toContain('windows-arm64-validated-nsis');
+    expect(assemble).toContain('windows-x64-exact-nsis-candidate');
+    expect(assemble).toContain('windows-arm64-exact-nsis-candidate');
+    expect(assemble.match(/windows-installer-ui-evidence\.mjs/gu)).toHaveLength(1);
+    expect(assemble).toContain('windows-installer-ui-smoke-$arch.json release-artifacts/');
+    expect(publishWorkflow).toContain('windows-installer-ui-evidence.mjs');
+    expect(publishWorkflow.indexOf('windows-installer-ui-evidence.mjs')).toBeLessThan(
+      publishWorkflow.indexOf('gh release create'),
+    );
     expect(assemble).toContain('windows-native-release-candidates');
     expect(assemble).toContain('join(",") !== "gateway,owner"');
     expect(assemble).toContain('value.predecessor === null');
