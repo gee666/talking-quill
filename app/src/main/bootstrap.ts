@@ -82,7 +82,8 @@ export function startMain(options: MainBootstrapOptions = {}): void {
   let machineQuitDeadline = machineQuitRequested ? Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS : null;
   let bootstrapQuit: BoundedElectronQuit | null = null;
   const requestBootstrapQuit = (deadline: number, exitCode = 0) => {
-    bootstrapQuit ??= createBoundedElectronQuit(app, deadline, { fallbackExitCode: exitCode });
+    if (bootstrapQuit !== null) return;
+    bootstrapQuit = createBoundedElectronQuit(app, deadline, { fallbackExitCode: exitCode });
     bootstrapQuit.request(exitCode);
   };
 
@@ -121,6 +122,7 @@ export function startMain(options: MainBootstrapOptions = {}): void {
       if (process.platform !== 'darwin') application?.quit();
     });
 
+    if (machineQuitDeadline !== null) requestBootstrapQuit(machineQuitDeadline);
     void app
       .whenReady()
       .then(async () => {
