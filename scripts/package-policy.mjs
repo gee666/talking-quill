@@ -153,7 +153,15 @@ function requiredOnnxRuntimePaths(target) {
   );
 }
 
-const ONNX_BUILDER_ROOT_EXCLUSION = '!node_modules/onnxruntime-node/bin/napi-v3/**/*';
+const ONNX_NATIVE_ROOT = 'node_modules/onnxruntime-node/bin/napi-v3/';
+export const ONNX_BUILDER_NATIVE_INVENTORY = Object.freeze(
+  ONNX_RUNTIME_PATHS.filter((entry) =>
+    /^node_modules\/onnxruntime-node\/bin\/napi-v3\/(?:darwin|linux|win32)\/(?:arm64|x64)\/.+/u.test(
+      entry,
+    ),
+  ),
+);
+const ONNX_BUILDER_ROOT_EXCLUSION = `!${ONNX_NATIVE_ROOT}**/*`;
 const ONNX_BUILDER_TARGET_PATTERN = Object.freeze({
   win: 'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*',
   mac: 'node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*',
@@ -226,36 +234,49 @@ function collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet) {
 
   const from = typeof value.from === 'string' ? value.from : '';
   const to = typeof value.to === 'string' ? value.to : '';
-  const filters = Array.isArray(value.filter) ? value.filter : [value.filter];
-  const fileSetMentionsOnnx =
-    isOnnxBuilderPattern(to) ||
-    filters.some((filter) => {
-      if (typeof filter !== 'string') return false;
-      const combined = from === '' ? filter : `${from}/${filter.replace(/^!/u, '')}`;
-      return (
-        isOnnxBuilderPattern(combined) ||
-        hasOnnxNativeReference(from) ||
-        hasOnnxNativeReference(filter)
-      );
-    });
+  const configuredFilters = Array.isArray(value.filter) ? value.filter : [value.filter];
+  const filters = value.filter === undefined ? ['**/*'] : configuredFilters;
+  const fileSetMentionsOnnx = filters.some((filter) => {
+    if (typeof filter !== 'string') return false;
+    const relativeFilter = filter.replace(/^!/u, '');
+    const source = from === '' ? filter : `${from}/${relativeFilter}`;
+    const destination = to === '' ? filter : `${to}/${relativeFilter}`;
+    return (
+      isOnnxBuilderPattern(source) ||
+      isOnnxBuilderPattern(destination) ||
+      hasOnnxNativeReference(from) ||
+      hasOnnxNativeReference(to) ||
+      hasOnnxNativeReference(filter)
+    );
+  });
   if (fileSetMentionsOnnx && (!allowDefaultFileSet || from !== '' || to !== '')) {
     throw new Error(`Unexpected electron-builder ONNX FileSet in ${field}`);
   }
   collectOnnxBuilderPatterns(value.filter, field, found, allowDefaultFileSet);
 }
 
-const ONNX_NATIVE_PROBES = Object.freeze([
-  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
-  'node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/onnxruntime_binding.node',
-]);
+const onnxBuilderPatternCache = new Map();
 
 function isOnnxBuilderPattern(value) {
   if (value === '') return false;
+  const cached = onnxBuilderPatternCache.get(value);
+  if (cached !== undefined) return cached;
   const original = value.replaceAll('\\', '/').toLowerCase();
   if (original === '!node_modules/**/*') return false;
   const normalized = posix.normalize(original.replace(/^!/u, ''));
-  if (hasOnnxNativeReference(normalized)) return true;
-  return ONNX_NATIVE_PROBES.some((probe) => minimatch(probe, normalized, { dot: true }));
+  const expandedPatterns = [
+    normalized,
+    normalized.replaceAll('${arch}', 'x64'),
+    normalized.replaceAll('${arch}', 'arm64'),
+    normalized.replace(/\$\{[^}]+\}/gu, '**'),
+  ];
+  const matches =
+    hasOnnxNativeReference(normalized) ||
+    ONNX_BUILDER_NATIVE_INVENTORY.some((entry) =>
+      expandedPatterns.some((pattern) => minimatch(entry.toLowerCase(), pattern, { dot: true })),
+    );
+  onnxBuilderPatternCache.set(value, matches);
+  return matches;
 }
 
 function hasOnnxNativeReference(value) {

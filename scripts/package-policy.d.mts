@@ -1,4 +1,5 @@
 export const ONNX_RUNTIME_PATHS: readonly string[];
+export const ONNX_BUILDER_NATIVE_INVENTORY: readonly string[];
 export const PROVIDER_LOGO_BASENAMES: readonly string[];
 export function validateElectronBuilderOnnxConfig(
   config: Record<string, unknown>,

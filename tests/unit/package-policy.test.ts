@@ -11,6 +11,7 @@ import { validateNsisUninstallPolicy } from '../../scripts/nsis-uninstall-policy
 import {
   discoverFinalArtifactNames,
   finalArtifactNamesForIdentity,
+  ONNX_BUILDER_NATIVE_INVENTORY,
   ONNX_RUNTIME_PATHS,
   PROVIDER_LOGO_BASENAMES,
   validateAsarEntries,
@@ -40,6 +41,19 @@ function matcherArray(owner: MutableMatcherOwner, key: 'files' | 'asarUnpack'): 
   const value = owner[key];
   if (!Array.isArray(value)) throw new Error(`Merged electron-builder ${key} is not an array`);
   return value;
+}
+
+function obfuscateOnnxNativePattern(path: string): string {
+  return path.replaceAll('onnxruntime', 'onnx[r]untime').replaceAll('napi-v3', 'napi-v[3]');
+}
+
+function isTargetOnnxNativePath(
+  path: string,
+  platform: 'win' | 'mac',
+  architecture: 'x64' | 'arm64',
+): boolean {
+  const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
+  return path.includes(`/napi-v3/${nativePlatform}/${architecture}/`);
 }
 
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
@@ -120,6 +134,26 @@ const validAsar = [
   'node_modules/onnxruntime-common/dist/cjs/index.js',
   ...ONNX_RUNTIME_PATHS,
 ];
+
+const expectedOnnxBuilderNativeInventory = [
+  ...(['arm64', 'x64'] as const).flatMap((architecture) => [
+    `node_modules/onnxruntime-node/bin/napi-v3/darwin/${architecture}/libonnxruntime.1.21.0.dylib`,
+    `node_modules/onnxruntime-node/bin/napi-v3/darwin/${architecture}/onnxruntime_binding.node`,
+  ]),
+  ...(['arm64', 'x64'] as const).flatMap((architecture) => [
+    `node_modules/onnxruntime-node/bin/napi-v3/linux/${architecture}/libonnxruntime.so.1`,
+    `node_modules/onnxruntime-node/bin/napi-v3/linux/${architecture}/libonnxruntime.so.1.21.0`,
+    ...(architecture === 'x64'
+      ? ['node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_shared.so']
+      : []),
+    `node_modules/onnxruntime-node/bin/napi-v3/linux/${architecture}/onnxruntime_binding.node`,
+  ]),
+  ...(['arm64', 'x64'] as const).flatMap((architecture) => [
+    `node_modules/onnxruntime-node/bin/napi-v3/win32/${architecture}/DirectML.dll`,
+    `node_modules/onnxruntime-node/bin/napi-v3/win32/${architecture}/onnxruntime.dll`,
+    `node_modules/onnxruntime-node/bin/napi-v3/win32/${architecture}/onnxruntime_binding.node`,
+  ]),
+] as const;
 
 const asarForTarget = (platform: 'win' | 'mac', architecture: 'x64' | 'arm64') => {
   const binaryRoot = 'node_modules/onnxruntime-node/bin/napi-v3/';
@@ -432,6 +466,46 @@ describe('packaged runtime allowlist', () => {
           matcherArray(config.win, 'files').push('node_modules/onnx[r]untime-node/bin/**/*'),
       },
       {
+        name: "Javier's Linux role bypass",
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push(
+            'node_modules/onnx[r]untime-node/bin/napi-v[3]/linux/@(${arch}|ppc64)/**/libonnx[r]untime*.so*',
+          ),
+      },
+      {
+        name: 'brace platform and architecture bypass',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push(
+            'node_modules/onnx[r]untime-node/bin/napi-v[3]/{darwin/{x64,arm64},win32/arm64}/**/*',
+          ),
+      },
+      {
+        name: 'builder platform macro bypass',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push(
+            'node_modules/onnx[r]untime-node/bin/napi-v[3]/@(${platform})/${arch}/**/*',
+          ),
+      },
+      {
+        name: 'builder os macro bypass',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push(
+            'node_modules/onnx[r]untime-node/bin/napi-v[3]/${os}32/${arch}/**/*',
+          ),
+      },
+      {
+        name: 'environment destination macro bypass',
+        mutate: (config) => {
+          config.win.files = [
+            'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*',
+            {
+              from: 'vendor',
+              to: 'node_modules/onnx[r]untime-node/bin/napi-v[3]/${env.ONNX_OS}/${arch}',
+            },
+          ];
+        },
+      },
+      {
         name: 'split from and filter',
         mutate: (config) => {
           config.win.files = [
@@ -491,6 +565,79 @@ describe('packaged runtime allowlist', () => {
         () => validateElectronBuilderOnnxConfig(config, { platform: 'win', architecture: 'x64' }),
         bypass.name,
       ).toThrow(/Unexpected electron-builder ONNX (?:selector|FileSet)/u);
+    }
+  });
+
+  it('tracks every exact ONNX native role path across supported and foreign tuples', () => {
+    expect(ONNX_BUILDER_NATIVE_INVENTORY).toEqual(expectedOnnxBuilderNativeInventory);
+  });
+
+  it('rejects an obfuscated mutation for every non-target native inventory entry', async () => {
+    const base = await loadMergedElectronBuilderConfig('build/electron-builder.unsigned.yml');
+    const targets = [
+      ['win', 'x64'],
+      ['win', 'arm64'],
+      ['mac', 'x64'],
+      ['mac', 'arm64'],
+    ] as const;
+
+    for (const [platform, architecture] of targets) {
+      for (const entry of ONNX_BUILDER_NATIVE_INVENTORY) {
+        if (isTargetOnnxNativePath(entry, platform, architecture)) continue;
+        const obfuscated = obfuscateOnnxNativePattern(entry);
+        const mutations = [
+          obfuscated,
+          obfuscated.replace(/\/(?:arm64|x64)\//u, '/${arch}/'),
+          obfuscated
+            .replace(/\/(?:darwin|linux|win32)\//u, '/${env.ONNX_PLATFORM}/')
+            .replace(/\/(?:arm64|x64)\//u, '/${arch}/'),
+        ];
+        for (const mutation of mutations) {
+          const config = structuredClone(base) as MutableBuilderConfig;
+          matcherArray(config[platform], 'files').push(mutation);
+
+          expect(
+            () => validateElectronBuilderOnnxConfig(config, { platform, architecture }),
+            `${platform}/${architecture} accepted non-target ${mutation}`,
+          ).toThrow('Unexpected electron-builder ONNX selector');
+        }
+      }
+    }
+  });
+
+  it('rejects every native inventory entry expressed through source or destination FileSets', async () => {
+    const base = await loadMergedElectronBuilderConfig('build/electron-builder.unsigned.yml');
+
+    for (const entry of ONNX_BUILDER_NATIVE_INVENTORY) {
+      const obfuscated = obfuscateOnnxNativePattern(entry);
+      const macro = obfuscated.replace(/\/(?:arm64|x64)\//u, '/${arch}/');
+      const environmentMacro = macro.replace(
+        /\/(?:darwin|linux|win32)\//u,
+        '/${env.ONNX_PLATFORM}/',
+      );
+      const variants = [obfuscated, macro, environmentMacro].flatMap((pattern) => {
+        const patternSeparator = pattern.lastIndexOf('/');
+        return [
+          {
+            from: 'node_modules',
+            filter: pattern.slice('node_modules/'.length),
+          },
+          {
+            from: 'vendor',
+            to: pattern.slice(0, patternSeparator),
+            filter: pattern.slice(patternSeparator + 1),
+          },
+        ];
+      });
+      for (const fileSet of variants) {
+        const config = structuredClone(base) as MutableBuilderConfig;
+        matcherArray(config.win, 'files').push(fileSet);
+
+        expect(
+          () => validateElectronBuilderOnnxConfig(config, { platform: 'win', architecture: 'x64' }),
+          `FileSet accepted ${entry}`,
+        ).toThrow('Unexpected electron-builder ONNX FileSet');
+      }
     }
   });
 
