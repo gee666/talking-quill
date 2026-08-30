@@ -83,9 +83,7 @@ interface BuilderFileMatcher {
   patterns: string[];
 }
 
-const { getFileMatchers, getNodeModuleFileMatcher } = electronBuilderRequire(
-  'app-builder-lib/out/fileMatcher.js',
-) as {
+const fileMatcherModule = electronBuilderRequire('app-builder-lib/out/fileMatcher.js') as {
   getFileMatchers(
     config: MutableMatcherOwner,
     name: 'files',
@@ -108,6 +106,8 @@ const { getFileMatchers, getNodeModuleFileMatcher } = electronBuilderRequire(
     },
   ): BuilderFileMatcher;
 };
+const getFileMatchers = fileMatcherModule.getFileMatchers.bind(fileMatcherModule);
+const getNodeModuleFileMatcher = fileMatcherModule.getNodeModuleFileMatcher.bind(fileMatcherModule);
 
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
@@ -493,7 +493,12 @@ describe('packaged runtime allowlist', () => {
         config[platform] as MutableMatcherOwner,
         {
           config,
-          debugLogger: { isEnabled: false, add() {} },
+          debugLogger: {
+            isEnabled: false,
+            add() {
+              throw new Error('Disabled debug logger received an entry');
+            },
+          },
         },
       );
       expect(matcher.from).toBe(appDirectory);
