@@ -12,12 +12,14 @@ describe('installed observation routing', () => {
     for (const canonical of [index, bootstrap, application]) {
       expect(canonical).not.toContain('authorizeInstalledAcceptance');
       expect(canonical).not.toContain('runInstalledObservation');
+      expect(canonical).not.toContain('runExtension');
+      expect(canonical).not.toContain('ApplicationRuntimeExtension');
       expect(canonical).not.toContain('--talking-quill-installed-readiness-pipe=');
     }
     expect(index).toBe("import { startMain } from './bootstrap';\n\nstartMain();\n");
     expect(entry).toContain('authorizeInstalledAcceptance({');
-    expect(entry).toMatch(/runInstalledObservation\(\s*context\.helper/u);
-    expect(entry).toContain('stopAfterExtension: true');
+    expect(entry).toContain('installedObservation: {');
+    expect(entry).not.toContain('extension:');
     expect(observation).not.toContain('new BrowserWindow');
     expect(observation).toContain('context.showValidationWidget()');
     expect(observation).toContain("failureStage = 'user-data-root'");

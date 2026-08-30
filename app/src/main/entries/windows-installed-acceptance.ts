@@ -9,9 +9,9 @@ import {
   consumeInstalledAcceptanceNonce,
   hasInstalledAcceptanceArguments,
 } from '../acceptance/authorization';
-import { runInstalledObservation } from '../acceptance/installed-observation';
+import type { InstalledObservationRequest } from '../acceptance/installed-observation';
 import { isStrictPathChild } from '../app/runtime-path-policy';
-import { startMain } from '../bootstrap';
+import { startMain, type MainBootstrapOptions } from '../bootstrap';
 
 if (
   !app.isPackaged ||
@@ -52,41 +52,21 @@ if (authorization.lifecycleUserData !== null) {
   lifecycleProfile = profile;
 }
 
-startMain({
+const startInstalledAcceptance = startMain as (
+  options: MainBootstrapOptions & { readonly installedObservation: InstalledObservationRequest },
+) => void;
+startInstalledAcceptance({
   ...(lifecycleProfile === undefined ? {} : { userDataPath: lifecycleProfile }),
   hiddenStartupFailure: true,
-  stopAfterExtension: true,
-  application: {
-    extension: {
-      run: (context) =>
-        runInstalledObservation(
-          context.helper,
-          {
-            command: authorization.command,
-            heartbeatDurationMs: authorization.heartbeatDurationMs,
-            pipeName: authorization.readinessPipe,
-            launchCorrelation: authorization.launchCorrelation,
-            physicalObservation: authorization.physicalObservation,
-            automationValidation: authorization.automationValidation,
-            automationArmedPipe: authorization.automationArmedPipe,
-            automationCase: authorization.automationCase,
-            expectedUserDataRoot: lifecycleProfile ?? null,
-          },
-          {
-            profiles: context.profiles,
-            persistentWindowRolesReady: context.persistentWindowRolesReady,
-            userDataRoot: context.userDataRoot,
-            showValidationWidget: context.showWidget,
-            hideValidationWidget: context.hideWidget,
-            windowsLoginStart: context.windowsLoginStart,
-            mainWindowVisible: context.mainWindowVisible,
-            waitForIgnoredLoginStart: context.waitForSecondaryLoginStart,
-            probeDiagnostics: async () => {
-              const result = await context.verifyDiagnosticWriteContainment();
-              return { enabled: result.enabled, injectedFailureContained: result.contained };
-            },
-          },
-        ),
-    },
+  installedObservation: {
+    command: authorization.command,
+    heartbeatDurationMs: authorization.heartbeatDurationMs,
+    pipeName: authorization.readinessPipe,
+    launchCorrelation: authorization.launchCorrelation,
+    physicalObservation: authorization.physicalObservation,
+    automationValidation: authorization.automationValidation,
+    automationArmedPipe: authorization.automationArmedPipe,
+    automationCase: authorization.automationCase,
+    expectedUserDataRoot: lifecycleProfile ?? null,
   },
 });

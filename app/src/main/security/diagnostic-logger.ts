@@ -367,15 +367,6 @@ export class DiagnosticLogger {
     return this.#enabled;
   }
 
-  async verifyWriteFailureContainment(): Promise<boolean> {
-    try {
-      await this.#enqueue(() => Promise.reject(new Error('injected-write-failure')));
-      return false;
-    } catch {
-      return true;
-    }
-  }
-
   async initialize(): Promise<void> {
     if (this.#initialized || this.#disposed) return;
     const generation = ++this.#initializationGeneration;

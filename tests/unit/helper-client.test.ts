@@ -10,7 +10,6 @@ import {
 } from '../../app/src/main/helper/helper-client';
 import { encodeHelperFrame, HelperFrameDecoder } from '../../app/src/main/helper/framing';
 import {
-  HelperFrontAppSchema,
   type ActivationBinding,
   type HelperNotification,
   type HelperRuntimeObservability,
@@ -583,29 +582,6 @@ describe('supervised native HelperClient', () => {
 
     await client.stop();
     expect(client.readiness).toMatchObject({ status: 'stopped', reason: 'shutdown' });
-  });
-
-  it('validates an extension response with its entry-owned schema', async () => {
-    const controlled = createControlledClient({ platform: 'win32' });
-    await controlled.client.start();
-    const pending = controlled.client.requestExtension(
-      'extension.status',
-      HelperFrontAppSchema,
-      3_000,
-    );
-    await waitFor(() =>
-      controlled.requests.some((request) => request.method === 'extension.status'),
-    );
-    const request = controlled.requests.find(
-      (candidate) => candidate.method === 'extension.status',
-    );
-    expect(request?.params).toEqual({});
-    controlled.emitResult(request?.id ?? 0, {
-      processName: 'fixture-app',
-      windowTitle: 'Fixture target',
-      windowBounds: null,
-    });
-    await expect(pending).resolves.toMatchObject({ processName: 'fixture-app' });
   });
 
   it.each([

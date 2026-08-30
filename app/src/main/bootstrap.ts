@@ -18,7 +18,6 @@ export interface MainBootstrapOptions {
   readonly userDataPath?: string;
   readonly isolatedInstance?: boolean;
   readonly hiddenStartupFailure?: boolean;
-  readonly stopAfterExtension?: boolean;
   readonly application?: Omit<TalkingQuillApplicationOptions, 'windowsLoginStart'>;
 }
 
@@ -96,10 +95,7 @@ export function startMain(options: MainBootstrapOptions = {}): void {
       );
       // Login registration may race an already running instance. A valid marker
       // remains background-only.
-      if (loginStart === 'login-start') {
-        application?.handleSecondaryLoginStart();
-        return;
-      }
+      if (loginStart === 'login-start') return;
       if (loginStart === 'invalid') return;
       if (commandLine.includes('--talking-quill-request-machine-quit')) {
         machineQuitRequested = true;
@@ -179,11 +175,6 @@ export function startMain(options: MainBootstrapOptions = {}): void {
         if (machineQuitRequested) {
           application.quit();
           return;
-        }
-        try {
-          await application.runExtension();
-        } finally {
-          if (options.stopAfterExtension === true) await application.stop();
         }
         if (restoreRequested !== null) application.handleApplicationActivation(restoreRequested);
       })

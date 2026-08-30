@@ -93,30 +93,8 @@ const LIFECYCLE_TIMEOUT_MS = 15_000;
 const RESET_ACKNOWLEDGEMENT_TIMEOUT_MS = 1_000;
 type ApplicationLifecycle = 'new' | 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
 
-export interface ApplicationRuntimeContext {
-  readonly helper: HelperClient;
-  readonly profiles: ReturnType<SettingsStore['get']>['dictationProfiles'];
-  readonly persistentWindowRolesReady: boolean;
-  readonly userDataRoot: string;
-  readonly showWidget: () => Promise<boolean>;
-  readonly hideWidget: () => void;
-  readonly windowsLoginStart: boolean;
-  readonly mainWindowVisible: boolean;
-  readonly waitForSecondaryLoginStart: (timeoutMs: number) => Promise<boolean>;
-  readonly verifyDiagnosticWriteContainment: () => Promise<{
-    readonly enabled: boolean;
-    readonly contained: boolean;
-  }>;
-}
-
-export interface ApplicationRuntimeExtension {
-  readonly run: (context: ApplicationRuntimeContext) => Promise<void>;
-  readonly onSecondaryLoginStart?: () => void;
-}
-
 export interface TalkingQuillApplicationOptions {
   readonly windowsLoginStart?: boolean;
-  readonly extension?: ApplicationRuntimeExtension;
   readonly packagedEgressProof?: boolean;
   readonly interactiveAppData?: string;
   readonly interactiveHome?: string;
@@ -126,7 +104,6 @@ export class TalkingQuillApplication {
   readonly #roles = new WindowRoleRegistry();
   readonly #startupAbort = new AbortController();
   readonly #windowsLoginStart: boolean;
-  readonly #extension: ApplicationRuntimeExtension | null;
   readonly #packagedEgressProof: boolean;
   readonly #interactiveAppData: string | undefined;
   readonly #interactiveHome: string | undefined;
@@ -164,12 +141,9 @@ export class TalkingQuillApplication {
   #updateInstallRequested = false;
   #showMainWhenReady = false;
   #applicationActivationSequence = 0;
-  #secondaryLoginStartObserved = false;
-  readonly #secondaryLoginWaiters = new Set<() => void>();
 
   constructor(options: TalkingQuillApplicationOptions = {}) {
     this.#windowsLoginStart = options.windowsLoginStart === true;
-    this.#extension = options.extension ?? null;
     this.#packagedEgressProof = options.packagedEgressProof === true;
     this.#interactiveAppData = options.interactiveAppData;
     this.#interactiveHome = options.interactiveHome;
@@ -181,60 +155,6 @@ export class TalkingQuillApplication {
     this.#lifecycle = 'starting';
     this.#startPromise = this.#startInternal();
     return this.#startPromise;
-  }
-
-  handleSecondaryLoginStart(): void {
-    this.#secondaryLoginStartObserved = true;
-    this.#extension?.onSecondaryLoginStart?.();
-    for (const waiter of this.#secondaryLoginWaiters) waiter();
-    this.#secondaryLoginWaiters.clear();
-  }
-
-  async #waitForSecondaryLoginStart(timeoutMs: number): Promise<boolean> {
-    if (this.#secondaryLoginStartObserved) return true;
-    return new Promise((resolveWait) => {
-      const complete = () => {
-        clearTimeout(timer);
-        this.#secondaryLoginWaiters.delete(complete);
-        resolveWait(true);
-      };
-      const timer = setTimeout(() => {
-        this.#secondaryLoginWaiters.delete(complete);
-        resolveWait(false);
-      }, timeoutMs);
-      this.#secondaryLoginWaiters.add(complete);
-    });
-  }
-
-  async runExtension(): Promise<void> {
-    if (this.#extension === null) return;
-    if (
-      this.#lifecycle !== 'running' ||
-      this.#helper === null ||
-      this.#settings === null ||
-      this.#windows === null
-    ) {
-      throw new Error('Application runtime extension is not ready');
-    }
-    const windows = this.#windows;
-    await this.#extension.run({
-      helper: this.#helper,
-      profiles: this.#settings.get().dictationProfiles,
-      persistentWindowRolesReady: windows.hasPersistentWindowRoles(),
-      userDataRoot: app.getPath('userData'),
-      showWidget: async () => {
-        if (!(await windows.createWidgetForActivation())) return false;
-        return windows.showWidget(this.#settings?.get().app.widgetSize ?? 'default');
-      },
-      hideWidget: () => windows.removeWidget(),
-      windowsLoginStart: this.#windowsLoginStart,
-      mainWindowVisible: windows.isMainVisible(),
-      waitForSecondaryLoginStart: (timeoutMs) => this.#waitForSecondaryLoginStart(timeoutMs),
-      verifyDiagnosticWriteContainment: async () => ({
-        enabled: this.#diagnostics?.enabled === true,
-        contained: (await this.#diagnostics?.verifyWriteFailureContainment()) === true,
-      }),
-    });
   }
 
   stop(): Promise<void> {

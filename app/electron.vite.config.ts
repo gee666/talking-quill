@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'electron-vite';
+import { windowsInstalledAcceptanceOverlay } from './windows-installed-acceptance-overlay';
 
 const rendererRoot = resolve(__dirname, 'src/renderer');
 const harnessEnvironment = [
@@ -50,6 +51,7 @@ export default defineConfig(({ mode }) => {
   }).trim();
   return {
     main: {
+      plugins: acceptanceBuild ? [windowsInstalledAcceptanceOverlay()] : [],
       define: {
         __TALKING_QUILL_SOURCE_REVISION__: JSON.stringify(sourceRevision),
         __TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL__: JSON.stringify(

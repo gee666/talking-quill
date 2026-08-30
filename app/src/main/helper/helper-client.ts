@@ -6,7 +6,7 @@ import {
 import { dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { StringDecoder } from 'node:string_decoder';
-import { z, type ZodType } from 'zod';
+import { z } from 'zod';
 import {
   HELPER_PROTOCOL_VERSION,
   HelperDiagnosticIdentitySchema,
@@ -511,19 +511,6 @@ export class HelperClient {
     });
     this.#healthRefresh = { session, operation };
     return operation;
-  }
-
-  requestExtension(method: string, resultSchema: ZodType, timeoutMs: number): Promise<unknown> {
-    const session = this.#rpcSession;
-    if (session === null || !this.#ordinaryRequestsAvailable() || !this.#desiredRunning) {
-      return Promise.reject(new HelperClientError('not-running', 'Native helper is terminating'));
-    }
-    return this.#rpcChannel.requestExtension(session, method, resultSchema, {
-      timeoutMs,
-      timeoutReason: 'request-timeout',
-      allowDraining: false,
-      supervision: false,
-    });
   }
 
   async getRuntimeObservability(): Promise<HelperRuntimeObservability> {

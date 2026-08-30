@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { isDeepStrictEqual } from 'node:util';
 import { resolve } from 'node:path';
-import { z } from 'zod';
+import { z, type ZodType } from 'zod';
 import { HelperOwnerObservabilitySchema } from '../../shared/helper/protocol';
 import type { DictationProfile } from '../../shared/schemas/dictation-profiles';
 import type { HelperClient } from '../helper';
@@ -80,9 +80,9 @@ export const PauseLeaseRenewalSchema = z
     }
   });
 
-async function endpointObservability(helper: HelperClient) {
+async function endpointObservability(helper: InstalledAcceptanceHelper) {
   return EndpointObservabilitySchema.parse(
-    await helper.requestExtension(
+    await helper.requestAcceptance(
       'acceptance.endpoint_observability',
       EndpointObservabilitySchema,
       3_000,
@@ -90,14 +90,18 @@ async function endpointObservability(helper: HelperClient) {
   );
 }
 
-async function pauseLeaseRenewal(helper: HelperClient) {
+async function pauseLeaseRenewal(helper: InstalledAcceptanceHelper) {
   return PauseLeaseRenewalSchema.parse(
-    await helper.requestExtension(
+    await helper.requestAcceptance(
       'acceptance.pause_lease_renewal',
       PauseLeaseRenewalSchema,
       10_000,
     ),
   );
+}
+
+export interface InstalledAcceptanceHelper extends HelperClient {
+  requestAcceptance(method: string, resultSchema: ZodType, timeoutMs: number): Promise<unknown>;
 }
 
 export interface InstalledObservationRequest {
@@ -128,7 +132,7 @@ export interface InstalledObservationContext {
 }
 
 export async function runInstalledObservation(
-  helper: HelperClient,
+  helper: InstalledAcceptanceHelper,
   request: InstalledObservationRequest,
   context: InstalledObservationContext,
 ): Promise<void> {
@@ -140,7 +144,7 @@ export async function runInstalledObservation(
 }
 
 async function runReadinessObservation(
-  helper: HelperClient,
+  helper: InstalledAcceptanceHelper,
   request: InstalledObservationRequest,
   context: InstalledObservationContext,
 ): Promise<void> {
@@ -401,7 +405,7 @@ async function runReadinessObservation(
 }
 
 async function runPhysicalObservation(
-  helper: HelperClient,
+  helper: InstalledAcceptanceHelper,
   request: InstalledObservationRequest,
   context: InstalledObservationContext,
 ): Promise<void> {

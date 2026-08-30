@@ -13,6 +13,11 @@ const FORBIDDEN_PRODUCTION_MARKERS = Object.freeze({
   acceptanceBuildEnvironment: 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD',
   packagedTestEnvironment: 'TALKING_QUILL_PACKAGED_TEST',
   packagedTestProfile: '--talking-quill-user-data=',
+  generalizedApplicationDispatch: 'runExtension',
+  generalizedHelperDispatch: 'requestExtension',
+  acceptanceApplicationDispatch: 'runInstalledAcceptance',
+  acceptanceHelperDispatch: 'requestAcceptance',
+  acceptanceDiagnosticFailure: 'acceptance-injected-write-failure',
   installedReadinessFailure: 'Installed readiness test failed',
   installedPhysicalFailure: 'Installed physical observation did not traverse every boundary',
 });

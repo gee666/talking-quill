@@ -3,6 +3,7 @@ import configFactory from '../../app/electron.vite.config';
 
 const createConfig = configFactory as unknown as (environment: { readonly mode: string }) => {
   readonly main?: {
+    readonly plugins?: readonly { readonly name?: string }[];
     readonly define?: Readonly<Record<string, string>>;
     readonly build?: { readonly rollupOptions?: { readonly input?: Record<string, string> } };
   };
@@ -31,12 +32,19 @@ describe('main entry build configuration', () => {
     expect(config.renderer?.plugins).toHaveLength(1);
     expect(config.preload?.build?.emptyOutDir).toBeUndefined();
     expect(config.main?.define).not.toHaveProperty('__TALKING_QUILL_ACCEPTANCE_BUILD__');
+    expect(config.main?.plugins).toEqual([]);
   });
 
   it('selects acceptance only through the explicit noncanonical package variant', () => {
     process.env.TALKING_QUILL_PACKAGE_VARIANT = 'installed-acceptance';
     process.env.TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL = 'public_key';
-    expect(entry('production')).toMatch(/entries[\\/]windows-installed-acceptance\.ts$/u);
+    const config = createConfig({ mode: 'production' });
+    expect(config.main?.build?.rollupOptions?.input?.index).toMatch(
+      /entries[\\/]windows-installed-acceptance\.ts$/u,
+    );
+    expect(config.main?.plugins?.map(({ name }) => name)).toEqual([
+      'talking-quill-windows-installed-acceptance-overlay',
+    ]);
   });
 
   it('selects the packaged-test entry only through its explicit test build variant', () => {
