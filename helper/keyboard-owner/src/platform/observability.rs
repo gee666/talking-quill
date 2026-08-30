@@ -150,7 +150,7 @@ impl TransactionObservability {
 
     #[cfg(windows)]
     pub(crate) fn record_pump_alive(&self) {
-        self.publish_native(|| self.pump_alive.store(1, Ordering::Relaxed));
+        self.publish_native(|| self.pump_alive.store(1, Ordering::Release));
     }
 
     #[cfg(windows)]
@@ -160,17 +160,17 @@ impl TransactionObservability {
 
     #[cfg(windows)]
     pub(crate) fn record_physical_callback(&self) {
-        self.publish_native(|| increment_atomic(&self.physical_callbacks));
+        self.publish_native(|| increment_atomic_published(&self.physical_callbacks));
     }
 
     #[cfg(windows)]
     pub(crate) fn record_physical_callback_filtered(&self) {
-        self.publish_native(|| increment_atomic(&self.physical_callbacks_filtered));
+        self.publish_native(|| increment_atomic_published(&self.physical_callbacks_filtered));
     }
 
     #[cfg(windows)]
     pub(crate) fn record_registered_candidate_callback(&self) {
-        self.publish_native(|| increment_atomic(&self.registered_candidate_callbacks));
+        self.publish_native(|| increment_atomic_published(&self.registered_candidate_callbacks));
     }
 
     #[cfg(windows)]
@@ -180,7 +180,7 @@ impl TransactionObservability {
 
     #[cfg(windows)]
     pub(crate) fn record_registered_release_callback(&self) {
-        self.publish_native(|| increment_atomic(&self.registered_release_callbacks));
+        self.publish_native(|| increment_atomic_published(&self.registered_release_callbacks));
     }
 
     #[cfg(windows)]
@@ -214,6 +214,7 @@ impl TransactionObservability {
                 continue;
             }
             let reason = |reason: CancelReason| load(&self.cancellation_reasons[reason.index()]);
+            let registered_input = self.load_registered_input_after_subsets(|| {}, || {});
             let (modifier_wait_duration_ms_total, modifier_wait_duration_ms_max) =
                 self.load_modifier_wait_durations_after_max(|| {});
             let snapshot = TransactionObservabilitySnapshot {
@@ -255,19 +256,7 @@ impl TransactionObservability {
                     partial: load(&self.dummy_partial),
                     failed: load(&self.dummy_failed),
                 },
-                registered_input: RegisteredInputCounters {
-                    hook_installed: load(&self.hook_installed),
-                    pump_alive: load(&self.pump_alive),
-                    hc_action_callbacks: load(&self.hc_action_callbacks),
-                    physical_callbacks: load(&self.physical_callbacks),
-                    physical_callbacks_filtered: load(&self.physical_callbacks_filtered),
-                    registered_candidate_callbacks: load(&self.registered_candidate_callbacks),
-                    registered_match_callbacks: load(&self.registered_match_callbacks),
-                    registered_release_callbacks: load(&self.registered_release_callbacks),
-                    callback_channel_accepted: load(&self.callback_channel_accepted),
-                    callback_channel_rejected: load(&self.callback_channel_rejected),
-                    adapter_dequeued: load(&self.adapter_dequeued),
-                },
+                registered_input,
                 native_paste: NativePasteCounters {
                     target_validation_fallbacks: load(&self.target_validation_fallbacks),
                     modifier_wait_duration_ms_total,
@@ -279,6 +268,43 @@ impl TransactionObservability {
             if self.publication.load(Ordering::Acquire) == before {
                 return snapshot;
             }
+        }
+    }
+
+    fn load_registered_input_after_subsets(
+        &self,
+        after_leaf_subsets: impl FnOnce(),
+        after_physical_subset: impl FnOnce(),
+    ) -> RegisteredInputCounters {
+        // These are the call-order subset relations in this metric group:
+        // pump <= hook, filtered <= physical <= HC_ACTION, candidate <=
+        // physical, and release <= match. Shared-prefix matching can produce
+        // more than one match per candidate. Channel outcomes can occur for
+        // both match and release notifications, and adapter dequeue runs on a
+        // different thread, so those counters are not subset pairs.
+        let pump_alive = load_acquire(&self.pump_alive);
+        let physical_callbacks_filtered = load_acquire(&self.physical_callbacks_filtered);
+        let registered_candidate_callbacks = load_acquire(&self.registered_candidate_callbacks);
+        let registered_release_callbacks = load_acquire(&self.registered_release_callbacks);
+        after_leaf_subsets();
+
+        // Physical is itself a published subset of HC_ACTION and the base for
+        // filtered and candidate. Load it after both deeper subsets.
+        let physical_callbacks = load_acquire(&self.physical_callbacks);
+        after_physical_subset();
+
+        RegisteredInputCounters {
+            hook_installed: load(&self.hook_installed),
+            pump_alive,
+            hc_action_callbacks: load(&self.hc_action_callbacks),
+            physical_callbacks,
+            physical_callbacks_filtered,
+            registered_candidate_callbacks,
+            registered_match_callbacks: load(&self.registered_match_callbacks),
+            registered_release_callbacks,
+            callback_channel_accepted: load(&self.callback_channel_accepted),
+            callback_channel_rejected: load(&self.callback_channel_rejected),
+            adapter_dequeued: load(&self.adapter_dequeued),
         }
     }
 
@@ -311,14 +337,28 @@ fn increment_atomic(counter: &AtomicU64) {
     add_atomic(counter, 1);
 }
 
+fn increment_atomic_published(counter: &AtomicU64) {
+    add_atomic_with_order(counter, 1, Ordering::AcqRel);
+}
+
 fn add_atomic(counter: &AtomicU64, increment: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    add_atomic_with_order(counter, increment, Ordering::Relaxed);
+}
+
+fn add_atomic_with_order(counter: &AtomicU64, increment: u64, order: Ordering) {
+    let _ = counter.fetch_update(order, Ordering::Relaxed, |value| {
         Some(
             value
                 .saturating_add(increment)
                 .min(MAX_OBSERVABILITY_COUNTER),
         )
     });
+}
+
+fn load_acquire(counter: &AtomicU64) -> u64 {
+    counter
+        .load(Ordering::Acquire)
+        .min(MAX_OBSERVABILITY_COUNTER)
 }
 
 fn load(counter: &AtomicU64) -> u64 {
@@ -541,6 +581,243 @@ mod tests {
         thread.join().unwrap();
     }
 
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    enum RegisteredSubsetStage {
+        Leaf,
+        Physical,
+    }
+
+    #[cfg(windows)]
+    fn forced_registered_subset_snapshot(
+        before_subset: fn(&TransactionObservability),
+        publish_subset: fn(&TransactionObservability),
+        stage: RegisteredSubsetStage,
+    ) -> (RegisteredInputCounters, RegisteredInputCounters) {
+        let observability = Arc::new(TransactionObservability::new());
+        let writer = Arc::clone(&observability);
+        let base_recorded = Arc::new(std::sync::Barrier::new(2));
+        let publish = Arc::new(std::sync::Barrier::new(2));
+        let subset_recorded = Arc::new(std::sync::Barrier::new(2));
+        let writer_base_recorded = Arc::clone(&base_recorded);
+        let writer_publish = Arc::clone(&publish);
+        let writer_subset_recorded = Arc::clone(&subset_recorded);
+        let thread = std::thread::spawn(move || {
+            before_subset(&writer);
+            writer_base_recorded.wait();
+            writer_publish.wait();
+            publish_subset(&writer);
+            writer_subset_recorded.wait();
+        });
+        let interleave = || {
+            base_recorded.wait();
+            publish.wait();
+            subset_recorded.wait();
+        };
+        let forced = match stage {
+            RegisteredSubsetStage::Leaf => {
+                observability.load_registered_input_after_subsets(interleave, || {})
+            }
+            RegisteredSubsetStage::Physical => {
+                observability.load_registered_input_after_subsets(|| {}, interleave)
+            }
+        };
+        thread.join().unwrap();
+        (forced, observability.snapshot().registered_input)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pump_snapshot_reads_subset_before_hook_installation_base() {
+        let (forced, current) = forced_registered_subset_snapshot(
+            TransactionObservability::record_hook_installed,
+            TransactionObservability::record_pump_alive,
+            RegisteredSubsetStage::Leaf,
+        );
+        assert_eq!((forced.hook_installed, forced.pump_alive), (1, 0));
+        assert_eq!((current.hook_installed, current.pump_alive), (1, 1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_snapshot_reads_subset_before_hc_action_base() {
+        let (forced, current) = forced_registered_subset_snapshot(
+            TransactionObservability::record_hc_action_callback,
+            TransactionObservability::record_physical_callback,
+            RegisteredSubsetStage::Physical,
+        );
+        assert_eq!(
+            (forced.hc_action_callbacks, forced.physical_callbacks),
+            (1, 0)
+        );
+        assert_eq!(
+            (current.hc_action_callbacks, current.physical_callbacks),
+            (1, 1)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filtered_snapshot_reads_subset_before_physical_base() {
+        fn record_physical_base(observability: &TransactionObservability) {
+            observability.record_hc_action_callback();
+            observability.record_physical_callback();
+        }
+
+        let (forced, current) = forced_registered_subset_snapshot(
+            record_physical_base,
+            TransactionObservability::record_physical_callback_filtered,
+            RegisteredSubsetStage::Leaf,
+        );
+        assert_eq!(
+            (
+                forced.physical_callbacks,
+                forced.physical_callbacks_filtered,
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            (
+                current.physical_callbacks,
+                current.physical_callbacks_filtered,
+            ),
+            (1, 1)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_snapshot_reads_subset_before_physical_base() {
+        fn record_physical_base(observability: &TransactionObservability) {
+            observability.record_hc_action_callback();
+            observability.record_physical_callback();
+        }
+
+        let (forced, current) = forced_registered_subset_snapshot(
+            record_physical_base,
+            TransactionObservability::record_registered_candidate_callback,
+            RegisteredSubsetStage::Leaf,
+        );
+        assert_eq!(
+            (
+                forced.physical_callbacks,
+                forced.registered_candidate_callbacks,
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            (
+                current.physical_callbacks,
+                current.registered_candidate_callbacks,
+            ),
+            (1, 1)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn release_snapshot_reads_subset_before_match_base() {
+        let (forced, current) = forced_registered_subset_snapshot(
+            TransactionObservability::record_registered_match_callback,
+            TransactionObservability::record_registered_release_callback,
+            RegisteredSubsetStage::Leaf,
+        );
+        assert_eq!(
+            (
+                forced.registered_match_callbacks,
+                forced.registered_release_callbacks,
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            (
+                current.registered_match_callbacks,
+                current.registered_release_callbacks,
+            ),
+            (1, 1)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_registered_subset_reads_preserve_all_call_order_invariants() {
+        const WRITERS: usize = 4;
+        const ITERATIONS: u64 = 2_000;
+
+        let observability = Arc::new(TransactionObservability::new());
+        observability.record_hook_installed();
+        observability.record_pump_alive();
+        let midpoint = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let resume = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let leaf_updates_finished = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let physical_updates_start = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let physical_updates_finished = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let threads = (0..WRITERS)
+            .map(|_| {
+                let writer = Arc::clone(&observability);
+                let midpoint = Arc::clone(&midpoint);
+                let resume = Arc::clone(&resume);
+                let leaf_updates_finished = Arc::clone(&leaf_updates_finished);
+                let physical_updates_start = Arc::clone(&physical_updates_start);
+                let physical_updates_finished = Arc::clone(&physical_updates_finished);
+                std::thread::spawn(move || {
+                    for iteration in 1..=ITERATIONS {
+                        writer.record_hc_action_callback();
+                        writer.record_physical_callback();
+                        writer.record_physical_callback_filtered();
+                        writer.record_registered_candidate_callback();
+                        writer.record_registered_match_callback();
+                        writer.record_registered_release_callback();
+                        match iteration {
+                            value if value == ITERATIONS / 2 => {
+                                midpoint.wait();
+                                resume.wait();
+                            }
+                            value if value == ITERATIONS / 2 + 1 => {
+                                leaf_updates_finished.wait();
+                                physical_updates_start.wait();
+                            }
+                            value if value == ITERATIONS / 2 + 2 => {
+                                physical_updates_finished.wait();
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        midpoint.wait();
+        let guaranteed_concurrent_sample = observability.load_registered_input_after_subsets(
+            || {
+                resume.wait();
+                leaf_updates_finished.wait();
+            },
+            || {
+                physical_updates_start.wait();
+                physical_updates_finished.wait();
+            },
+        );
+        assert_registered_subset_invariants(guaranteed_concurrent_sample);
+        assert!(guaranteed_concurrent_sample.physical_callbacks > 0);
+        while threads.iter().any(|thread| !thread.is_finished()) {
+            assert_registered_subset_invariants(observability.snapshot().registered_input);
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_registered_subset_invariants(observability.snapshot().registered_input);
+    }
+
+    #[cfg(windows)]
+    fn assert_registered_subset_invariants(snapshot: RegisteredInputCounters) {
+        assert!(snapshot.pump_alive <= snapshot.hook_installed);
+        assert!(snapshot.physical_callbacks <= snapshot.hc_action_callbacks);
+        assert!(snapshot.physical_callbacks_filtered <= snapshot.physical_callbacks);
+        assert!(snapshot.registered_candidate_callbacks <= snapshot.physical_callbacks);
+        assert!(snapshot.registered_release_callbacks <= snapshot.registered_match_callbacks);
+    }
+
     #[test]
     fn native_paste_reasons_distinguish_timeout_from_other_modifier_conflicts() {
         let observability = TransactionObservability::new();
@@ -602,18 +879,30 @@ mod tests {
 
         let observability = Arc::new(TransactionObservability::new());
         let start = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
+        let midpoint = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
+        let resume = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
+        let concurrent_updates_finished = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
         let finish = Arc::new(std::sync::Barrier::new(WRITERS as usize + 1));
         let completed = Arc::new(AtomicU64::new(0));
         let threads = (0..WRITERS)
             .map(|writer_index| {
                 let writer = Arc::clone(&observability);
                 let start = Arc::clone(&start);
+                let midpoint = Arc::clone(&midpoint);
+                let resume = Arc::clone(&resume);
+                let concurrent_updates_finished = Arc::clone(&concurrent_updates_finished);
                 let finish = Arc::clone(&finish);
                 let completed = Arc::clone(&completed);
                 std::thread::spawn(move || {
                     start.wait();
                     for duration in 1..=WAITS_PER_WRITER {
                         writer.record_modifier_wait(Duration::from_millis(duration + writer_index));
+                        if duration == WAITS_PER_WRITER / 2 {
+                            midpoint.wait();
+                            resume.wait();
+                        } else if duration == WAITS_PER_WRITER / 2 + 1 {
+                            concurrent_updates_finished.wait();
+                        }
                     }
                     completed.fetch_add(1, Ordering::Release);
                     finish.wait();
@@ -621,6 +910,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         start.wait();
+        midpoint.wait();
+        let (concurrent_total, concurrent_maximum) = observability
+            .load_modifier_wait_durations_after_max(|| {
+                resume.wait();
+                concurrent_updates_finished.wait();
+            });
+        assert!(concurrent_maximum <= concurrent_total);
+        assert!(concurrent_total > 0);
 
         while completed.load(Ordering::Acquire) != WRITERS {
             let snapshot = observability.snapshot().native_paste;
