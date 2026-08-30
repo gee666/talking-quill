@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 export interface ChildProcessExitAdapter {
   readonly pid: number | undefined;
+  readonly forceTreeFirstOnTimeout: boolean;
   waitForExit(timeoutMs: number): Promise<boolean>;
   waitForTreeExit(timeoutMs: number): Promise<boolean>;
   requestKill(): boolean;
@@ -47,6 +48,11 @@ export async function waitForChildExit(
   timeouts: ChildProcessExitTimeouts = defaultTimeouts,
 ): Promise<void> {
   if (await adapter.waitForExit(timeouts.initialMs)) return;
+
+  if (adapter.forceTreeFirstOnTimeout) {
+    await forceFirstAndConfirmExit(adapter, label, timeouts);
+    return;
+  }
 
   let killRequested = false;
   let normalKillFailure: unknown;
@@ -96,6 +102,35 @@ export async function waitForChildExit(
   );
 }
 
+async function forceFirstAndConfirmExit(
+  adapter: ChildProcessExitAdapter,
+  label: string,
+  timeouts: ChildProcessExitTimeouts,
+): Promise<never> {
+  let forceFailure: unknown;
+  try {
+    await adapter.forceKillTree();
+  } catch (error: unknown) {
+    forceFailure = error;
+  }
+  const [parentExited, treeExited] = await Promise.all([
+    adapter.waitForExit(timeouts.forcedMs),
+    adapter.waitForTreeExit(timeouts.forcedMs),
+  ]);
+  if (forceFailure === undefined && parentExited && treeExited) {
+    throw new Error(
+      `${label} did not exit within ${String(timeouts.initialMs)} ms; Windows process tree required forced termination`,
+    );
+  }
+  const details = [
+    `pid=${String(adapter.pid ?? 'unavailable')}`,
+    `parentExited=${String(parentExited)}`,
+    `treeExited=${String(treeExited)}`,
+    ...(forceFailure === undefined ? [] : [`taskkillError=${formatError(forceFailure)}`]),
+  ].join(', ');
+  throw new Error(`${label} Windows process-tree teardown failed; ${details}`);
+}
+
 export function createChildProcessExitAdapter(
   child: ChildProcess,
   options: ChildProcessExitAdapterOptions = {},
@@ -124,6 +159,7 @@ export function createChildProcessExitAdapter(
 
   return {
     pid: child.pid,
+    forceTreeFirstOnTimeout: platform === 'win32',
     async waitForExit(timeoutMs) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const exited = await Promise.race([
@@ -166,7 +202,9 @@ async function forceKillTree(
   if (pid === undefined) throw new Error('Child process ID is unavailable');
   const platform = options.platform ?? process.platform;
   if (platform === 'win32') {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error('Parent exited before taskkill could retain its process-tree relationship');
+    }
     await (options.forceKillWindowsTree ?? forceKillWindowsTree)(pid);
     return;
   }

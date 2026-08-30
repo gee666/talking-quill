@@ -26,6 +26,7 @@ function processAdapter(
   exitResults: readonly boolean[],
   treeExitResults: readonly boolean[],
   forceFailure?: Error,
+  forceTreeFirstOnTimeout = false,
 ) {
   const remaining = [...exitResults];
   const remainingTree = [...treeExitResults];
@@ -37,6 +38,7 @@ function processAdapter(
   );
   const adapter: ChildProcessExitAdapter = {
     pid: 1234,
+    forceTreeFirstOnTimeout,
     waitForExit,
     waitForTreeExit,
     requestKill,
@@ -102,6 +104,20 @@ describe('source E2E child process teardown', () => {
     expect(forceKillWindowsTree).toHaveBeenCalledOnce();
     expect(forceKillWindowsTree).toHaveBeenCalledWith(4321);
     expect(killProcess).not.toHaveBeenCalled();
+  });
+
+  it('runs Windows taskkill before a parent can exit and strand descendants', async () => {
+    const process = processAdapter([false, true], [true], undefined, true);
+
+    await expect(waitForChildExit(process.adapter, 'second instance', timeouts)).rejects.toThrow(
+      'Windows process tree required forced termination',
+    );
+
+    expect(process.requestKill).not.toHaveBeenCalled();
+    expect(process.forceKillTree).toHaveBeenCalledOnce();
+    expect(process.forceKillTree.mock.invocationCallOrder[0]).toBeLessThan(
+      process.waitForExit.mock.invocationCallOrder[1] ?? Number.POSITIVE_INFINITY,
+    );
   });
 
   it('waits for confirmed exit after a graceful timeout kill', async () => {
