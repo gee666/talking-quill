@@ -14,6 +14,7 @@ const { getMakeNsisPath } = electronBuilderRequire(
 
 const installerInclude = resolve(repositoryRoot, 'build', 'installer.nsh');
 const projectDirectory = resolve(repositoryRoot, 'app');
+const makeNsisArguments = ['-WX', '-V2', '-NOCD'];
 const source = await readFile(installerInclude, 'utf8');
 
 if (source.includes('StrCpy $TEMP')) {
@@ -34,7 +35,7 @@ try {
     const outputPath = join(workDirectory, `${mode}-macro-check.exe`);
     await writeFile(scriptPath, macroCompileScript({ mode, outputPath }), 'utf8');
 
-    const result = spawnSync(makensis.path, ['-V2', '-NOCD', scriptPath], {
+    const result = spawnSync(makensis.path, [...makeNsisArguments, scriptPath], {
       cwd: appBuilderRoot,
       encoding: 'utf8',
       env: { ...process.env, ...(makensis.env ?? {}) },
@@ -67,8 +68,32 @@ ${uninstall ? '!define BUILD_UNINSTALLER\n' : ''}!include "${nsisPath(installerI
 
 Section
 ${uninstall ? `  WriteUninstaller "${nsisPath(join(dirname(outputPath), 'unused-uninstaller.exe'))}"\n` : ''}SectionEnd
-${uninstall ? 'Section "Uninstall"\nSectionEnd\n\nFunction un.onInit\n  !insertmacro customUnEarlyInit\nFunctionEnd' : 'Function .onInit\n  !insertmacro customEarlyInit\nFunctionEnd'}
+${uninstall ? uninstallerOuterContext() : installerOuterContext()}
 `;
+}
+
+function installerOuterContext() {
+  return `Function .onInit
+  !insertmacro customEarlyInit
+  !insertmacro customInit
+FunctionEnd
+
+Function .onUserAbort
+  Call TalkingQuillOnUserAbort
+FunctionEnd`;
+}
+
+function uninstallerOuterContext() {
+  return `UninstPage custom un.TalkingQuillDataPage un.TalkingQuillDataPageLeave
+UninstPage instfiles
+
+Section "Uninstall"
+SectionEnd
+
+Function un.onInit
+  !insertmacro customUnEarlyInit
+  !insertmacro customUnInit
+FunctionEnd`;
 }
 
 function nsisPath(path) {

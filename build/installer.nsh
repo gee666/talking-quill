@@ -1,11 +1,9 @@
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 !include "FileFunc.nsh"
-!include "StrFunc.nsh"
 !ifdef BUILD_UNINSTALLER
+!include "StrFunc.nsh"
 ${UnStrStr}
-!else
-${StrStr}
 !endif
 !define /ifndef INSTALL_REGISTRY_KEY "Software\${APP_GUID}"
 !define /ifndef UNINSTALL_REGISTRY_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
