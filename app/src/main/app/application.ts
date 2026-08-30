@@ -72,6 +72,8 @@ import { getTrustedCaptureDocument, secureSession } from '../security/session-po
 import {
   StartupCancelledError,
   StartupCleanupStack,
+  type AbsoluteShutdownWatchdog,
+  armAbsoluteShutdownWatchdog,
   type LifecycleProgress,
   type LifecycleStep,
   reportLifecycleDiagnostics,
@@ -132,12 +134,14 @@ export class TalkingQuillApplication {
   #startPromise: Promise<void> | null = null;
   #quitPromise: Promise<void> | null = null;
   #quitDeadline = 0;
+  #quitWatchdog: AbsoluteShutdownWatchdog | null = null;
   #settingsFlush: Promise<void> | null = null;
   #vaultFlush: Promise<void> | null = null;
   #shutdownProgress: LifecycleProgress | null = null;
   #lifecycle: ApplicationLifecycle = 'new';
   #quitAllowed = false;
   #shutdownComplete = false;
+  #processExitRequested = false;
   #resetRestartScheduled = false;
   #resetPending = false;
   #resetAcknowledgementToken: string | null = null;
@@ -824,12 +828,10 @@ export class TalkingQuillApplication {
   }
 
   #abortAfterFailedReset(restartWithoutReset: boolean): void {
-    // A timed-out producer may still be executing. Do not enter the ordinary shutdown sequence,
-    // which would close dependent stores beneath it; process termination is the cancellation edge.
-    this.#skipDependentShutdown = true;
-    this.#quitAllowed = true;
+    // A timed-out producer may still be executing. The shared quit deadline remains the final
+    // cancellation edge and prevents Chromium or an audio driver from holding the process open.
     if (restartWithoutReset) app.relaunch({ args: process.argv.slice(1) });
-    app.quit();
+    this.#requestQuit({ skipDependentShutdown: true });
   }
 
   #acknowledgeDataReset(token: string): void {
@@ -855,6 +857,11 @@ export class TalkingQuillApplication {
   }
 
   quit(): void {
+    this.#requestQuit();
+  }
+
+  #requestQuit(options: { readonly skipDependentShutdown?: boolean } = {}): void {
+    if (options.skipDependentShutdown === true) this.#skipDependentShutdown = true;
     if (this.#quitPromise !== null) return;
     this.#lifecycle = 'stopping';
     this.#quitDeadline = Date.now() + LIFECYCLE_TIMEOUT_MS;
@@ -870,7 +877,9 @@ export class TalkingQuillApplication {
     this.#vaultFlush = this.#vault?.flush() ?? Promise.resolve();
     void this.#settingsFlush.catch(() => undefined);
     void this.#vaultFlush.catch(() => undefined);
-    setTimeout(() => this.#forceQuitAtDeadline(), Math.max(1, this.#quitDeadline - Date.now()));
+    this.#quitWatchdog = armAbsoluteShutdownWatchdog(this.#quitDeadline, () =>
+      this.#forceQuitAtDeadline(),
+    );
     this.#quitPromise = this.#drainBeforeQuit();
   }
 
@@ -915,8 +924,7 @@ export class TalkingQuillApplication {
       // Startup cleanup is cancellation-aware, but an OS filesystem call can still stall. Never
       // let that hold the process open indefinitely or race asynchronous startup against teardown.
       this.#skipDependentShutdown = true;
-      this.shutdown();
-      app.exit(1);
+      this.#finishQuit(1);
       return;
     }
     const diagnostics = await runBoundedLifecycle(
@@ -944,8 +952,7 @@ export class TalkingQuillApplication {
     }
     // All application-owned producers and durable stores have settled. Do not hand control back
     // to Chromium's graceful audio teardown, which can wait forever in a native driver.
-    this.shutdown();
-    app.exit(diagnostics.some(({ outcome }) => outcome === 'timed-out') ? 1 : 0);
+    this.#finishQuit(diagnostics.some(({ outcome }) => outcome === 'timed-out') ? 1 : 0);
   }
 
   #observeShutdownProgress(progress: LifecycleProgress): void {
@@ -963,8 +970,18 @@ export class TalkingQuillApplication {
       step: this.#shutdownProgress?.step ?? 'startup-settlement',
       pendingIpc: this.#ipc?.pendingChannels().slice(0, 16) ?? [],
     });
+    this.#finishQuit(1);
+  }
+
+  #finishQuit(exitCode: number): void {
+    if (this.#processExitRequested) return;
+    this.#processExitRequested = true;
+    if (this.#quitWatchdog !== null) {
+      this.#quitWatchdog.cancel();
+      this.#quitWatchdog = null;
+    }
     this.shutdown();
-    app.exit(1);
+    app.exit(exitCode);
   }
 
   async #waitForStartupSettlement(): Promise<boolean> {

@@ -28,6 +28,7 @@ class FakeCaptureClient {
       preferred: string | null,
       captureId: string,
       includeSystemAudio?: boolean,
+      signal?: AbortSignal,
     ) => Promise<CaptureStarted>
   >((preferred, captureId, includeSystemAudio) =>
     Promise.resolve({
@@ -40,7 +41,9 @@ class FakeCaptureClient {
       channelCount: 1,
     }),
   );
-  readonly activate = vi.fn<(captureId: string) => Promise<void>>(() => Promise.resolve());
+  readonly activate = vi.fn<(captureId: string, signal?: AbortSignal) => Promise<void>>(() =>
+    Promise.resolve(),
+  );
   readonly rebindDefault = vi.fn((captureId: string, bindingGeneration: number) =>
     Promise.resolve({
       captureId,
@@ -48,7 +51,9 @@ class FakeCaptureClient {
       bindingGeneration: bindingGeneration + 1,
     }),
   );
-  readonly stop = vi.fn(() => Promise.resolve());
+  readonly stop = vi.fn<(captureId?: string, signal?: AbortSignal) => Promise<void>>(() =>
+    Promise.resolve(),
+  );
   readonly reset = vi.fn();
   readonly dispose = vi.fn();
   frameListener: ((frame: CaptureFrame) => void) | null = null;
@@ -518,6 +523,39 @@ describe('RecordingService ownership', () => {
       test.service.startTest(owner as unknown as Electron.WebContents),
     ).resolves.toMatchObject({ status: 'active' });
     expect(test.capture.start).toHaveBeenCalledTimes(2);
+    await test.service.shutdown();
+  });
+
+  it('propagates invocation cancellation into a pending test capture command', async () => {
+    const test = harness();
+    const owner = new FakeOwner();
+    const controller = new AbortController();
+    test.capture.start.mockImplementationOnce(
+      (_preferred, _captureId, _includeSystemAudio, signal) =>
+        new Promise<CaptureStarted>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new CaptureClientError('capture-unavailable')),
+            { once: true },
+          );
+        }),
+    );
+
+    const starting = test.service.startTest(
+      owner as unknown as Electron.WebContents,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(test.capture.start).toHaveBeenCalledOnce());
+    const signal = test.capture.start.mock.calls[0]?.[3];
+    expect(signal).toBe(controller.signal);
+
+    controller.abort();
+
+    await expect(starting).resolves.toMatchObject({
+      status: 'unavailable',
+      reason: 'capture-unavailable',
+    });
+    expect(test.capture.stop.mock.calls[0]?.[1]).toBe(controller.signal);
     await test.service.shutdown();
   });
 

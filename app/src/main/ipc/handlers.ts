@@ -271,14 +271,17 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       return { accepted: true };
     },
     'recording:get-devices': () => dependencies.recording.getDevices(),
-    'recording:start-test': async (_request, context) => {
-      const result = await dependencies.recording.startTest(
-        dependencies.windows.getByWebContentsId(context.webContentsId)?.webContents ?? null,
-      );
-      return result;
-    },
+    'recording:start-test': (_request, context) =>
+      runUntilInvocationDestroyed(context.onDestroyed, (signal) =>
+        dependencies.recording.startTest(
+          dependencies.windows.getByWebContentsId(context.webContentsId)?.webContents ?? null,
+          signal,
+        ),
+      ),
     'recording:stop-test': (_request, context) =>
-      dependencies.recording.stopTest(context.webContentsId),
+      runUntilInvocationDestroyed(context.onDestroyed, (signal) =>
+        dependencies.recording.stopTest(context.webContentsId, signal),
+      ),
     'recording:open-microphone-settings': async () => {
       await dependencies.recording.openMicrophoneSettings();
       return { accepted: true };
@@ -313,6 +316,19 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       return dependencies.vocabularyFiles.exportFile(owner);
     },
   };
+}
+
+async function runUntilInvocationDestroyed<Result>(
+  onDestroyed: (listener: () => void) => () => void,
+  operation: (signal: AbortSignal) => Promise<Result>,
+): Promise<Result> {
+  const controller = new AbortController();
+  const removeDestroyedListener = onDestroyed(() => controller.abort());
+  try {
+    return await operation(controller.signal);
+  } finally {
+    removeDestroyedListener();
+  }
 }
 
 async function updateSettings(

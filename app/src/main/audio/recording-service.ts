@@ -379,8 +379,12 @@ export class RecordingService {
     };
   }
 
-  async startTest(ownerWebContents: WebContents | null): Promise<MicrophoneTestState> {
+  async startTest(
+    ownerWebContents: WebContents | null,
+    signal?: AbortSignal,
+  ): Promise<MicrophoneTestState> {
     if (
+      signal?.aborted === true ||
       this.#pendingDictationGeneration !== null ||
       this.#activeCaptureKind === 'dictation' ||
       this.#dictation !== null
@@ -392,9 +396,15 @@ export class RecordingService {
       };
     }
     const operationGeneration = ++this.#operationGeneration;
-    const previousStop = this.#stopActive();
+    const previousStop = this.#stopActive(signal);
     await this.#enqueue(async () => {
-      if (this.#disposed || operationGeneration !== this.#operationGeneration) return;
+      if (
+        this.#disposed ||
+        signal?.aborted === true ||
+        operationGeneration !== this.#operationGeneration
+      ) {
+        return;
+      }
       const previousStopped = await previousStop;
       if (!previousStopped || operationGeneration !== this.#operationGeneration) return;
       const captureWebContents = this.#captureWebContents;
@@ -433,7 +443,9 @@ export class RecordingService {
         preferredMicrophoneId === null ? 1 : 2,
       );
       try {
-        const started = await this.#capture.start(preferredMicrophoneId, captureId);
+        const started = await (signal === undefined
+          ? this.#capture.start(preferredMicrophoneId, captureId)
+          : this.#capture.start(preferredMicrophoneId, captureId, false, signal));
         if (
           operationGeneration !== this.#operationGeneration ||
           !this.#hasOwner(ownerWebContents.id)
@@ -461,6 +473,7 @@ export class RecordingService {
           captureWebContents.id,
           captureId,
           operationGeneration,
+          signal,
         );
         if (!activated || !this.#hasOwner(ownerWebContents.id)) {
           await this.#stopActive();
@@ -481,7 +494,7 @@ export class RecordingService {
         });
       } catch (error: unknown) {
         this.#invalidateEvidenceForStartupFailure(error);
-        const safelyStopped = await this.#stopActive();
+        const safelyStopped = await this.#stopActive(signal);
         if (safelyStopped && operationGeneration === this.#operationGeneration) {
           this.#setFailureState(error, captureId);
         }
@@ -640,7 +653,7 @@ export class RecordingService {
     await this.#stopActive();
   }
 
-  async stopTest(ownerWebContentsId?: number): Promise<MicrophoneTestState> {
+  async stopTest(ownerWebContentsId?: number, signal?: AbortSignal): Promise<MicrophoneTestState> {
     if (
       this.#pendingDictationGeneration !== null ||
       this.#activeCaptureKind === 'dictation' ||
@@ -656,7 +669,7 @@ export class RecordingService {
       return this.getState();
     }
     const operationGeneration = ++this.#operationGeneration;
-    const safelyStopped = await this.#stopActive();
+    const safelyStopped = await this.#stopActive(signal);
     if (safelyStopped && operationGeneration === this.#operationGeneration) {
       this.#setState({ status: 'idle', permission: this.#permission.getStatus() });
     }
@@ -700,9 +713,11 @@ export class RecordingService {
     webContentsId: number,
     captureId: string,
     operationGeneration: number,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     this.#permission.seal(captureId);
-    await this.#capture.activate(captureId);
+    if (signal === undefined) await this.#capture.activate(captureId);
+    else await this.#capture.activate(captureId, signal);
     if (
       this.#disposed ||
       operationGeneration !== this.#operationGeneration ||
@@ -978,7 +993,7 @@ export class RecordingService {
     return result;
   }
 
-  #stopActive(): Promise<boolean> {
+  #stopActive(signal?: AbortSignal): Promise<boolean> {
     const inFlight = this.#stopInFlight;
     if (inFlight !== null) return inFlight.promise;
     const captureId = this.#activeCaptureId;
@@ -999,7 +1014,7 @@ export class RecordingService {
     this.#permission.release(captureId);
     this.#systemAudio?.release(captureId);
 
-    const promise = this.#stopCapture(captureId);
+    const promise = this.#stopCapture(captureId, signal);
     const stop = { promise };
     this.#stopInFlight = stop;
     const clearStop = () => {
@@ -1010,15 +1025,17 @@ export class RecordingService {
     return promise;
   }
 
-  async #stopCapture(captureId: string): Promise<boolean> {
+  async #stopCapture(captureId: string, signal?: AbortSignal): Promise<boolean> {
     let resolveTimeout!: (value: false) => void;
     const timeout = new Promise<false>((resolve) => {
       resolveTimeout = resolve;
     });
     const timer = setTimeout(() => resolveTimeout(false), CAPTURE_CANCEL_TIMEOUT_MS);
     timer.unref();
+    const stopping =
+      signal === undefined ? this.#capture.stop(captureId) : this.#capture.stop(captureId, signal);
     const stopped = await Promise.race([
-      this.#capture.stop(captureId).then(
+      stopping.then(
         () => true as const,
         () => false as const,
       ),

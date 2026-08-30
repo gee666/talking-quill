@@ -27,6 +27,30 @@ export interface SynchronousLifecycleStep {
 
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 
+export interface AbsoluteShutdownWatchdog {
+  cancel(): void;
+}
+
+export function armAbsoluteShutdownWatchdog(
+  deadline: number,
+  onDeadline: () => void,
+): AbsoluteShutdownWatchdog {
+  let timer: ReturnType<typeof setTimeout> | null = setTimeout(
+    () => {
+      timer = null;
+      onDeadline();
+    },
+    Math.max(1, deadline - Date.now()),
+  );
+  return {
+    cancel() {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
 export class StartupCancelledError extends Error {
   constructor() {
     super('Application startup was cancelled');

@@ -61,6 +61,7 @@ interface PendingRequest {
   readonly resolve: (message: CapturePortMessage) => void;
   readonly reject: (error: CaptureClientError) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  readonly removeAbortListener: () => void;
 }
 
 export interface CaptureMessageChannel {
@@ -133,17 +134,21 @@ export class CaptureWindowClient {
     preferredMicrophoneId: string | null,
     captureId: string = randomUUID(),
     includeSystemAudio = false,
+    signal?: AbortSignal,
   ): Promise<CaptureStarted> {
-    if (this.#activeCaptureId !== null) await this.stop(this.#activeCaptureId);
+    if (this.#activeCaptureId !== null) await this.stop(this.#activeCaptureId, signal);
     this.#activeCaptureId = captureId;
     this.#lastSequence = -1;
-    const response = await this.#request({
-      type: 'stream:start',
-      requestId: randomUUID(),
-      captureId,
-      preferredMicrophoneId,
-      includeSystemAudio,
-    }).catch((error: unknown) => {
+    const response = await this.#request(
+      {
+        type: 'stream:start',
+        requestId: randomUUID(),
+        captureId,
+        preferredMicrophoneId,
+        includeSystemAudio,
+      },
+      signal,
+    ).catch((error: unknown) => {
       if (this.#activeCaptureId === captureId) this.#activeCaptureId = null;
       throw error;
     });
@@ -171,13 +176,16 @@ export class CaptureWindowClient {
     };
   }
 
-  async activate(captureId: string): Promise<void> {
+  async activate(captureId: string, signal?: AbortSignal): Promise<void> {
     if (this.#activeCaptureId !== captureId) throw new CaptureClientError('capture-failed');
-    const response = await this.#request({
-      type: 'stream:activate',
-      requestId: randomUUID(),
-      captureId,
-    });
+    const response = await this.#request(
+      {
+        type: 'stream:activate',
+        requestId: randomUUID(),
+        captureId,
+      },
+      signal,
+    );
     if (response.type !== 'stream:activated' || response.captureId !== captureId) {
       throw new CaptureClientError('capture-failed');
     }
@@ -207,13 +215,16 @@ export class CaptureWindowClient {
     };
   }
 
-  async stop(captureId: string = this.#activeCaptureId ?? ''): Promise<void> {
+  async stop(captureId: string = this.#activeCaptureId ?? '', signal?: AbortSignal): Promise<void> {
     if (captureId.length === 0) return;
-    const response = await this.#request({
-      type: 'stream:stop',
-      requestId: randomUUID(),
-      captureId,
-    });
+    const response = await this.#request(
+      {
+        type: 'stream:stop',
+        requestId: randomUUID(),
+        captureId,
+      },
+      signal,
+    );
     if (response.type !== 'stream:stopped' || response.captureId !== captureId) {
       throw new CaptureClientError('capture-failed');
     }
@@ -257,21 +268,40 @@ export class CaptureWindowClient {
     this.#stopListeners.clear();
   }
 
-  #request(command: CapturePortCommand): Promise<CapturePortMessage> {
+  #request(command: CapturePortCommand, signal?: AbortSignal): Promise<CapturePortMessage> {
     const port = this.#port;
-    if (port === null) return Promise.reject(new CaptureClientError('capture-unavailable'));
+    if (port === null || signal?.aborted === true) {
+      return Promise.reject(new CaptureClientError('capture-unavailable'));
+    }
     return new Promise((resolve, reject) => {
+      let removeAbortListener: () => void = () => undefined;
       const timer = setTimeout(() => {
         this.#pending.delete(command.requestId);
+        removeAbortListener();
         reject(new CaptureClientError('capture-unavailable'));
       }, CAPTURE_COMMAND_TIMEOUT_MS);
       timer.unref();
-      this.#pending.set(command.requestId, { resolve, reject, timer });
+      if (signal !== undefined) {
+        const abort = () => this.#closePort();
+        signal.addEventListener('abort', abort, { once: true });
+        removeAbortListener = () => signal.removeEventListener('abort', abort);
+      }
+      this.#pending.set(command.requestId, {
+        resolve,
+        reject,
+        timer,
+        removeAbortListener: () => removeAbortListener(),
+      });
+      if (signal?.aborted === true) {
+        this.#closePort();
+        return;
+      }
       try {
         port.postMessage(command);
       } catch {
         clearTimeout(timer);
         this.#pending.delete(command.requestId);
+        removeAbortListener();
         reject(new CaptureClientError('capture-unavailable'));
       }
     });
@@ -345,6 +375,7 @@ export class CaptureWindowClient {
     if (pending === undefined) return;
     this.#pending.delete(requestId);
     clearTimeout(pending.timer);
+    pending.removeAbortListener();
     if (message.type === 'request:error') {
       pending.reject(new CaptureClientError(message.code));
     } else {
@@ -359,6 +390,7 @@ export class CaptureWindowClient {
     this.#activeCaptureId = null;
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
+      pending.removeAbortListener();
       pending.reject(new CaptureClientError('capture-unavailable'));
     }
     this.#pending.clear();

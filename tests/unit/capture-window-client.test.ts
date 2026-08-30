@@ -81,6 +81,19 @@ describe('CaptureWindowClient', () => {
     await expect(activating).resolves.toBeUndefined();
   });
 
+  it('force-closes a pending capture command when its invocation is cancelled', async () => {
+    const test = harness();
+    const controller = new AbortController();
+    const captureId = randomUUID();
+    const starting = test.client.start(null, captureId, false, controller.signal);
+    expect(lastCommand(test.port1)).toMatchObject({ type: 'stream:start', captureId });
+
+    controller.abort();
+
+    await expect(starting).rejects.toBeInstanceOf(CaptureClientError);
+    expect(test.port1.close).toHaveBeenCalledOnce();
+  });
+
   it('correlates default rebinds and forwards only current binding invalidations', async () => {
     const test = harness();
     const captureId = randomUUID();
