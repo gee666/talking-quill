@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
@@ -21,6 +21,7 @@ const { getMakeNsisPath } = electronBuilderRequire(
 
 const installerInclude = resolve(repositoryRoot, 'build', 'installer.nsh');
 const makeNsisArguments = ['-WX', '-V2', '-NOCD'];
+let windowsJobSupervisor;
 const [source, bootstrapPayloadInclude] = await Promise.all([
   readFile(installerInclude, 'utf8'),
   checkProtectedBootstrapInclude(),
@@ -75,14 +76,26 @@ try {
     }
   }
   if (process.platform === 'win32') {
+    windowsJobSupervisor = await buildWindowsJobSupervisor(workDirectory);
+    await testWindowsJobSupervisor(workDirectory);
+    await testStaleCleanupRefusals(workDirectory);
     const startingResidue = await snapshotProtectedBootstrapResidue();
+    console.log(
+      `Protected-bootstrap pre-existing matching residue: ${String(startingResidue.names.length)}`,
+    );
     try {
-      await runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot);
-      await assertProtectedBootstrapResidueUnchanged(
-        startingResidue,
-        'compiled protected bootstrap runtime harness',
-      );
-      await runProtectedBootstrapIntegration(workDirectory, bootstrapPayload);
+      for (let cycle = 1; cycle <= 3; cycle++) {
+        await runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot);
+        await assertProtectedBootstrapResidueUnchanged(
+          startingResidue,
+          `compiled protected bootstrap runtime harness cycle ${String(cycle)}`,
+        );
+        await runProtectedBootstrapIntegration(workDirectory, bootstrapPayload);
+        await assertProtectedBootstrapResidueUnchanged(
+          startingResidue,
+          `complete protected bootstrap runtime harness cycle ${String(cycle)}`,
+        );
+      }
     } finally {
       await assertProtectedBootstrapResidueUnchanged(
         startingResidue,
@@ -92,6 +105,221 @@ try {
   }
 } finally {
   await rm(workDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+async function buildWindowsJobSupervisor(workDirectory) {
+  const compiler = windowsCSharpCompiler();
+  const supervisor = join(workDirectory, 'windows-job-object-supervisor.exe');
+  requireSuccess(
+    spawnSync(
+      compiler,
+      [
+        '/nologo',
+        `/out:${supervisor}`,
+        resolve(repositoryRoot, 'scripts', 'windows-job-object-supervisor.cs'),
+      ],
+      { encoding: 'utf8', timeout: 60_000, windowsHide: true },
+    ),
+    'Windows Job Object supervisor compilation',
+  );
+  return supervisor;
+}
+
+async function testWindowsJobSupervisor(workDirectory) {
+  const sourcePath = join(workDirectory, 'JobSupervisorFixture.cs');
+  const executable = join(workDirectory, 'job-supervisor-fixture.exe');
+  await writeFile(sourcePath, jobSupervisorFixtureSource(), 'utf8');
+  requireSuccess(
+    spawnSync(windowsCSharpCompiler(), ['/nologo', `/out:${executable}`, sourcePath], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      windowsHide: true,
+    }),
+    'Job Object adversarial fixture compilation',
+  );
+
+  for (const [mode, timeout, expected] of [
+    ['parent-exits', 10_000, 23],
+    ['timeout', 500, 124],
+  ]) {
+    const pidPath = join(workDirectory, `job-${mode}.pid`);
+    const result = spawnSupervisedWithArguments(executable, [mode, pidPath], process.env, timeout);
+    requireStatus(result, expected, `Job Object ${mode} descendant containment`);
+    const descendantPid = Number.parseInt((await readFile(pidPath, 'utf8')).trim(), 10);
+    if (!Number.isSafeInteger(descendantPid) || descendantPid < 1) {
+      throw new Error(`Job Object ${mode} fixture wrote an invalid descendant PID`);
+    }
+    const probe = spawnSync(
+      resolve(
+        process.env.WINDIR ?? String.raw`C:\Windows`,
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe',
+      ),
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `if (Get-Process -Id ${String(descendantPid)} -ErrorAction SilentlyContinue) { exit 1 }`,
+      ],
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+    );
+    requireSuccess(probe, `Job Object ${mode} descendant termination confirmation`);
+  }
+}
+
+async function testStaleCleanupRefusals(workDirectory) {
+  for (const [label, unknownContent, expectedStatus] of [
+    ['recent', false, 'recent'],
+    ['unknown-content', true, 'refused'],
+  ]) {
+    const runId = randomHarnessSuffix();
+    const path = createProtectedHarnessLeaf(runId, unknownContent, false);
+    try {
+      const result = spawnSupervisedWithArguments(nativePowerShellPath(), [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        resolve(repositoryRoot, 'scripts', 'cleanup-windows-protected-bootstrap-leaves.ps1'),
+        '-RunId',
+        runId,
+      ]);
+      requireSuccess(result, `stale cleanup ${label} refusal`);
+      if (!new RegExp(`\\b${expectedStatus}\\b`, 'u').test(result.stdout)) {
+        throw new Error(
+          `stale cleanup ${label} fixture was not refused as ${expectedStatus}: ${result.stdout}`,
+        );
+      }
+    } finally {
+      removeProtectedHarnessLeaf(path);
+    }
+  }
+
+  const liveRunId = randomHarnessSuffix();
+  const livePath = createProtectedHarnessLeaf(liveRunId, false, true);
+  const marker = join(workDirectory, 'cleanup-live-environment.ready');
+  const sleeper = startSupervisedEnvironmentSleeper(livePath, marker);
+  try {
+    try {
+      await waitForFile(marker, 10_000);
+      const result = spawnSupervisedWithArguments(nativePowerShellPath(), [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        resolve(repositoryRoot, 'scripts', 'cleanup-windows-protected-bootstrap-leaves.ps1'),
+        '-RunId',
+        liveRunId,
+      ]);
+      requireSuccess(result, 'stale cleanup live-environment refusal');
+      if (!/\blive\b/u.test(result.stdout)) {
+        throw new Error(`stale cleanup missed a live environment reference: ${result.stdout}`);
+      }
+    } finally {
+      if (sleeper.exitCode === null && sleeper.signalCode === null) {
+        sleeper.kill();
+        await new Promise((resolveExit) => sleeper.once('exit', resolveExit));
+      }
+    }
+    const removal = spawnSupervisedWithArguments(nativePowerShellPath(), [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      resolve(repositoryRoot, 'scripts', 'cleanup-windows-protected-bootstrap-leaves.ps1'),
+      '-Apply',
+      '-RunId',
+      liveRunId,
+    ]);
+    if (removal.status !== 0 || !/\bremoved\b/u.test(removal.stdout)) {
+      throw new Error(`stale cleanup did not remove its dead test leaf: ${removal.stdout}`);
+    }
+  } finally {
+    removeProtectedHarnessLeaf(livePath);
+  }
+}
+
+function startSupervisedEnvironmentSleeper(leaf, marker) {
+  const command = `[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}',[string]$PID);Start-Sleep -Seconds 300`;
+  const rawArguments = ['-NoProfile', '-NonInteractive', '-Command', command]
+    .map(quoteWindowsArgument)
+    .join(' ');
+  return spawn(
+    windowsJobSupervisor,
+    ['300000', nativePowerShellPath(), Buffer.from(rawArguments, 'utf8').toString('base64')],
+    {
+      env: { ...process.env, TQ_CLEANUP_LIVE_LEAF: leaf },
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  );
+}
+
+async function waitForFile(path, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      await readFile(path);
+      return;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  throw new Error(`Timed out waiting for fixture file: ${path}`);
+}
+
+function createProtectedHarnessLeaf(runId, unknownContent, old) {
+  const command = String.raw`$pd=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData).TrimEnd('\');$p=Join-Path $pd '.Talking Quill.Harness-${runId}';$a=New-Object Security.AccessControl.DirectorySecurity;$a.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')));$a.SetAccessRuleProtection($true,$false);foreach($s in @('S-1-5-18','S-1-5-32-544')){$i=New-Object Security.Principal.SecurityIdentifier($s);$a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($i,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))};[IO.Directory]::CreateDirectory($p,$a)|Out-Null;${unknownContent ? "[IO.File]::WriteAllText((Join-Path $p 'unknown.bin'),'x');" : ''}${old ? '$d=[DateTime]::UtcNow.AddDays(-2);[IO.Directory]::SetCreationTimeUtc($p,$d);[IO.Directory]::SetLastWriteTimeUtc($p,$d);' : ''}[Console]::Write($p)`;
+  const result = spawnSync(
+    nativePowerShellPath(),
+    ['-NoProfile', '-NonInteractive', '-Command', command],
+    {
+      encoding: 'utf8',
+      timeout: 30_000,
+      windowsHide: true,
+    },
+  );
+  requireSuccess(result, 'protected stale-cleanup fixture creation');
+  return result.stdout.trim();
+}
+
+function removeProtectedHarnessLeaf(path) {
+  const escaped = path.replaceAll("'", "''");
+  const command = `for($i=0;$i -lt 20 -and (Test-Path -LiteralPath '${escaped}');$i++){Remove-Item -LiteralPath '${escaped}' -Recurse -Force -ErrorAction SilentlyContinue;if(Test-Path -LiteralPath '${escaped}'){Start-Sleep -Milliseconds 250}};if(Test-Path -LiteralPath '${escaped}'){exit 1}`;
+  requireSuccess(
+    spawnSync(nativePowerShellPath(), ['-NoProfile', '-NonInteractive', '-Command', command], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      windowsHide: true,
+    }),
+    'protected stale-cleanup fixture removal',
+  );
+}
+
+function nativePowerShellPath() {
+  return resolve(
+    process.env.WINDIR ?? String.raw`C:\Windows`,
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+}
+
+function windowsCSharpCompiler() {
+  return resolve(
+    process.env.WINDIR ?? String.raw`C:\Windows`,
+    'Microsoft.NET',
+    'Framework64',
+    'v4.0.30319',
+    'csc.exe',
+  );
 }
 
 async function writeFixtureBootstrapInclude(workDirectory, expectedNsisRoot) {
@@ -144,11 +372,7 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
   const uninstallerWriter = join(workDirectory, 'uninstaller-macro-check.exe');
   const uninstaller = join(workDirectory, 'unused-uninstaller.exe');
   requireStatus(
-    spawnSync(uninstallerWriter, ['/S'], {
-      encoding: 'utf8',
-      timeout: 60_000,
-      windowsHide: true,
-    }),
+    spawnSupervisedWithArguments(uninstallerWriter, ['/S']),
     0,
     'compiled uninstaller fixture writer',
   );
@@ -205,7 +429,7 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
   const programData = nativeProgramDataPath();
   const reparseTarget = join(workDirectory, 'compiled-reparse-target');
   const reparseLeaf = join(programData, `.Talking Quill.Harness-${randomHarnessSuffix()}`);
-  await mkdir(reparseTarget);
+  await mkdir(reparseTarget, { recursive: true });
   try {
     await symlink(reparseTarget, reparseLeaf, 'junction');
     await requireCompiledTempRejection({
@@ -225,7 +449,10 @@ async function runCompiledNsisRuntimeHarness(workDirectory, uninstallerRoot) {
 async function requireCompiledNsisTailRejection({ uninstaller, workDirectory, uninstallerRoot }) {
   const unrelated = join(workDirectory, 'unrelated-uninstall-root');
   const reparseTarget = join(workDirectory, 'uninstaller-root-reparse-target');
-  await Promise.all([mkdir(unrelated), mkdir(reparseTarget)]);
+  await Promise.all([
+    mkdir(unrelated, { recursive: true }),
+    mkdir(reparseTarget, { recursive: true }),
+  ]);
   const rejected = [
     unrelated,
     `${uninstallerRoot}\\..\\unrelated-uninstall-root`,
@@ -339,14 +566,29 @@ function requireForwardedNsisParameters(evidence, publicArguments, label, uninst
   }
 }
 
-function spawnWithRawArguments(executable, rawArguments, environment) {
-  return spawnSync(executable, [rawArguments], {
-    encoding: 'utf8',
-    env: environment,
-    timeout: 60_000,
-    windowsHide: true,
-    windowsVerbatimArguments: true,
-  });
+function spawnWithRawArguments(executable, rawArguments, environment, timeout = 60_000) {
+  if (windowsJobSupervisor === undefined) {
+    throw new Error('Windows Job Object supervisor is unavailable');
+  }
+  return spawnSync(
+    windowsJobSupervisor,
+    [String(timeout), executable, Buffer.from(rawArguments, 'utf8').toString('base64')],
+    {
+      encoding: 'utf8',
+      env: environment,
+      timeout: timeout + 20_000,
+      windowsHide: true,
+    },
+  );
+}
+
+function spawnSupervisedWithArguments(executable, arguments_, environment = process.env, timeout) {
+  return spawnWithRawArguments(
+    executable,
+    arguments_.map(quoteWindowsArgument).join(' '),
+    environment,
+    timeout,
+  );
 }
 
 function quoteWindowsArgument(argument) {
@@ -437,16 +679,12 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     '/EXITCODE=37',
   ];
   const success = await runResidueCheckedCase('C# protected bootstrap success', () =>
-    spawnSync(executable, [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        TQ_BOOTSTRAP_TEST_COMMAND: command,
-        TQ_BOOTSTRAP_TEST_LOG: logPath,
-        TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
-      },
-      timeout: 60_000,
-      windowsHide: true,
+    spawnSupervisedWithArguments(executable, [...publicArguments, '/TQELEVATEDBOOTSTRAP=1'], {
+      ...process.env,
+      TQ_BOOTSTRAP_TEST_COMMAND: command,
+      TQ_BOOTSTRAP_TEST_LOG: logPath,
+      TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
+      TQ_BOOTSTRAP_FIXTURE_STAGE: '',
     }),
   );
   if (success.error || success.status !== 37) {
@@ -495,10 +733,25 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
     throw new Error(`protected bootstrap accepted malformed TEMP: ${String(malformed.status)}`);
   }
 
+  for (const [label, arguments_] of [
+    ['duplicate elevated marker', ['/TQELEVATEDBOOTSTRAP=1', '/TQELEVATEDBOOTSTRAP=1']],
+    [
+      'duplicate protected marker',
+      ['/TQELEVATEDBOOTSTRAP=1', '/TQPROTECTEDTEMP=C:\\one', '/TQPROTECTEDTEMP=C:\\two'],
+    ],
+  ]) {
+    const duplicate = await runResidueCheckedCase(`${label} rejection`, () =>
+      spawnBootstrapFixture(executable, command, powershell, arguments_, {}),
+    );
+    if (duplicate.status !== 78) {
+      throw new Error(`bootstrap fixture accepted ${label}: ${String(duplicate.status)}`);
+    }
+  }
+
   const programData = nativeProgramDataPath();
   const reparseTarget = join(fixtureDirectory, 'reparse-target');
   const reparseLeaf = join(programData, `.Talking Quill.Harness-${randomHarnessSuffix()}`);
-  await mkdir(reparseTarget);
+  await mkdir(reparseTarget, { recursive: true });
   try {
     await symlink(reparseTarget, reparseLeaf, 'junction');
     const reparse = await runResidueCheckedCase('reparse TEMP rejection', () =>
@@ -517,13 +770,7 @@ async function runProtectedBootstrapIntegration(workDirectory, payload) {
 
 function nativeProgramDataPath() {
   const result = spawnSync(
-    resolve(
-      process.env.WINDIR ?? String.raw`C:\Windows`,
-      'System32',
-      'WindowsPowerShell',
-      'v1.0',
-      'powershell.exe',
-    ),
+    nativePowerShellPath(),
     [
       '-NoProfile',
       '-NonInteractive',
@@ -566,38 +813,39 @@ async function runResidueCheckedCase(label, action) {
 async function snapshotProtectedBootstrapResidue() {
   const programData = nativeProgramDataPath();
   const names = (await readdir(programData)).filter((name) =>
-    /^\.Talking Quill\.(?:Installer|Harness)-[0-9a-f]{32}$/u.test(name),
+    /^\.Talking Quill\.(?:Installer|Harness|Cleanup)-[0-9a-f]{32}$/u.test(name),
   );
   return { programData, names: names.sort() };
 }
 
 async function assertProtectedBootstrapResidueUnchanged(starting, label) {
-  const ending = await snapshotProtectedBootstrapResidue();
-  if (
-    ending.programData.toLowerCase() !== starting.programData.toLowerCase() ||
-    JSON.stringify(ending.names) !== JSON.stringify(starting.names)
-  ) {
-    const before = new Set(starting.names);
-    const after = new Set(ending.names);
-    const added = ending.names.filter((name) => !before.has(name));
-    const removed = starting.names.filter((name) => !after.has(name));
-    throw new Error(
-      `${label} changed protected-bootstrap ProgramData residue: ${JSON.stringify({ added, removed })}`,
-    );
+  for (let observation = 1; observation <= 3; observation++) {
+    const ending = await snapshotProtectedBootstrapResidue();
+    if (
+      ending.programData.toLowerCase() !== starting.programData.toLowerCase() ||
+      JSON.stringify(ending.names) !== JSON.stringify(starting.names)
+    ) {
+      const before = new Set(starting.names);
+      const after = new Set(ending.names);
+      const added = ending.names.filter((name) => !before.has(name));
+      const removed = starting.names.filter((name) => !after.has(name));
+      throw new Error(
+        `${label} changed protected-bootstrap ProgramData residue on observation ${String(observation)}: ${JSON.stringify({ added, removed, preExistingCount: starting.names.length })}`,
+      );
+    }
+    if (observation !== 3) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    }
   }
 }
 
 function spawnBootstrapFixture(executable, command, powershell, arguments_, environment) {
-  return spawnSync(executable, arguments_, {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ...environment,
-      TQ_BOOTSTRAP_TEST_COMMAND: command,
-      TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
-    },
-    timeout: 60_000,
-    windowsHide: true,
+  return spawnSupervisedWithArguments(executable, arguments_, {
+    ...process.env,
+    ...environment,
+    TQ_BOOTSTRAP_TEST_COMMAND: command,
+    TQ_BOOTSTRAP_TEST_POWERSHELL: powershell,
+    TQ_BOOTSTRAP_FIXTURE_STAGE: '',
   });
 }
 
@@ -618,6 +866,38 @@ function requireStatus(result, expected, label) {
   }
 }
 
+function jobSupervisorFixtureSource() {
+  return String.raw`using System;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+
+internal static class JobSupervisorFixture
+{
+    private static int Main(string[] args)
+    {
+        if (args.Length == 2 && args[0] == "child")
+        {
+            File.WriteAllText(args[1], Process.GetCurrentProcess().Id.ToString());
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        if (args.Length != 2) return 90;
+        ProcessStartInfo start = new ProcessStartInfo();
+        start.FileName = Assembly.GetExecutingAssembly().Location;
+        start.Arguments = "child \"" + args[1].Replace("\"", "\\\"") + "\"";
+        start.UseShellExecute = false;
+        Process.Start(start);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!File.Exists(args[1]) && DateTime.UtcNow < deadline) Thread.Sleep(10);
+        if (!File.Exists(args[1])) return 91;
+        if (args[0] == "timeout") Thread.Sleep(Timeout.Infinite);
+        return 23;
+    }
+}`;
+}
+
 function bootstrapFixtureSource() {
   return String.raw`using System;
 using System.Diagnostics;
@@ -629,30 +909,36 @@ internal static class BootstrapFixture
 {
     private static int Main(string[] args)
     {
-        string waiting = Environment.GetEnvironmentVariable("TQ_BOOTSTRAP_TEST_WAITING_PID");
-        if (!String.IsNullOrEmpty(waiting) && waiting != Process.GetCurrentProcess().Id.ToString())
+        if (Environment.GetEnvironmentVariable("TQ_BOOTSTRAP_FIXTURE_STAGE") == "waiting")
         {
-            int validation = RunBootstrap();
-            if (validation != 0) return validation;
-            string marker = args.FirstOrDefault(value => value.StartsWith(
-                "/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase));
+            string[] elevated = args.Where(value => value.Equals(
+                "/TQELEVATEDBOOTSTRAP=1", StringComparison.OrdinalIgnoreCase)).ToArray();
+            string[] elevatedFamily = args.Where(value => value.StartsWith(
+                "/TQELEVATEDBOOTSTRAP=", StringComparison.OrdinalIgnoreCase)).ToArray();
+            string[] protectedFamily = args.Where(value => value.StartsWith(
+                "/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (elevated.Length != 1 || elevatedFamily.Length != 1 ||
+                protectedFamily.Length != 1 ||
+                protectedFamily[0].Length == "/TQPROTECTEDTEMP=".Length) return 78;
+
+            string marker = protectedFamily[0];
             string temp = Environment.GetEnvironmentVariable("TEMP");
+            if (!String.Equals(marker.Substring(marker.IndexOf('=') + 1), temp,
+                StringComparison.Ordinal)) return 78;
             string log = Environment.GetEnvironmentVariable("TQ_BOOTSTRAP_TEST_LOG");
             if (!String.IsNullOrEmpty(log))
             {
-                string[] lines = new[] {
-                    "protected=" + (!String.IsNullOrEmpty(marker)).ToString().ToLowerInvariant(),
-                    "same-temp=" + (marker != null && marker.Substring(marker.IndexOf('=') + 1) == temp).ToString().ToLowerInvariant()
-                }.Concat(args.Select(value => Convert.ToBase64String(Encoding.UTF8.GetBytes(value)))).ToArray();
+                string[] lines = new[] { "protected=true", "same-temp=true" }
+                    .Concat(args.Select(value => Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(value)))).ToArray();
                 File.WriteAllLines(log, lines, new UTF8Encoding(false));
             }
-            string exit = args.FirstOrDefault(value => value.StartsWith("/EXITCODE=", StringComparison.Ordinal));
+            string exit = args.FirstOrDefault(value => value.StartsWith(
+                "/EXITCODE=", StringComparison.Ordinal));
             return exit == null ? 0 : Int32.Parse(exit.Substring(10));
         }
 
-        Environment.SetEnvironmentVariable(
-            "TQ_BOOTSTRAP_TEST_WAITING_PID",
-            Process.GetCurrentProcess().Id.ToString());
+        Environment.SetEnvironmentVariable("TQ_BOOTSTRAP_FIXTURE_STAGE", "waiting");
         return RunBootstrap();
     }
 

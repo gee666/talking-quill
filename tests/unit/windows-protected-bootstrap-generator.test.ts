@@ -80,10 +80,11 @@ describe('Windows protected bootstrap generator', () => {
   });
 
   it('pins protected leaf identity, cleanup retries, manifests, and stale cleanup refusal policy', async () => {
-    const [bootstrap, cleanup, harness] = await Promise.all([
+    const [bootstrap, cleanup, harness, supervisor] = await Promise.all([
       readFile('build/windows-protected-bootstrap.ps1', 'utf8'),
       readFile('scripts/cleanup-windows-protected-bootstrap-leaves.ps1', 'utf8'),
       readFile('scripts/check-nsis-early-init.mjs', 'utf8'),
+      readFile('scripts/windows-job-object-supervisor.cs', 'utf8'),
     ]);
 
     expect(bootstrap).toContain("cnotmatch '^\\.Talking Quill\\.Installer-[0-9a-f]{32}$'");
@@ -97,7 +98,15 @@ describe('Windows protected bootstrap generator', () => {
     expect(cleanup).toContain("throw 'unknown content'");
     expect(cleanup).toContain('Test-ExactAcl');
     expect(cleanup).toContain('reparse content');
+    expect(cleanup).toContain('EnvironmentReferences');
+    expect(cleanup).toContain('Get-CandidateValidation $Candidate.Path');
+    expect(cleanup).toContain("throw 'leaf timestamps or content changed'");
     expect(harness).toContain('assertProtectedBootstrapResidueUnchanged');
     expect(harness).toContain('removeHarnessReparseLeaf');
+    expect(harness).toContain('for (let cycle = 1; cycle <= 3; cycle++)');
+    expect(harness).not.toContain('TQ_BOOTSTRAP_TEST_WAITING_PID');
+    expect(supervisor).toContain('JobObjectLimitKillOnJobClose');
+    expect(supervisor).toContain('AssignProcessToJobObject');
+    expect(supervisor).toContain('RequireEmptyJob');
   });
 });
