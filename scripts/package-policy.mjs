@@ -1,4 +1,10 @@
+import { createRequire } from 'node:module';
+import { posix } from 'node:path';
 import { findSecretRuleIds } from './secret-rules.mjs';
+
+const require = createRequire(import.meta.url);
+const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
+const { minimatch } = electronBuilderRequire('minimatch');
 
 const FORBIDDEN_PARTS = [
   'reference',
@@ -145,6 +151,123 @@ function requiredOnnxRuntimePaths(target) {
       entry === architectureRoot ||
       entry.startsWith(`${architectureRoot}/`),
   );
+}
+
+const ONNX_BUILDER_ROOT_EXCLUSION = '!node_modules/onnxruntime-node/bin/napi-v3/**/*';
+const ONNX_BUILDER_TARGET_PATTERN = Object.freeze({
+  win: 'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*',
+  mac: 'node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*',
+});
+
+export function validateElectronBuilderOnnxConfig(config, target) {
+  if (
+    config === null ||
+    typeof config !== 'object' ||
+    !['win', 'mac'].includes(target?.platform) ||
+    !['x64', 'arm64'].includes(target?.architecture)
+  ) {
+    throw new Error('electron-builder ONNX target must specify win|mac and x64|arm64');
+  }
+
+  const platformConfig = config[target.platform];
+  if (platformConfig === null || typeof platformConfig !== 'object') {
+    throw new Error(`electron-builder ${target.platform} configuration is missing`);
+  }
+
+  assertOnlyOnnxBuilderPatterns(config.files, 'files', [ONNX_BUILDER_ROOT_EXCLUSION], true);
+  assertOnlyOnnxBuilderPatterns(config.asarUnpack, 'asarUnpack', [], false);
+  const targetPattern = ONNX_BUILDER_TARGET_PATTERN[target.platform];
+  assertOnlyOnnxBuilderPatterns(
+    platformConfig.files,
+    `${target.platform}.files`,
+    [targetPattern],
+    false,
+  );
+  assertOnlyOnnxBuilderPatterns(
+    platformConfig.asarUnpack,
+    `${target.platform}.asarUnpack`,
+    [targetPattern],
+    false,
+  );
+
+  const expanded = targetPattern.replace('${arch}', target.architecture);
+  const expectedPlatform = target.platform === 'mac' ? 'darwin' : 'win32';
+  if (!expanded.includes(`/napi-v3/${expectedPlatform}/${target.architecture}/`)) {
+    throw new Error('electron-builder ONNX target pattern does not resolve to the target tuple');
+  }
+}
+
+function assertOnlyOnnxBuilderPatterns(value, field, expected, allowDefaultFileSet) {
+  const found = [];
+  collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet);
+  if (
+    found.length !== expected.length ||
+    found.some((pattern, index) => pattern !== expected[index])
+  ) {
+    throw new Error(
+      `Unexpected electron-builder ONNX selector in ${field}: ${found.length === 0 ? '<missing>' : found.join(', ')}`,
+    );
+  }
+}
+
+function collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet) {
+  if (value == null) return;
+  if (typeof value === 'string') {
+    if (isOnnxBuilderPattern(value)) found.push(value.replaceAll('\\', '/'));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectOnnxBuilderPatterns(item, field, found, allowDefaultFileSet);
+    return;
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`electron-builder ${field} contains an unsupported matcher`);
+  }
+
+  const from = typeof value.from === 'string' ? value.from : '';
+  const to = typeof value.to === 'string' ? value.to : '';
+  const filters = Array.isArray(value.filter) ? value.filter : [value.filter];
+  const fileSetMentionsOnnx =
+    isOnnxBuilderPattern(to) ||
+    filters.some((filter) => {
+      if (typeof filter !== 'string') return false;
+      const combined = from === '' ? filter : `${from}/${filter.replace(/^!/u, '')}`;
+      return (
+        isOnnxBuilderPattern(combined) ||
+        hasOnnxNativeReference(from) ||
+        hasOnnxNativeReference(filter)
+      );
+    });
+  if (fileSetMentionsOnnx && (!allowDefaultFileSet || from !== '' || to !== '')) {
+    throw new Error(`Unexpected electron-builder ONNX FileSet in ${field}`);
+  }
+  collectOnnxBuilderPatterns(value.filter, field, found, allowDefaultFileSet);
+}
+
+const ONNX_NATIVE_PROBES = Object.freeze([
+  'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll',
+  'node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/onnxruntime_binding.node',
+]);
+
+function isOnnxBuilderPattern(value) {
+  if (value === '') return false;
+  const original = value.replaceAll('\\', '/').toLowerCase();
+  if (original === '!node_modules/**/*') return false;
+  const normalized = posix.normalize(original.replace(/^!/u, ''));
+  if (hasOnnxNativeReference(normalized)) return true;
+  return ONNX_NATIVE_PROBES.some((probe) => minimatch(probe, normalized, { dot: true }));
+}
+
+function hasOnnxNativeReference(value) {
+  const normalized = value.toLowerCase();
+  if (normalized.includes('napi-v3')) return true;
+  if (!normalized.includes('onnxruntime')) return false;
+  return ![
+    'node_modules/onnxruntime-node/package.json',
+    'node_modules/onnxruntime-node/dist/',
+    'node_modules/onnxruntime-common/package.json',
+    'node_modules/onnxruntime-common/dist/',
+  ].some((allowed) => normalized === allowed || normalized.startsWith(allowed));
 }
 
 const OUT_EXACT_PATHS = new Set([

@@ -1,4 +1,4 @@
-extends: electron-builder.unsigned.yml
+extends: ../build/electron-builder.unsigned.yml
 
 afterPack: after-pack-macos-owner.cjs
 

@@ -1,5 +1,12 @@
 export const ONNX_RUNTIME_PATHS: readonly string[];
 export const PROVIDER_LOGO_BASENAMES: readonly string[];
+export function validateElectronBuilderOnnxConfig(
+  config: Record<string, unknown>,
+  target: {
+    readonly platform: 'win' | 'mac';
+    readonly architecture: 'x64' | 'arm64';
+  },
+): void;
 export function discoverFinalArtifactNames(fileNames: readonly string[]): string[];
 export function validateAsarEntries(
   entries: readonly string[],

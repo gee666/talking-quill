@@ -3,6 +3,10 @@ import { access, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  loadMergedElectronBuilderConfig,
+  type ElectronBuilderConfig,
+} from '../../scripts/electron-builder-config-policy.mjs';
 import { validateNsisUninstallPolicy } from '../../scripts/nsis-uninstall-policy.mjs';
 import {
   discoverFinalArtifactNames,
@@ -10,6 +14,7 @@ import {
   ONNX_RUNTIME_PATHS,
   PROVIDER_LOGO_BASENAMES,
   validateAsarEntries,
+  validateElectronBuilderOnnxConfig,
   validateExpectedFinalArtifacts,
   validateFinalArtifactInspection,
   validatePhysicalEntries,
@@ -18,6 +23,24 @@ import {
   validateRuntimeContent,
   validateSharedReleaseArtifacts,
 } from '../../scripts/package-policy.mjs';
+
+interface MutableMatcherOwner {
+  files?: unknown;
+  asarUnpack?: unknown;
+  [key: string]: unknown;
+}
+
+type MutableBuilderConfig = Omit<ElectronBuilderConfig, 'files' | 'asarUnpack' | 'win' | 'mac'> &
+  MutableMatcherOwner & {
+    win: MutableMatcherOwner;
+    mac: MutableMatcherOwner;
+  };
+
+function matcherArray(owner: MutableMatcherOwner, key: 'files' | 'asarUnpack'): unknown[] {
+  const value = owner[key];
+  if (!Array.isArray(value)) throw new Error(`Merged electron-builder ${key} is not an array`);
+  return value;
+}
 
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
 
@@ -348,6 +371,135 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateAsarEntries([...validAsar, 'node_modules/aws4/aws4.js'])).toThrow(
       'Unexpected ASAR',
     );
+  });
+
+  it.each([
+    ['win', 'x64'],
+    ['win', 'arm64'],
+    ['mac', 'x64'],
+    ['mac', 'arm64'],
+  ] as const)(
+    'accepts the merged schema-native electron-builder ONNX selectors for %s/%s',
+    async (platform, architecture) => {
+      const config = await loadMergedElectronBuilderConfig('build/electron-builder.unsigned.yml');
+
+      expect(() =>
+        validateElectronBuilderOnnxConfig(config, { platform, architecture }),
+      ).not.toThrow();
+    },
+  );
+
+  it('loads every inherited package config from the app package working directory', () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        "import { validatePackageElectronBuilderConfigs } from '../scripts/electron-builder-config-policy.mjs'; await validatePackageElectronBuilderConfigs();",
+      ],
+      { cwd: 'app', encoding: 'utf8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it('rejects inherited ONNX selector and FileSet bypass variants', async () => {
+    const base = await loadMergedElectronBuilderConfig('build/electron-builder.unsigned.yml');
+    const cases: { name: string; mutate(config: MutableBuilderConfig): void }[] = [
+      {
+        name: 'root broad include',
+        mutate: (config) =>
+          matcherArray(config, 'files').push('node_modules/onnxruntime-node/bin/napi-v3/**/*'),
+      },
+      {
+        name: 'platform broad include',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push('node_modules/onnxruntime-node/bin/napi-v3/**/*'),
+      },
+      {
+        name: 'wildcard package and binary tree',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push('node_modules/onnxruntime-*/bin/**/*'),
+      },
+      {
+        name: 'normalized parent traversal',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push('node_modules/onnxruntime-node/dist/../bin/**/*'),
+      },
+      {
+        name: 'character-class package selector',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push('node_modules/onnx[r]untime-node/bin/**/*'),
+      },
+      {
+        name: 'split from and filter',
+        mutate: (config) => {
+          config.win.files = [
+            {
+              from: 'node_modules/onnxruntime-node',
+              filter: 'bin/napi-v3/win32/${arch}/**/*',
+            },
+          ];
+        },
+      },
+      {
+        name: 'globbed package in a FileSet',
+        mutate: (config) => {
+          config.win.files = [
+            {
+              from: 'node_modules',
+              filter: 'onnxruntime-*/bin/napi-v3/win32/${arch}/**/*',
+            },
+          ];
+        },
+      },
+      {
+        name: 'default-root FileSet in platform files',
+        mutate: (config) => {
+          config.win.files = [
+            { filter: 'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*' },
+          ];
+        },
+      },
+      {
+        name: 'foreign asar selector',
+        mutate: (config) =>
+          matcherArray(config.win, 'asarUnpack').push(
+            'node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*',
+          ),
+      },
+      {
+        name: 'brace selector',
+        mutate: (config) =>
+          matcherArray(config, 'files').push(
+            'node_modules/{onnxruntime-node,other}/bin/napi-v3/**/*',
+          ),
+      },
+      {
+        name: 'duplicate exact selector',
+        mutate: (config) =>
+          matcherArray(config.win, 'files').push(
+            'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*',
+          ),
+      },
+    ];
+
+    for (const bypass of cases) {
+      const config = structuredClone(base) as MutableBuilderConfig;
+      bypass.mutate(config);
+      expect(
+        () => validateElectronBuilderOnnxConfig(config, { platform: 'win', architecture: 'x64' }),
+        bypass.name,
+      ).toThrow(/Unexpected electron-builder ONNX (?:selector|FileSet)/u);
+    }
+  });
+
+  it('keeps afterPack as a read-only bidirectional ONNX structural gate', async () => {
+    const source = await readFile(resolve('app/after-pack.cjs'), 'utf8');
+    expect(source).toContain('await verifyPackagedStructure(context)');
+    expect(source).not.toContain('before-pack');
+    expect(source).not.toContain('pruneOnnxRuntime');
+    expect(source).not.toContain('rmSync');
   });
 
   it('keeps uninstall data removal explicit and opt-in', async () => {

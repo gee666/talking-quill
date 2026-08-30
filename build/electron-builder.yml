@@ -8,7 +8,6 @@ asar:
   smartUnpack: false
 asarUnpack:
   - node_modules/better-sqlite3/build/Release/better_sqlite3.node
-  - node_modules/onnxruntime-node/bin/napi-v3/**/*
 files:
   - out/main/index.js
   - out/workers/whisper-bootstrap.cjs
@@ -49,7 +48,7 @@ files:
   - node_modules/file-uri-to-path/index.js
   - node_modules/onnxruntime-node/package.json
   - node_modules/onnxruntime-node/dist/*.js
-  - node_modules/onnxruntime-node/bin/napi-v3/**/*
+  - '!node_modules/onnxruntime-node/bin/napi-v3/**/*'
   - node_modules/onnxruntime-common/package.json
   - node_modules/onnxruntime-common/dist/cjs/package.json
   - node_modules/onnxruntime-common/dist/cjs/*.js
@@ -68,12 +67,15 @@ extraResources:
       - talking-quill-keyboard-owner.exe
 npmRebuild: true
 buildDependenciesFromSource: false
-beforePack: before-pack.cjs
 afterPack: after-pack.cjs
 afterSign: after-sign.cjs
 artifactName: Talking-Quill-${version}-${os}-${arch}.${ext}
 win:
   icon: icon.png
+  files:
+    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*
+  asarUnpack:
+    - node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*
   requestedExecutionLevel: asInvoker
   signExts:
     - .exe
@@ -95,6 +97,10 @@ nsis:
   createStartMenuShortcut: true
 mac:
   icon: icon.png
+  files:
+    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*
+  asarUnpack:
+    - node_modules/onnxruntime-node/bin/napi-v3/darwin/${arch}/**/*
   sign: ../build/mac-sign.cjs
   hardenedRuntime: true
   gatekeeperAssess: false

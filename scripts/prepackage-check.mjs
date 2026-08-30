@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validatePackageElectronBuilderConfigs } from './electron-builder-config-policy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -27,6 +28,7 @@ if (forbiddenEnvironment.length > 0) {
   );
 }
 
+await validatePackageElectronBuilderConfigs();
 cleanTargetArtifacts();
 run('scripts/generate-notices.mjs', ['--check']);
 run('scripts/model-manifest.mjs', ['--check']);
