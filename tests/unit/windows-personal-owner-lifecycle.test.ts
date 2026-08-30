@@ -59,18 +59,24 @@ describe('Windows gateway and owner lifecycle contract', () => {
   });
 
   it('relaunches into validated ProgramData before any privileged plugin or cleanup code', async () => {
-    const [installer, patch, lifecycle] = await Promise.all([
+    const [installer, bootstrap, patch, lifecycle] = await Promise.all([
       readFile('build/installer.nsh', 'utf8'),
+      readFile('build/windows-protected-bootstrap.ps1', 'utf8'),
       readFile('patches/app-builder-lib@26.15.3.patch', 'utf8'),
       readFile('helper/src/windows_installer.rs', 'utf8'),
     ]);
     expect(patch).toContain('!insertmacro customEarlyInit');
     expect(installer).toContain('!macro customEarlyInit');
-    expect(installer).toContain('[Environment+SpecialFolder]::CommonApplicationData');
-    expect(installer).toContain('SetAccessRuleProtection($$true,$$false)');
-    expect(installer).toContain('/TQPROTECTEDTEMP=');
-    expect(installer).toContain('AreAccessRulesProtected');
-    expect(installer).toContain('ReparsePoint');
+    expect(installer).toContain('TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD');
+    expect(installer).not.toMatch(/-Command[^\r\n]*"\s+"\$[R0-9]/u);
+    expect(bootstrap).toContain('[Environment+SpecialFolder]::CommonApplicationData');
+    expect(bootstrap).toContain('SetAccessRuleProtection($true, $false)');
+    expect(bootstrap).toContain('/TQPROTECTEDTEMP=');
+    expect(bootstrap).toContain('AreAccessRulesProtected');
+    expect(bootstrap).toContain('ReparsePoint');
+    expect(bootstrap).toContain('NtQueryInformationProcess');
+    expect(bootstrap).toContain('CommandLineToArgvW');
+    expect(bootstrap).toContain('QueryFullProcessImageName');
     expect(installer).toContain('talking-quill-installer-lifecycle.exe');
     expect(installer).not.toContain('File /oname=$PLUGINSDIR\\talking-quill-machine-cleanup.ps1');
     expect(lifecycle).toContain('FOLDERID_ProgramFiles');

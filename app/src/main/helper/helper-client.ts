@@ -993,15 +993,15 @@ export class HelperClient {
           child.exitCode !== 0 ||
           (requireNeutral && ownerDisposition !== 'neutral')
         ) {
-          throw (
+          const stopError =
             this.#stopTerminalFault ??
             (shutdownError instanceof Error
               ? shutdownError
               : new HelperClientError(
                   'transport-error',
                   'Native helper did not complete clean shutdown',
-                ))
-          );
+                ));
+          throw stopError;
         }
       } finally {
         close.cancel();

@@ -842,6 +842,7 @@ describe('packaged runtime allowlist', () => {
       multiUserUi,
       installValidation,
       cleanup,
+      protectedBootstrap,
     ] = await Promise.all([
       readFile(resolve('build/installer.nsh'), 'utf8'),
       readFile(resolve(templateRoot, 'assistedInstaller.nsh'), 'utf8'),
@@ -856,6 +857,7 @@ describe('packaged runtime allowlist', () => {
       readFile(resolve(templateRoot, 'multiUserUi.nsh'), 'utf8'),
       readFile(resolve('build/installer-install-validation.nsh'), 'utf8'),
       readFile(resolve('build/windows-personal-machine-cleanup.ps1'), 'utf8'),
+      readFile(resolve('build/windows-protected-bootstrap.ps1'), 'utf8'),
     ]);
     const pinned = {
       assisted,
@@ -870,6 +872,7 @@ describe('packaged runtime allowlist', () => {
       multiUserUi,
       installValidation,
       cleanup,
+      protectedBootstrap,
     };
     expect(custom).not.toContain('/TALKINGQUILLTESTCOMMITFAIL=');
     expect(installValidation).toContain('/TALKINGQUILLTESTCOMMITFAIL=');
@@ -959,11 +962,12 @@ describe('packaged runtime allowlist', () => {
     ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
     expect(() =>
       validateNsisUninstallPolicy({
-        custom: custom.replace(
+        custom,
+        ...pinned,
+        protectedBootstrap: protectedBootstrap.replace(
           '[Environment+SpecialFolder]::CommonApplicationData).TrimEnd',
           '[Environment+SpecialFolder]::CommonApplicationData)',
         ),
-        ...pinned,
       }),
     ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
     expect(() =>

@@ -1,0 +1,262 @@
+$ErrorActionPreference = [Management.Automation.ActionPreference]::Stop
+$inheritedTemp = [Environment]::GetEnvironmentVariable('TEMP')
+$inheritedTmp = [Environment]::GetEnvironmentVariable('TMP')
+$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData).TrimEnd('\')
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes = New-Object byte[] 16
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$leaf = Join-Path $programData ('.Talking Quill.Installer-' + (-join ($bytes | ForEach-Object { $_.ToString('x2') })))
+$directoryAcl = New-Object Security.AccessControl.DirectorySecurity
+$directoryAcl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+$directoryAcl.SetAccessRuleProtection($true, $false)
+foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+    $identity = New-Object Security.Principal.SecurityIdentifier($sid)
+    $directoryAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+        $identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+}
+[IO.Directory]::CreateDirectory($leaf, $directoryAcl) | Out-Null
+[Environment]::SetEnvironmentVariable('TEMP', $leaf, 'Process')
+[Environment]::SetEnvironmentVariable('TMP', $leaf, 'Process')
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class TalkingQuillProtectedBootstrapNative
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        internal IntPtr Reserved1;
+        internal IntPtr PebBaseAddress;
+        internal IntPtr Reserved2_0;
+        internal IntPtr Reserved2_1;
+        internal IntPtr UniqueProcessId;
+        internal IntPtr ParentProcessId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString
+    {
+        internal ushort Length;
+        internal ushort MaximumLength;
+        internal IntPtr Buffer;
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr process,
+        int informationClass,
+        ref ProcessBasicInformation information,
+        int informationLength,
+        out int returnLength);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr process,
+        int informationClass,
+        IntPtr information,
+        int informationLength,
+        out int returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process,
+        int flags,
+        StringBuilder executableName,
+        ref int size);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    public static string[] ReadWaitingParent()
+    {
+        ProcessBasicInformation basic = new ProcessBasicInformation();
+        int returned;
+        int status = NtQueryInformationProcess(
+            System.Diagnostics.Process.GetCurrentProcess().Handle,
+            0,
+            ref basic,
+            Marshal.SizeOf(typeof(ProcessBasicInformation)),
+            out returned);
+        if (status != 0 || basic.ParentProcessId == IntPtr.Zero)
+            throw new InvalidOperationException("The waiting parent process is unavailable.");
+
+        IntPtr parent = OpenProcess(0x1000, false, unchecked((uint)basic.ParentProcessId.ToInt64()));
+        if (parent == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            StringBuilder image = new StringBuilder(32768);
+            int imageLength = image.Capacity;
+            if (!QueryFullProcessImageName(parent, 0, image, ref imageLength))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+
+            int required = 0;
+            NtQueryInformationProcess(parent, 60, IntPtr.Zero, 0, out required);
+            if (required <= Marshal.SizeOf(typeof(UnicodeString)) || required > 131072)
+                throw new InvalidOperationException("The waiting parent command line is unavailable.");
+            IntPtr commandBuffer = Marshal.AllocHGlobal(required);
+            try
+            {
+                status = NtQueryInformationProcess(parent, 60, commandBuffer, required, out returned);
+                if (status != 0)
+                    throw new InvalidOperationException("The waiting parent command line query failed.");
+                UnicodeString nativeCommand = (UnicodeString)Marshal.PtrToStructure(
+                    commandBuffer,
+                    typeof(UnicodeString));
+                if (nativeCommand.Buffer == IntPtr.Zero || nativeCommand.Length == 0 ||
+                    (nativeCommand.Length & 1) != 0 || nativeCommand.Length > required)
+                    throw new InvalidOperationException("The waiting parent command line is malformed.");
+                string commandLine = Marshal.PtrToStringUni(
+                    nativeCommand.Buffer,
+                    nativeCommand.Length / 2);
+                int count;
+                IntPtr argv = CommandLineToArgvW(commandLine, out count);
+                if (argv == IntPtr.Zero || count < 1 || count > 4096)
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                try
+                {
+                    string[] result = new string[count + 1];
+                    result[0] = image.ToString();
+                    for (int index = 0; index < count; index++)
+                    {
+                        IntPtr value = Marshal.ReadIntPtr(argv, index * IntPtr.Size);
+                        result[index + 1] = Marshal.PtrToStringUni(value);
+                    }
+                    return result;
+                }
+                finally
+                {
+                    LocalFree(argv);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(commandBuffer);
+            }
+        }
+        finally
+        {
+            CloseHandle(parent);
+        }
+    }
+
+    public static string JoinArguments(string[] arguments)
+    {
+        StringBuilder result = new StringBuilder();
+        foreach (string argument in arguments)
+        {
+            if (result.Length != 0) result.Append(' ');
+            if (argument.Length != 0 && argument.IndexOfAny(new char[] { ' ', '\t', '\"' }) < 0)
+            {
+                result.Append(argument);
+                continue;
+            }
+            result.Append('\"');
+            int slashes = 0;
+            foreach (char character in argument)
+            {
+                if (character == '\\')
+                {
+                    slashes++;
+                }
+                else if (character == '\"')
+                {
+                    result.Append('\\', slashes * 2 + 1);
+                    result.Append('\"');
+                    slashes = 0;
+                }
+                else
+                {
+                    result.Append('\\', slashes);
+                    result.Append(character);
+                    slashes = 0;
+                }
+            }
+            result.Append('\\', slashes * 2);
+            result.Append('\"');
+        }
+        return result.ToString();
+    }
+}
+'@
+
+$parent = [TalkingQuillProtectedBootstrapNative]::ReadWaitingParent()
+$parentExecutable = $parent[0]
+$parentArguments = @($parent[2..($parent.Length - 1)])
+$publicArguments = [Collections.Generic.List[string]]::new()
+$protectedTemp = $null
+$elevatedMarker = $false
+foreach ($argument in $parentArguments) {
+    if ($argument.Equals('/TQELEVATEDBOOTSTRAP=1', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($elevatedMarker) { throw 'The elevated bootstrap marker is duplicated.' }
+        $elevatedMarker = $true
+        continue
+    }
+    if ($argument.StartsWith('/TQELEVATEDBOOTSTRAP=', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The elevated bootstrap marker is malformed.'
+    }
+    if ($argument.StartsWith('/TQPROTECTEDTEMP=', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($null -ne $protectedTemp) { throw 'The protected TEMP marker is duplicated.' }
+        $protectedTemp = $argument.Substring('/TQPROTECTEDTEMP='.Length)
+        if ([string]::IsNullOrEmpty($protectedTemp)) { throw 'The protected TEMP marker is empty.' }
+        continue
+    }
+    $publicArguments.Add($argument)
+}
+
+if ($null -ne $protectedTemp) {
+    $path = [IO.Path]::GetFullPath($protectedTemp)
+    if ([IO.Path]::GetDirectoryName($path) -cne $programData -or
+        -not [IO.Path]::GetFileName($path).StartsWith('.Talking Quill.Installer-', [StringComparison]::Ordinal)) {
+        exit 78
+    }
+    if (-not $path.Equals($inheritedTemp, [StringComparison]::Ordinal) -or
+        -not $path.Equals($inheritedTmp, [StringComparison]::Ordinal)) {
+        exit 78
+    }
+    $item = Get-Item -Force -LiteralPath $path
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 78 }
+    $acl = Get-Acl -LiteralPath $path
+    $allowed = @('S-1-5-18', 'S-1-5-32-544')
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+    if (-not $acl.AreAccessRulesProtected -or $owner -notin $allowed -or $rules.Count -ne 2 -or
+        @($rules | Where-Object {
+            $_.AccessControlType -ne 'Allow' -or $_.IdentityReference.Value -notin $allowed -or
+            $_.FileSystemRights -ne 'FullControl' -or
+            $_.InheritanceFlags -ne 'ContainerInherit, ObjectInherit' -or $_.PropagationFlags -ne 'None'
+        }).Count -ne 0) {
+        exit 78
+    }
+    exit 0
+}
+
+if (-not $elevatedMarker) { exit 78 }
+$childArguments = @($publicArguments)
+$childArguments += '/TQELEVATEDBOOTSTRAP=1'
+$start = New-Object Diagnostics.ProcessStartInfo
+$start.FileName = $parentExecutable
+$start.Arguments = [TalkingQuillProtectedBootstrapNative]::JoinArguments($childArguments) +
+    ' /TQPROTECTEDTEMP=' + [TalkingQuillProtectedBootstrapNative]::JoinArguments(@($leaf))
+$start.UseShellExecute = $false
+$start.EnvironmentVariables['TEMP'] = $leaf
+$start.EnvironmentVariables['TMP'] = $leaf
+$child = [Diagnostics.Process]::Start($start)
+$child.WaitForExit()
+exit $child.ExitCode
+} finally {
+    Remove-Item -LiteralPath $leaf -Recurse -Force -ErrorAction SilentlyContinue
+}

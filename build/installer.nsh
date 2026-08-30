@@ -1,6 +1,7 @@
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 !include "FileFunc.nsh"
+!include "${PROJECT_DIR}\..\build\windows-protected-bootstrap-encoded.nsh"
 !ifdef BUILD_UNINSTALLER
 !include "StrFunc.nsh"
 ${UnStrStr}
@@ -52,7 +53,9 @@ Var TalkingQuillSecureTemp
   ${If} $R1 == ""
     ClearErrors
     StrCpy $R2 79
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference=$$([Management.Automation.ActionPreference]::Stop);$$pd=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData);$$rng=New-Object Security.Cryptography.RNGCryptoServiceProvider;$$b=New-Object byte[] 16;$$rng.GetBytes($$b);$$rng.Dispose();$$leaf=Join-Path $$pd (\".Talking Quill.Installer-\"+(-join($$b|ForEach-Object{$$_.ToString(\"x2\")})));$$acl=New-Object Security.AccessControl.DirectorySecurity;$$acl.SetOwner((New-Object Security.Principal.SecurityIdentifier(\"S-1-5-32-544\")));$$acl.SetAccessRuleProtection($$true,$$false);foreach($$sid in @(\"S-1-5-18\",\"S-1-5-32-544\")){$$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($$sid,\"FullControl\",\"ContainerInherit,ObjectInherit\",\"None\",\"Allow\")))};[IO.Directory]::CreateDirectory($$leaf,$$acl)|Out-Null;try{$$psi=New-Object Diagnostics.ProcessStartInfo;$$psi.FileName=$$args[0];$$psi.Arguments=$$args[1]+\" /TQPROTECTEDTEMP=`\"\"+$$leaf+\"`\"\";$$psi.UseShellExecute=$$false;$$psi.EnvironmentVariables[\"TEMP\"]=$$leaf;$$psi.EnvironmentVariables[\"TMP\"]=$$leaf;$$p=[Diagnostics.Process]::Start($$psi);$$p.WaitForExit();exit $$p.ExitCode}finally{Remove-Item -LiteralPath $$leaf -Recurse -Force -ErrorAction SilentlyContinue}" "$EXEPATH" "$R0"' $R2
+    ; The static bootstrap reads this waiting NSIS parent through native process
+    ; APIs. No caller-controlled value is interpolated into PowerShell source.
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
     IfErrors 0 +3
       SetErrorLevel 79
       Quit
@@ -62,7 +65,7 @@ Var TalkingQuillSecureTemp
 
   ClearErrors
   StrCpy $R2 78
-  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference=$$([Management.Automation.ActionPreference]::Stop);$$p=[IO.Path]::GetFullPath($$args[0]);$$pd=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData).TrimEnd(\"\\\");if([IO.Path]::GetDirectoryName($$p) -cne $$pd -or -not [IO.Path]::GetFileName($$p).StartsWith(\".Talking Quill.Installer-\",[StringComparison]::Ordinal)){exit 78};$$i=Get-Item -Force -LiteralPath $$p;if(($$i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $$i.PSIsContainer){exit 78};$$a=Get-Acl -LiteralPath $$p;if(-not $$a.AreAccessRulesProtected -or @($$a.Access|Where-Object{$$_.AccessControlType -ne \"Allow\" -or $$_.IdentityReference.Value -notin @(\"S-1-5-18\",\"S-1-5-32-544\") -or $$_.FileSystemRights -ne \"FullControl\"}).Count -ne 0 -or $$a.Owner -notin @(\"S-1-5-18\",\"S-1-5-32-544\")){exit 78}" "$R1"' $R2
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' $R2
   IfErrors 0 +2
     StrCpy $R2 78
   ${If} $R2 != 0

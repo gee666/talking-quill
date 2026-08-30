@@ -12,6 +12,7 @@ export interface NsisUninstallSources {
   readonly multiUserUi: string;
   readonly installValidation: string;
   readonly cleanup: string;
+  readonly protectedBootstrap: string;
 }
 
 export function validateNsisUninstallPolicy(sources: NsisUninstallSources): void;

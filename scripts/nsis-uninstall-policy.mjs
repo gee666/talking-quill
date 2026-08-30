@@ -18,6 +18,7 @@ export function validateNsisUninstallPolicy({
   multiUserUi,
   installValidation,
   cleanup,
+  protectedBootstrap,
 }) {
   if (custom.includes('!include "installer-publication.nsh"')) {
     throw new Error('Windows publication must not select the retired authority installer');
@@ -205,12 +206,14 @@ export function validateNsisUninstallPolicy({
       'generated running-process and old-uninstaller paths must yield to the custom lifecycle barrier',
     );
   }
-  const protectedBootstrap = macroBody(custom, 'TalkingQuillProtectedEarlyBootstrap');
+  const protectedBootstrapMacro = macroBody(custom, 'TalkingQuillProtectedEarlyBootstrap');
   const protectedPathValidation = protectedBootstrap.indexOf(
     '[Environment+SpecialFolder]::CommonApplicationData).TrimEnd',
   );
-  const immutableTempCheck = protectedBootstrap.indexOf('${If} $TEMP != $R1');
-  const secureTempAssignment = protectedBootstrap.indexOf('StrCpy $TalkingQuillSecureTemp $R1');
+  const immutableTempCheck = protectedBootstrapMacro.indexOf('${If} $TEMP != $R1');
+  const secureTempAssignment = protectedBootstrapMacro.indexOf(
+    'StrCpy $TalkingQuillSecureTemp $R1',
+  );
   const generatedUnOnInit = uninstaller.indexOf('Function un.onInit');
   const unEarlyBootstrap = uninstaller.indexOf('!insertmacro customUnEarlyInit', generatedUnOnInit);
   const firstUnOnInitWork = uninstaller.indexOf('SetOutPath $INSTDIR', generatedUnOnInit);
@@ -220,11 +223,21 @@ export function validateNsisUninstallPolicy({
     firstUnOnInitWork <= unEarlyBootstrap ||
     !custom.includes('ExecShellWait "runas" "$EXEPATH"') ||
     !custom.includes('TALKING_QUILL_PERSONAL_INSTALLER') ||
-    custom.indexOf('ExecShellWait "runas" "$EXEPATH"') >
-      custom.indexOf('[Environment+SpecialFolder]::CommonApplicationData') ||
-    protectedBootstrap.includes('StrCpy $TEMP') ||
+    custom.indexOf('ExecShellWait "runas" "$EXEPATH"') > custom.indexOf('ExecWait') ||
+    protectedBootstrapMacro.includes('StrCpy $TEMP') ||
     protectedPathValidation < 0 ||
-    immutableTempCheck <= protectedPathValidation ||
+    !protectedBootstrap.includes('NtQueryInformationProcess') ||
+    !protectedBootstrap.includes('CommandLineToArgvW') ||
+    !protectedBootstrap.includes('QueryFullProcessImageName') ||
+    !protectedBootstrap.includes("StartsWith('/TQPROTECTEDTEMP='") ||
+    !protectedBootstrap.includes('JoinArguments($childArguments)') ||
+    !protectedBootstrap.includes('FileAttributes]::ReparsePoint') ||
+    !protectedBootstrap.includes('SetAccessRuleProtection($true, $false)') ||
+    !protectedBootstrap.includes("SetEnvironmentVariable('TEMP', $leaf, 'Process')") ||
+    protectedBootstrap.indexOf("SetEnvironmentVariable('TEMP', $leaf, 'Process')") >
+      protectedBootstrap.indexOf('Add-Type -TypeDefinition') ||
+    /-Command[^\r\n]*\s"\$[R0-9]/u.test(protectedBootstrapMacro) ||
+    immutableTempCheck < 0 ||
     secureTempAssignment <= immutableTempCheck
   ) {
     throw new Error('installer and uninstaller must elevate before protected plugin bootstrap');
@@ -414,6 +427,9 @@ export async function loadNsisPolicyInputs() {
       resolve(repositoryRoot, 'build', 'installer-install-validation.nsh'),
     ),
     cleanup: await read(resolve(repositoryRoot, 'build', 'windows-personal-machine-cleanup.ps1')),
+    protectedBootstrap: await read(
+      resolve(repositoryRoot, 'build', 'windows-protected-bootstrap.ps1'),
+    ),
   };
 }
 
