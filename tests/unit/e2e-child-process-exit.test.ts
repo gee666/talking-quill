@@ -22,9 +22,15 @@ function childProcess(pid = 4321): ChildProcess {
   return child;
 }
 
-function processAdapter(exitResults: readonly boolean[], forceFailure?: Error) {
+function processAdapter(
+  exitResults: readonly boolean[],
+  treeExitResults: readonly boolean[],
+  forceFailure?: Error,
+) {
   const remaining = [...exitResults];
+  const remainingTree = [...treeExitResults];
   const waitForExit = vi.fn(() => Promise.resolve(remaining.shift() ?? false));
+  const waitForTreeExit = vi.fn(() => Promise.resolve(remainingTree.shift() ?? false));
   const requestKill = vi.fn(() => true);
   const forceKillTree = vi.fn(() =>
     forceFailure === undefined ? Promise.resolve() : Promise.reject(forceFailure),
@@ -32,10 +38,11 @@ function processAdapter(exitResults: readonly boolean[], forceFailure?: Error) {
   const adapter: ChildProcessExitAdapter = {
     pid: 1234,
     waitForExit,
+    waitForTreeExit,
     requestKill,
     forceKillTree,
   };
-  return { adapter, forceKillTree, requestKill, waitForExit };
+  return { adapter, forceKillTree, requestKill, waitForExit, waitForTreeExit };
 }
 
 describe('source E2E child process teardown', () => {
@@ -55,6 +62,7 @@ describe('source E2E child process teardown', () => {
       platform: 'linux',
       ownsProcessGroup: true,
       killProcess,
+      processGroupExists: () => true,
     });
 
     await adapter.forceKillTree();
@@ -70,6 +78,7 @@ describe('source E2E child process teardown', () => {
       platform: 'linux',
       ownsProcessGroup: true,
       killProcess,
+      processGroupExists: () => false,
     });
     child.emit('exit', 0, null);
 
@@ -96,7 +105,7 @@ describe('source E2E child process teardown', () => {
   });
 
   it('waits for confirmed exit after a graceful timeout kill', async () => {
-    const process = processAdapter([false, true]);
+    const process = processAdapter([false, true], [true]);
 
     await expect(waitForChildExit(process.adapter, 'second instance', timeouts)).rejects.toThrow(
       'terminated after a normal kill request',
@@ -108,8 +117,21 @@ describe('source E2E child process teardown', () => {
     expect(process.waitForExit).toHaveBeenNthCalledWith(2, 2);
   });
 
+  it('force-cleans descendants when the parent exits after the normal kill', async () => {
+    const process = processAdapter([false, true], [false, true]);
+
+    await expect(waitForChildExit(process.adapter, 'second instance', timeouts)).rejects.toThrow(
+      'owned process tree required forced termination',
+    );
+
+    expect(process.requestKill).toHaveBeenCalledOnce();
+    expect(process.forceKillTree).toHaveBeenCalledOnce();
+    expect(process.waitForExit).toHaveBeenCalledTimes(2);
+    expect(process.waitForTreeExit).toHaveBeenCalledTimes(2);
+  });
+
   it('escalates to forced tree termination and confirms exit', async () => {
-    const process = processAdapter([false, false, true]);
+    const process = processAdapter([false, false, true], [false, true]);
 
     await expect(waitForChildExit(process.adapter, 'second instance', timeouts)).rejects.toThrow(
       'required forced termination',
@@ -121,10 +143,14 @@ describe('source E2E child process teardown', () => {
   });
 
   it('reports teardown failure when the process remains alive', async () => {
-    const process = processAdapter([false, false, false], new Error('taskkill failed'));
+    const process = processAdapter(
+      [false, false, false],
+      [false, false],
+      new Error('taskkill failed'),
+    );
 
     await expect(waitForChildExit(process.adapter, 'second instance', timeouts)).rejects.toThrow(
-      'teardown failed after normal and forced termination attempts; pid=1234, normalKillRequested=true, forceError=Error: taskkill failed',
+      'teardown failed after normal and forced termination attempts; pid=1234, normalKillRequested=true, parentExited=false, treeExited=false, forceError=Error: taskkill failed',
     );
 
     expect(process.requestKill).toHaveBeenCalledOnce();
