@@ -209,6 +209,9 @@ RequestExecutionLevel user
 Section
   SetErrorLevel 91
 SectionEnd
+Function .onInit
+  !insertmacro customInit
+FunctionEnd
 `;
 }
 
@@ -225,7 +228,7 @@ async function testNsisCancellationExit(workDirectory, installer) {
     'NSIS cancellation controller compilation',
   );
   requireStatus(
-    spawnSync(controller, [installer], { encoding: 'utf8', timeout: 30_000, windowsHide: true }),
+    spawnSupervisedWithArguments(controller, [installer], process.env, 35_000),
     0,
     'compiled NSIS graceful interactive cancellation',
   );
@@ -235,6 +238,8 @@ function nsisCancellationControllerSource() {
   return `using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -245,8 +250,11 @@ internal static class NsisCancellationController
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr data);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int maximum);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int maximum);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
-    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int controlId);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     private const uint WmCommand = 0x0111;
     private const int IdCancel = 2;
@@ -255,46 +263,113 @@ internal static class NsisCancellationController
     public static int Main(string[] args)
     {
         if (args.Length != 1) return 126;
-        using (Process process = Process.Start(new ProcessStartInfo(args[0]) { UseShellExecute = false }))
+        string installer = Path.GetFullPath(args[0]);
+        string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        string[] baselineLeaves = ProtectedLeaves(programData);
+        var knownWindows = new HashSet<long>();
+        Process outer = null;
+        IntPtr target = IntPtr.Zero, confirmation = IntPtr.Zero;
+        bool cancelAccepted = false, confirmationAccepted = false;
+        try
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(15);
-            IntPtr main = IntPtr.Zero;
-            while (DateTime.UtcNow < deadline && !process.HasExited)
+            outer = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = false });
+            Log("process role=compiled-callback pid=" + outer.Id + " image=" + installer);
+            DateTime startupDeadline = DateTime.UtcNow.AddSeconds(15);
+            while (DateTime.UtcNow < startupDeadline && target == IntPtr.Zero)
             {
-                foreach (IntPtr window in Windows(process.Id))
+                foreach (IntPtr window in Windows())
                 {
+                    uint pid; GetWindowThreadProcessId(window, out pid);
                     string cls = WindowClass(window);
-                    if (cls != "#32770") continue;
-                    if (main == IntPtr.Zero) { main = window; PostMessage(main, WmCommand, new IntPtr(IdCancel), IntPtr.Zero); }
-                    else if (window != main) PostMessage(window, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
+                    if (knownWindows.Add(window.ToInt64()))
+                        Log("window hwnd=" + window.ToInt64() + " pid=" + pid + " class=" + cls + " title=" + WindowTitle(window));
+                    IntPtr cancel = GetDlgItem(window, IdCancel);
+                    if (pid == outer.Id && cls == "#32770" && cancel != IntPtr.Zero &&
+                        IsWindowVisible(cancel) && IsWindowEnabled(cancel)) target = window;
                 }
-                if (process.WaitForExit(10)) return process.ExitCode;
-                Thread.Sleep(10);
+                if (target == IntPtr.Zero) Thread.Sleep(20);
             }
-            if (!process.HasExited) process.Kill();
-            return 124;
+            if (target == IntPtr.Zero)
+                return Fail(124, "compiled callback NSIS UI window was not observed");
+            uint targetPid; GetWindowThreadProcessId(target, out targetPid);
+            if (targetPid != outer.Id)
+                return Fail(124, "cancellation target was not owned by the compiled callback fixture");
+            IntPtr cancelButton = GetDlgItem(target, IdCancel);
+            Log("event=cancel-ready hwnd=" + target.ToInt64() + " button=" + cancelButton.ToInt64() +
+                " visible=" + IsWindowVisible(cancelButton) + " enabled=" + IsWindowEnabled(cancelButton));
+            cancelAccepted = PostMessage(target, WmCommand, new IntPtr(IdCancel), IntPtr.Zero);
+            Log("event=IDCANCEL hwnd=" + target.ToInt64() + " pid=" + targetPid + " accepted=" + cancelAccepted);
+            if (!cancelAccepted) return Fail(124, "IDCANCEL was not accepted");
+
+            DateTime exitDeadline = DateTime.UtcNow.AddSeconds(10);
+            DateTime nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
+            while (DateTime.UtcNow < exitDeadline)
+            {
+                if (confirmation == IntPtr.Zero && !outer.HasExited && DateTime.UtcNow >= nextCancelAttempt)
+                {
+                    uint currentPid; GetWindowThreadProcessId(target, out currentPid);
+                    if (currentPid != outer.Id || !PostMessage(target, WmCommand, new IntPtr(IdCancel), IntPtr.Zero))
+                        return Fail(124, "IDCANCEL retry target changed or rejected delivery");
+                    Log("event=IDCANCEL-retry hwnd=" + target.ToInt64() + " pid=" + currentPid);
+                    nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
+                }
+                foreach (IntPtr window in Windows())
+                {
+                    uint pid; GetWindowThreadProcessId(window, out pid);
+                    string cls = WindowClass(window);
+                    if (knownWindows.Add(window.ToInt64()))
+                        Log("window hwnd=" + window.ToInt64() + " pid=" + pid + " class=" + cls + " title=" + WindowTitle(window));
+                    if (pid == outer.Id && window != target && cls == "#32770")
+                    {
+                        if (confirmation == IntPtr.Zero)
+                        {
+                            confirmation = window;
+                            Log("event=cancel-confirmation hwnd=" + window.ToInt64() + " pid=" + pid);
+                        }
+                        confirmationAccepted |= PostMessage(window, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
+                    }
+                }
+                if (ExitedWith(outer, 0, "compiled callback fixture") &&
+                    baselineLeaves.SequenceEqual(ProtectedLeaves(programData), StringComparer.OrdinalIgnoreCase))
+                {
+                    Log("result=pass callback-exit=0 descendants=0 protected-residue=baseline");
+                    return 0;
+                }
+                Thread.Sleep(20);
+            }
+            return Fail(124, "bounded cancellation teardown did not complete");
+        }
+        catch (Exception error) { return Fail(125, error.ToString()); }
+        finally
+        {
+            if (outer != null && !outer.HasExited)
+            {
+                outer.Kill();
+                if (!outer.WaitForExit(5000)) Log("cleanup=outer-still-alive");
+            }
+            if (outer != null) outer.Dispose();
         }
     }
 
-    private static List<IntPtr> Windows(int processId)
+    private static bool ExitedWith(Process process, int expected, string role)
+    {
+        if (process == null || !process.HasExited) return false;
+        if (process.ExitCode != expected) throw new InvalidOperationException(role + " exited " + process.ExitCode);
+        return true;
+    }
+
+    private static List<IntPtr> Windows()
     {
         var windows = new List<IntPtr>();
-        EnumWindows(delegate(IntPtr window, IntPtr data)
-        {
-            uint owner;
-            GetWindowThreadProcessId(window, out owner);
-            if (owner == processId && IsWindowVisible(window)) windows.Add(window);
-            return true;
-        }, IntPtr.Zero);
+        EnumWindows(delegate(IntPtr window, IntPtr data) { if (IsWindowVisible(window)) windows.Add(window); return true; }, IntPtr.Zero);
         return windows;
     }
 
-    private static string WindowClass(IntPtr window)
-    {
-        var text = new StringBuilder(256);
-        GetClassName(window, text, text.Capacity);
-        return text.ToString();
-    }
+    private static string WindowClass(IntPtr window) { var text = new StringBuilder(256); GetClassName(window, text, text.Capacity); return text.ToString(); }
+    private static string WindowTitle(IntPtr window) { var text = new StringBuilder(1024); GetWindowText(window, text, text.Capacity); return text.ToString(); }
+    private static string[] ProtectedLeaves(string programData) { return Directory.GetDirectories(programData, ".Talking Quill.Installer-*", SearchOption.TopDirectoryOnly).OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray(); }
+    private static void Log(string message) { Console.WriteLine(DateTime.UtcNow.ToString("o") + " " + message); }
+    private static int Fail(int code, string message) { Console.Error.WriteLine(DateTime.UtcNow.ToString("o") + " " + message); return code; }
 }`;
 }
 

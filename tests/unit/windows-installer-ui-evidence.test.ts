@@ -40,12 +40,25 @@ function evidence() {
       filesystemSamples: 20,
       registrySamples: 20,
       errors: [],
+      events: [
+        '1ms launched outer pid=40',
+        '20ms classified pid=41 role=elevated',
+        '40ms classified pid=42 role=protected',
+        '45ms IDCANCEL hwnd=100 pid=42 accepted=True',
+      ],
     },
     processes: [
-      { pid: 40, parentPid: 1, image: expected.installer },
-      { pid: 41, parentPid: 40, image: 'powershell.exe' },
-      { pid: 42, parentPid: 41, image: expected.installer },
+      { pid: 40, parentPid: 1, image: expected.installer, role: 'outer', exitCode: 0 },
+      { pid: 41, parentPid: 40, image: expected.installer, role: 'elevated', exitCode: 0 },
+      { pid: 43, parentPid: 41, image: 'powershell.exe', role: null, exitCode: 0 },
+      { pid: 42, parentPid: 43, image: expected.installer, role: 'protected', exitCode: 0 },
+      { pid: 44, parentPid: 42, image: 'powershell.exe', role: null, exitCode: 0 },
     ],
+    nsisRoleExits: {
+      outer: { pid: 40, exitCode: 0 },
+      elevated: { pid: 41, exitCode: 0 },
+      protected: { pid: 42, exitCode: 0 },
+    },
     powershellProcessStarts: 2,
     visibleConsoleWindowEvents: [],
     filesystemOrRegistryMutationEvents: [],
@@ -53,6 +66,12 @@ function evidence() {
     protectedBootstrapBaselineRestored: true,
     cancellation: {
       method: 'WM_COMMAND/IDCANCEL',
+      targetRole: 'protected',
+      targetProcessId: 42,
+      postAccepted: true,
+      confirmationObserved: true,
+      confirmationProcessId: 42,
+      confirmationPostAccepted: true,
       graceful: true,
       forcedCleanup: false,
       exitCode: WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE,
@@ -97,6 +116,38 @@ describe('mandatory Windows installer UI smoke evidence', () => {
       { monitoring: { ...evidence().monitoring, errors: ['filesystem watcher overflow'] } },
     ],
     ['sampling gap', { monitoring: { ...evidence().monitoring, maximumSampleGapMs: 51 } }],
+    [
+      'outer window selected',
+      { cancellation: { ...evidence().cancellation, targetProcessId: 40 } },
+    ],
+    [
+      'wrong protected role binding',
+      { nsisRoleExits: { ...evidence().nsisRoleExits, protected: { pid: 43, exitCode: 0 } } },
+    ],
+    [
+      'elevated wrapper nonzero exit',
+      { nsisRoleExits: { ...evidence().nsisRoleExits, elevated: { pid: 41, exitCode: 124 } } },
+    ],
+    [
+      'elevated role not bound to process record',
+      {
+        processes: evidence().processes.map((process) =>
+          process.pid === 41 ? { ...process, role: null } : process,
+        ),
+      },
+    ],
+    [
+      'duplicate NSIS role PID',
+      { nsisRoleExits: { ...evidence().nsisRoleExits, elevated: { pid: 40, exitCode: 0 } } },
+    ],
+    [
+      'cancel delivery not accepted',
+      { cancellation: { ...evidence().cancellation, postAccepted: false } },
+    ],
+    [
+      'observed confirmation not accepted',
+      { cancellation: { ...evidence().cancellation, confirmationPostAccepted: false } },
+    ],
     ['forced cleanup', { cancellation: { ...evidence().cancellation, forcedCleanup: true } }],
     ['missing graceful exit', { cancellation: { ...evidence().cancellation, graceful: false } }],
     [

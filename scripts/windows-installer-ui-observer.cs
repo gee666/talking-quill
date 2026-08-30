@@ -33,6 +33,8 @@ internal static class WindowsInstallerUiObserver
     private static readonly ConcurrentQueue<string> MutationEvents = new ConcurrentQueue<string>();
     private static readonly ConcurrentQueue<string> ConsoleEvents = new ConcurrentQueue<string>();
     private static readonly ConcurrentQueue<string> ObserverErrors = new ConcurrentQueue<string>();
+    private static readonly ConcurrentQueue<string> DiagnosticEvents = new ConcurrentQueue<string>();
+    private static readonly ConcurrentDictionary<string, byte> LoggedWindows = new ConcurrentDictionary<string, byte>();
     private static readonly ConcurrentDictionary<uint, ProcessRecord> RelevantProcesses = new ConcurrentDictionary<uint, ProcessRecord>();
     private static readonly ConcurrentDictionary<uint, ProcessRecord> StartedProcesses = new ConcurrentDictionary<uint, ProcessRecord>();
     private static readonly List<FileSystemWatcher> FileWatchers = new List<FileSystemWatcher>();
@@ -58,13 +60,21 @@ internal static class WindowsInstallerUiObserver
     private static int powershellStarts;
     private static bool protectedLeafObserved;
     private static WindowRecord installerWindow;
+    private static WindowRecord confirmationWindow;
+    private static long observationStartedTicks;
+    private static bool cancelPostAccepted;
+    private static bool confirmationPostAccepted;
 
     private sealed class ProcessRecord
     {
         internal uint Pid;
         internal uint ParentPid;
         internal string Image;
+        internal string CommandLine;
+        internal string Role;
         internal long CreationTime;
+        internal IntPtr Handle;
+        internal int ExitCode = -1;
     }
 
     private sealed class RegistryWatch
@@ -128,6 +138,14 @@ internal static class WindowsInstallerUiObserver
         internal uint processId, threadId;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString
+    {
+        internal ushort Length;
+        internal ushort MaximumLength;
+        internal IntPtr Buffer;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ProcessEntry32
     {
@@ -142,6 +160,7 @@ internal static class WindowsInstallerUiObserver
     private delegate bool EnumWindowsDelegate(IntPtr window, IntPtr data);
     private delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint threadId, uint time);
 
+    [DllImport("ntdll.dll")] private static extern int NtQueryInformationProcess(IntPtr process, int informationClass, IntPtr information, int informationLength, out int returnLength);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref StartupInfo startup, out ProcessInformation process);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint length);
@@ -163,6 +182,8 @@ internal static class WindowsInstallerUiObserver
     [DllImport("advapi32.dll", SetLastError = true)] private static extern int RegNotifyChangeKeyValue(IntPtr key, bool watchSubtree, uint filter, IntPtr eventHandle, bool asynchronous);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsDelegate callback, IntPtr data);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int controlId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int size);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
@@ -185,6 +206,7 @@ internal static class WindowsInstallerUiObserver
             (args[3] != "x64" && args[3] != "arm64") || !Hex(args[4], 40) || !Hex(args[5], 40) || !Hex(args[6], 64) || !Hex(args[7], 64) || !Hex(args[8], 64)) return Fail("Observer arguments are invalid");
         installerName = Path.GetFileName(installerPath);
         programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData).TrimEnd('\\');
+        observationStartedTicks = Stopwatch.GetTimestamp();
         baselineProtectedLeaves = ProtectedLeaves();
         baselineProcesses = ProcessSnapshot().ToDictionary(value => value.Pid, value => ProcessCreationTime(value.Pid));
         if (baselineProtectedLeaves.Count != 0) return Fail("Protected bootstrap baseline is not empty");
@@ -228,7 +250,8 @@ internal static class WindowsInstallerUiObserver
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             if (!AssignProcessToJobObject(job, child.process)) throw new Win32Exception(Marshal.GetLastWin32Error());
             launched = true;
-            TrackProcess(child.processId, 0, installerPath, ProcessCreationTime(child.processId));
+            TrackProcess(child.processId, 0, installerPath, ProcessCreationTime(child.processId), "outer");
+            LogEvent("launched outer pid=" + child.processId.ToString(CultureInfo.InvariantCulture));
             if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
             CloseHandle(child.thread); child.thread = IntPtr.Zero;
 
@@ -238,13 +261,40 @@ internal static class WindowsInstallerUiObserver
             if (installerWindow.ClassName != "#32770" || installerWindow.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) < 0)
                 throw new InvalidOperationException("NSIS GUI title or class is invalid");
 
-            PostMessage(installerWindow.Handle, WmCommand, new IntPtr(IdCancel), IntPtr.Zero);
+            WindowRecord cancellationTarget = ReadWindow(installerWindow.Handle);
+            if (cancellationTarget.Pid != installerWindow.Pid || !IsProtectedInstallerProcess(cancellationTarget.Pid) ||
+                cancellationTarget.ClassName != "#32770" || !CancellationWindowReady(cancellationTarget.Handle))
+                throw new InvalidOperationException("Protected NSIS cancellation window changed before delivery");
+            cancelPostAccepted = PostMessage(cancellationTarget.Handle, WmCommand, new IntPtr(IdCancel), IntPtr.Zero);
+            LogEvent("IDCANCEL hwnd=" + cancellationTarget.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                " pid=" + cancellationTarget.Pid.ToString(CultureInfo.InvariantCulture) + " accepted=" + cancelPostAccepted);
+            if (!cancelPostAccepted) throw new Win32Exception(Marshal.GetLastWin32Error(), "IDCANCEL delivery failed");
+            DateTime nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
             while (DateTime.UtcNow < deadline)
             {
                 foreach (WindowRecord window in EnumerateWindows())
                 {
                     if (window.Pid == installerWindow.Pid && window.Handle != installerWindow.Handle && window.ClassName == "#32770")
-                        PostMessage(window.Handle, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
+                    {
+                        if (confirmationWindow == null)
+                        {
+                            confirmationWindow = window;
+                            LogEvent("cancel confirmation hwnd=" + window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                                " pid=" + window.Pid.ToString(CultureInfo.InvariantCulture));
+                        }
+                        confirmationPostAccepted |= PostMessage(window.Handle, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
+                    }
+                }
+                if (confirmationWindow == null && ProcessAlive(installerWindow.Pid) && DateTime.UtcNow >= nextCancelAttempt)
+                {
+                    WindowRecord currentTarget = ReadWindow(installerWindow.Handle);
+                    if (currentTarget.Pid != installerWindow.Pid || !IsProtectedInstallerProcess(currentTarget.Pid) ||
+                        !CancellationWindowReady(currentTarget.Handle) ||
+                        !PostMessage(currentTarget.Handle, WmCommand, new IntPtr(IdCancel), IntPtr.Zero))
+                        throw new InvalidOperationException("Protected NSIS IDCANCEL retry target changed or rejected delivery");
+                    LogEvent("IDCANCEL retry hwnd=" + currentTarget.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                        " pid=" + currentTarget.Pid.ToString(CultureInfo.InvariantCulture));
+                    nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
                 }
                 if (!AnyTrackedProcessAlive()) { graceful = true; break; }
                 Thread.Sleep(5);
@@ -267,7 +317,8 @@ internal static class WindowsInstallerUiObserver
             long maxGapMs = maxSampleGapTicks * 1000 / Stopwatch.Frequency;
             bool pass = beforeHash == afterHash && ObserverErrors.IsEmpty && ConsoleEvents.IsEmpty && MutationEvents.IsEmpty &&
                 finalLeaves.SetEquals(baselineProtectedLeaves) && finalRegistry == baselineRegistry && finalFiles == baselineFiles &&
-                maxGapMs <= 50 && graceful && exitCode == ExpectedCancellationExitCode && !forcedCleanup && !AnyTrackedProcessAlive();
+                maxGapMs <= 50 && graceful && exitCode == ExpectedCancellationExitCode && cancelPostAccepted &&
+                (confirmationWindow == null || confirmationPostAccepted) && NsisRoleExitsValid() && !forcedCleanup && !AnyTrackedProcessAlive();
             WriteEvidence(evidencePath, args, before.Length, beforeHash, afterHash, subsystem, maxGapMs, graceful, forcedCleanup, exitCode, pass);
             return pass ? 0 : Fail("Installer UI evidence did not satisfy the release gate");
         }
@@ -293,6 +344,8 @@ internal static class WindowsInstallerUiObserver
         {
             if (child.thread != IntPtr.Zero) CloseHandle(child.thread);
             if (child.process != IntPtr.Zero) CloseHandle(child.process);
+            foreach (ProcessRecord process in RelevantProcesses.Values)
+                if (process.Handle != IntPtr.Zero) { CloseHandle(process.Handle); process.Handle = IntPtr.Zero; }
             if (job != IntPtr.Zero) CloseHandle(job);
         }
     }
@@ -363,10 +416,24 @@ internal static class WindowsInstallerUiObserver
         string image = Path.GetFileName(window.Image ?? "").ToLowerInvariant();
         if (window.ClassName == "ConsoleWindowClass" || image == "powershell.exe" || image == "pwsh.exe" || image == "conhost.exe")
             ConsoleEvents.Enqueue(source + ":" + window.Pid.ToString(CultureInfo.InvariantCulture) + ":" + window.ClassName + ":" + window.Title);
-        if (String.Equals(window.Image, installerPath, StringComparison.OrdinalIgnoreCase) && window.ClassName == "#32770" && window.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (String.Equals(window.Image, installerPath, StringComparison.OrdinalIgnoreCase) && window.ClassName == "#32770" &&
+            window.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            lock (Sync) { if (installerWindow == null) installerWindow = window; }
+            string role = ProcessRole(window.Pid);
+            string windowKey = window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) + ":" +
+                window.Pid.ToString(CultureInfo.InvariantCulture) + ":" + role;
+            if (LoggedWindows.TryAdd(windowKey, 0))
+                LogEvent("window source=" + source + " hwnd=" + window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                    " pid=" + window.Pid.ToString(CultureInfo.InvariantCulture) + " role=" + role);
+            if (IsProtectedInstallerProcess(window.Pid) && CancellationWindowReady(window.Handle))
+                lock (Sync) { if (installerWindow == null) installerWindow = window; }
         }
+    }
+
+    private static bool CancellationWindowReady(IntPtr window)
+    {
+        IntPtr cancel = GetDlgItem(window, IdCancel);
+        return cancel != IntPtr.Zero && IsWindowVisible(cancel) && IsWindowEnabled(cancel);
     }
 
     private static List<WindowRecord> EnumerateWindows()
@@ -413,9 +480,48 @@ internal static class WindowsInstallerUiObserver
         finally { CloseHandle(process); }
     }
 
-    private static void TrackProcess(uint pid, uint parent, string image, long creationTime) { RelevantProcesses[pid] = new ProcessRecord { Pid = pid, ParentPid = parent, Image = image, CreationTime = creationTime }; }
+    private static bool TrackProcess(uint pid, uint parent, string image, long creationTime, string role = null)
+    {
+        string commandLine = ProcessCommandLine(pid);
+        if (role == null) role = ClassifyInstallerRole(image, commandLine);
+        IntPtr handle = String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase)
+            ? OpenProcess(0x00101000, false, pid) : IntPtr.Zero;
+        var record = new ProcessRecord { Pid = pid, ParentPid = parent, Image = image, CommandLine = commandLine,
+            Role = role, CreationTime = creationTime, Handle = handle };
+        ProcessRecord previous;
+        if (!RelevantProcesses.TryAdd(pid, record))
+        {
+            previous = RelevantProcesses[pid];
+            lock (previous)
+            {
+                if (!String.IsNullOrEmpty(image) && (String.IsNullOrEmpty(previous.Image) ||
+                    String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase))) previous.Image = image;
+                if (previous.CreationTime == 0 && creationTime != 0) previous.CreationTime = creationTime;
+                if (String.IsNullOrEmpty(previous.CommandLine) && !String.IsNullOrEmpty(commandLine)) previous.CommandLine = commandLine;
+                if (String.IsNullOrEmpty(previous.Role) && !String.IsNullOrEmpty(role)) previous.Role = role;
+                if (previous.Handle == IntPtr.Zero && handle != IntPtr.Zero) { previous.Handle = handle; handle = IntPtr.Zero; }
+            }
+            if (handle != IntPtr.Zero) CloseHandle(handle);
+            return false;
+        }
+        LogEvent("process pid=" + pid.ToString(CultureInfo.InvariantCulture) + " parent=" + parent.ToString(CultureInfo.InvariantCulture) +
+            " role=" + (role ?? "descendant") + " image=" + Path.GetFileName(image ?? String.Empty));
+        return true;
+    }
     private static void ResolveTrackedProcesses()
     {
+        foreach (ProcessRecord tracked in RelevantProcesses.Values)
+        {
+            if (!String.IsNullOrEmpty(tracked.Role) || !String.Equals(tracked.Image, installerPath, StringComparison.OrdinalIgnoreCase)) continue;
+            string commandLine = ProcessCommandLine(tracked.Pid);
+            string role = ClassifyInstallerRole(tracked.Image, commandLine);
+            if (!String.IsNullOrEmpty(commandLine)) tracked.CommandLine = commandLine;
+            if (!String.IsNullOrEmpty(role))
+            {
+                tracked.Role = role;
+                LogEvent("classified pid=" + tracked.Pid.ToString(CultureInfo.InvariantCulture) + " role=" + role);
+            }
+        }
         bool changed;
         do
         {
@@ -424,16 +530,32 @@ internal static class WindowsInstallerUiObserver
             {
                 string name = Path.GetFileName(process.Image ?? String.Empty).ToLowerInvariant();
                 bool candidate = String.Equals(process.Image, installerPath, StringComparison.OrdinalIgnoreCase);
-                if ((candidate || RelevantProcesses.ContainsKey(process.ParentPid)) && RelevantProcesses.TryAdd(process.Pid, process))
+                if (candidate || RelevantProcesses.ContainsKey(process.ParentPid))
                 {
-                    if (name == "powershell.exe" || name == "pwsh.exe") Interlocked.Increment(ref powershellStarts);
-                    changed = true;
+                    ProcessRecord existing;
+                    if (RelevantProcesses.TryGetValue(process.Pid, out existing) && existing.CreationTime != 0 &&
+                        (existing.Handle != IntPtr.Zero) == candidate && String.Equals(existing.Image, process.Image, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    bool added = TrackProcess(process.Pid, process.ParentPid, process.Image, process.CreationTime);
+                    if (added && (name == "powershell.exe" || name == "pwsh.exe")) Interlocked.Increment(ref powershellStarts);
+                    if (added) changed = true;
                 }
             }
         } while (changed);
     }
     private static long ProcessCreationTime(uint pid) { try { return Process.GetProcessById((int)pid).StartTime.ToUniversalTime().ToFileTimeUtc(); } catch { return 0; } }
-    private static bool ProcessAlive(uint pid) { ProcessRecord record; return RelevantProcesses.TryGetValue(pid, out record) && record.CreationTime != 0 && ProcessCreationTime(pid) == record.CreationTime; }
+    private static bool ProcessAlive(uint pid)
+    {
+        ProcessRecord record;
+        if (!RelevantProcesses.TryGetValue(pid, out record) || record.CreationTime == 0) return false;
+        bool alive = ProcessCreationTime(pid) == record.CreationTime;
+        if (!alive && record.Handle != IntPtr.Zero && record.ExitCode < 0)
+        {
+            uint code;
+            if (GetExitCodeProcess(record.Handle, out code) && code != 259) record.ExitCode = unchecked((int)code);
+        }
+        return alive;
+    }
     private static bool AnyTrackedProcessAlive() { ResolveTrackedProcesses(); return RelevantProcesses.Keys.Any(ProcessAlive); }
     private static void TerminateTrackedProcesses()
     {
@@ -455,6 +577,72 @@ internal static class WindowsInstallerUiObserver
     }
     private static int ProcessExitCode(IntPtr handle) { uint code; return GetExitCodeProcess(handle, out code) ? unchecked((int)code) : -1; }
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    private static string ProcessCommandLine(uint pid)
+    {
+        IntPtr process = OpenProcess(0x1000, false, pid);
+        if (process == IntPtr.Zero) return String.Empty;
+        IntPtr buffer = IntPtr.Zero;
+        try
+        {
+            int required;
+            NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out required);
+            if (required <= Marshal.SizeOf(typeof(UnicodeString)) || required > 131072) return String.Empty;
+            buffer = Marshal.AllocHGlobal(required);
+            int returned;
+            if (NtQueryInformationProcess(process, 60, buffer, required, out returned) != 0) return String.Empty;
+            UnicodeString command = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+            if (command.Buffer == IntPtr.Zero || (command.Length & 1) != 0 || command.Length > required) return String.Empty;
+            return Marshal.PtrToStringUni(command.Buffer, command.Length / 2) ?? String.Empty;
+        }
+        catch { return String.Empty; }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            CloseHandle(process);
+        }
+    }
+
+    private static string ClassifyInstallerRole(string image, string commandLine)
+    {
+        if (!String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase)) return null;
+        if ((commandLine ?? String.Empty).IndexOf("/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase) >= 0) return "protected";
+        if ((commandLine ?? String.Empty).IndexOf("/TQELEVATEDBOOTSTRAP=1", StringComparison.OrdinalIgnoreCase) >= 0 &&
+            (commandLine ?? String.Empty).IndexOf("/TQOUTERWINDOW=", StringComparison.OrdinalIgnoreCase) >= 0) return "elevated";
+        return null;
+    }
+
+    private static string ProcessRole(uint pid)
+    {
+        ProcessRecord process;
+        return RelevantProcesses.TryGetValue(pid, out process) ? process.Role ?? "descendant" : "untracked";
+    }
+
+    private static bool IsProtectedInstallerProcess(uint pid)
+    {
+        ResolveTrackedProcesses();
+        ProcessRecord process;
+        if (!RelevantProcesses.TryGetValue(pid, out process)) return false;
+        if (process.Role == "protected") return true;
+        string commandLine = ProcessCommandLine(pid);
+        string role = ClassifyInstallerRole(process.Image, commandLine);
+        if (!String.IsNullOrEmpty(commandLine)) process.CommandLine = commandLine;
+        if (!String.IsNullOrEmpty(role)) process.Role = role;
+        return role == "protected";
+    }
+
+    private static bool NsisRoleExitsValid()
+    {
+        foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
+        string[] roles = { "outer", "elevated", "protected" };
+        return roles.All(role => RelevantProcesses.Values.Count(process => process.Role == role && process.ExitCode == 0) == 1);
+    }
+
+    private static void LogEvent(string message)
+    {
+        long elapsed = (Stopwatch.GetTimestamp() - observationStartedTicks) * 1000 / Stopwatch.Frequency;
+        DiagnosticEvents.Enqueue(elapsed.ToString(CultureInfo.InvariantCulture) + "ms " + message);
+    }
 
     private static void StartRegistryWatchers()
     {
@@ -645,18 +833,21 @@ internal static class WindowsInstallerUiObserver
     private static void WriteEvidence(string path, string[] args, int bytes, string before, string after, int subsystem, long maxGapMs, bool graceful, bool forced, int exitCode, bool pass)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path));
-        var processes = RelevantProcesses.Values.OrderBy(value => value.Pid).Select(value => "{\"pid\":" + value.Pid + ",\"parentPid\":" + value.ParentPid + ",\"image\":" + Json(Path.GetFileName(value.Image ?? String.Empty)) + "}");
-        string window = installerWindow == null ? "null" : "{\"title\":" + Json(installerWindow.Title) + ",\"className\":" + Json(installerWindow.ClassName) + ",\"processId\":" + installerWindow.Pid + "}";
+        foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
+        var processes = RelevantProcesses.Values.OrderBy(value => value.Pid).Select(value => "{\"pid\":" + value.Pid + ",\"parentPid\":" + value.ParentPid + ",\"image\":" + Json(Path.GetFileName(value.Image ?? String.Empty)) + ",\"role\":" + Json(value.Role) + ",\"exitCode\":" + value.ExitCode + "}");
+        string window = installerWindow == null ? "null" : "{\"title\":" + Json(installerWindow.Title) + ",\"className\":" + Json(installerWindow.ClassName) + ",\"processId\":" + installerWindow.Pid + ",\"handle\":" + installerWindow.Handle.ToInt64() + "}";
+        string roleExits = "{" + String.Join(",", new[] { "outer", "elevated", "protected" }.Select(role => "\"" + role + "\":" +
+            (RelevantProcesses.Values.Where(process => process.Role == role).Select(process => "{\"pid\":" + process.Pid + ",\"exitCode\":" + process.ExitCode + "}").FirstOrDefault() ?? "null"))) + "}";
         string json = "{" +
             "\"schemaVersion\":2,\"installer\":" + Json(installerName) + ",\"architecture\":" + Json(args[3]) + "," +
             "\"sourceCommit\":" + Json(args[4]) + ",\"sourceTree\":" + Json(args[5]) + ",\"sourceTreeSha256\":" + Json(args[6]) + "," +
             "\"installerProvenanceSha256\":" + Json(args[7]) + ",\"provenanceDocumentSha256\":" + Json(args[8]) + "," +
             "\"bytes\":" + bytes + ",\"installerSha256Before\":" + Json(before) + ",\"installerSha256After\":" + Json(after) + "," +
             "\"outerPeSubsystem\":\"windows-gui\",\"outerPeSubsystemValue\":" + subsystem + ",\"nsisWindow\":" + window + "," +
-            "\"monitoring\":{\"sampleIntervalMs\":5,\"maximumSampleGapMs\":" + maxGapMs + ",\"processSamples\":" + processSamples + ",\"windowSamples\":" + windowSamples + ",\"filesystemSamples\":" + filesystemSamples + ",\"registrySamples\":" + registrySamples + ",\"errors\":" + JsonArray(ObserverErrors) + "}," +
-            "\"processes\":[" + String.Join(",", processes) + "],\"powershellProcessStarts\":" + powershellStarts + ",\"visibleConsoleWindowEvents\":" + JsonArray(ConsoleEvents) + "," +
+            "\"monitoring\":{\"sampleIntervalMs\":5,\"maximumSampleGapMs\":" + maxGapMs + ",\"processSamples\":" + processSamples + ",\"windowSamples\":" + windowSamples + ",\"filesystemSamples\":" + filesystemSamples + ",\"registrySamples\":" + registrySamples + ",\"errors\":" + JsonArray(ObserverErrors) + ",\"events\":" + JsonArray(DiagnosticEvents) + "}," +
+            "\"processes\":[" + String.Join(",", processes) + "],\"nsisRoleExits\":" + roleExits + ",\"powershellProcessStarts\":" + powershellStarts + ",\"visibleConsoleWindowEvents\":" + JsonArray(ConsoleEvents) + "," +
             "\"filesystemOrRegistryMutationEvents\":" + JsonArray(MutationEvents) + ",\"transientProtectedBootstrapObserved\":" + (protectedLeafObserved ? "true" : "false") + ",\"protectedBootstrapBaselineRestored\":" + (ProtectedLeaves().SetEquals(baselineProtectedLeaves) ? "true" : "false") + "," +
-            "\"cancellation\":{\"method\":\"WM_COMMAND/IDCANCEL\",\"graceful\":" + (graceful ? "true" : "false") + ",\"forcedCleanup\":" + (forced ? "true" : "false") + ",\"exitCode\":" + exitCode + "}," +
+            "\"cancellation\":{\"method\":\"WM_COMMAND/IDCANCEL\",\"targetRole\":\"protected\",\"targetProcessId\":" + (installerWindow == null ? 0 : installerWindow.Pid) + ",\"postAccepted\":" + (cancelPostAccepted ? "true" : "false") + ",\"confirmationObserved\":" + (confirmationWindow != null ? "true" : "false") + ",\"confirmationProcessId\":" + (confirmationWindow == null ? 0 : confirmationWindow.Pid) + ",\"confirmationPostAccepted\":" + (confirmationPostAccepted ? "true" : "false") + ",\"graceful\":" + (graceful ? "true" : "false") + ",\"forcedCleanup\":" + (forced ? "true" : "false") + ",\"exitCode\":" + exitCode + "}," +
             "\"activeProcessesAfterTeardown\":" + ActiveProcessesJson() + ",\"noDurableInstallMutation\":" + (MutationEvents.IsEmpty ? "true" : "false") + ",\"exactBaselineRestored\":" + ((RegistrySnapshot() == "clean" && DurableFileSnapshot() == "clean" && ProtectedLeaves().SetEquals(baselineProtectedLeaves)) ? "true" : "false") + ",\"passed\":" + (pass ? "true" : "false") + "}\n";
         string pending = path + ".pending"; File.WriteAllText(pending, json, new UTF8Encoding(false)); if (File.Exists(path)) File.Delete(path); File.Move(pending, path);
     }

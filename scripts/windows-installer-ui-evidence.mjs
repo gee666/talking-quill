@@ -12,6 +12,15 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
   const monitoring = value?.monitoring;
   const cancellation = value?.cancellation;
   const window = value?.nsisWindow;
+  const nsisRoles = ['outer', 'elevated', 'protected'];
+  const rolePids = nsisRoles.map((role) => value?.nsisRoleExits?.[role]?.pid);
+  const roleExitsMatchProcesses = nsisRoles.every((role) => {
+    const expectedRole = value?.nsisRoleExits?.[role];
+    return value?.processes?.some(
+      (process) =>
+        process?.pid === expectedRole?.pid && process?.role === role && process?.exitCode === 0,
+    );
+  });
   if (
     value?.schemaVersion !== 2 ||
     value.installer !== expected.installer ||
@@ -40,17 +49,36 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
     ) ||
     !Array.isArray(monitoring.errors) ||
     monitoring.errors.length !== 0 ||
+    !Array.isArray(monitoring.events) ||
+    monitoring.events.length === 0 ||
     !Array.isArray(value.visibleConsoleWindowEvents) ||
     value.visibleConsoleWindowEvents.length !== 0 ||
     !Array.isArray(value.filesystemOrRegistryMutationEvents) ||
     value.filesystemOrRegistryMutationEvents.length !== 0 ||
     !Array.isArray(value.processes) ||
     value.processes.length < 3 ||
+    !nsisRoles.every(
+      (role) =>
+        value.nsisRoleExits?.[role]?.exitCode === 0 &&
+        Number.isSafeInteger(value.nsisRoleExits[role].pid) &&
+        value.nsisRoleExits[role].pid > 0,
+    ) ||
+    new Set(rolePids).size !== nsisRoles.length ||
+    !roleExitsMatchProcesses ||
+    window?.processId !== value.nsisRoleExits.protected.pid ||
     !Number.isSafeInteger(value.powershellProcessStarts) ||
     value.powershellProcessStarts < 2 ||
     value.transientProtectedBootstrapObserved !== true ||
     value.protectedBootstrapBaselineRestored !== true ||
     cancellation?.method !== 'WM_COMMAND/IDCANCEL' ||
+    cancellation.targetRole !== 'protected' ||
+    cancellation.targetProcessId !== window.processId ||
+    cancellation.postAccepted !== true ||
+    typeof cancellation.confirmationObserved !== 'boolean' ||
+    typeof cancellation.confirmationPostAccepted !== 'boolean' ||
+    (cancellation.confirmationObserved &&
+      (cancellation.confirmationProcessId !== window.processId ||
+        cancellation.confirmationPostAccepted !== true)) ||
     cancellation.graceful !== true ||
     cancellation.forcedCleanup !== false ||
     cancellation.exitCode !== WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE ||

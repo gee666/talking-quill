@@ -117,6 +117,11 @@ describe('Windows protected bootstrap generator', () => {
     expect(observer).toContain('Path.GetTempPath()');
     expect(observer).toContain('ConsoleWindowClass');
     expect(observer).toContain('WM_COMMAND/IDCANCEL');
+    expect(observer).toContain('ClassifyInstallerRole');
+    expect(observer).toContain('/TQPROTECTEDTEMP=');
+    expect(observer).toContain('CancellationWindowReady');
+    expect(observer).toContain('IDCANCEL retry');
+    expect(observer).toContain('NsisRoleExitsValid');
     expect(observer).toContain('ExpectedCancellationExitCode = 0');
     expect(observer).toContain('exitCode == ExpectedCancellationExitCode');
     expect(observer).toContain('activeProcessesAfterTeardown');
@@ -153,6 +158,9 @@ describe('Windows protected bootstrap generator', () => {
     expect(cleanup).toContain('Get-CandidateValidation $Candidate.Path');
     expect(cleanup).toContain("throw 'leaf timestamps or content changed'");
     expect(harness).toContain('compiled NSIS graceful interactive cancellation');
+    expect(harness).toContain('spawnSupervisedWithArguments(controller');
+    expect(harness).toContain('event=cancel-ready');
+    expect(harness).toContain('event=IDCANCEL');
     expect(harness).toContain('MUI_CUSTOMFUNCTION_ABORT TalkingQuillOnUserAbort');
     expect(harness).toContain('SetErrorLevel 0');
     expect(harness).toContain('assertProtectedBootstrapResidueUnchanged');
