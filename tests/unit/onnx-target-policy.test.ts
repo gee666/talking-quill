@@ -10,8 +10,8 @@ interface Target {
 }
 
 interface OnnxConfig {
-  files: string[];
-  asarUnpack: string[];
+  files: unknown;
+  asarUnpack: unknown;
 }
 
 interface BeforePackContext {
@@ -37,18 +37,29 @@ const tuples = [
   ['darwin', 'arm64', 3],
 ] as const;
 
-function targetContext(platform: string, arch: number): BeforePackContext {
+function targetContext(platform: string, arch: number, config?: OnnxConfig): BeforePackContext {
   return {
     electronPlatformName: platform,
     arch,
     packager: {
-      config: {
+      config: config ?? {
         files: ['package.json', onnxPolicy.ONNX_NATIVE_PATTERN],
         asarUnpack: ['native.node', onnxPolicy.ONNX_NATIVE_PATTERN],
       },
     },
   };
 }
+
+function attempt12Config(): OnnxConfig {
+  // JSON.parse has an `any` return type; this checked-in fixture is consumed as builder input.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+  return JSON.parse(
+    readFileSync('tests/fixtures/electron-builder/attempt-12-before-pack-config.json', 'utf8'),
+  );
+}
+
+const winX64Target = { platform: 'win32', architecture: 'x64' } as const;
+const winX64Pattern = 'node_modules/onnxruntime-node/bin/napi-v3/win32/x64/**/*';
 
 describe('electron-builder target-native ONNX policy', () => {
   it.each(tuples)(
@@ -63,6 +74,43 @@ describe('electron-builder target-native ONNX policy', () => {
       expect(context.packager.config.asarUnpack).toEqual(['native.node', selected]);
     },
   );
+
+  it('handles the normalized FileSet shape emitted in release attempt 12', async () => {
+    const context = targetContext('win32', 1, attempt12Config());
+
+    await beforePack(context);
+
+    const files = context.packager.config.files as { filter: string[] }[];
+    expect(files).toHaveLength(1);
+    expect(files[0]?.filter).toContain('package.json');
+    expect(files[0]?.filter).toContain(winX64Pattern);
+    expect(JSON.stringify(files)).not.toContain(onnxPolicy.ONNX_NATIVE_PATTERN);
+    expect(context.packager.config.asarUnpack).toEqual([
+      'node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      winX64Pattern,
+    ]);
+  });
+
+  it.each([
+    ['string', onnxPolicy.ONNX_NATIVE_PATTERN, winX64Pattern],
+    [
+      'object with string filter',
+      { filter: onnxPolicy.ONNX_NATIVE_PATTERN },
+      { filter: winX64Pattern },
+    ],
+    [
+      'FileSet array',
+      [{ filter: ['package.json', onnxPolicy.ONNX_NATIVE_PATTERN] }],
+      [{ filter: ['package.json', winX64Pattern] }],
+    ],
+  ])('supports electron-builder files in %s form', (_name, files, expected) => {
+    const config = { files: structuredClone(files), asarUnpack: onnxPolicy.ONNX_NATIVE_PATTERN };
+
+    onnxPolicy.applyTargetNativeOnnxPolicy(config, winX64Target);
+
+    expect(config.files).toEqual(expected);
+    expect(config.asarUnpack).toBe(winX64Pattern);
+  });
 
   it('uses the builder target tuple during a cross-build instead of the host tuple', () => {
     const crossTarget = process.platform === 'win32' ? ['darwin', 3] : ['win32', 1];
@@ -85,12 +133,60 @@ describe('electron-builder target-native ONNX policy', () => {
     expect(() =>
       onnxPolicy.applyTargetNativeOnnxPolicy(
         { files: ['package.json'], asarUnpack: [onnxPolicy.ONNX_NATIVE_PATTERN] },
-        {
-          platform: 'win32',
-          architecture: 'x64',
-        },
+        winX64Target,
       ),
     ).toThrow('files is missing its ONNX native selector');
+  });
+
+  it.each([
+    [
+      'multiple selectors',
+      [onnxPolicy.ONNX_NATIVE_PATTERN, onnxPolicy.ONNX_NATIVE_PATTERN],
+      'exactly one ONNX native selector',
+    ],
+    ['an exclusion', [`!${onnxPolicy.ONNX_NATIVE_PATTERN}`], 'unsupported ONNX native selector'],
+    ['an already narrowed selector', [winX64Pattern], 'unsupported ONNX native selector'],
+    [
+      'an ONNX FileSet source',
+      [{ from: 'node_modules/onnxruntime-node/bin/napi-v3', filter: '**/*' }],
+      'unsupported ONNX file set',
+    ],
+    [
+      'an ONNX selector under a remapped FileSet',
+      [{ from: 'vendor', filter: onnxPolicy.ONNX_NATIVE_PATTERN }],
+      'ambiguous ONNX file set',
+    ],
+  ])('fails closed when files contains %s', (_name, files, message) => {
+    expect(() =>
+      onnxPolicy.applyTargetNativeOnnxPolicy(
+        { files, asarUnpack: onnxPolicy.ONNX_NATIVE_PATTERN },
+        winX64Target,
+      ),
+    ).toThrow(message);
+  });
+
+  it('rejects multiple asarUnpack selectors without partly rewriting files', () => {
+    const config = {
+      files: [onnxPolicy.ONNX_NATIVE_PATTERN],
+      asarUnpack: [onnxPolicy.ONNX_NATIVE_PATTERN, onnxPolicy.ONNX_NATIVE_PATTERN],
+    };
+
+    expect(() => onnxPolicy.applyTargetNativeOnnxPolicy(config, winX64Target)).toThrow(
+      'asarUnpack must contain exactly one ONNX native selector',
+    );
+    expect(config.files).toEqual([onnxPolicy.ONNX_NATIVE_PATTERN]);
+  });
+
+  it('rejects object forms for asarUnpack', () => {
+    expect(() =>
+      onnxPolicy.applyTargetNativeOnnxPolicy(
+        {
+          files: onnxPolicy.ONNX_NATIVE_PATTERN,
+          asarUnpack: { filter: onnxPolicy.ONNX_NATIVE_PATTERN },
+        },
+        winX64Target,
+      ),
+    ).toThrow('asarUnpack must be a string or an array of strings');
   });
 
   it('keeps the beforePack hook wired in electron-builder configuration', () => {
