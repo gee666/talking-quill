@@ -193,21 +193,26 @@ export function validateElectronBuilderOnnxConfig(config, target) {
     throw new Error(`electron-builder ${target.platform} configuration is missing`);
   }
 
-  assertOnlyOnnxBuilderPatterns(config.files, 'files', [ONNX_BUILDER_ROOT_EXCLUSION], true);
-  assertOnlyOnnxBuilderPatterns(config.asarUnpack, 'asarUnpack', [], false);
+  assertOnlyOnnxBuilderPatterns(
+    config.files,
+    'files',
+    [ONNX_BUILDER_ROOT_EXCLUSION],
+    'implicit-root',
+  );
+  assertOnlyOnnxBuilderPatterns(config.asarUnpack, 'asarUnpack', [], null);
   const targetPatterns = ONNX_BUILDER_TARGET_PATTERNS[target.platform];
   assertOnlyOnnxBuilderPatterns(
     platformConfig.files,
     `${target.platform}.files`,
     targetPatterns,
-    true,
+    'explicit-root',
   );
   assertExactOnnxBuilderFileSet(platformConfig.files, `${target.platform}.files`, targetPatterns);
   assertOnlyOnnxBuilderPatterns(
     platformConfig.asarUnpack,
     `${target.platform}.asarUnpack`,
     targetPatterns,
-    false,
+    null,
   );
 
   const expectedPlatform = target.platform === 'mac' ? 'darwin' : 'win32';
@@ -229,8 +234,8 @@ function assertExactOnnxBuilderFileSet(value, field, expected) {
     (candidate) =>
       candidate !== null &&
       typeof candidate === 'object' &&
-      (candidate.from === undefined || candidate.from === '.') &&
-      candidate.to === undefined &&
+      candidate.from === '.' &&
+      candidate.to === '.' &&
       Array.isArray(candidate.filter) &&
       candidate.filter.some(
         (pattern) => typeof pattern === 'string' && isOnnxBuilderPattern(pattern),
@@ -245,9 +250,9 @@ function assertExactOnnxBuilderFileSet(value, field, expected) {
   }
 }
 
-function assertOnlyOnnxBuilderPatterns(value, field, expected, allowDefaultFileSet) {
+function assertOnlyOnnxBuilderPatterns(value, field, expected, allowedFileSetLocation) {
   const found = [];
-  collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet);
+  collectOnnxBuilderPatterns(value, field, found, allowedFileSetLocation);
   if (
     found.length !== expected.length ||
     found.some((pattern, index) => pattern !== expected[index])
@@ -258,14 +263,15 @@ function assertOnlyOnnxBuilderPatterns(value, field, expected, allowDefaultFileS
   }
 }
 
-function collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet) {
+function collectOnnxBuilderPatterns(value, field, found, allowedFileSetLocation) {
   if (value == null) return;
   if (typeof value === 'string') {
     if (isOnnxBuilderPattern(value)) found.push(value.replaceAll('\\', '/'));
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectOnnxBuilderPatterns(item, field, found, allowDefaultFileSet);
+    for (const item of value)
+      collectOnnxBuilderPatterns(item, field, found, allowedFileSetLocation);
     return;
   }
   if (typeof value !== 'object') {
@@ -289,10 +295,13 @@ function collectOnnxBuilderPatterns(value, field, found, allowDefaultFileSet) {
       hasOnnxNativeReference(filter)
     );
   });
-  if (fileSetMentionsOnnx && (!allowDefaultFileSet || !['', '.'].includes(from) || to !== '')) {
+  const fileSetLocationMatches =
+    (allowedFileSetLocation === 'implicit-root' && from === '' && to === '') ||
+    (allowedFileSetLocation === 'explicit-root' && from === '.' && to === '.');
+  if (fileSetMentionsOnnx && !fileSetLocationMatches) {
     throw new Error(`Unexpected electron-builder ONNX FileSet in ${field}`);
   }
-  collectOnnxBuilderPatterns(value.filter, field, found, allowDefaultFileSet);
+  collectOnnxBuilderPatterns(value.filter, field, found, allowedFileSetLocation);
 }
 
 const onnxBuilderPatternCache = new Map();

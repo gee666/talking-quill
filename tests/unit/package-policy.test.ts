@@ -43,6 +43,25 @@ function matcherArray(owner: MutableMatcherOwner, key: 'files' | 'asarUnpack'): 
   return value;
 }
 
+function onnxFileSet(owner: MutableMatcherOwner): {
+  from?: string;
+  to?: string;
+  filter?: unknown;
+} {
+  const candidate = matcherArray(owner, 'files').find(
+    (value) =>
+      value !== null &&
+      typeof value === 'object' &&
+      Array.isArray((value as { filter?: unknown }).filter) &&
+      (value as { filter: unknown[] }).filter.some(
+        (pattern) =>
+          typeof pattern === 'string' && pattern.includes('onnxruntime-node/bin/napi-v3'),
+      ),
+  );
+  if (candidate === undefined) throw new Error('Merged electron-builder ONNX FileSet is missing');
+  return candidate as { from?: string; to?: string; filter?: unknown };
+}
+
 function obfuscateOnnxNativePattern(path: string): string {
   return path.replaceAll('onnxruntime', 'onnx[r]untime').replaceAll('napi-v3', 'napi-v[3]');
 }
@@ -58,9 +77,26 @@ function isTargetOnnxNativePath(
 
 const require = createRequire(import.meta.url);
 const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
-const { getNodeModuleFileMatcher } = electronBuilderRequire(
+interface BuilderFileMatcher {
+  from: string;
+  to: string;
+  patterns: string[];
+}
+
+const { getFileMatchers, getNodeModuleFileMatcher } = electronBuilderRequire(
   'app-builder-lib/out/fileMatcher.js',
 ) as {
+  getFileMatchers(
+    config: MutableMatcherOwner,
+    name: 'files',
+    destination: string,
+    options: {
+      macroExpander: (pattern: string) => string;
+      customBuildOptions: MutableMatcherOwner;
+      globalOutDir: string;
+      defaultSrc: string;
+    },
+  ): BuilderFileMatcher[] | null;
   getNodeModuleFileMatcher(
     appDir: string,
     destination: string,
@@ -70,7 +106,7 @@ const { getNodeModuleFileMatcher } = electronBuilderRequire(
       config: MutableMatcherOwner;
       debugLogger: { isEnabled: boolean; add(): void };
     },
-  ): { patterns: string[] };
+  ): BuilderFileMatcher;
 };
 
 const jpegProviderLogos = new Set(['fireworksai', 'localai', 'mistral', 'openrouter']);
@@ -447,24 +483,28 @@ describe('packaged runtime allowlist', () => {
         validateElectronBuilderOnnxConfig(config, { platform, architecture }),
       ).not.toThrow();
 
+      const appDirectory = resolve('app');
+      const destination = resolve('release', 'fixture');
+      const macroExpander = (pattern: string) => pattern.replaceAll('${arch}', architecture);
       const matcher = getNodeModuleFileMatcher(
-        resolve('app'),
-        resolve('release', 'fixture'),
-        (pattern) => pattern.replaceAll('${arch}', architecture),
+        appDirectory,
+        destination,
+        macroExpander,
         config[platform] as MutableMatcherOwner,
         {
           config,
           debugLogger: { isEnabled: false, add() {} },
         },
       );
+      expect(matcher.from).toBe(appDirectory);
+      expect(matcher.to).toBe(destination);
       const nativePatterns = matcher.patterns.filter((pattern) =>
         pattern.includes('onnxruntime-node/bin/napi-v3'),
       );
       const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
       const architectureRoot = `node_modules/onnxruntime-node/bin/napi-v3/${nativePlatform}/${architecture}`;
-      expect(nativePatterns).toEqual([
-        '!node_modules/onnxruntime-node/bin/napi-v3/**/*',
-        ...(platform === 'mac'
+      const targetLeaves =
+        platform === 'mac'
           ? [
               `${architectureRoot}/libonnxruntime.1.21.0.dylib`,
               `${architectureRoot}/onnxruntime_binding.node`,
@@ -473,8 +513,30 @@ describe('packaged runtime allowlist', () => {
               `${architectureRoot}/DirectML.dll`,
               `${architectureRoot}/onnxruntime.dll`,
               `${architectureRoot}/onnxruntime_binding.node`,
-            ]),
+            ];
+      expect(nativePatterns).toEqual([
+        '!node_modules/onnxruntime-node/bin/napi-v3/**/*',
+        ...targetLeaves,
       ]);
+
+      const fileMatchers = getFileMatchers(config, 'files', destination, {
+        macroExpander,
+        customBuildOptions: config[platform] as MutableMatcherOwner,
+        globalOutDir: resolve('release'),
+        defaultSrc: appDirectory,
+      });
+      const targetFileMatcher = fileMatchers?.find((candidate) =>
+        candidate.patterns.some((pattern) => targetLeaves.includes(pattern)),
+      );
+      expect(targetFileMatcher?.from).toBe(appDirectory);
+      expect(targetFileMatcher?.to).toBe(destination);
+      expect(targetFileMatcher?.patterns).toEqual(targetLeaves);
+      expect(targetLeaves.map((leaf) => resolve(targetFileMatcher?.from ?? '', leaf))).toEqual(
+        targetLeaves.map((leaf) => resolve(appDirectory, leaf)),
+      );
+      expect(targetLeaves.map((leaf) => resolve(targetFileMatcher?.to ?? '', leaf))).toEqual(
+        targetLeaves.map((leaf) => resolve(destination, leaf)),
+      );
     },
   );
 
@@ -588,6 +650,26 @@ describe('packaged runtime allowlist', () => {
           config.win.files = [
             { filter: 'node_modules/onnxruntime-node/bin/napi-v3/win32/${arch}/**/*' },
           ];
+        },
+      },
+      {
+        name: 'omitted FileSet source',
+        mutate: (config) => delete onnxFileSet(config.win).from,
+      },
+      {
+        name: 'alternate FileSet source',
+        mutate: (config) => {
+          onnxFileSet(config.win).from = 'node_modules';
+        },
+      },
+      {
+        name: 'omitted FileSet destination',
+        mutate: (config) => delete onnxFileSet(config.win).to,
+      },
+      {
+        name: 'alternate FileSet destination',
+        mutate: (config) => {
+          onnxFileSet(config.win).to = 'native';
         },
       },
       {
