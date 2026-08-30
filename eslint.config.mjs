@@ -31,6 +31,7 @@ export default tseslint.config(
       'pnpm-lock.yaml',
       'scripts/**/*.d.mts',
       'tests/fixtures/compatibility/keyboard-owner-v1/*.d.mts',
+      'tests/native/*.d.mts',
     ],
   },
   eslint.configs.recommended,

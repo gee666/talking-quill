@@ -5,17 +5,27 @@ import { isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
+import {
+  FAILURE_CLEANUP_REQUESTS,
+  prepareHelperHarnessExecutable,
+} from './helper-harness-support.mjs';
+
 const arguments_ = process.argv.slice(2);
 const interactive = arguments_.includes('--interactive');
 const helperArgument = valueAfter('--helper');
-const helper = resolve(
+const repositoryRoot = resolve(import.meta.dirname, '..', '..');
+const sourceHelper = resolve(
   helperArgument ??
     `app/native/${process.platform === 'win32' ? 'talking-quill-helper.exe' : 'talking-quill-helper'}`,
 );
-if (!isAbsolute(helper)) throw new Error('Helper path must resolve to an absolute path');
-await access(helper);
+if (!isAbsolute(sourceHelper)) throw new Error('Helper path must resolve to an absolute path');
+await access(sourceHelper);
+const preparedHelper = await prepareHelperHarnessExecutable({
+  helper: sourceHelper,
+  repositoryRoot,
+});
 
-const child = spawn(helper, [], {
+const child = spawn(preparedHelper.executable, [], {
   stdio: ['pipe', 'pipe', 'inherit'],
   shell: false,
   windowsHide: false,
@@ -33,91 +43,177 @@ const childExit = new Promise((resolveExit, reject) => {
     else reject(error);
   });
 });
+// Observe spawn failures immediately while preserving rejection for the main
+// flow, which reports the original error after bounded cleanup.
+void childExit.catch(() => undefined);
 let pendingBytes = Buffer.alloc(0);
 let nextId = 1;
 const pending = new Map();
 const notifications = [];
 const requestSequence = [];
 
+child.stdin.on('error', () => undefined);
 child.stdout.on('data', (chunk) => {
-  pendingBytes = Buffer.concat([pendingBytes, chunk]);
-  while (pendingBytes.length >= 4) {
-    const length = pendingBytes.readUInt32BE(0);
-    if (length === 0 || length > 16 * 1024) throw new Error(`Invalid frame length ${length}`);
-    if (pendingBytes.length < length + 4) return;
-    const message = JSON.parse(pendingBytes.subarray(4, length + 4).toString('utf8'));
-    pendingBytes = pendingBytes.subarray(length + 4);
-    if ('id' in message) {
-      const request = pending.get(message.id);
-      if (request === undefined) throw new Error(`Unknown response ID ${String(message.id)}`);
-      pending.delete(message.id);
-      if ('error' in message) request.reject(new Error(message.error.message));
-      else request.resolve(message.result);
-    } else {
-      notifications.push(message);
-      console.log(`event ${JSON.stringify(redactNotification(message))}`);
+  try {
+    pendingBytes = Buffer.concat([pendingBytes, chunk]);
+    while (pendingBytes.length >= 4) {
+      const length = pendingBytes.readUInt32BE(0);
+      if (length === 0 || length > 16 * 1024) throw new Error(`Invalid frame length ${length}`);
+      if (pendingBytes.length < length + 4) return;
+      const message = JSON.parse(pendingBytes.subarray(4, length + 4).toString('utf8'));
+      pendingBytes = pendingBytes.subarray(length + 4);
+      if ('id' in message) {
+        const request = pending.get(message.id);
+        if (request === undefined) throw new Error(`Unknown response ID ${String(message.id)}`);
+        pending.delete(message.id);
+        if ('error' in message) request.reject(new Error(message.error.message));
+        else request.resolve(message.result);
+      } else {
+        notifications.push(message);
+        console.log(`event ${JSON.stringify(redactNotification(message))}`);
+      }
     }
+  } catch (error) {
+    const protocolError = error instanceof Error ? error : new Error(String(error));
+    for (const request of pending.values()) request.reject(protocolError);
+    pending.clear();
   }
 });
 
-const initialized = await request('initialize', { protocolVersion: 10 });
-validateKeyboardOwnerSnapshot(initialized.keyboardOwner);
-validateKeyboardCaptureCapability(initialized.keyboardCapture, initialized.keyboardOwner);
-const permissions = await request('permissions.get', {});
-const health = await request('ping', {});
-validateKeyboardOwnerSnapshot(health.keyboardOwner);
-if (
-  health.keyboardOwner.instanceId !== initialized.keyboardOwner.instanceId ||
-  health.keyboardOwner.leaseEpoch !== initialized.keyboardOwner.leaseEpoch
-) {
-  throw new Error('Helper ping changed keyboard-owner instance or lease epoch');
-}
-await request('session.set_capture', { mode: 'off' });
-await request('activation.configure', { enabled: false, bindings: fullChordBindings() });
-if (
-  JSON.stringify(requestSequence.slice(0, 5)) !==
-  JSON.stringify([
-    'initialize',
-    'permissions.get',
-    'ping',
-    'session.set_capture',
-    'activation.configure',
-  ])
-) {
-  throw new Error(`Helper disabled-first startup order changed: ${requestSequence.join(' -> ')}`);
-}
-const activationRegistration = await configureActivationCoverage(initialized, permissions);
-await request('activation.configure', { enabled: false, bindings: [] });
-const observability = await request('runtime.observability', {});
-validateKeyboardOwnerSnapshot(observability.keyboardOwner);
-if (typeof observability.owner?.authAttempts !== 'number') {
-  throw new Error(`Malformed owner observability: ${JSON.stringify(observability.owner)}`);
-}
-const maintenanceBoundary = await validateMaintenanceBoundary(initialized.keyboardOwner);
-const safeReport = {
-  initialized,
-  activationRegistration,
-  health,
-  permissions,
-  observability,
-  maintenanceBoundary,
-  frontApp: await request('front_app.get', {}).catch((error) => ({ unavailable: error.message })),
-};
-console.log(JSON.stringify(safeReport, null, 2));
-
-if (interactive) {
-  if (activationRegistration.safeDisabled) {
-    throw new Error('Interactive activation checks require a trusted native test build');
+let protocolInitialized = false;
+let plannedShutdown = false;
+let initializeResponseComplete;
+const initializeResponse = new Promise((resolveResponse) => {
+  initializeResponseComplete = resolveResponse;
+});
+let runError;
+try {
+  const initialized = await request('initialize', { protocolVersion: 10 });
+  validateKeyboardOwnerSnapshot(initialized.keyboardOwner);
+  validateKeyboardCaptureCapability(initialized.keyboardCapture, initialized.keyboardOwner);
+  if (preparedHelper.staged && !initialized.keyboardOwner.authenticated) {
+    throw new Error('Staged Windows helper did not authenticate its provenance-bound owner');
   }
-  await runInteractive();
+  const permissions = await request('permissions.get', {});
+  const health = await request('ping', {});
+  validateKeyboardOwnerSnapshot(health.keyboardOwner);
+  if (
+    health.keyboardOwner.instanceId !== initialized.keyboardOwner.instanceId ||
+    health.keyboardOwner.leaseEpoch !== initialized.keyboardOwner.leaseEpoch
+  ) {
+    throw new Error('Helper ping changed keyboard-owner instance or lease epoch');
+  }
+  await request('session.set_capture', { mode: 'off' });
+  await request('activation.configure', { enabled: false, bindings: fullChordBindings() });
+  if (
+    JSON.stringify(requestSequence.slice(0, 5)) !==
+    JSON.stringify([
+      'initialize',
+      'permissions.get',
+      'ping',
+      'session.set_capture',
+      'activation.configure',
+    ])
+  ) {
+    throw new Error(`Helper disabled-first startup order changed: ${requestSequence.join(' -> ')}`);
+  }
+  const activationRegistration = await configureActivationCoverage(initialized, permissions);
+  await request('activation.configure', { enabled: false, bindings: [] });
+  const observability = await request('runtime.observability', {});
+  validateKeyboardOwnerSnapshot(observability.keyboardOwner);
+  if (typeof observability.owner?.authAttempts !== 'number') {
+    throw new Error(`Malformed owner observability: ${JSON.stringify(observability.owner)}`);
+  }
+  const maintenanceBoundary = await validateMaintenanceBoundary(initialized.keyboardOwner);
+  const safeReport = {
+    initialized,
+    activationRegistration,
+    health,
+    permissions,
+    observability,
+    maintenanceBoundary,
+    frontApp: await request('front_app.get', {}).catch((error) => ({ unavailable: error.message })),
+  };
+  console.log(JSON.stringify(safeReport, null, 2));
+
+  if (interactive) {
+    if (activationRegistration.safeDisabled) {
+      throw new Error('Interactive activation checks require a trusted native test build');
+    }
+    await runInteractive();
+  }
+  const shutdown = await requestDisabledNeutralShutdown();
+  if (!['neutral', 'draining'].includes(shutdown.ownerDisposition)) {
+    throw new Error(`Malformed owner shutdown disposition: ${JSON.stringify(shutdown)}`);
+  }
+  plannedShutdown = true;
+  if (!(await waitForChildExit(3_000))) {
+    throw new Error('Helper did not exit after its planned neutral shutdown response');
+  }
+  await childExit;
+} catch (error) {
+  runError = error;
+} finally {
+  if (!plannedShutdown && child.exitCode === null) {
+    await cleanupFailedHarness();
+  }
+  const childExited = await waitForChildExit(3_000);
+  if (childExited) {
+    try {
+      await preparedHelper.cleanup();
+    } catch (error) {
+      runError ??= error;
+    }
+  } else {
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.unref();
+    runError ??= new Error(
+      'Helper remained alive after cleanup requests; it was detached without force-killing its unknown-neutral owner',
+    );
+  }
 }
-await request('session.set_capture', { mode: 'off' }).catch(() => undefined);
-await request('activation.configure', { enabled: false, bindings: [] }).catch(() => undefined);
-const shutdown = await request('shutdown', {});
-if (!['neutral', 'draining'].includes(shutdown.ownerDisposition)) {
-  throw new Error(`Malformed owner shutdown disposition: ${JSON.stringify(shutdown)}`);
+if (runError !== undefined) throw runError;
+
+async function waitForChildExit(milliseconds) {
+  if (child.exitCode !== null) return true;
+  return Promise.race([
+    childExit.then(
+      () => true,
+      () => true,
+    ),
+    delay(milliseconds).then(() => false),
+  ]);
 }
-await childExit;
+
+async function requestDisabledNeutralShutdown() {
+  let shutdown;
+  for (const [method, params] of FAILURE_CLEANUP_REQUESTS) {
+    const result = await request(method, params);
+    if (method === 'shutdown') shutdown = result;
+  }
+  return shutdown;
+}
+
+async function cleanupFailedHarness() {
+  if (!protocolInitialized) {
+    await Promise.race([initializeResponse, delay(3_500)]);
+  }
+  if (protocolInitialized) {
+    try {
+      await requestDisabledNeutralShutdown();
+      plannedShutdown = true;
+      return;
+    } catch {
+      // The requests were issued in disabled-first order. Never force-kill an
+      // owner whose native neutrality the harness cannot authenticate.
+    }
+  }
+  for (const [method, params] of FAILURE_CLEANUP_REQUESTS) {
+    sendWithoutWaiting(method, params);
+  }
+  child.stdin.end();
+}
 
 function validateKeyboardOwnerSnapshot(owner) {
   if (
@@ -521,24 +617,24 @@ function shortcutMatches(shortcut, keys, modifiers) {
 
 function request(method, params) {
   requestSequence.push(method);
-  const id = nextId++;
-  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-  if (payload.length === 0 || payload.length > 16 * 1024) throw new Error('Request too large');
-  const frame = Buffer.allocUnsafe(payload.length + 4);
-  frame.writeUInt32BE(payload.length, 0);
-  payload.copy(frame, 4);
+  const { id, frame } = requestFrame(method, params);
   return new Promise((resolveRequest, reject) => {
     const timeout = setTimeout(() => {
-      pending.delete(id);
+      if (method !== 'initialize') pending.delete(id);
       reject(new Error(`${method} timed out`));
     }, 3_000);
     pending.set(id, {
       resolve: (value) => {
         clearTimeout(timeout);
+        if (method === 'initialize') {
+          protocolInitialized = true;
+          initializeResponseComplete();
+        }
         resolveRequest(value);
       },
       reject: (error) => {
         clearTimeout(timeout);
+        if (method === 'initialize') initializeResponseComplete();
         reject(error);
       },
     });
@@ -546,10 +642,27 @@ function request(method, params) {
       if (error) {
         pending.delete(id);
         clearTimeout(timeout);
+        if (method === 'initialize') initializeResponseComplete();
         reject(error);
       }
     });
   });
+}
+
+function sendWithoutWaiting(method, params) {
+  requestSequence.push(method);
+  const { frame } = requestFrame(method, params);
+  child.stdin.write(frame, () => undefined);
+}
+
+function requestFrame(method, params) {
+  const id = nextId++;
+  const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  if (payload.length === 0 || payload.length > 16 * 1024) throw new Error('Request too large');
+  const frame = Buffer.allocUnsafe(payload.length + 4);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return { id, frame };
 }
 
 function valueAfter(name) {

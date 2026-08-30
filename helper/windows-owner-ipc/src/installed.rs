@@ -46,6 +46,8 @@ struct ReleaseManifest {
     architecture: String,
     owner_mode: String,
     package_mode: String,
+    source_commit: String,
+    source_tree: String,
     roles: Vec<ManifestRole>,
     predecessor: Option<ManifestPredecessor>,
     fresh_install: Option<bool>,
@@ -153,6 +155,8 @@ impl InstalledRelease {
                 && (manifest.fresh_install.is_some() || manifest.predecessor.is_none()))
             || manifest.version.is_empty()
             || manifest.version.len() > 64
+            || !valid_source_identity(&manifest.source_commit)
+            || !valid_source_identity(&manifest.source_tree)
             || manifest.roles.len() != 2
             || manifest.update.channel != format!("latest-{architecture}")
             || manifest.update.payload != "nsis"
@@ -368,6 +372,8 @@ fn canonical_package_layout(manifest: &ReleaseManifest) -> Result<[u8; 32], Inst
         ("architecture", manifest.architecture.as_str()),
         ("ownerMode", manifest.owner_mode.as_str()),
         ("packageMode", manifest.package_mode.as_str()),
+        ("sourceCommit", manifest.source_commit.as_str()),
+        ("sourceTree", manifest.source_tree.as_str()),
     ] {
         hash_layout_field(&mut hash, name, value)?;
     }
@@ -426,6 +432,13 @@ fn hash_layout_field(
     hash.update(name.as_bytes());
     hash.update(value.as_bytes());
     Ok(())
+}
+
+fn valid_source_identity(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn parse_hex32(value: &str) -> Result<[u8; 32], InstalledReleaseError> {
@@ -541,6 +554,8 @@ mod tests {
             "architecture": architecture,
             "ownerMode": "local-unsigned-enabled",
             "packageMode": if predecessor.is_null() { "fresh" } else { "update" },
+            "sourceCommit": "11".repeat(20),
+            "sourceTree": "22".repeat(20),
             "roles": [
                 {"role":"gateway","path":"resources/helper/talking-quill-helper.exe","sha256":hex(&[gateway;32]),"suppressionCapable":false},
                 {"role":"owner","path":"resources/helper/talking-quill-keyboard-owner.exe","sha256":hex(&[owner;32]),"suppressionCapable":true}
@@ -640,6 +655,26 @@ mod tests {
         let proof = protected_policy_proof(&release.binding);
         assert_eq!(&proof[..8], b"TQKOWPR1");
         assert_ne!(proof[0], 0x30);
+    }
+
+    #[test]
+    fn installed_manifest_binds_source_provenance() {
+        let gateway = facts("talking-quill-helper.exe", 16, 1);
+        let owner = facts("talking-quill-keyboard-owner.exe", 17, 2);
+        let resources = Path::new(r"C:\Program Files\Talking Quill\resources");
+        let mut value: serde_json::Value = serde_json::from_slice(&manifest(1, 2)).unwrap();
+        value["sourceCommit"] = "33".repeat(20).into();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(
+            InstalledRelease::from_manifest_bytes(
+                &gateway,
+                &owner,
+                ChannelPurpose::Capture,
+                resources,
+                &bytes,
+            )
+            .is_err()
+        );
     }
 
     #[test]
