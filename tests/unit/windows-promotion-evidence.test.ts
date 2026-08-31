@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,84 @@ const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(removeTestDirectory)));
 const sha = (byte: string) => byte.repeat(64);
 const source = (byte: string) => byte.repeat(40);
+const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest();
+const le32 = (value: number) => {
+  const bytes = Buffer.alloc(4);
+  bytes.writeUInt32LE(value);
+  return bytes;
+};
+
+function authenticationReceipt(action: 'install' | 'repair' | 'uninstall') {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const point = (key: typeof publicKey) => {
+    const jwk = key.export({ format: 'jwk' });
+    if (jwk.x === undefined || jwk.y === undefined)
+      throw new Error('Generated P-256 key is invalid');
+    return Buffer.concat([
+      Buffer.from([4]),
+      Buffer.from(jwk.x, 'base64url'),
+      Buffer.from(jwk.y, 'base64url'),
+    ]);
+  };
+  const controllerPublic = point(publicKey);
+  const workerPublic = Buffer.from(controllerPublic);
+  const request = Buffer.alloc(6);
+  request[0] = { install: 1, repair: 2, uninstall: 3 }[action];
+  request[1] = 1;
+  const nonce = Buffer.alloc(32, 2);
+  const peer = Buffer.alloc(32, 3);
+  const workerProof = Buffer.alloc(32, 4);
+  const controllerProof = Buffer.alloc(32, 5);
+  const transcript = digest(
+    Buffer.concat([
+      Buffer.from('TalkingQuill/setup-authenticated-transcript/v1'),
+      nonce,
+      controllerPublic,
+      workerPublic,
+      peer,
+      request,
+      workerProof,
+      controllerProof,
+    ]),
+  );
+  const challenge = Buffer.alloc(32, 6);
+  const packageHash = Buffer.from(sha('a'), 'hex');
+  const signed = Buffer.concat([
+    Buffer.from('TalkingQuill/setup-evidence-signature/v1'),
+    challenge,
+    le32(100),
+    le32(101),
+    packageHash,
+    peer,
+    transcript,
+    nonce,
+    controllerPublic,
+    workerPublic,
+    request,
+    workerProof,
+    controllerProof,
+  ]);
+  return {
+    schemaVersion: 2,
+    controllerPid: 100,
+    workerPid: 101,
+    packageSha256: packageHash.toString('hex'),
+    peerBinding: peer.toString('hex'),
+    transcriptSha256: transcript.toString('hex'),
+    observerChallenge: challenge.toString('hex'),
+    nonce: nonce.toString('hex'),
+    controllerPublicKey: controllerPublic.toString('hex'),
+    workerPublicKey: workerPublic.toString('hex'),
+    request: request.toString('hex'),
+    workerProof: workerProof.toString('hex'),
+    controllerProof: controllerProof.toString('hex'),
+    evidencePublicKey: controllerPublic.toString('hex'),
+    evidenceSignature: sign('sha256', signed, {
+      key: privateKey,
+      dsaEncoding: 'ieee-p1363',
+    }).toString('hex'),
+  };
+}
 
 function success(architecture: string, operation: 'fresh' | 'repair') {
   const controller = {
@@ -41,7 +119,9 @@ function success(architecture: string, operation: 'fresh' | 'repair') {
     authenticatedSetupPids: [100, 101],
     processIdentities: [controller, worker],
     pipeObserved: true,
-    nativeAuthenticationReceipt: { transcriptSha256: sha('1') },
+    nativeAuthenticationReceipt: authenticationReceipt(
+      operation === 'fresh' ? 'install' : 'repair',
+    ),
     installedIdentityBound: true,
     registrationsExact: true,
     terminalTopology: true,
@@ -110,25 +190,48 @@ async function fixture() {
     Buffer.from(jwk.x, 'base64url'),
     Buffer.from(jwk.y, 'base64url'),
   ]);
-  const publicKeyPath = join(root, 'release-key.sec1');
+  const publicKeyPath = join(root, 'promotion-key.sec1');
   await writeFile(publicKeyPath, sec1.toString('hex'));
+  const updater = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const updaterJwk = updater.publicKey.export({ format: 'jwk' });
+  if (updaterJwk.x === undefined || updaterJwk.y === undefined)
+    throw new Error('Generated updater P-256 key is invalid');
+  const updaterSec1 = Buffer.concat([
+    Buffer.from([4]),
+    Buffer.from(updaterJwk.x, 'base64url'),
+    Buffer.from(updaterJwk.y, 'base64url'),
+  ]);
+  const updatePublicKeyPath = join(root, 'update-key.sec1');
+  await writeFile(updatePublicKeyPath, updaterSec1.toString('hex'));
   return {
     directory,
     publicKeyPath,
+    updatePublicKeyPath,
     output: join(directory, 'windows-promotion-lifecycle-evidence-v1.json'),
     privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+    updatePrivateKeyPkcs8Base64: updater.privateKey
+      .export({ format: 'der', type: 'pkcs8' })
+      .toString('base64'),
   };
 }
 
 describe('Windows promotion lifecycle evidence', () => {
   it('binds exact lifecycle claims to the pinned protected P-256 release key', async () => {
     const value = await fixture();
-    await createWindowsPromotionEvidence({
+    const created = await createWindowsPromotionEvidence({
       ...value,
       repository: 'owner/repository',
       workflowRunId: '123',
       privateKeyPkcs8Base64: value.privateKey,
     });
+    const records = created.payload.records as {
+      claims: { kind: string; action: string };
+    }[];
+    expect(
+      records
+        .filter(({ claims }) => claims.kind === 'fault')
+        .every(({ claims }) => claims.action === 'fault'),
+    ).toBe(true);
     await expect(
       verifyWindowsPromotionEvidence({
         path: value.output,
@@ -152,6 +255,26 @@ describe('Windows promotion lifecycle evidence', () => {
     ).rejects.toThrow(/did not pass exact lifecycle policy/u);
   });
 
+  it('rejects a signed receipt whose authenticated action differs from its lifecycle claim', async () => {
+    const value = await fixture();
+    const path = join(value.directory, 'windows-installer-success-x64.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...success('x64', 'repair'),
+        nativeAuthenticationReceipt: authenticationReceipt('install'),
+      }),
+    );
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.privateKey,
+      }),
+    ).rejects.toThrow(/action does not match/u);
+  });
+
   it('rejects a receipt-supplied or unrelated signing key', async () => {
     const value = await fixture();
     const unrelated = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey;
@@ -165,5 +288,17 @@ describe('Windows promotion lifecycle evidence', () => {
           .toString('base64'),
       }),
     ).rejects.toThrow(/does not match/u);
+  });
+
+  it('rejects reuse of the updater signing key for promotion evidence', async () => {
+    const value = await fixture();
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.updatePrivateKeyPkcs8Base64,
+      }),
+    ).rejects.toThrow(/promotion key/u);
   });
 });

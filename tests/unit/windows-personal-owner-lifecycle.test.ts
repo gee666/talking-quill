@@ -103,6 +103,38 @@ describe('Windows gateway and owner lifecycle contract', () => {
     );
   });
 
+  it('recovers through authenticated installed entry points before arming a new action', async () => {
+    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const authenticate = setup.indexOf('WorkerChannel::connect_and_authenticate(&current, None)');
+    const recover = setup.indexOf('recover_with_adapter(&paths, &system)?;', authenticate);
+    const arm = setup.indexOf('write_transaction(&paths, "uninstall-armed"', recover);
+    expect(authenticate).toBeGreaterThan(-1);
+    expect(recover).toBeGreaterThan(authenticate);
+    expect(arm).toBeGreaterThan(recover);
+    expect(setup).toContain(
+      'Recovered machine state does not match the authenticated setup request.',
+    );
+    expect(setup).toContain('paths.maintenance_uninstaller');
+  });
+
+  it('retains bounded visible update recovery until the active generation succeeds', async () => {
+    const [updater, workflow] = await Promise.all([
+      readFile('helper/src/windows_update.rs', 'utf8'),
+      readFile('.github/workflows/release-unsigned.yml', 'utf8'),
+    ]);
+    expect(updater).toContain('CurrentVersion\\Run"');
+    expect(updater).not.toContain('!Talking Quill Update Recovery');
+    expect(updater).toContain('MAX_VISIBLE_RECOVERY_ATTEMPTS: u8 = 3');
+    expect(updater).toContain('show_visible_retry_paused()');
+    expect(updater).toContain('read_active_generation(&recovery_directory()?)? != generation');
+    expect(updater).toContain('let recovery_generation = if resuming');
+    expect(updater).toContain(
+      'Automatic update prompts are paused and the recovery generation is retained.',
+    );
+    expect(workflow).toContain('Persistent visible recovery command is missing or mismatched.');
+    expect(workflow).toContain('Successful recovery retained its persistent retry command.');
+  });
+
   it('keeps durable install recovery inside the native worker', async () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
     for (const phase of [

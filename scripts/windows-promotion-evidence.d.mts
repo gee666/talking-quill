@@ -8,6 +8,7 @@ export interface WindowsPromotionEvidenceOptions {
 export interface CreateWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
   readonly output: string;
   readonly privateKeyPkcs8Base64: string;
+  readonly updatePublicKeyPath: string;
 }
 
 export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
@@ -16,13 +17,13 @@ export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionE
 
 export interface WindowsPromotionEvidenceEnvelope {
   readonly payload: {
-    readonly schemaVersion: 1;
+    readonly schemaVersion: 2;
     readonly promotionClass: 'protected-release-acceptance';
     readonly repository: string;
     readonly workflowRunId: string;
     readonly sourceCommit: string;
     readonly sourceTree: string;
-    readonly releaseKeySha256: string;
+    readonly promotionKeySha256: string;
     readonly records: readonly unknown[];
   };
   readonly signature: {

@@ -15,6 +15,78 @@ const le32 = (value) => {
 };
 const hash = (bytes) => createHash('sha256').update(bytes).digest();
 
+const REQUEST_ACTIONS = Object.freeze({ 1: 'install', 2: 'repair', 3: 'uninstall' });
+
+export function verifyAuthenticatedSetupReceipt(receipt, expectedAction, expectedPackageSha256) {
+  const fields = {
+    package: hex(receipt?.packageSha256, 32),
+    peer: hex(receipt?.peerBinding, 32),
+    transcript: hex(receipt?.transcriptSha256, 32),
+    challenge: hex(receipt?.observerChallenge, 32),
+    nonce: hex(receipt?.nonce, 32),
+    controllerPublic: hex(receipt?.controllerPublicKey, 65),
+    workerPublic: hex(receipt?.workerPublicKey, 65),
+    request: hex(receipt?.request, 6),
+    workerProof: hex(receipt?.workerProof, 32),
+    controllerProof: hex(receipt?.controllerProof, 32),
+    evidencePublic: hex(receipt?.evidencePublicKey, 65),
+    signature: hex(receipt?.evidenceSignature, 64),
+  };
+  if (Object.values(fields).some((value) => value === null) || receipt?.schemaVersion !== 2)
+    throw new Error('Setup transcript receipt fields are invalid');
+  const action = REQUEST_ACTIONS[fields.request[0]];
+  if (
+    action === undefined ||
+    action !== expectedAction ||
+    ![0, 1].includes(fields.request[1]) ||
+    (action !== 'uninstall' && fields.request.readUInt32LE(2) !== 0)
+  )
+    throw new Error(
+      'Authenticated setup receipt action does not match the claimed lifecycle action',
+    );
+  if (typeof expectedPackageSha256 === 'string' && receipt.packageSha256 !== expectedPackageSha256)
+    throw new Error('Setup transcript package binding is invalid');
+  const transcript = Buffer.concat([
+    Buffer.from('TalkingQuill/setup-authenticated-transcript/v1'),
+    fields.nonce,
+    fields.controllerPublic,
+    fields.workerPublic,
+    fields.peer,
+    fields.request,
+    fields.workerProof,
+    fields.controllerProof,
+  ]);
+  if (!hash(transcript).equals(fields.transcript))
+    throw new Error('Setup transcript digest is invalid');
+  const signed = Buffer.concat([
+    Buffer.from('TalkingQuill/setup-evidence-signature/v1'),
+    fields.challenge,
+    le32(receipt.controllerPid),
+    le32(receipt.workerPid),
+    fields.package,
+    fields.peer,
+    fields.transcript,
+    fields.nonce,
+    fields.controllerPublic,
+    fields.workerPublic,
+    fields.request,
+    fields.workerProof,
+    fields.controllerProof,
+  ]);
+  const spki = Buffer.concat([
+    Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+    fields.evidencePublic,
+  ]);
+  const key = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+  if (!verify('sha256', signed, { key, dsaEncoding: 'ieee-p1363' }, fields.signature))
+    throw new Error('Setup transcript P-256 signature is invalid');
+  return Object.freeze({
+    action,
+    silent: fields.request[1] === 1,
+    lifecycleParent: fields.request.readUInt32LE(2),
+  });
+}
+
 export async function verifyWindowsInstallerSuccessEvidence({
   evidencePath,
   installerPath,
@@ -32,6 +104,11 @@ export async function verifyWindowsInstallerSuccessEvidence({
   validateArtifactProvenanceManifest(provenance);
   const receipt = evidence.nativeAuthenticationReceipt;
   const installerHash = hash(installer);
+  verifyAuthenticatedSetupReceipt(
+    receipt,
+    operation === 'fresh' ? 'install' : 'repair',
+    installerHash.toString('hex'),
+  );
   const fields = {
     package: hex(receipt?.packageSha256, 32),
     peer: hex(receipt?.peerBinding, 32),

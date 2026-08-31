@@ -9,11 +9,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson } from './release-manifest.mjs';
+import { verifyAuthenticatedSetupReceipt } from './windows-installer-success-evidence.mjs';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SOURCE = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*$/u;
-const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v1\0');
+const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v2\0');
 const SUCCESS_NAMES = (arch) => [
   [`windows-installer-success-fresh-${arch}.json`, 'fresh', 'install'],
   [`windows-installer-success-${arch}.json`, 'repair', 'repair'],
@@ -132,6 +133,7 @@ function validateSuccess(value, arch, operation, action) {
     value.authenticatedSetupPids.length !== 2
   )
     throw new Error(`${arch} ${operation} evidence did not pass exact lifecycle policy`);
+  verifyAuthenticatedSetupReceipt(value.nativeAuthenticationReceipt, action, value.installerSha256);
   value.processIdentities.forEach((identity, index) =>
     validateIdentity(identity, `${arch} ${operation} process ${index}`),
   );
@@ -217,7 +219,7 @@ function validateFault(value, arch) {
     kind: 'fault',
     architecture: arch,
     operation: 'fault-recovery',
-    action: 'repair',
+    action: 'fault',
     passed: value.passed,
     exitCode: 0,
     packageSha256: value.candidateSha256,
@@ -263,18 +265,22 @@ export async function createWindowsPromotionEvidence({
   workflowRunId,
   privateKeyPkcs8Base64,
   publicKeyPath,
+  updatePublicKeyPath,
 }) {
   if (!GENERATION.test(workflowRunId) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository))
     throw new Error('Promotion workflow identity is invalid');
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
-  if (pinned.length !== 65 || pinned[0] !== 4) throw new Error('Pinned release key is invalid');
+  const updatePinned = Buffer.from((await readFile(updatePublicKeyPath, 'utf8')).trim(), 'hex');
+  if (pinned.length !== 65 || pinned[0] !== 4) throw new Error('Pinned promotion key is invalid');
+  if (updatePinned.length !== 65 || updatePinned[0] !== 4 || updatePinned.equals(pinned))
+    throw new Error('Promotion and updater public keys must be distinct repository pins');
   const privateKey = createPrivateKey({
     key: Buffer.from(privateKeyPkcs8Base64, 'base64'),
     format: 'der',
     type: 'pkcs8',
   });
   if (!publicSec1(privateKey).equals(pinned))
-    throw new Error('Protected acceptance key does not match the repository release-key pin');
+    throw new Error('Protected promotion key does not match the repository promotion-key pin');
   const records = await evidenceRecords(directory);
   const sourceCommit = records[0].claims.sourceCommit;
   const sourceTree = records[0].claims.sourceTree;
@@ -286,13 +292,13 @@ export async function createWindowsPromotionEvidence({
     throw new Error('Lifecycle evidence source identities disagree');
   const keyId = hash(pinned);
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     promotionClass: 'protected-release-acceptance',
     repository,
     workflowRunId,
     sourceCommit,
     sourceTree,
-    releaseKeySha256: keyId,
+    promotionKeySha256: keyId,
     records,
   };
   const signed = Buffer.concat([DOMAIN, Buffer.from(canonicalJson(payload))]);
@@ -327,7 +333,7 @@ export async function verifyWindowsPromotionEvidence({
       'workflowRunId',
       'sourceCommit',
       'sourceTree',
-      'releaseKeySha256',
+      'promotionKeySha256',
       'records',
     ],
     'promotion payload',
@@ -336,10 +342,10 @@ export async function verifyWindowsPromotionEvidence({
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
   const keyId = hash(pinned);
   if (
-    envelope.payload.schemaVersion !== 1 ||
+    envelope.payload.schemaVersion !== 2 ||
     envelope.signature.scheme !== 'p256-sha256-p1363-v1' ||
     envelope.signature.keyId !== keyId ||
-    envelope.payload.releaseKeySha256 !== keyId ||
+    envelope.payload.promotionKeySha256 !== keyId ||
     envelope.payload.promotionClass !== 'protected-release-acceptance' ||
     envelope.payload.repository !== repository ||
     envelope.payload.workflowRunId !== workflowRunId
@@ -380,7 +386,8 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
       ...common,
       output: resolve(option('--output')),
       privateKeyPkcs8Base64:
-        process.env.TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64 ?? '',
+        process.env.TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64 ?? '',
+      updatePublicKeyPath: resolve(option('--update-public-key')),
     });
   } else {
     await verifyWindowsPromotionEvidence({ ...common, path: resolve(option('--evidence')) });

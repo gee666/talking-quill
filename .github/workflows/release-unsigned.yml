@@ -380,8 +380,12 @@ jobs:
           if ($resume.Count -ne 1) { throw 'Protected staged predecessor recovery owner is not exact.' }
           $generation = Get-Content -LiteralPath (Join-Path $resume[0].DirectoryName 'active-recovery-generation-v1') -Raw
           if ($generation -notmatch '^[0-9a-f]{32}$') { throw 'Protected update recovery generation is invalid.' }
+          $retryName = "Talking Quill Update Recovery $generation"
+          $retry = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName
+          if ($retry -notlike "*--windows-update-resume-v2=$generation*") { throw 'Persistent visible recovery command is missing or mismatched.' }
           $resumed = Start-Process -FilePath $resume[0].FullName -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
           if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
+          if ($null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName -ErrorAction SilentlyContinue)) { throw 'Successful recovery retained its persistent retry command.' }
           $expectedDigest = $identity.releaseBuildDigest
           $deadline = (Get-Date).AddMinutes(3)
           do {
@@ -637,7 +641,7 @@ jobs:
           merge-multiple: true
       - name: Assemble immutable native release files
         env:
-          TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64 }}
+          TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -662,7 +666,7 @@ jobs:
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
           cp installed-evidence/*.json release-artifacts/
-          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --public-key build/windows-update-public-key.sec1
+          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --public-key build/windows-promotion-public-key.sec1 --update-public-key build/windows-update-public-key.sec1
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
           node --input-type=module - <<'NODE'

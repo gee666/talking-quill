@@ -40,6 +40,7 @@ use windows_sys::Win32::UI::Shell::{
     FOLDERID_ProgramData, FOLDERID_ProgramFiles, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     SHGetKnownFolderPath, ShellExecuteExW,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
 
 #[used]
 static WINDOWS_UPDATE_PRIMARY_KEY_MARKER: &str = concat!(
@@ -190,7 +191,23 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         || argument.starts_with("--windows-update-cleanup-v1="))
         && !is_elevated()
     {
-        return launch_elevated_bootstrap(argument).map(|()| 0);
+        let visible_generation = argument
+            .strip_prefix("--windows-update-resume-v2=")
+            .or_else(|| {
+                argument
+                    .strip_prefix("--windows-update-cleanup-v1=")
+                    .and_then(|binding| binding.split_once(':').map(|(_, generation)| generation))
+            });
+        let visible_attempt = visible_generation.map(begin_visible_retry).transpose()?;
+        let result = launch_elevated_bootstrap(argument);
+        if let Some((generation, attempt)) = visible_attempt {
+            if result.is_ok() {
+                clear_visible_retry(&generation);
+            } else if attempt == MAX_VISIBLE_RECOVERY_ATTEMPTS {
+                show_visible_retry_paused();
+            }
+        }
+        return result.map(|()| 0);
     }
     if !is_elevated() {
         return Err(EXIT_NOT_ELEVATED);
@@ -203,19 +220,22 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     if argument.starts_with("--windows-update-bootstrap-v2=") {
         return stage_bootstrap(argument).map(|()| 0);
     }
-    let (encoded, previous_generation) =
+    let (encoded, previous_generation, resuming) =
         if let Some(generation) = argument.strip_prefix("--windows-update-resume-v2=") {
             validate_generation(generation)?;
-            (read_persisted_request()?, Some(generation.to_owned()))
+            if read_active_generation(&recovery_directory()?)? != generation {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            (read_persisted_request()?, Some(generation.to_owned()), true)
         } else {
             let staged = argument
                 .strip_prefix("--windows-update-bootstrap-staged-v2=")
                 .ok_or(EXIT_INVALID_REQUEST)?;
             let (generation, encoded) = staged.split_once(':').ok_or(EXIT_INVALID_REQUEST)?;
             validate_generation(generation)?;
-            (encoded.to_owned(), Some(generation.to_owned()))
+            (encoded.to_owned(), Some(generation.to_owned()), false)
         };
-    let execution = execute_staged_request(&encoded, previous_generation.as_deref());
+    let execution = execute_staged_request(&encoded, previous_generation.as_deref(), resuming);
     let result = execution
         .as_ref()
         .map(|(code, _)| *code)
@@ -331,16 +351,22 @@ fn run_native_cleanup(binding: &str) -> Result<String, i32> {
 fn execute_staged_request(
     encoded: &str,
     previous_generation: Option<&str>,
+    resuming: bool,
 ) -> Result<(u32, String), i32> {
     let request = parse_and_authorize_request(encoded)?;
     let expected_hash = decode_hash(&request.sha256).ok_or(EXIT_INVALID_REQUEST)?;
     let staged = copy_verified_installer(Path::new(&request.installer_path), expected_hash)?;
     persist_request(encoded)?;
-    let recovery_generation = persist_restart_recovery()?;
-    persist_active_generation(&recovery_directory()?, &recovery_generation)?;
-    if let Some(previous) = previous_generation {
-        clear_restart_recovery(previous)?;
-    }
+    let recovery_generation = if resuming {
+        previous_generation.ok_or(EXIT_INVALID_REQUEST)?.to_owned()
+    } else {
+        let generation = persist_restart_recovery()?;
+        persist_active_generation(&recovery_directory()?, &generation)?;
+        if let Some(previous) = previous_generation {
+            clear_restart_recovery(previous)?;
+        }
+        generation
+    };
     acknowledge_recovery_ownership()?;
     let code = launch_verified_installer(&staged, expected_hash, &request.candidate)?;
     Ok((code, recovery_generation))
@@ -894,8 +920,11 @@ fn native_transaction_absent() -> Result<bool, i32> {
     }
 }
 
-const RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
-const RUN_ONCE_VALUE_PREFIX: &str = "!Talking Quill Update Recovery ";
+// A normal Run value is the durable retry record. Windows must not consume recovery ownership
+// before the elevated child reports success, as RunOnce does even when UAC is cancelled.
+const RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_ONCE_VALUE_PREFIX: &str = "Talking Quill Update Recovery ";
+const MAX_VISIBLE_RECOVERY_ATTEMPTS: u8 = 3;
 const RECOVERY_REQUEST_FILE: &str = "update-recovery-request-v2.txt";
 
 fn recovery_directory() -> Result<PathBuf, i32> {
@@ -908,6 +937,68 @@ fn recovery_directory() -> Result<PathBuf, i32> {
 
 fn recovery_request_path() -> Result<PathBuf, i32> {
     Ok(recovery_directory()?.join(RECOVERY_REQUEST_FILE))
+}
+
+fn visible_retry_path(generation: &str) -> Result<PathBuf, i32> {
+    validate_generation(generation)?;
+    let root = std::env::var_os("LOCALAPPDATA").ok_or(EXIT_LAUNCH_FAILED)?;
+    Ok(PathBuf::from(root)
+        .join("Talking Quill")
+        .join(format!("update-recovery-visible-attempt-{generation}")))
+}
+
+fn begin_visible_retry(generation: &str) -> Result<(String, u8), i32> {
+    let path = visible_retry_path(generation)?;
+    let attempt = match std::fs::read_to_string(&path) {
+        Ok(value) => value.parse::<u8>().map_err(|_| EXIT_IDENTITY_MISMATCH)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(_) => return Err(EXIT_LAUNCH_FAILED),
+    };
+    if attempt >= MAX_VISIBLE_RECOVERY_ATTEMPTS {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let next = attempt + 1;
+    let parent = path.parent().ok_or(EXIT_LAUNCH_FAILED)?;
+    std::fs::create_dir_all(parent).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = File::create(&temporary).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    file.write_all(next.to_string().as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if unsafe {
+        MoveFileExW(
+            wide_nul(&temporary)?.as_ptr(),
+            wide_nul(&path)?.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    Ok((generation.to_owned(), next))
+}
+
+fn clear_visible_retry(generation: &str) {
+    if let Ok(path) = visible_retry_path(generation) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn show_visible_retry_paused() {
+    let text = wide_nul(Path::new(
+        "Talking Quill could not obtain administrator approval after three attempts. Automatic update prompts are paused and the recovery generation is retained. Open Apps > Installed apps and choose Uninstall for Talking Quill to run maintenance. Maintenance recovers the installed state before continuing.",
+    ));
+    let title = wide_nul(Path::new("Talking Quill recovery paused"));
+    if let (Ok(text), Ok(title)) = (text, title) {
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONWARNING,
+            )
+        };
+    }
 }
 
 fn persist_request(encoded: &str) -> Result<(), i32> {

@@ -703,16 +703,13 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         false
     };
     let system = WindowsNativeSystem;
-    let armed_here = if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
+    // Authentication and package validation happen before recovery. Once the machine lock is held,
+    // every installed entry point must finish durable recovery before arming or deriving a new action.
+    recover_with_adapter(&paths, &system)?;
+    if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
         authenticated_controller.as_ref()
         && *lifecycle_parent != 0
     {
-        if path_present(&paths.transaction)? {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Existing installer recovery must complete before uninstall can arm deletion.",
-            ));
-        }
         write_transaction(&paths, "uninstall-armed", Action::Uninstall, true)?;
         pipe_write(
             server.as_raw_handle(),
@@ -731,17 +728,18 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
                 "Uninstall controller did not commit mapped-image deletion ownership.",
             ));
         }
-        true
-    } else {
-        false
-    };
-    if !armed_here {
-        recover_with_adapter(&paths, &system)?;
     }
     let mut action = if uninstall_authorized {
         Action::Uninstall
     } else {
-        derive_action(&current, &paths)?
+        let derived = derive_action(&current, &paths)?;
+        if requested_action.is_some_and(|requested| requested != derived) {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Recovered machine state does not match the authenticated setup request.",
+            ));
+        }
+        derived
     };
     if action != Action::Uninstall {
         action =
@@ -2081,7 +2079,10 @@ fn authorize_package_mode(
 }
 
 fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
-    let maintenance = canonical(current).ok() == canonical(&paths.maintenance_uninstaller).ok();
+    let maintenance = canonical(current)
+        .ok()
+        .zip(canonical(&paths.maintenance_uninstaller).ok())
+        .is_some_and(|(current, maintenance)| current == maintenance);
     if maintenance
         || current
             .file_name()

@@ -82,7 +82,7 @@ jobs:
           rm tmp/windows-native-release-candidates.zip
           (cd release-artifacts && sha256sum --check SHA256SUMS.txt)
           test -f release-artifacts/windows-promotion-lifecycle-evidence-v1.json
-          node scripts/windows-promotion-evidence.mjs --evidence release-artifacts/windows-promotion-lifecycle-evidence-v1.json --directory release-artifacts --repository "$REPOSITORY" --run-id "$RUN_ID" --public-key build/windows-update-public-key.sec1
+          node scripts/windows-promotion-evidence.mjs --evidence release-artifacts/windows-promotion-lifecycle-evidence-v1.json --directory release-artifacts --repository "$REPOSITORY" --run-id "$RUN_ID" --public-key build/windows-promotion-public-key.sec1
           for arch in x64 arm64; do
             test -f "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe"
             test -f "release-artifacts/Talking-Quill-$version-win-$arch-update.exe"
