@@ -82,7 +82,14 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     expect(setup).toContain('PendingFileRenameOperations');
     expect(setup).toContain('for target in [&paths.maintenance_uninstaller, current]');
-    expect(setup).toContain('collect_finalizer_deletion_paths(&launcher, &mut tree)?');
+    const deletionOwnership = setup.slice(
+      setup.indexOf('fn establish_finalizer_deletion_ownership'),
+      setup.indexOf('fn collect_finalizer_deletion_paths'),
+    );
+    expect(deletionOwnership).not.toContain(
+      'collect_finalizer_deletion_paths(&launcher, &mut tree)?',
+    );
+    expect(setup).toContain('relocated_uninstall_matches_maintenance(target, paths)?');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
@@ -95,6 +102,12 @@ describe('Windows elevated updater launch', () => {
     ).toBeLessThan(finalize.indexOf('remove_transaction(paths)?'));
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
+    );
+    expect(finalize.indexOf('system.unregister_uninstall()?')).toBeLessThan(
+      finalize.indexOf('remove_update_recovery_launcher_residue(paths)?'),
+    );
+    expect(finalize.indexOf('remove_update_recovery_launcher_residue(paths)?')).toBeLessThan(
+      finalize.indexOf('clear_machine_relaunch_owner(paths)'),
     );
     const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
     expect(residue.indexOf('system.unregister_uninstall()?')).toBeLessThan(
@@ -111,8 +124,15 @@ describe('Windows elevated updater launch', () => {
     ]);
     expect(main).toContain('--windows-update-bootstrap-v3=');
     expect(main).toContain('--windows-update-app-ready-v1=');
-    expect(helper).toContain('RELAUNCH_RUN_VALUE_PREFIX');
-    expect(helper).toContain('--windows-update-relaunch-v1={generation}');
+    expect(main).toContain('--windows-update-relaunch-owner-install-v1');
+    expect(helper).toContain('RELAUNCH_RUN_VALUE');
+    expect(helper).toContain('--windows-update-relaunch-owner-v1');
+    expect(helper).toContain('HKEY_LOCAL_MACHINE');
+    expect(helper).toContain('current_relaunch_identity()');
+    expect(helper).toContain('FOLDERID_ProgramData');
+    expect(helper).toContain(
+      'launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")',
+    );
     expect(helper).toContain('command.encode_utf16().count() > 260');
     expect(helper).not.toContain('--windows-update-bootstrap-v3={encoded}');
     expect(helper).toContain('relaunch-record-marker-v1');

@@ -204,19 +204,28 @@ fn run_inner() -> Result<i32> {
         let mut relocation_server = None;
         let mut relocated_finalizer = false;
         let action = if relocated {
-            let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
             let original = process_image(parent_process_id()?)?;
-            let expected = if canonical(&original).ok()
-                == canonical(&controller_paths.maintenance_uninstaller).ok()
-            {
-                controller_paths.maintenance_uninstaller.clone()
-            } else if is_uninstall_finalizer(&original)? {
-                relocated_finalizer = true;
-                original.clone()
-            } else {
-                installed
-            };
-            assert_plain_file(&expected)?;
+            let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
+            let expected =
+                if canonical(&original)? == canonical(&controller_paths.maintenance_uninstaller)? {
+                    controller_paths.maintenance_uninstaller.clone()
+                } else if canonical(&original)? == canonical(&installed)? {
+                    installed
+                } else if is_uninstall_finalizer(&original)? {
+                    relocated_finalizer = true;
+                    original.clone()
+                } else {
+                    return Err(fail(
+                        EXIT_REJECTED,
+                        "Relocated uninstall source is not an authenticated maintenance image.",
+                    ));
+                };
+            validate_relocated_uninstall_image(
+                &current,
+                &original,
+                &expected,
+                &controller_paths.maintenance_uninstaller,
+            )?;
             let (action, server, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(&expected))?;
             silent = requested_silent;
@@ -536,6 +545,55 @@ fn arm_mapped_image_deletion(path: &Path) -> Result<()> {
             "Windows did not commit mapped uninstall image deletion.",
         ));
     }
+    Ok(())
+}
+
+fn validate_relocated_uninstall_image(
+    relocated: &Path,
+    original: &Path,
+    expected: &Path,
+    maintenance: &Path,
+) -> Result<()> {
+    let relocated_canonical = std::fs::canonicalize(relocated).map_err(io_failure)?;
+    let temp_canonical = std::fs::canonicalize(std::env::temp_dir()).map_err(io_failure)?;
+    let name = relocated_canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| fail(EXIT_REJECTED, "Relocated uninstall path is invalid."))?;
+    if relocated_canonical.parent() != Some(temp_canonical.as_path())
+        || !name.starts_with(".TalkingQuill-uninstall-")
+        || !name.ends_with(".exe")
+        || name.len() != ".TalkingQuill-uninstall-".len() + 32 + ".exe".len()
+        || canonical(original)? != canonical(expected)?
+    {
+        return Err(fail(EXIT_REJECTED, "Relocated uninstall path is invalid."));
+    }
+    let original_file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(original)
+        .map_err(io_failure)?;
+    let expected_file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(expected)
+        .map_err(io_failure)?;
+    let relocated_file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(relocated)
+        .map_err(io_failure)?;
+    if file_identity_text(&original_file)? != file_identity_text(&expected_file)?
+        || file_hash(original)? != file_hash(expected)?
+        || file_hash(original)? != file_hash(maintenance)?
+        || file_hash(relocated)? != file_hash(maintenance)?
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Relocated uninstall source identity does not match maintenance authority.",
+        ));
+    }
+    drop((original_file, expected_file, relocated_file));
     Ok(())
 }
 
@@ -3476,7 +3534,10 @@ fn complete_terminal_uninstall(
     let legacy = retire_and_remove_machine_lock(paths, machine_lock)?;
     finalize_uninstall(paths, system, current)?;
     drop(legacy);
-    arm_mapped_image_deletion(current)
+    // The current worker already has verified reboot deletion ownership. Immediate POSIX
+    // deletion is best-effort and cannot re-open a terminal recovery gap.
+    let _ = arm_mapped_image_deletion(current);
+    Ok(())
 }
 
 fn finalize_uninstall(
@@ -3514,9 +3575,16 @@ fn finalize_uninstall(
     // leave an authoritative journal without a registered owner.
     remove_transaction(paths)?;
     system.unregister_uninstall()?;
+    // HKLM Run remains the durable machine owner through journal and registration retirement.
+    // Every other image is removed first; the owner value is the final fallible mutation.
     remove_maintenance_uninstaller(paths)?;
+    remove_uninstall_finalizer_residue(paths)?;
     remove_update_recovery_launcher_residue(paths)?;
-    remove_uninstall_finalizer_residue(paths)
+    clear_machine_relaunch_owner(paths)?;
+    // The now-empty protected namespace prevented Run-target squatting until the value was
+    // durably retired. Removing it is terminal best-effort work only.
+    let _ = fs::remove_dir(paths.program_data.join("Talking Quill Update Recovery"));
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4333,6 +4401,53 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE: &str = "Talking Quill Update Relaunch";
+    let mut key = ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    };
+    if opened == 2 {
+        return Ok(());
+    }
+    if opened != 0 {
+        return Err(fail(EXIT_FAILURE, "Cannot open machine relaunch owner."));
+    }
+    let launcher = paths
+        .program_data
+        .join("Talking Quill Update Recovery/talking-quill-update-recovery-launcher.exe");
+    let expected = format!(
+        "\"{}\" --windows-update-relaunch-owner-v1",
+        launcher.display()
+    );
+    let actual = read_registry_value(key, VALUE, 1024)?;
+    if actual.as_deref().is_some_and(|value| value != expected) {
+        unsafe { RegCloseKey(key) };
+        return Err(fail(EXIT_REJECTED, "Machine relaunch owner was replaced."));
+    }
+    if actual.is_some() && unsafe { RegDeleteValueW(key, wide(OsStr::new(VALUE)).as_ptr()) } != 0 {
+        unsafe { RegCloseKey(key) };
+        return Err(fail(EXIT_FAILURE, "Cannot retire machine relaunch owner."));
+    }
+    let flushed = unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Cannot flush machine relaunch retirement.",
+        ))
+    }
+}
+
 fn remove_update_recovery_launcher_residue(paths: &Paths) -> Result<()> {
     let launcher = paths.program_data.join("Talking Quill Update Recovery");
     if !path_present(&launcher)? {
@@ -4349,7 +4464,46 @@ fn remove_update_recovery_launcher_residue(paths: &Paths) -> Result<()> {
             "Update recovery launcher identity is invalid.",
         ));
     }
-    remove_owned_tree(&launcher, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))
+    let mut tree = Vec::new();
+    collect_finalizer_deletion_paths(&launcher, &mut tree)?;
+    for target in tree {
+        if target == launcher {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&target).map_err(io_failure)?;
+        if metadata.is_dir() {
+            fs::remove_dir(&target).map_err(io_failure)?;
+        } else {
+            fs::remove_file(&target).map_err(io_failure)?;
+        }
+    }
+    // Keep the exact protected directory as a non-squattable namespace until HKLM Run is
+    // flushed. Its identity was retained above and no executable remains in it.
+    if owned_tree_identity(&launcher).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?
+        != identity
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Update launcher directory was replaced.",
+        ));
+    }
+    Ok(())
+}
+
+fn relocated_uninstall_matches_maintenance(target: &Path, paths: &Paths) -> Result<bool> {
+    let canonical_target = std::fs::canonicalize(target).map_err(io_failure)?;
+    let canonical_temp = std::fs::canonicalize(std::env::temp_dir()).map_err(io_failure)?;
+    let name = canonical_target
+        .file_name()
+        .and_then(|value| value.to_str());
+    Ok(canonical_target.parent() == Some(canonical_temp.as_path())
+        && name.is_some_and(|value| {
+            value.starts_with(".TalkingQuill-uninstall-")
+                && value.ends_with(".exe")
+                && value.len() == ".TalkingQuill-uninstall-".len() + 32 + ".exe".len()
+        })
+        && path_present(&paths.maintenance_uninstaller)?
+        && file_hash(target)? == file_hash(&paths.maintenance_uninstaller)?)
 }
 
 fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Result<()> {
@@ -4402,38 +4556,8 @@ fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Resu
             scheduled.push(target);
         }
     }
-    let launcher = paths.program_data.join("Talking Quill Update Recovery");
-    if path_present(&launcher)? {
-        let identity = owned_tree_identity(&launcher)
-            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-        if !medium_launcher_directory_is_protected(&launcher)?
-            || !fs::read_to_string(launcher.join("launcher-tree-identity-v1"))
-                .is_ok_and(|value| value == identity)
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Update recovery launcher identity is invalid.",
-            ));
-        }
-        let mut tree = Vec::new();
-        collect_finalizer_deletion_paths(&launcher, &mut tree)?;
-        for target in tree {
-            if unsafe {
-                MoveFileExW(
-                    wide(target.as_os_str()).as_ptr(),
-                    ptr::null(),
-                    MOVEFILE_DELAY_UNTIL_REBOOT,
-                )
-            } == 0
-            {
-                return Err(fail(
-                    EXIT_FAILURE,
-                    "Windows could not take ownership of update launcher deletion.",
-                ));
-            }
-            scheduled.push(target);
-        }
-    }
+    // The stable ProgramData launcher is deliberately not scheduled here. Its HKLM Run
+    // value remains callable through the terminal commit and it is retired last afterward.
     for target in [&paths.maintenance_uninstaller, current] {
         if !path_present(target)? {
             continue;
@@ -4441,7 +4565,8 @@ fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Resu
         assert_plain_file(target)?;
         let canonical_target = canonical(target)?;
         let authorized = canonical_target == canonical(&paths.maintenance_uninstaller)?
-            || is_uninstall_finalizer(target)?;
+            || is_uninstall_finalizer(target)?
+            || relocated_uninstall_matches_maintenance(target, paths)?;
         if !authorized {
             return Err(fail(
                 EXIT_REJECTED,
@@ -5076,6 +5201,31 @@ mod tests {
         }
         assert!(recovery_plan(&transaction("prepared", "repair", true), false, false).is_err());
         assert!(recovery_plan(&transaction("unknown", "repair", true), true, true).is_err());
+    }
+
+    #[test]
+    fn normal_relocated_uninstall_binds_original_and_maintenance_identity() {
+        let suffix = "11".repeat(16);
+        let root =
+            std::env::temp_dir().join(format!("tq-relocated-source-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let maintenance = root.join("Talking Quill Maintenance.exe");
+        let installed = root.join("Uninstall Talking Quill.exe");
+        let relocated = std::env::temp_dir().join(format!(".TalkingQuill-uninstall-{suffix}.exe"));
+        let _ = fs::remove_file(&relocated);
+        fs::copy(std::env::current_exe().unwrap(), &maintenance).unwrap();
+        fs::copy(&maintenance, &installed).unwrap();
+        fs::copy(&maintenance, &relocated).unwrap();
+        validate_relocated_uninstall_image(&relocated, &installed, &installed, &maintenance)
+            .unwrap();
+        fs::write(&installed, b"replaced").unwrap();
+        assert!(
+            validate_relocated_uninstall_image(&relocated, &installed, &installed, &maintenance)
+                .is_err()
+        );
+        fs::remove_file(relocated).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

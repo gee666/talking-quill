@@ -17,14 +17,14 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSecurityDescriptorToStringSecurityDescriptorW,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
     SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetFileSecurityW, GetTokenInformation, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-    SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -133,6 +133,22 @@ struct AppReadyRequest {
 struct PersistedRelaunchRecord {
     schema_version: u8,
     generation: String,
+    user_sid: String,
+    logon_sid: String,
+    request: String,
+    nonce: String,
+    source_version: String,
+    target_version: String,
+    phase: String,
+    completed_version: Option<String>,
+    predecessor: InstalledManifest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct LegacyPersistedRelaunchRecord {
+    schema_version: u8,
+    generation: String,
     request: String,
     nonce: String,
     source_version: String,
@@ -177,7 +193,7 @@ struct UpdateAuthorization {
     verification_key_sha256: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateRole {
     role: String,
@@ -197,7 +213,7 @@ struct UpdatePredecessor {
     owner_sha256: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstalledManifest {
     version: String,
@@ -313,7 +329,13 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
             return Err(EXIT_INVALID_REQUEST);
         }
         validate_generation(generation)?;
-        return run_persisted_relaunch(generation);
+        return migrate_legacy_relaunch(generation);
+    }
+    if argument == "--windows-update-relaunch-owner-v1" {
+        if is_elevated() {
+            return Err(EXIT_INVALID_REQUEST);
+        }
+        return run_machine_relaunch_owner();
     }
     let generation = if let Some(generation) = argument.strip_prefix("--windows-update-resume-v2=")
     {
@@ -392,7 +414,13 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
             return Err(EXIT_INVALID_REQUEST);
         }
         validate_generation(generation)?;
-        return run_persisted_relaunch(generation);
+        return migrate_legacy_relaunch(generation);
+    }
+    if argument == "--windows-update-relaunch-owner-install-v1" {
+        if !is_elevated() {
+            return Err(EXIT_NOT_ELEVATED);
+        }
+        return install_machine_relaunch_owner().map(|()| 0);
     }
     if let Some(encoded) = argument.strip_prefix("--windows-update-launch-after-parent-v1=") {
         if is_elevated() {
@@ -478,11 +506,25 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     result
 }
 
-const RELAUNCH_RUN_VALUE_PREFIX: &str = "Talking Quill Update Relaunch ";
+const RELAUNCH_RUN_VALUE: &str = "Talking Quill Update Relaunch";
 const RELAUNCH_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RELAUNCH_ROOT_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x00000025;;;AU)";
 const RELAUNCH_RECORD_NAME: &str = "relaunch-record-v1.json";
 const RELAUNCH_MARKER_NAME: &str = "relaunch-record-marker-v1";
-const RELAUNCH_USER_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+
+fn relaunch_record_sddl(identity: &RelaunchIdentity) -> String {
+    if identity.user_sid == identity.logon_sid {
+        format!(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{})",
+            identity.user_sid
+        )
+    } else {
+        format!(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{})(A;OICI;FA;;;{})",
+            identity.user_sid, identity.logon_sid
+        )
+    }
+}
 
 fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     if encoded.len() > 16_384 {
@@ -506,21 +548,29 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
-    let launcher = ensure_medium_launcher(&current)?;
+    let identity = current_relaunch_identity()?;
+    let predecessor = installed_manifest()?;
+    if predecessor.version != request.candidate.predecessor.version {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    // Machine ownership is established and flushed before a user-scoped record can exist.
+    launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")?;
+    verify_machine_relaunch_owner()?;
     let generation = new_recovery_generation()?;
     let record = PersistedRelaunchRecord {
-        schema_version: 1,
+        schema_version: 2,
         generation: generation.clone(),
+        user_sid: identity.user_sid,
+        logon_sid: identity.logon_sid,
         request: wrapper.request,
         nonce: wrapper.nonce,
         source_version: intent.source_version,
         target_version: intent.target_version,
         phase: "armed".into(),
         completed_version: None,
+        predecessor,
     };
     publish_relaunch_record(&record)?;
-    arm_relaunch_run_owner(&generation, &launcher)?;
     std::fs::remove_file(&intent_path).map_err(|_| EXIT_LAUNCH_FAILED)?;
     let result = run_persisted_relaunch(&generation);
     drop(_intent_lock);
@@ -529,12 +579,169 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     result
 }
 
+fn migrate_legacy_relaunch(generation: &str) -> Result<u32, i32> {
+    let legacy_root =
+        known_folder(&FOLDERID_LocalAppData)?.join("Talking Quill/Windows Update Recovery");
+    let legacy_directory = legacy_root.join(generation);
+    let legacy_metadata =
+        std::fs::symlink_metadata(&legacy_directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if !legacy_metadata.is_dir()
+        || legacy_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let bytes = std::fs::read(legacy_directory.join(RELAUNCH_RECORD_NAME))
+        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let legacy: LegacyPersistedRelaunchRecord =
+        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if legacy.schema_version != 1
+        || legacy.generation != generation
+        || !valid_nonce(&legacy.nonce)
+        || !valid_version(&legacy.source_version)
+        || !valid_version(&legacy.target_version)
+        || !matches!(
+            legacy.phase.as_str(),
+            "armed" | "setup-started" | "setup-complete" | "launch-started" | "app-ready"
+        )
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let suffix = legacy
+        .request
+        .strip_prefix("--windows-update-bootstrap-v2=")
+        .ok_or(EXIT_INVALID_REQUEST)?;
+    let request = parse_request_envelope(suffix)?;
+    verify_update_authorization(&request.candidate)?;
+    if request.candidate.package_sha256 != request.sha256
+        || canonical_candidate_layout(&request.candidate)?
+            != request.candidate.package_layout_digest
+        || legacy.source_version != request.candidate.predecessor.version
+        || legacy.target_version != request.candidate.version
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let installed = installed_manifest()?;
+    let predecessor = if installed.version == request.candidate.predecessor.version {
+        installed
+    } else {
+        InstalledManifest {
+            version: request.candidate.predecessor.version.clone(),
+            platform: request.candidate.predecessor.platform.clone(),
+            architecture: request.candidate.predecessor.architecture.clone(),
+            source_commit: String::new(),
+            source_tree: String::new(),
+            release_build_digest: request.candidate.predecessor.release_build_digest.clone(),
+            roles: vec![
+                UpdateRole {
+                    role: "gateway".into(),
+                    path: "resources/helper/talking-quill-helper.exe".into(),
+                    sha256: request.candidate.predecessor.gateway_sha256.clone(),
+                    suppression_capable: false,
+                },
+                UpdateRole {
+                    role: "owner".into(),
+                    path: "resources/helper/talking-quill-keyboard-owner.exe".into(),
+                    sha256: request.candidate.predecessor.owner_sha256.clone(),
+                    suppression_capable: true,
+                },
+            ],
+        }
+    };
+    launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")?;
+    verify_machine_relaunch_owner()?;
+    let identity = current_relaunch_identity()?;
+    let record = PersistedRelaunchRecord {
+        schema_version: 2,
+        generation: generation.to_owned(),
+        user_sid: identity.user_sid,
+        logon_sid: identity.logon_sid,
+        request: legacy.request,
+        nonce: legacy.nonce,
+        source_version: legacy.source_version,
+        target_version: legacy.target_version,
+        phase: legacy.phase,
+        completed_version: legacy.completed_version,
+        predecessor,
+    };
+    let machine_directory = relaunch_generation_directory(generation)?;
+    if machine_directory.exists() {
+        let existing = read_persisted_relaunch_record(generation)?;
+        if existing.request != record.request
+            || existing.nonce != record.nonce
+            || existing.source_version != record.source_version
+            || existing.target_version != record.target_version
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    } else {
+        publish_relaunch_record(&record)?;
+    }
+    clear_legacy_relaunch_owner(generation)?;
+    remove_relaunch_record_directory(&legacy_directory)?;
+    run_persisted_relaunch(generation)
+}
+
+fn clear_legacy_relaunch_owner(generation: &str) -> Result<(), i32> {
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide_nul(Path::new(RELAUNCH_RUN_KEY))?.as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let name = format!("Talking Quill Update Relaunch {generation}");
+    let expected = format!(
+        "\"{}\" --windows-update-relaunch-v1={generation}",
+        medium_launcher_path()?.display()
+    );
+    let actual = read_registry_string(key, &name)?;
+    if actual.as_deref().is_some_and(|value| value != expected) {
+        unsafe { RegCloseKey(key) };
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let status = if actual.is_some() {
+        unsafe { RegDeleteValueW(key, wide_nul(Path::new(&name))?.as_ptr()) }
+    } else {
+        0
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(EXIT_LAUNCH_FAILED)
+    }
+}
+
+fn run_machine_relaunch_owner() -> Result<u32, i32> {
+    verify_machine_relaunch_owner()?;
+    let identity = current_relaunch_identity()?;
+    for generation in relaunch_generations()? {
+        let Ok(record) = read_persisted_relaunch_record(&generation) else {
+            continue;
+        };
+        if record.user_sid == identity.user_sid && record.logon_sid == identity.logon_sid {
+            let _ = run_persisted_relaunch(&generation);
+        }
+    }
+    Ok(0)
+}
+
 fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
     let directory = relaunch_generation_directory(generation)?;
     let _lock = acquire_relaunch_record_lock(&directory)?;
     let mut record = read_persisted_relaunch_record(generation)?;
+    let identity = current_relaunch_identity()?;
+    if record.user_sid != identity.user_sid || record.logon_sid != identity.logon_sid {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     if record.phase == "app-ready" {
-        clear_relaunch_run_owner(generation)?;
         drop(_lock);
         remove_relaunch_record_directory(&directory)?;
         return Ok(0);
@@ -551,7 +758,7 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     if matches!(record.phase.as_str(), "setup-complete" | "launch-started") {
-        let surviving = verified_surviving_version(&request.candidate)?;
+        let surviving = verified_surviving_version(&request.candidate, &record.predecessor)?;
         if record.completed_version.as_deref() != Some(surviving.as_str()) {
             return Err(EXIT_IDENTITY_MISMATCH);
         }
@@ -564,7 +771,9 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
     }
     let target_committed = verify_post_install_request(&request).is_ok();
     let recovering_setup = record.phase == "setup-started";
-    if recovering_setup && verified_surviving_version(&request.candidate).is_err() {
+    if recovering_setup
+        && verified_surviving_version(&request.candidate, &record.predecessor).is_err()
+    {
         for recovery_generation in owned_recovery_generations()? {
             let resume = format!("--windows-update-resume-v2={recovery_generation}");
             if launch_elevated_bootstrap(&resume).is_ok() {
@@ -572,23 +781,26 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
             }
         }
     }
-    let recovered_survivor =
-        recovering_setup && verified_surviving_version(&request.candidate).is_ok();
+    let recovered_survivor = recovering_setup
+        && verified_surviving_version(&request.candidate, &record.predecessor).is_ok();
     if !target_committed && !recovered_survivor {
-        verify_update_relation(&request.candidate, &request.sha256)?;
+        verify_update_relation_against_snapshot(
+            &request.candidate,
+            &request.sha256,
+            &record.predecessor,
+        )?;
         if record.phase == "armed" {
             record.phase = "setup-started".into();
             write_persisted_relaunch_record(&directory, &record)?;
         }
         let setup_result = launch_elevated_installed_helper(&record.request);
         if setup_result == Err(1223) {
-            clear_relaunch_run_owner(generation)?;
             drop(_lock);
             remove_relaunch_record_directory(&directory)?;
             return Err(1223);
         }
     }
-    let surviving = verified_surviving_version(&request.candidate)?;
+    let surviving = verified_surviving_version(&request.candidate, &record.predecessor)?;
     record.phase = "setup-complete".into();
     record.completed_version = Some(surviving.clone());
     write_persisted_relaunch_record(&directory, &record)?;
@@ -627,7 +839,6 @@ fn acknowledge_app_ready(encoded: &str) -> Result<u32, i32> {
             record.phase = "app-ready".into();
             write_persisted_relaunch_record(&directory, &record)?;
         }
-        clear_relaunch_run_owner(&generation)?;
         drop(lock);
         remove_relaunch_record_directory(&directory)?;
     }
@@ -638,13 +849,29 @@ fn acknowledge_app_ready(encoded: &str) -> Result<u32, i32> {
     }
 }
 
+#[cfg(test)]
+static TEST_RELAUNCH_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 fn relaunch_root() -> Result<PathBuf, i32> {
-    Ok(known_folder(&FOLDERID_LocalAppData)?.join("Talking Quill/Windows Update Recovery"))
+    #[cfg(test)]
+    if let Some(root) = TEST_RELAUNCH_ROOT
+        .lock()
+        .map_err(|_| EXIT_LAUNCH_FAILED)?
+        .clone()
+    {
+        return Ok(root);
+    }
+    Ok(known_folder(&FOLDERID_ProgramData)?.join("Talking Quill Update Recovery/Relaunch Records"))
+}
+
+fn relaunch_identity_key(identity: &RelaunchIdentity) -> String {
+    hex_digest(&Sha256::digest(identity.user_sid.as_bytes()))[..16].to_owned()
 }
 
 fn relaunch_generation_directory(generation: &str) -> Result<PathBuf, i32> {
     validate_generation(generation)?;
-    Ok(relaunch_root()?.join(generation))
+    let identity = current_relaunch_identity()?;
+    Ok(relaunch_root()?.join(format!("{}-{generation}", relaunch_identity_key(&identity))))
 }
 
 fn relaunch_marker_value(record: &PersistedRelaunchRecord) -> String {
@@ -659,12 +886,15 @@ fn relaunch_marker_value(record: &PersistedRelaunchRecord) -> String {
 fn publish_relaunch_record(record: &PersistedRelaunchRecord) -> Result<(), i32> {
     let root = relaunch_root()?;
     if !root.exists() {
-        std::fs::create_dir_all(&root).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        return Err(EXIT_IDENTITY_MISMATCH);
     }
-    apply_relaunch_dacl(&root)?;
+    let identity = current_relaunch_identity()?;
+    if record.user_sid != identity.user_sid || record.logon_sid != identity.logon_sid {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     let directory = relaunch_generation_directory(&record.generation)?;
     std::fs::create_dir(&directory).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    apply_relaunch_dacl(&directory)?;
+    apply_relaunch_dacl(&directory, &identity)?;
     write_persisted_relaunch_record(&directory, record)?;
     write_protected_relaunch_file(
         &directory.join(RELAUNCH_MARKER_NAME),
@@ -691,7 +921,7 @@ fn write_protected_relaunch_file(path: &Path, bytes: &[u8]) -> Result<(), i32> {
         .share_mode(0)
         .open(&temporary)
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    apply_relaunch_dacl(&temporary)?;
+    apply_relaunch_dacl(&temporary, &current_relaunch_identity()?)?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
@@ -721,7 +951,7 @@ fn verify_protected_relaunch_file(path: &Path, expected: &[u8]) -> Result<(), i3
     let mut actual = Vec::new();
     file.read_to_end(&mut actual)
         .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if actual == expected && has_relaunch_dacl(path)? {
+    if actual == expected && has_relaunch_dacl(path, &current_relaunch_identity()?)? {
         Ok(())
     } else {
         Err(EXIT_IDENTITY_MISMATCH)
@@ -730,7 +960,8 @@ fn verify_protected_relaunch_file(path: &Path, expected: &[u8]) -> Result<(), i3
 
 fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchRecord, i32> {
     let directory = relaunch_generation_directory(generation)?;
-    if !has_relaunch_dacl(&directory)? {
+    let identity = current_relaunch_identity()?;
+    if !has_relaunch_dacl(&directory, &identity)? {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     let path = directory.join(RELAUNCH_RECORD_NAME);
@@ -738,8 +969,10 @@ fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchR
     verify_protected_relaunch_file(&path, &bytes)?;
     let record: PersistedRelaunchRecord =
         serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if record.schema_version != 1
+    if record.schema_version != 2
         || record.generation != generation
+        || record.user_sid != identity.user_sid
+        || record.logon_sid != identity.logon_sid
         || !valid_nonce(&record.nonce)
         || !valid_version(&record.source_version)
         || !valid_version(&record.target_version)
@@ -765,7 +998,7 @@ fn acquire_relaunch_record_lock(directory: &Path) -> Result<std::fs::File, i32> 
         .share_mode(0)
         .open(&path)
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    apply_relaunch_dacl(&path)?;
+    apply_relaunch_dacl(&path, &current_relaunch_identity()?)?;
     Ok(file)
 }
 
@@ -775,13 +1008,17 @@ fn relaunch_generations() -> Result<Vec<String>, i32> {
         return Ok(Vec::new());
     }
     let mut values = Vec::new();
+    let prefix = format!("{}-", relaunch_identity_key(&current_relaunch_identity()?));
     for entry in std::fs::read_dir(root).map_err(|_| EXIT_LAUNCH_FAILED)? {
         let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(generation) = name.strip_prefix(&prefix) else {
+            continue;
+        };
         if entry.file_type().map_err(|_| EXIT_LAUNCH_FAILED)?.is_dir()
-            && validate_generation(&name).is_ok()
+            && validate_generation(generation).is_ok()
         {
-            values.push(name);
+            values.push(generation.to_owned());
         }
     }
     Ok(values)
@@ -994,12 +1231,23 @@ fn installed_manifest_version() -> Result<String, i32> {
     Ok(installed_manifest()?.version)
 }
 
-fn verified_surviving_version(candidate: &UpdateCandidate) -> Result<String, i32> {
+fn verified_surviving_version(
+    candidate: &UpdateCandidate,
+    stored_predecessor: &InstalledManifest,
+) -> Result<String, i32> {
     if installed_candidate_committed(candidate) {
+        verify_installed_candidate_files(candidate)?;
         return Ok(candidate.version.clone());
     }
     let installed = installed_manifest()?;
     let predecessor = &candidate.predecessor;
+    if stored_predecessor.version != predecessor.version
+        || stored_predecessor.platform != predecessor.platform
+        || stored_predecessor.architecture != predecessor.architecture
+        || stored_predecessor.release_build_digest != predecessor.release_build_digest
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     let role_hash = |role: &str| {
         installed
             .roles
@@ -1014,21 +1262,29 @@ fn verified_surviving_version(candidate: &UpdateCandidate) -> Result<String, i32
         && role_hash("gateway") == Some(predecessor.gateway_sha256.as_str())
         && role_hash("owner") == Some(predecessor.owner_sha256.as_str())
     {
+        verify_installed_snapshot(stored_predecessor)?;
         Ok(predecessor.version.clone())
     } else {
         Err(EXIT_IDENTITY_MISMATCH)
     }
 }
 
-fn relaunch_run_value_name(generation: &str) -> Result<String, i32> {
-    validate_generation(generation)?;
-    Ok(format!("{RELAUNCH_RUN_VALUE_PREFIX}{generation}"))
+fn verify_installed_candidate_files(candidate: &UpdateCandidate) -> Result<(), i32> {
+    let root = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill");
+    for role in &candidate.roles {
+        let mut file = open_locked(&root.join(&role.path)).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut file).map_err(|_| EXIT_IDENTITY_MISMATCH)?
+            != decode_hash(&role.sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    }
+    Ok(())
 }
 
-fn relaunch_run_command(generation: &str, launcher: &Path) -> Result<String, i32> {
-    validate_generation(generation)?;
+fn relaunch_run_command(launcher: &Path) -> Result<String, i32> {
     let command = format!(
-        "\"{}\" --windows-update-relaunch-v1={generation}",
+        "\"{}\" --windows-update-relaunch-owner-v1",
         launcher.display()
     );
     if command.encode_utf16().count() > 260 {
@@ -1038,20 +1294,48 @@ fn relaunch_run_command(generation: &str, launcher: &Path) -> Result<String, i32
     }
 }
 
-fn arm_relaunch_run_owner(generation: &str, launcher: &Path) -> Result<(), i32> {
-    let command = relaunch_run_command(generation, launcher)?;
-    set_current_user_run_value(generation, Some(&command))
+fn install_machine_relaunch_owner() -> Result<(), i32> {
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let launcher = ensure_medium_launcher(&current)?;
+    let root = relaunch_root()?;
+    if !root.exists() {
+        create_directory_with_sddl(&root, RELAUNCH_ROOT_SDDL)?;
+        apply_restricted_dacl(&root, RELAUNCH_ROOT_SDDL)?;
+        flush_directory(root.parent().ok_or(EXIT_IDENTITY_MISMATCH)?)?;
+    }
+    let command = relaunch_run_command(&launcher)?;
+    set_machine_relaunch_run_value(&command)
 }
 
-fn clear_relaunch_run_owner(generation: &str) -> Result<(), i32> {
-    set_current_user_run_value(generation, None)
+fn verify_machine_relaunch_owner() -> Result<(), i32> {
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RELAUNCH_RUN_KEY))?.as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let expected = relaunch_run_command(&medium_launcher_path()?)?;
+    let actual = read_registry_string(key, RELAUNCH_RUN_VALUE)?;
+    unsafe { RegCloseKey(key) };
+    if actual.as_deref() == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err(EXIT_IDENTITY_MISMATCH)
+    }
 }
 
-fn set_current_user_run_value(generation: &str, command: Option<&str>) -> Result<(), i32> {
+fn set_machine_relaunch_run_value(command: &str) -> Result<(), i32> {
     let mut key = std::ptr::null_mut();
     if unsafe {
         RegCreateKeyExW(
-            HKEY_CURRENT_USER,
+            HKEY_LOCAL_MACHINE,
             wide_nul(Path::new(RELAUNCH_RUN_KEY))?.as_ptr(),
             0,
             std::ptr::null_mut(),
@@ -1065,35 +1349,17 @@ fn set_current_user_run_value(generation: &str, command: Option<&str>) -> Result
     {
         return Err(EXIT_LAUNCH_FAILED);
     }
-    let value_name = relaunch_run_value_name(generation)?;
-    let name = wide_nul(Path::new(&value_name))?;
-    let status = if let Some(command) = command {
-        let value = wide_nul(Path::new(command))?;
-        unsafe {
-            RegSetValueExW(
-                key,
-                name.as_ptr(),
-                0,
-                REG_SZ,
-                value.as_ptr().cast(),
-                (value.len() * 2) as u32,
-            )
-        }
-    } else {
-        let expected = medium_launcher_path()
-            .and_then(|launcher| relaunch_run_command(generation, &launcher))?;
-        let actual = read_registry_string(key, &value_name)?;
-        match actual.as_deref() {
-            None => 0,
-            Some(value) if value == expected => {
-                let status = unsafe { RegDeleteValueW(key, name.as_ptr()) };
-                if status == 2 { 0 } else { status }
-            }
-            Some(_) => {
-                unsafe { RegCloseKey(key) };
-                return Err(EXIT_IDENTITY_MISMATCH);
-            }
-        }
+    let name = wide_nul(Path::new(RELAUNCH_RUN_VALUE))?;
+    let value = wide_nul(Path::new(command))?;
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
     };
     let flushed = unsafe { RegFlushKey(key) };
     unsafe { RegCloseKey(key) };
@@ -1665,6 +1931,58 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
     Ok(())
 }
 
+fn verify_update_relation_against_snapshot(
+    candidate: &UpdateCandidate,
+    package_sha256: &str,
+    predecessor: &InstalledManifest,
+) -> Result<(), i32> {
+    let gateway = update_role(&predecessor.roles, "gateway")?;
+    let owner = update_role(&predecessor.roles, "owner")?;
+    if candidate.package_sha256 != package_sha256
+        || candidate.predecessor.version != predecessor.version
+        || candidate.predecessor.platform != predecessor.platform
+        || candidate.predecessor.architecture != predecessor.architecture
+        || candidate.predecessor.release_build_digest != predecessor.release_build_digest
+        || candidate.predecessor.gateway_sha256 != gateway.sha256
+        || candidate.predecessor.owner_sha256 != owner.sha256
+        || canonical_candidate_layout(candidate)? != candidate.package_layout_digest
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    verify_installed_snapshot(predecessor)
+}
+
+fn verify_installed_snapshot(snapshot: &InstalledManifest) -> Result<(), i32> {
+    let installed = installed_manifest()?;
+    if installed.version != snapshot.version
+        || installed.platform != snapshot.platform
+        || installed.architecture != snapshot.architecture
+        || installed.source_commit != snapshot.source_commit
+        || installed.source_tree != snapshot.source_tree
+        || installed.release_build_digest != snapshot.release_build_digest
+        || installed.roles.len() != snapshot.roles.len()
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let root = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill");
+    for role in &snapshot.roles {
+        let current = update_role(&installed.roles, &role.role)?;
+        if current.path != role.path
+            || current.sha256 != role.sha256
+            || current.suppression_capable != role.suppression_capable
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        let mut file = open_locked(&root.join(&role.path)).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut file).map_err(|_| EXIT_IDENTITY_MISMATCH)?
+            != decode_hash(&role.sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    }
+    Ok(())
+}
+
 fn verify_update_authorization(candidate: &UpdateCandidate) -> Result<(), i32> {
     let primary = env!("TALKING_QUILL_WINDOWS_UPDATE_PUBLIC_KEY_SEC1");
     let primary_digest = hex_digest(&Sha256::digest(decode_hex_bytes(primary, 65)?));
@@ -1902,8 +2220,8 @@ fn has_exact_security(path: &Path, sddl: &str) -> Result<bool, i32> {
     Ok(security_descriptor_text(actual.as_mut_ptr().cast())?.eq_ignore_ascii_case(&expected))
 }
 
-fn apply_relaunch_dacl(path: &Path) -> Result<(), i32> {
-    let descriptor = SecurityDescriptor::restricted(RELAUNCH_USER_SDDL)?;
+fn apply_relaunch_dacl(path: &Path, identity: &RelaunchIdentity) -> Result<(), i32> {
+    let descriptor = SecurityDescriptor::restricted(&relaunch_record_sddl(identity))?;
     let path = wide_nul(path)?;
     if unsafe {
         SetFileSecurityW(
@@ -1919,8 +2237,8 @@ fn apply_relaunch_dacl(path: &Path) -> Result<(), i32> {
     }
 }
 
-fn has_relaunch_dacl(path: &Path) -> Result<bool, i32> {
-    let expected = SecurityDescriptor::restricted(RELAUNCH_USER_SDDL)?;
+fn has_relaunch_dacl(path: &Path, identity: &RelaunchIdentity) -> Result<bool, i32> {
+    let expected = SecurityDescriptor::restricted(&relaunch_record_sddl(identity))?;
     let expected = security_descriptor_text(expected.0)?;
     let path = wide_nul(path)?;
     let mut needed = 0_u32;
@@ -2914,7 +3232,7 @@ fn read_registry_string(key: *mut c_void, name: &str) -> Result<Option<String>, 
     if first == 2 {
         return Ok(None);
     }
-    if first != 0 || kind != REG_SZ || !(2..=256).contains(&bytes) || !bytes.is_multiple_of(2) {
+    if first != 0 || kind != REG_SZ || !(2..=1024).contains(&bytes) || !bytes.is_multiple_of(2) {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     let mut value = vec![0_u16; bytes as usize / 2];
@@ -3320,6 +3638,71 @@ fn schedule_staged_cleanup(previous_generation: Option<&str>) -> Result<(), i32>
     spawn_staged_cleanup(&directory, generation)
 }
 
+#[derive(Clone, Eq, PartialEq)]
+struct RelaunchIdentity {
+    user_sid: String,
+    logon_sid: String,
+}
+
+fn sid_string(sid: *mut core::ffi::c_void) -> Result<String, i32> {
+    let mut text = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let length = unsafe { (0..).take_while(|&index| *text.add(index) != 0).count() };
+    let result = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) })
+        .map_err(|_| EXIT_IDENTITY_MISMATCH);
+    unsafe { LocalFree(text.cast()) };
+    result
+}
+
+fn token_information(class: i32) -> Result<Vec<u8>, i32> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut needed = 0;
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let mut value = vec![0_u8; needed as usize];
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            value.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(value)
+}
+
+fn current_relaunch_identity() -> Result<RelaunchIdentity, i32> {
+    let user = token_information(TokenUser)?;
+    let user = unsafe { &*(user.as_ptr().cast::<TOKEN_USER>()) };
+    let user_sid = sid_string(user.User.Sid)?;
+    // TokenUser is the durable SID of the real interactive logon identity. Unlike the
+    // per-session logon-group SID, it remains stable across reboot/login recovery.
+    Ok(RelaunchIdentity {
+        logon_sid: user_sid.clone(),
+        user_sid,
+    })
+}
+
 fn is_elevated() -> bool {
     let mut token: HANDLE = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
@@ -3662,15 +4045,32 @@ mod tests {
     #[test]
     fn relaunch_record_marker_and_each_phase_are_power_loss_safe() {
         let generation = super::new_recovery_generation().unwrap();
+        let identity = super::current_relaunch_identity().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("tq-relaunch-record-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        *super::TEST_RELAUNCH_ROOT.lock().unwrap() = Some(root.clone());
         let mut record = PersistedRelaunchRecord {
-            schema_version: 1,
+            schema_version: 2,
             generation: generation.clone(),
+            user_sid: identity.user_sid,
+            logon_sid: identity.logon_sid,
             request: "--windows-update-bootstrap-v2=dGVzdA==".into(),
             nonce: "11".repeat(16),
             source_version: "0.0.69".into(),
             target_version: "0.0.70".into(),
             phase: "armed".into(),
             completed_version: None,
+            predecessor: super::InstalledManifest {
+                version: "0.0.69".into(),
+                platform: "win32".into(),
+                architecture: "x64".into(),
+                source_commit: "a".repeat(40),
+                source_tree: "b".repeat(40),
+                release_build_digest: "c".repeat(64),
+                roles: Vec::new(),
+            },
         };
         publish_relaunch_record(&record).unwrap();
         for phase in [
@@ -3697,6 +4097,8 @@ mod tests {
             &super::relaunch_generation_directory(&generation).unwrap(),
         )
         .unwrap();
+        *super::TEST_RELAUNCH_ROOT.lock().unwrap() = None;
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

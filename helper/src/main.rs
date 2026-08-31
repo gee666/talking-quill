@@ -30,9 +30,10 @@ fn main() {
     #[cfg(windows)]
     if os_arguments.len() == 2
         && os_arguments.get(1).is_some_and(|value| {
-            value
-                .to_string_lossy()
-                .starts_with("--windows-update-bootstrap-v2=")
+            value == "--windows-update-relaunch-owner-install-v1"
+                || value
+                    .to_string_lossy()
+                    .starts_with("--windows-update-bootstrap-v2=")
                 || value
                     .to_string_lossy()
                     .starts_with("--windows-update-bootstrap-staged-v2=")

@@ -406,6 +406,13 @@ jobs:
           if ($retry -notlike "*--windows-update-resume-v2=$generation*") { throw 'Persistent visible recovery command is missing or mismatched.' }
           $recoveryLauncher = "$env:ProgramData\Talking Quill Update Recovery\talking-quill-update-recovery-launcher.exe"
           if (-not (Test-Path -LiteralPath $recoveryLauncher)) { throw 'Medium-integrity recovery launcher is missing.' }
+          $installedHelper = "$env:ProgramFiles\Talking Quill\resources\helper\talking-quill-helper.exe"
+          $ownerInstall = Start-Process -FilePath $installedHelper -ArgumentList '--windows-update-relaunch-owner-install-v1' -Wait -PassThru
+          if ($ownerInstall.ExitCode -ne 0) { throw "Machine login recovery owner installation failed: $($ownerInstall.ExitCode)" }
+          $machineRelaunch = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch'
+          if ($machineRelaunch -cne ('"' + $recoveryLauncher + '" --windows-update-relaunch-owner-v1')) { throw 'Stable machine login recovery owner is not exact.' }
+          $loginRecovery = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
+          if ($loginRecovery.ExitCode -ne 0) { throw "Actual launcher login recovery failed: $($loginRecovery.ExitCode)" }
           $resumed = Start-Process -FilePath $recoveryLauncher -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
           if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
           if ($null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName -ErrorAction SilentlyContinue)) { throw 'Successful recovery retained its persistent retry command.' }
@@ -472,12 +479,22 @@ jobs:
           $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
           $quiet = (Get-ItemProperty -LiteralPath $uninstallKey -Name QuietUninstallString).QuietUninstallString
           if ($quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S')) { throw 'QuietUninstallString is not exact.' }
-          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
+          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -PassThru
+          $normalRelocated = $false
+          $relocatedDeadline = (Get-Date).AddSeconds(30)
+          while (-not $uninstall.HasExited -and (Get-Date) -lt $relocatedDeadline) {
+            $normalRelocated = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ([IO.Path]::GetTempPath().TrimEnd('\') + '\.TalkingQuill-uninstall-*.exe') }).Count -eq 1
+            if ($normalRelocated) { break }
+            Start-Sleep -Milliseconds 10
+          }
+          $uninstall.WaitForExit()
+          if (-not $normalRelocated) { throw 'Normal uninstall did not execute through one relocated worker.' }
           if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
           $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' } | ForEach-Object FullName)
           $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
           $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
-          if ($terminalResidue.Count -ne 0 -or $terminalKeys.Count -ne 0) { throw 'Synchronous uninstall retained protected recovery residue.' }
+          $terminalRelaunchOwner = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
+          if ($terminalResidue.Count -ne 0 -or $terminalKeys.Count -ne 0 -or $null -ne $terminalRelaunchOwner) { throw 'Synchronous uninstall retained protected recovery residue.' }
           $faultDocument = Get-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
           $faultDocument | Add-Member -NotePropertyName terminalCleanup -NotePropertyValue @{ inspected = $true; residue = @(); registry = @() }
           $faultDocument | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
