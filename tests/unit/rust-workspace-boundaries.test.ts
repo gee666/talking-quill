@@ -290,6 +290,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
     expect(workspacePackage('talking-quill-helper').features).toEqual({
       default: [],
       'windows-installed-acceptance': [],
+      'windows-update-recovery-launcher': [],
     });
     expect(workspacePackage('talking-quill-keyboard-core').features).toEqual({
       default: [],
@@ -399,6 +400,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
           'Win32_System_SystemInformation',
           'Win32_System_Threading',
           'Win32_UI_Shell',
+          'Win32_UI_WindowsAndMessaging',
         ],
       }),
     ]);

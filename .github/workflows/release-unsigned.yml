@@ -84,7 +84,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-controls:
+    name: Verify protected release controls
+    runs-on: ubuntu-latest
+    environment: release-trust
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+      - name: Fail closed unless immutable publication controls exist
+        env:
+          RELEASE_CONTROL_TOKEN: ${{ secrets.RELEASE_CONTROL_TOKEN }}
+          RELEASE_TAG: v0.0.69
+        run: node scripts/release-control-preflight.mjs
+
   validate:
+    needs: release-controls
     name: Validate source
     runs-on: windows-latest
     timeout-minutes: 90
@@ -383,7 +404,9 @@ jobs:
           $retryName = "Talking Quill Update Recovery $generation"
           $retry = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName
           if ($retry -notlike "*--windows-update-resume-v2=$generation*") { throw 'Persistent visible recovery command is missing or mismatched.' }
-          $resumed = Start-Process -FilePath $resume[0].FullName -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
+          $recoveryLauncher = "$env:ProgramData\Talking Quill Update Recovery\talking-quill-update-recovery-launcher.exe"
+          if (-not (Test-Path -LiteralPath $recoveryLauncher)) { throw 'Medium-integrity recovery launcher is missing.' }
+          $resumed = Start-Process -FilePath $recoveryLauncher -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
           if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
           if ($null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName -ErrorAction SilentlyContinue)) { throw 'Successful recovery retained its persistent retry command.' }
           $expectedDigest = $identity.releaseBuildDigest
@@ -570,7 +593,7 @@ jobs:
           if (-not $finishUninstallRecoveryInterrupted) { throw 'recovering-finish-uninstall was not interrupted.' }
           $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
           $uninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -Wait -PassThru
-          if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          if ($uninstallRecovery.ExitCode -ne 0) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
           $machineResidue = @(
             "$env:ProgramFiles\Talking Quill",
             "$env:ProgramFiles\.Talking Quill.native-staging",
@@ -578,14 +601,17 @@ jobs:
             $transaction,
             $maintenance,
             "$env:ProgramData\Talking Quill\KeyboardAuthority",
-            "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine"
+            "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine",
+            "$env:ProgramData\Talking Quill Update Recovery"
           ) | Where-Object { Test-Path -LiteralPath $_ }
+          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -ErrorAction SilentlyContinue | Where-Object Name -like '.Talking Quill.update-bootstrap-*' | ForEach-Object FullName)
+          $recoveryValues = @((Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -like 'Talking Quill Update Recovery *')
           $uninstallRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
           $appPathRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe'
           $legacyService = $null -ne (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
           & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
           $legacyTask = $LASTEXITCODE -eq 0
-          if ($machineResidue.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained machine, registration, service, or task state.' }
+          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, machine, registration, service, or task state.' }
           $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
           $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; removeFreshRecovery = $removeFreshRecoveryInterrupted; uninstall = $uninstallInterrupted; finishUninstallRecovery = $finishUninstallRecoveryInterrupted }
           $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8
@@ -601,6 +627,11 @@ jobs:
     needs: [validate, package, smoke, lifecycle, fresh-lifecycle]
     runs-on: ubuntu-latest
     environment: release-signing
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -642,6 +673,7 @@ jobs:
       - name: Assemble immutable native release files
         env:
           TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64 }}
+          TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -705,7 +737,12 @@ jobs:
           });
           fs.writeFileSync(manifestPath, `${JSON.stringify(sealReleaseManifest(manifest), null, 2)}\n`);
           NODE
+          node scripts/publication-manifest.mjs --create --directory release-artifacts --output release-artifacts/release-publication-manifest-v1.json --repository '${{ github.repository }}' --tag "v$(node -p \"require('./app/package.json').version\")" --sequence '${{ github.run_number }}' --run-id '${{ github.run_id }}' --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --public-key build/release-manifest-public-key.sec1
+          node scripts/publication-manifest.mjs --manifest release-artifacts/release-publication-manifest-v1.json --directory release-artifacts --repository '${{ github.repository }}' --tag "v$(node -p \"require('./app/package.json').version\")" --sequence '${{ github.run_number }}' --run-id '${{ github.run_id }}' --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --public-key build/release-manifest-public-key.sec1
           (cd release-artifacts && sha256sum * > SHA256SUMS.txt)
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release-artifacts/*
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-native-release-candidates

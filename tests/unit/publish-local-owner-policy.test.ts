@@ -37,16 +37,9 @@ describe('Windows native publication policy', () => {
     expect(promote).toBeGreaterThan(inventoryCheck);
   });
 
-  it('leaves promotion as the final command so every earlier failure preserves the draft', () => {
-    const executableLines = workflow
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .filter((line) => line !== '' && !line.startsWith('#'));
-    expect(executableLines.at(-1)).toContain(
-      'curl --fail-with-body --silent --show-error --request PATCH',
-    );
+  it('makes promotion the final mutation and then verifies immutable publication', () => {
     const promote = workflow.indexOf('curl --fail-with-body --silent --show-error --request PATCH');
-    expect(workflow.slice(promote).match(/\bcurl\s/gu)).toHaveLength(1);
+    expect(workflow.slice(promote).match(/--request PATCH/gu)).toHaveLength(1);
     expect(workflow.slice(promote)).toContain(
       'Published release response identity or asset metadata mismatch',
     );
@@ -56,7 +49,10 @@ describe('Windows native publication policy', () => {
     expect(workflow).toContain('RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}');
     expect(workflow).toContain('releases/assets/$asset_id');
     expect(workflow).not.toContain('gh release download');
-    expect(workflow.slice(promote)).not.toMatch(/verify|download|fresh\.assets|fresh\.draft/iu);
+    const immutableCheck = workflow.indexOf('Require immutable published release', promote);
+    expect(immutableCheck).toBeGreaterThan(promote);
+    expect(workflow.slice(immutableCheck)).toContain('gh release verify-asset');
+    expect(workflow.slice(immutableCheck)).not.toMatch(/release (?:create|edit|upload)/u);
   });
 
   it('keeps the assembled producer and draft consumer inventories identical', () => {

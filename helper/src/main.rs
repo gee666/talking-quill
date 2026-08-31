@@ -38,6 +38,9 @@ fn main() {
                     .starts_with("--windows-update-bootstrap-staged-v2=")
                 || value
                     .to_string_lossy()
+                    .starts_with("--windows-update-resume-v2=")
+                || value
+                    .to_string_lossy()
                     .starts_with("--windows-update-cleanup-v1=")
         })
     {

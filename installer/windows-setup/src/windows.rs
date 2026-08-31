@@ -59,8 +59,9 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteTreeW, RegFlushKey, RegSetValueExW,
+    HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW,
@@ -703,31 +704,28 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         false
     };
     let system = WindowsNativeSystem;
+    let finishing_existing_uninstall = pending_uninstall_transaction(&paths)?;
+    // A relocated controller must stop mapping the installed image before finish-uninstall
+    // recovery can delete it. The existing protected journal is sufficient durable authority.
+    if finishing_existing_uninstall
+        && let Some((Action::Uninstall, server, _, lifecycle_parent)) =
+            authenticated_controller.as_ref()
+        && *lifecycle_parent != 0
+    {
+        arm_relocated_uninstall_controller(server)?;
+    }
     // Authentication and package validation happen before recovery. Once the machine lock is held,
     // every installed entry point must finish durable recovery before arming or deriving a new action.
     recover_with_adapter(&paths, &system)?;
+    if finishing_existing_uninstall {
+        return Ok(0);
+    }
     if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
         authenticated_controller.as_ref()
         && *lifecycle_parent != 0
     {
         write_transaction(&paths, "uninstall-armed", Action::Uninstall, true)?;
-        pipe_write(
-            server.as_raw_handle(),
-            b"TQ-UNINSTALL-JOURNALED",
-            None,
-            Instant::now() + Duration::from_secs(30),
-        )?;
-        if pipe_read::<18>(
-            server.as_raw_handle(),
-            None,
-            Instant::now() + Duration::from_secs(30),
-        )? != *b"TQ-UNINSTALL-ARMED"
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Uninstall controller did not commit mapped-image deletion ownership.",
-            ));
-        }
+        arm_relocated_uninstall_controller(server)?;
     }
     let mut action = if uninstall_authorized {
         Action::Uninstall
@@ -779,6 +777,7 @@ trait NativeSystemAdapter {
     fn register_installed(&self, paths: &Paths) -> Result<()>;
     fn unregister(&self) -> Result<()>;
     fn retire_legacy(&self, paths: &Paths) -> Result<()>;
+    fn clear_update_recovery(&self, paths: &Paths) -> Result<()>;
 }
 
 struct WindowsNativeSystem;
@@ -797,6 +796,9 @@ impl NativeSystemAdapter for WindowsNativeSystem {
     }
     fn retire_legacy(&self, paths: &Paths) -> Result<()> {
         retire_legacy_authority(paths)
+    }
+    fn clear_update_recovery(&self, paths: &Paths) -> Result<()> {
+        clear_update_recovery(paths)
     }
 }
 
@@ -1732,6 +1734,51 @@ fn retained_file_hash(path: &Path) -> Result<(File, [u8; 32])> {
     Ok((file, hash))
 }
 
+fn pending_uninstall_transaction(paths: &Paths) -> Result<bool> {
+    if !path_present(&paths.transaction)? {
+        return Ok(false);
+    }
+    assert_plain_file(&paths.transaction)?;
+    let transaction: Transaction =
+        serde_json::from_slice(&fs::read(&paths.transaction).map_err(io_failure)?)
+            .map_err(|_| fail(EXIT_REJECTED, "Installer transaction is invalid."))?;
+    if transaction.schema_version != TRANSACTION_SCHEMA {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Installer transaction schema is invalid.",
+        ));
+    }
+    Ok(transaction.action == "uninstall"
+        && matches!(
+            transaction.phase.as_str(),
+            "uninstall-armed"
+                | "uninstalling"
+                | "uninstall-quarantined"
+                | "recovering-finish-uninstall"
+        ))
+}
+
+fn arm_relocated_uninstall_controller(server: &OwnedHandle) -> Result<()> {
+    pipe_write(
+        server.as_raw_handle(),
+        b"TQ-UNINSTALL-JOURNALED",
+        None,
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    if pipe_read::<18>(
+        server.as_raw_handle(),
+        None,
+        Instant::now() + Duration::from_secs(30),
+    )? != *b"TQ-UNINSTALL-ARMED"
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Uninstall controller did not commit mapped-image deletion ownership.",
+        ));
+    }
+    Ok(())
+}
+
 fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
     let controller = process_image(parent_process_id()?)?;
     let installed = paths.install.join("Uninstall Talking Quill.exe");
@@ -2479,6 +2526,7 @@ fn uninstall(
     write_transaction(paths, "uninstalling", Action::Uninstall, true)?;
     system.unregister()?;
     system.retire_legacy(paths)?;
+    system.clear_update_recovery(paths)?;
     if defer_mapped_controller_cleanup && path_present(&paths.install)? {
         remove_plain_tree(&paths.backup)?;
         durable_rename(&paths.install, &paths.backup)?;
@@ -2655,6 +2703,7 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
         RecoveryPlan::FinishUninstall => {
             system.unregister()?;
             system.retire_legacy(paths)?;
+            system.clear_update_recovery(paths)?;
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
@@ -2682,6 +2731,9 @@ impl NativeSystemAdapter for InjectedNativeSystem {
         Ok(())
     }
     fn retire_legacy(&self, _paths: &Paths) -> Result<()> {
+        Ok(())
+    }
+    fn clear_update_recovery(&self, _paths: &Paths) -> Result<()> {
         Ok(())
     }
 }
@@ -2942,6 +2994,110 @@ fn unregister_app_path() -> Result<()> {
             "Cannot remove the native application registration.",
         ))
     }
+}
+
+fn clear_update_recovery(paths: &Paths) -> Result<()> {
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const PREFIX: &str = "Talking Quill Update Recovery ";
+    let mut key = ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    };
+    if opened == 0 {
+        let mut index = 0;
+        loop {
+            let mut name = [0_u16; 512];
+            let mut length = name.len() as u32;
+            let status = unsafe {
+                RegEnumValueW(
+                    key,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut length,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if status == 259 {
+                break;
+            }
+            if status != 0 {
+                unsafe { RegCloseKey(key) };
+                return Err(fail(
+                    EXIT_FAILURE,
+                    "Cannot enumerate update recovery values.",
+                ));
+            }
+            let value = String::from_utf16_lossy(&name[..length as usize]);
+            let owned = value.strip_prefix(PREFIX).is_some_and(|generation| {
+                generation.len() == 32
+                    && generation
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+            if owned {
+                if unsafe { RegDeleteValueW(key, name.as_ptr()) } != 0 {
+                    unsafe { RegCloseKey(key) };
+                    return Err(fail(EXIT_FAILURE, "Cannot remove update recovery value."));
+                }
+            } else {
+                index += 1;
+            }
+        }
+        if unsafe { RegFlushKey(key) } != 0 {
+            unsafe { RegCloseKey(key) };
+            return Err(fail(EXIT_FAILURE, "Cannot flush update recovery cleanup."));
+        }
+        unsafe { RegCloseKey(key) };
+    } else if opened != 2 {
+        return Err(fail(EXIT_FAILURE, "Cannot open update recovery values."));
+    }
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|value| value.strip_prefix(".Talking Quill.update-bootstrap-"))
+        else {
+            continue;
+        };
+        if suffix.len() == 16
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            let path = entry.path();
+            let identity = owned_tree_identity(&path)
+                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+            let recorded = fs::read_to_string(path.join("cleanup-tree-identity-v1"));
+            if staged_path_is_protected(&path, true)?
+                && recorded.is_ok_and(|value| value == identity)
+            {
+                remove_owned_tree(&path, &identity)
+                    .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+            }
+        }
+    }
+    let launcher = paths.program_data.join("Talking Quill Update Recovery");
+    if path_present(&launcher)? {
+        let identity = owned_tree_identity(&launcher)
+            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        if fs::read_to_string(launcher.join("launcher-tree-identity-v1"))
+            .is_ok_and(|value| value == identity)
+        {
+            remove_owned_tree(&launcher, &identity)
+                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn unregister_uninstall() -> Result<()> {

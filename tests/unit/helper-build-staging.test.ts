@@ -10,6 +10,7 @@ import {
   SOURCE_COMMIT_MARKER,
   SOURCE_TREE_MARKER,
   WINDOWS_UPDATE_PRIMARY_KEY_MARKER,
+  WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER,
   nativeRoleLayout,
   verifyCompleteNativeRoleInventory,
   verifyNativeSourceIdentity,
@@ -52,6 +53,10 @@ async function stageWindows(architecture: 'x64' | 'arm64', directory = root): Pr
     writeFile(
       resolve(directory, 'talking-quill-keyboard-owner.exe'),
       pe(architecture, OWNER_LOCAL_ENABLED_MARKER),
+    ),
+    writeFile(
+      resolve(directory, 'talking-quill-update-recovery-launcher.exe'),
+      pe(architecture, WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER),
     ),
   ]);
 }
@@ -246,10 +251,11 @@ describe('R9 role-separated native staging contract', () => {
     );
   });
 
-  it('defines exactly two Windows runtime roles with one suppression owner', () => {
+  it('defines exactly two Windows runtime roles plus one recovery utility with one suppression owner', () => {
     expect(nativeRoleLayout('win32')).toEqual([
       expect.objectContaining({ role: 'gateway', suppressionCapable: false }),
       expect.objectContaining({ role: 'owner', suppressionCapable: true }),
+      expect.objectContaining({ role: 'utility', suppressionCapable: false }),
     ]);
     for (const platform of ['win32', 'darwin'] as const) {
       const layout = nativeRoleLayout(platform);

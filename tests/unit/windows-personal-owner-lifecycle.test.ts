@@ -126,7 +126,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(updater).not.toContain('!Talking Quill Update Recovery');
     expect(updater).toContain('MAX_VISIBLE_RECOVERY_ATTEMPTS: u8 = 3');
     expect(updater).toContain('show_visible_retry_paused()');
-    expect(updater).toContain('read_active_generation(&recovery_directory()?)? != generation');
+    expect(updater).toContain('read_active_generation(&directory)? != generation');
     expect(updater).toContain('let recovery_generation = if resuming');
     expect(updater).toContain(
       'Automatic update prompts are paused and the recovery generation is retained.',

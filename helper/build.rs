@@ -44,6 +44,21 @@ fn main() {
         "build/windows-update-public-key.sec1 must contain one lowercase uncompressed P-256 SEC1 key"
     );
     println!("cargo:rustc-env=TALKING_QUILL_WINDOWS_UPDATE_PUBLIC_KEY_SEC1={update_key}");
+    let publication_key_path = PathBuf::from("../build/release-manifest-public-key.sec1");
+    println!("cargo:rerun-if-changed={}", publication_key_path.display());
+    let publication_key = fs::read_to_string(&publication_key_path)
+        .expect("build/release-manifest-public-key.sec1 is required for updater-compatible builds");
+    let publication_key = publication_key.trim();
+    assert!(
+        publication_key.len() == 130
+            && publication_key.starts_with("04")
+            && publication_key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && publication_key != update_key,
+        "the release-manifest key must be one lowercase uncompressed P-256 key distinct from the updater key"
+    );
+    println!("cargo:rustc-env=TALKING_QUILL_RELEASE_MANIFEST_PUBLIC_KEY_SEC1={publication_key}");
     println!("cargo:rerun-if-env-changed=TALKING_QUILL_MACOS_TEST_SUCCESSOR_NONCE");
     println!(
         "cargo:rustc-env=TALKING_QUILL_MACOS_BUILD_VARIANT={}",

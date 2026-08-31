@@ -65,6 +65,12 @@ can-suppress = false
 [features]
 default = []
 windows-installed-acceptance = []
+windows-update-recovery-launcher = []
+
+[[bin]]
+name = "talking-quill-update-recovery-launcher"
+path = "src/bin/talking-quill-update-recovery-launcher.rs"
+required-features = ["windows-update-recovery-launcher"]
 
 [dependencies]
 crossbeam-channel.workspace = true
@@ -102,6 +108,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

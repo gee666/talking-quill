@@ -30,6 +30,10 @@ export const OWNER_TEST_SEAMS_MARKER = Buffer.from(
   'TALKING_QUILL_KEYBOARD_OWNER_TEST_SEAMS=ENABLED_SAFE_NON_PROMOTABLE',
   'ascii',
 );
+export const WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER = Buffer.from(
+  'TALKING_QUILL_WINDOWS_UPDATE_RECOVERY_LAUNCHER=MEDIUM_SELF_ELEVATING_V1',
+  'ascii',
+);
 export const MACOS_SERVICE_BRIDGE_MARKER = Buffer.from(
   'TALKING_QUILL_MACOS_SERVICE_BRIDGE=LOCAL_MAINTENANCE_AUTHORITY_CANNOT_SUPPRESS',
   'ascii',
@@ -55,6 +59,11 @@ const ROLE_LAYOUTS = Object.freeze({
       name: 'talking-quill-keyboard-owner.exe',
       role: 'owner',
       suppressionCapable: true,
+    }),
+    Object.freeze({
+      name: 'talking-quill-update-recovery-launcher.exe',
+      role: 'utility',
+      suppressionCapable: false,
     }),
   ]),
   darwin: Object.freeze([
@@ -125,6 +134,25 @@ export async function verifyHelperBuildContract(path, { windows }) {
   }
 }
 
+export async function verifyWindowsUpdateRecoveryLauncherBuildContract(path) {
+  const executable = await readFile(path);
+  if (!executable.includes(WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER)) {
+    throw new Error('Windows update recovery launcher marker is missing');
+  }
+  for (const marker of [
+    GATEWAY_CANNOT_SUPPRESS_MARKER,
+    OWNER_LOCAL_ENABLED_MARKER,
+    OWNER_SAFE_DISABLED_MARKER,
+    OWNER_TEST_SEAMS_MARKER,
+    MACOS_SERVICE_BRIDGE_MARKER,
+    ...MACOS_LIFECYCLE_FIXTURE_MARKERS,
+    ...LEGACY_NATIVE_MARKERS,
+  ]) {
+    if (executable.includes(marker))
+      throw new Error('Windows update recovery launcher contains a forbidden role marker');
+  }
+}
+
 export async function verifyMacosServiceBridgeBuildContract(path) {
   const executable = await readFile(path);
   if (!executable.includes(MACOS_SERVICE_BRIDGE_MARKER)) {
@@ -157,6 +185,7 @@ export async function verifyCompleteNativeRoleInventory(paths, assignedRolePaths
         OWNER_SAFE_DISABLED_MARKER,
         OWNER_TEST_SEAMS_MARKER,
         MACOS_SERVICE_BRIDGE_MARKER,
+        WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER,
         ...MACOS_LIFECYCLE_FIXTURE_MARKERS,
         ...LEGACY_NATIVE_MARKERS,
       ]) {
@@ -254,7 +283,11 @@ export async function verifyStagedNativeRoleSet(directory, { platform, architect
   const owner = join(directory, layout.find((role) => role.role === 'owner').name);
   await verifyHelperBuildContract(gateway, { windows: platform === 'win32' });
   await verifyOwnerBuildContract(owner);
-  if (platform !== 'win32') {
+  if (platform === 'win32') {
+    await verifyWindowsUpdateRecoveryLauncherBuildContract(
+      join(directory, 'talking-quill-update-recovery-launcher.exe'),
+    );
+  } else {
     await verifyMacosServiceBridgeBuildContract(
       join(directory, 'talking-quill-macos-service-bridge'),
     );

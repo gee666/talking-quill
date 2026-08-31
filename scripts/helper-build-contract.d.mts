@@ -2,6 +2,7 @@ export const SOURCE_COMMIT_MARKER: Buffer;
 export const SOURCE_TREE_MARKER: Buffer;
 export const WINDOWS_TEST_PHYSICAL_MARKER: bigint;
 export const WINDOWS_UPDATE_PRIMARY_KEY_MARKER: Buffer;
+export const WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER: Buffer;
 export const RETIRED_WINDOWS_UPDATE_BRIDGE_KEY_MARKER: Buffer;
 export const GATEWAY_CANNOT_SUPPRESS_MARKER: Buffer;
 export const OWNER_SAFE_DISABLED_MARKER: Buffer;
@@ -12,7 +13,7 @@ export const LEGACY_NATIVE_MARKERS: readonly Buffer[];
 
 export interface NativeRoleContract {
   readonly name: string;
-  readonly role: 'gateway' | 'owner' | 'authority';
+  readonly role: 'gateway' | 'owner' | 'authority' | 'utility';
   readonly suppressionCapable: boolean;
 }
 

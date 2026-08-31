@@ -25,6 +25,7 @@ jobs:
       actions: read
     outputs:
       commit: ${{ steps.run.outputs.commit }}
+      sequence: ${{ steps.run.outputs.sequence }}
     steps:
       - id: run
         env:
@@ -45,6 +46,9 @@ jobs:
           commit="$(jq -r .head_sha <<<"$run")"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          sequence="$(jq -r .run_number <<<"$run")"
+          [[ "$sequence" =~ ^[1-9][0-9]*$ ]]
+          echo "sequence=$sequence" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: inspect
@@ -52,12 +56,20 @@ jobs:
     permissions:
       actions: read
       contents: write
+      attestations: read
+      id-token: write
+    environment: release-publication
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.inspect.outputs.commit }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Fail closed unless publication controls remain protected
+        env:
+          RELEASE_CONTROL_TOKEN: ${{ secrets.RELEASE_CONTROL_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-control-preflight.mjs
       - name: Download the preserved Windows native candidates
         env:
           GH_TOKEN: ${{ github.token }}
@@ -104,6 +116,10 @@ jobs:
             ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
           done
           test -f release-artifacts/THIRD_PARTY_NOTICES.txt
+          test -f release-artifacts/release-publication-manifest-v1.json
+          SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+          node scripts/publication-manifest.mjs --manifest release-artifacts/release-publication-manifest-v1.json --directory release-artifacts --repository "$REPOSITORY" --tag "$TAG" --sequence '${{ needs.inspect.outputs.sequence }}' --run-id "$RUN_ID" --source-commit '${{ needs.inspect.outputs.commit }}' --source-tree "$SOURCE_TREE" --public-key build/release-manifest-public-key.sec1
+          gh attestation verify release-artifacts/* --repo "$REPOSITORY"
           RUN_ID="$RUN_ID" node --input-type=module - <<'NODE'
           import fs from 'node:fs'; import crypto from 'node:crypto';
           import { validateReleaseManifest } from './scripts/release-manifest.mjs';
@@ -111,6 +127,15 @@ jobs:
           if (manifest.workflowRunId !== process.env.RUN_ID) throw new Error('Release manifest workflow run does not match promoted run');
           for (const asset of manifest.assets) { const bytes=fs.readFileSync(`release-artifacts/${asset.name}`); const hash=crypto.createHash('sha256').update(bytes).digest('hex'); if(bytes.length!==asset.bytes||hash!==asset.sha256) throw new Error(`Release asset mismatch: ${asset.name}`); }
           NODE
+
+      - name: Require repository immutable releases before draft creation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$REPOSITORY" --jq .immutable_releases)" = true
 
       - name: Create the unchanged installer as a draft
         env:
@@ -121,7 +146,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$TAG" release-artifacts/* \
+          mapfile -t assets < <(node -e 'const p=require("./release-artifacts/release-publication-manifest-v1.json").payload; for (const {name} of p.assets) console.log(`release-artifacts/${name}`); console.log("release-artifacts/release-publication-manifest-v1.json"); console.log("release-artifacts/SHA256SUMS.txt")')
+          test "${#assets[@]}" -gt 2
+          gh release create "$TAG" "${assets[@]}" \
             --repo "$REPOSITORY" \
             --target "$COMMIT" \
             --title "Talking Quill $TAG Windows native unsigned owner" \
@@ -167,6 +194,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$(gh api "repos/$REPOSITORY" --jq .immutable_releases)" = true
           curl --fail-with-body --silent --show-error --dump-header promotion-release.headers --output promotion-release.json -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/$REPOSITORY/releases/$RELEASE_ID"
           etag="$(awk 'BEGIN{IGNORECASE=1} /^etag:/{sub(/^[^:]+:[[:space:]]*/,""); sub(/\r$/,""); print; exit}' promotion-release.headers)"
           test -n "$etag"
@@ -180,3 +208,20 @@ jobs:
           if (!fresh.draft || fresh.prerelease || fresh.tag_name !== process.env.TAG || fresh.target_commitish !== process.env.COMMIT || String(fresh.id) !== process.env.RELEASE_ID || new Set(names).size !== names.length || new Set(ids).size !== ids.length || JSON.stringify(assets(fresh)) !== JSON.stringify(assets(before))) throw new Error('Fresh promotion release metadata differs from the byte-verified draft snapshot');
           NODE
           response="$(curl --fail-with-body --silent --show-error --request PATCH -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' -H 'X-GitHub-Api-Version: 2022-11-28' -H "If-Match: $etag" --data '{"draft":false,"prerelease":false,"make_latest":"true"}' "https://api.github.com/repos/$REPOSITORY/releases/$RELEASE_ID")" && RESPONSE="$response" node -e 'const fs=require("node:fs"), value=JSON.parse(process.env.RESPONSE), before=JSON.parse(fs.readFileSync("promotion-release.json","utf8")), assets=x=>x.assets.map(({id,name,size,digest})=>({id,name,size,digest:digest??null})).sort((a,b)=>a.name.localeCompare(b.name)); if (value.id !== Number(process.env.RELEASE_ID) || value.draft !== false || value.prerelease !== false || value.tag_name !== process.env.TAG || value.target_commitish !== process.env.COMMIT || JSON.stringify(assets(value)) !== JSON.stringify(assets(before))) throw new Error("Published release response identity or asset metadata mismatch")'
+
+      - name: Require immutable published release and verify every asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$REPOSITORY" --jq .immutable_releases)" = true
+          published="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          test "$(jq -r .draft <<<"$published")" = false
+          test "$(jq -r .immutable <<<"$published")" = true
+          mapfile -t assets < <(jq -r '.assets[].name' <<<"$published")
+          for name in "${assets[@]}"; do
+            gh release verify-asset "$TAG" "release-artifacts/$name" --repo "$REPOSITORY"
+          done

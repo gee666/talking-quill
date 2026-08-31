@@ -9,6 +9,7 @@ const approvedActions = new Set([
   'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
   'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f',
   'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
+  'actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be',
   'pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320',
   'dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b',
   'taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed',

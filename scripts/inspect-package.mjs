@@ -40,6 +40,7 @@ import {
   verifyMacosServiceBridgeBuildContract,
   verifyNativeSourceIdentity,
   verifyOwnerBuildContract,
+  verifyWindowsUpdateRecoveryLauncherBuildContract,
 } from './helper-build-contract.mjs';
 import { inspectNativeTree, readNativeArchitectures } from './native-architecture.mjs';
 import {
@@ -278,11 +279,17 @@ if (macosOwnerPackage) {
 if (!isMacBundle) {
   const windowsRoleDirectory = resolve(resources, 'helper');
   const windowsOwner = resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe');
+  const recoveryLauncher = resolve(
+    windowsRoleDirectory,
+    'talking-quill-update-recovery-launcher.exe',
+  );
   await verifyOwnerBuildContract(windowsOwner);
   await verifyNativeSourceIdentity(windowsOwner, sourceIdentity);
+  await verifyWindowsUpdateRecoveryLauncherBuildContract(recoveryLauncher);
+  await verifyNativeSourceIdentity(recoveryLauncher, sourceIdentity);
   await verifyCompleteNativeRoleInventory(
     unpackedNativeEntries.map((entry) => resolve(packageRoot, entry.path)),
-    [helper, resolve(windowsRoleDirectory, 'talking-quill-keyboard-owner.exe')],
+    [helper, windowsOwner, recoveryLauncher],
   );
 }
 if (!isMacBundle || macosOwnerPackage) {
@@ -754,8 +761,14 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
   if (!mac) {
     const roleDirectory = resolve(extractedResources, 'helper');
     const extractedOwner = resolve(roleDirectory, 'talking-quill-keyboard-owner.exe');
+    const extractedRecoveryLauncher = resolve(
+      roleDirectory,
+      'talking-quill-update-recovery-launcher.exe',
+    );
     await verifyOwnerBuildContract(extractedOwner);
     await verifyNativeSourceIdentity(extractedOwner, sourceIdentity);
+    await verifyWindowsUpdateRecoveryLauncherBuildContract(extractedRecoveryLauncher);
+    await verifyNativeSourceIdentity(extractedRecoveryLauncher, sourceIdentity);
     const extractedInventory = await inspectNativeTree(root, {
       platform: 'win',
       architecture: expectedArch,
@@ -763,7 +776,7 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
     });
     await verifyCompleteNativeRoleInventory(
       extractedInventory.map((entry) => resolve(root, entry.path)),
-      [extractedHelper, resolve(roleDirectory, 'talking-quill-keyboard-owner.exe')],
+      [extractedHelper, extractedOwner, extractedRecoveryLauncher],
     );
   }
   if (!mac || macosOwnerPackage) {

@@ -198,20 +198,21 @@ async function main() {
       environments: environmentNames,
       runnerLabels: ['windows-11-arm', 'macos-15-intel', 'macos-15'],
       environmentSecrets: {
-        'release-trust': ['RELEASE_TAG_SIGNING_PUBLIC_KEY'],
+        'release-trust': ['RELEASE_TAG_SIGNING_PUBLIC_KEY', 'RELEASE_CONTROL_TOKEN'],
         'release-signing': [
           'WINDOWS_CSC_LINK',
           'WINDOWS_CSC_KEY_PASSWORD',
           'WINDOWS_SIGNING_THUMBPRINT',
           'TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64',
           'TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64',
+          'TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64',
           'MACOS_CSC_LINK',
           'MACOS_CSC_KEY_PASSWORD',
           'APPLE_ID',
           'APPLE_APP_SPECIFIC_PASSWORD',
           'APPLE_TEAM_ID',
         ],
-        'release-publication': ['RELEASE_TAG_SIGNING_PUBLIC_KEY'],
+        'release-publication': ['RELEASE_TAG_SIGNING_PUBLIC_KEY', 'RELEASE_CONTROL_TOKEN'],
       },
       environmentVariables: {
         'release-trust': ['RELEASE_TAG_SIGNER_FINGERPRINTS', 'RELEASE_POLICY_TREE_SHA256'],

@@ -32,6 +32,7 @@ export function verifyDraftRelease(rawArguments) {
   const expectedNames = [
     ...manifest.assets.map((asset) => asset.name),
     'release-manifest.json',
+    'release-publication-manifest-v1.json',
     'SHA256SUMS.txt',
   ].sort();
   const actualAssets = response.assets?.map((asset) => asset.name).sort();

@@ -70,6 +70,11 @@ run(rustup, ['target', 'add', target]);
 // Build each trust role explicitly. The gateway package has no owner feature;
 // only the detached owner receives the enabled local-unsigned feature.
 buildCargoRole('talking-quill-helper', 'talking-quill-helper', gatewayFeatures);
+if (platform === 'win32') {
+  buildCargoRole('talking-quill-helper', 'talking-quill-update-recovery-launcher', [
+    'windows-update-recovery-launcher',
+  ]);
+}
 const macosOwnerFeatures = ['local-unsigned-owner'];
 if (
   platform === 'darwin' &&

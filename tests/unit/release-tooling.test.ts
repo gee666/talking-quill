@@ -62,12 +62,19 @@ describe('active release tooling', () => {
     });
     const manifestPath = resolve(fixture, 'release-manifest.json');
     writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    const publicationManifestPath = resolve(fixture, 'release-publication-manifest-v1.json');
+    writeFileSync(publicationManifestPath, '{"signed":"publication"}\n');
     const checksumsPath = resolve(fixture, 'SHA256SUMS.txt');
     writeFileSync(
       checksumsPath,
-      `${sha256(resolve(fixture, artifact))}  ${artifact}\n${sha256(manifestPath)}  release-manifest.json\n`,
+      `${sha256(resolve(fixture, artifact))}  ${artifact}\n${sha256(manifestPath)}  release-manifest.json\n${sha256(publicationManifestPath)}  release-publication-manifest-v1.json\n`,
     );
-    const names = [artifact, 'release-manifest.json', 'SHA256SUMS.txt'];
+    const names = [
+      artifact,
+      'release-manifest.json',
+      'release-publication-manifest-v1.json',
+      'SHA256SUMS.txt',
+    ];
     for (const name of names) cpSync(resolve(fixture, name), resolve(downloaded, name));
     const responsePath = resolve(fixture, 'draft-response.json');
     const response = {
