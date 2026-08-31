@@ -191,6 +191,20 @@ export function createElectronUpdateBackend(
   };
 }
 
+export async function launchWindowsUpdateReadyHelper(
+  executable: string,
+  argument: string,
+): Promise<void> {
+  await new Promise<void>((resolveReady, rejectReady) => {
+    const child = spawn(executable, [argument], { stdio: 'ignore', windowsHide: true });
+    child.once('error', rejectReady);
+    child.once('exit', (code) => {
+      if (code === 0) resolveReady();
+      else rejectReady(new Error('Native update readiness acknowledgement failed'));
+    });
+  });
+}
+
 async function launchWindowsElevation(
   executable: string,
   arguments_: readonly string[],

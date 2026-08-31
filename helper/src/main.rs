@@ -38,6 +38,15 @@ fn main() {
                     .starts_with("--windows-update-bootstrap-staged-v2=")
                 || value
                     .to_string_lossy()
+                    .starts_with("--windows-update-bootstrap-v3=")
+                || value
+                    .to_string_lossy()
+                    .starts_with("--windows-update-app-ready-v1=")
+                || value
+                    .to_string_lossy()
+                    .starts_with("--windows-update-launch-after-parent-v1=")
+                || value
+                    .to_string_lossy()
                     .starts_with("--windows-update-resume-v2=")
                 || value
                     .to_string_lossy()

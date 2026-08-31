@@ -1,6 +1,7 @@
 import { app, clipboard, powerMonitor, safeStorage, session, shell } from 'electron';
 
 declare const __TALKING_QUILL_SOURCE_REVISION__: string;
+
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, lstatSync, openSync, readFileSync } from 'node:fs';
@@ -49,7 +50,11 @@ import { WelcomeService } from '../welcome/welcome-service';
 import { UpdateService } from '../info/update-service';
 import { UpdateOperationCoordinator } from '../info/update-operation-coordinator';
 import { ApplicationUpdateController } from '../info/application-update-controller';
-import { createElectronUpdateBackend } from '../info/electron-update-backend';
+import {
+  createElectronUpdateBackend,
+  launchWindowsUpdateReadyHelper,
+} from '../info/electron-update-backend';
+import { acknowledgeWindowsUpdateAppReady } from '../info/windows-update-relaunch-intent';
 import {
   MacosOwnerUpdateCoordinator,
   type DownloadedApplicationUpdate,
@@ -678,9 +683,11 @@ export class TalkingQuillApplication {
       if (app.isPackaged) {
         void updates
           .check(app.getVersion(), this.#startupAbort.signal)
-          .then((result) => {
-            applicationUpdates.acceptCheckResult(result);
-            if (result.status === 'available') windows.showMain();
+          .then(async (result) => {
+            const updateState = await applicationUpdates.acceptCheckResult(result);
+            if (updateState.phase === 'available' || updateState.phase === 'downloading') {
+              windows.showMain();
+            }
           })
           .catch(() => undefined);
       }
@@ -724,6 +731,17 @@ export class TalkingQuillApplication {
       }
       this.#assertStartupActive();
       this.#lifecycle = 'running';
+      if (process.platform === 'win32' && app.isPackaged) {
+        const readyHelper = this.#helperExecutablePath();
+        if (readyHelper !== null) {
+          void acknowledgeWindowsUpdateAppReady(
+            app.getPath('userData'),
+            readyHelper,
+            app.getVersion(),
+            launchWindowsUpdateReadyHelper,
+          ).catch(() => undefined);
+        }
+      }
       if (process.env.NODE_ENV === 'test') {
         Reflect.set(globalThis, '__talkingQuillRequestQuit', this.#testQuitRequest);
       }

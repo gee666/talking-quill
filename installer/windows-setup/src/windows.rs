@@ -47,9 +47,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
     FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FlushFileBuffers,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE,
-    SetFileInformationByHandle, WriteFile,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_DELAY_UNTIL_REBOOT,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -770,10 +770,10 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     {
         // A prior finalizer removed the completion journal before crashing. The still-registered
         // maintenance entry is authenticated residue authority and may finish only terminal cleanup.
-        remove_maintenance_uninstaller(&paths)?;
         system.unregister_app_path()?;
         let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
         system.unregister_uninstall()?;
+        remove_maintenance_uninstaller(&paths)?;
         remove_uninstall_finalizer_residue(&paths)?;
         drop(legacy);
         arm_mapped_image_deletion(&current)?;
@@ -2519,6 +2519,7 @@ fn pending_uninstall_transaction(paths: &Paths) -> Result<bool> {
                 | "uninstall-cleanup-complete"
                 | "uninstall-finalizer-publishing"
                 | "uninstall-finalizer-published"
+                | "uninstall-finalizer-deletion-owned"
                 | "uninstall-terminal-committing"
                 | "uninstall-app-path-retiring"
                 | "uninstall-app-path-retired"
@@ -2572,6 +2573,7 @@ fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
                     | "uninstall-cleanup-complete"
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-finalizer-deletion-owned"
                     | "uninstall-terminal-committing"
                     | "uninstall-app-path-retiring"
                     | "uninstall-app-path-retired"
@@ -3486,7 +3488,16 @@ fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result
     )?;
     system.unregister_app_path()?;
     write_transaction(paths, "uninstall-app-path-retired", Action::Uninstall, true)?;
-    remove_maintenance_uninstaller(paths)?;
+    // Move callable recovery authority to the maintenance image before Windows
+    // takes reboot-time ownership of the finalizer tree.
+    register_uninstall_executable(&paths.maintenance_uninstaller)?;
+    establish_finalizer_deletion_ownership(paths)?;
+    write_transaction(
+        paths,
+        "uninstall-finalizer-deletion-owned",
+        Action::Uninstall,
+        true,
+    )?;
     write_transaction(
         paths,
         "uninstall-registration-retiring",
@@ -3498,6 +3509,7 @@ fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result
     // leave an authoritative journal without a registered owner.
     remove_transaction(paths)?;
     system.unregister_uninstall()?;
+    remove_maintenance_uninstaller(paths)?;
     remove_uninstall_finalizer_residue(paths)
 }
 
@@ -3531,6 +3543,7 @@ fn recovery_plan(
                     | "uninstall-cleanup-complete"
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-finalizer-deletion-owned"
                     | "uninstall-terminal-committing"
                     | "uninstall-app-path-retiring"
                     | "uninstall-app-path-retired"
@@ -3596,6 +3609,7 @@ fn recovery_plan(
         | "uninstall-cleanup-complete"
         | "uninstall-finalizer-publishing"
         | "uninstall-finalizer-published"
+        | "uninstall-finalizer-deletion-owned"
         | "uninstall-terminal-committing"
         | "uninstall-app-path-retiring"
         | "uninstall-app-path-retired"
@@ -4321,6 +4335,168 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn establish_finalizer_deletion_ownership(paths: &Paths) -> Result<()> {
+    let mut scheduled = Vec::new();
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let pending = name
+            .strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX)
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        let published = name
+            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !pending && !published {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !medium_launcher_directory_is_protected(&path)?
+        {
+            continue;
+        }
+        let identity =
+            owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        if !pending
+            && !fs::read_to_string(path.join("finalizer-tree-identity-v1"))
+                .is_ok_and(|value| value == identity)
+        {
+            continue;
+        }
+        let mut tree = Vec::new();
+        collect_finalizer_deletion_paths(&path, &mut tree)?;
+        for target in tree {
+            if unsafe {
+                MoveFileExW(
+                    wide(target.as_os_str()).as_ptr(),
+                    ptr::null(),
+                    MOVEFILE_DELAY_UNTIL_REBOOT,
+                )
+            } == 0
+            {
+                return Err(fail(
+                    EXIT_FAILURE,
+                    "Windows could not take ownership of finalizer deletion.",
+                ));
+            }
+            scheduled.push(target);
+        }
+    }
+    verify_pending_finalizer_deletions(&scheduled)
+}
+
+fn collect_finalizer_deletion_paths(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(path).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child).map_err(io_failure)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Finalizer tree contains a reparse point.",
+            ));
+        }
+        if metadata.is_dir() {
+            collect_finalizer_deletion_paths(&child, output)?;
+        } else if metadata.is_file() {
+            output.push(child);
+        } else {
+            return Err(fail(EXIT_REJECTED, "Finalizer tree entry type is invalid."));
+        }
+    }
+    output.push(path.to_path_buf());
+    Ok(())
+}
+
+fn verify_pending_finalizer_deletions(expected: &[PathBuf]) -> Result<()> {
+    if expected.is_empty() {
+        return Err(fail(
+            EXIT_REJECTED,
+            "No protected finalizer tree was available.",
+        ));
+    }
+    const SESSION_MANAGER: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+    const VALUE: &str = "PendingFileRenameOperations";
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(SESSION_MANAGER)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot verify finalizer deletion ownership.",
+        ));
+    }
+    let mut bytes = 0_u32;
+    let queried = unsafe {
+        RegQueryValueExW(
+            key,
+            wide(OsStr::new(VALUE)).as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if queried != 0 || bytes == 0 || bytes > 1024 * 1024 {
+        unsafe { RegCloseKey(key) };
+        return Err(fail(
+            EXIT_FAILURE,
+            "Finalizer deletion ownership is missing.",
+        ));
+    }
+    let mut data = vec![0_u16; (bytes as usize).div_ceil(2)];
+    let mut actual = bytes;
+    let queried = unsafe {
+        RegQueryValueExW(
+            key,
+            wide(OsStr::new(VALUE)).as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            data.as_mut_ptr().cast(),
+            &mut actual,
+        )
+    };
+    unsafe { RegCloseKey(key) };
+    if queried != 0 {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot read finalizer deletion ownership.",
+        ));
+    }
+    let entries = data
+        .split(|value| *value == 0)
+        .filter(|value| !value.is_empty())
+        .map(String::from_utf16_lossy)
+        .map(|value| {
+            value
+                .trim_start_matches('!')
+                .trim_start_matches(r"\??\")
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+    for path in expected {
+        let canonical = fs::canonicalize(path).map_err(io_failure)?;
+        let expected_path = canonical.to_string_lossy().to_ascii_lowercase();
+        if !entries.iter().any(|entry| entry == &expected_path) {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Finalizer deletion path was not registered.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
@@ -4947,6 +5123,7 @@ mod tests {
                     | "uninstall-cleanup-complete"
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-finalizer-deletion-owned"
                     | "uninstall-terminal-committing"
                     | "uninstall-app-path-retiring"
                     | "uninstall-app-path-retired"
@@ -4997,6 +5174,7 @@ mod tests {
                 "uninstall-cleanup-complete"
                 | "uninstall-finalizer-publishing"
                 | "uninstall-finalizer-published"
+                | "uninstall-finalizer-deletion-owned"
                 | "uninstall-terminal-committing"
                 | "uninstall-app-path-retiring"
                 | "uninstall-app-path-retired"
@@ -5079,6 +5257,7 @@ mod tests {
             "uninstall-cleanup-complete",
             "uninstall-finalizer-publishing",
             "uninstall-finalizer-published",
+            "uninstall-finalizer-deletion-owned",
             "uninstall-terminal-committing",
             "uninstall-app-path-retiring",
             "uninstall-app-path-retired",
@@ -5100,6 +5279,7 @@ mod tests {
                     | "uninstall-cleanup-complete"
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-finalizer-deletion-owned"
                     | "uninstall-terminal-committing"
                     | "uninstall-app-path-retiring"
                     | "uninstall-app-path-retired"

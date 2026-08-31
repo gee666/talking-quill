@@ -76,20 +76,47 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('uninstall-app-path-retiring');
     expect(setup).toContain('uninstall-app-path-retired');
     expect(setup).toContain('uninstall-registration-retiring');
-    expect(setup).toContain('uninstall-registration-retired');
+    expect(setup).toContain('uninstall-finalizer-deletion-owned');
     expect(setup).toContain('TQ-KEEP-IMAGE');
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
-    expect(setup).not.toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
+    expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
+    expect(setup).toContain('PendingFileRenameOperations');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
+    expect(
+      finalize.indexOf('register_uninstall_executable(&paths.maintenance_uninstaller)?'),
+    ).toBeLessThan(finalize.indexOf('establish_finalizer_deletion_ownership(paths)?'));
+    expect(finalize.indexOf('establish_finalizer_deletion_ownership(paths)?')).toBeLessThan(
+      finalize.indexOf('remove_transaction(paths)?'),
+    );
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
+    const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
+    expect(residue.indexOf('system.unregister_uninstall()?')).toBeLessThan(
+      residue.indexOf('remove_maintenance_uninstaller(&paths)?'),
+    );
   });
 
-  it('persists a nonce-bound native relaunch wrapper before elevation', () => {
+  it('persists a nonce-bound native relaunch wrapper before elevation', async () => {
+    const [main, helper, application] = await Promise.all([
+      readFile('helper/src/main.rs', 'utf8'),
+      readFile('helper/src/windows_update.rs', 'utf8'),
+      readFile('app/src/main/app/application.ts', 'utf8'),
+    ]);
+    expect(main).toContain('--windows-update-bootstrap-v3=');
+    expect(main).toContain('--windows-update-app-ready-v1=');
+    expect(helper).toContain('RELAUNCH_RUN_VALUE');
+    expect(helper).toContain('"setup-complete"');
+    expect(helper).toContain('"launch-started"');
+    expect(helper).toContain('defer_launch_until_parent_exit');
+    expect(helper).toContain('verified_surviving_version');
+    expect(helper).toContain('verify_app_ready_parent');
+    expect(application.indexOf("this.#lifecycle = 'running'")).toBeLessThan(
+      application.lastIndexOf('acknowledgeWindowsUpdateAppReady('),
+    );
     const request = '--windows-update-bootstrap-v2=YWJjZA==';
     const wrapped = wrapWindowsUpdateRelaunchRequest(
       request,

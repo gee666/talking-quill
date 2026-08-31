@@ -89,7 +89,7 @@ export function createHandlers(dependencies: HandlerDependencies): InvokeHandler
       const result = await dependencies.updateOperations.run(context, operationId, (signal) =>
         dependencies.updates.check(dependencies.appVersion, signal),
       );
-      dependencies.applicationUpdates.acceptCheckResult(result);
+      await dependencies.applicationUpdates.acceptCheckResult(result);
       return result;
     },
     'info:cancel-update': ({ operationId }, context) => ({

@@ -74,7 +74,7 @@ export class ApplicationUpdateController {
     return this.#state;
   }
 
-  acceptCheckResult(result: UpdateCheckResult): ApplicationUpdateState {
+  async acceptCheckResult(result: UpdateCheckResult): Promise<ApplicationUpdateState> {
     if (this.#disposed || ['downloading', 'installing'].includes(this.#state.phase)) {
       return this.#state;
     }
@@ -93,26 +93,58 @@ export class ApplicationUpdateController {
           this.#backend === null ? 'This build requires updates to be installed manually.' : null,
       });
     }
-    const availableVersion = normalizeVersion(result.latestVersion);
-    const state = this.#setState({
-      phase: this.#backend === null ? 'unsupported' : 'available',
-      availableVersion,
-      releaseUrl: result.releaseUrl,
-      latestVersion: availableVersion,
-      latestReleaseUrl: result.releaseUrl,
-      percent: null,
-      message:
-        this.#backend === null
-          ? 'Install this release manually from its GitHub release page.'
-          : null,
-    });
-    if (this.#backend !== null && this.#operation === null) {
-      this.#setState({ phase: 'downloading', percent: 0, message: null });
-      this.#operation = this.#downloadAutomatically(availableVersion).finally(() => {
-        this.#operation = null;
+    const latestVersion = normalizeVersion(result.latestVersion);
+    if (this.#backend === null) {
+      return this.#setState({
+        phase: 'unsupported',
+        availableVersion: latestVersion,
+        releaseUrl: result.releaseUrl,
+        latestVersion,
+        latestReleaseUrl: result.releaseUrl,
+        percent: null,
+        message: 'Install this release manually from its GitHub release page.',
       });
     }
-    return state;
+    try {
+      const checked = await this.#backend.checkForUpdates();
+      const availableVersion = checked === null ? null : normalizeVersion(checked.version);
+      const compatibleReleaseUrl = checked?.releaseUrl ?? null;
+      if (
+        this.#isDisposed() ||
+        availableVersion === null ||
+        compareVersions(availableVersion, this.#currentVersion) <= 0 ||
+        compareVersions(availableVersion, latestVersion) > 0 ||
+        compatibleReleaseUrl === null
+      ) {
+        throw new Error('The update metadata did not identify a compatible release edge');
+      }
+      const state = this.#setState({
+        phase: 'available',
+        availableVersion,
+        releaseUrl: compatibleReleaseUrl,
+        latestVersion,
+        latestReleaseUrl: result.releaseUrl,
+        percent: null,
+        message: null,
+      });
+      if (this.#operation === null) {
+        this.#setState({ phase: 'downloading', percent: 0, message: null });
+        this.#operation = this.#downloadAutomatically(availableVersion).finally(() => {
+          this.#operation = null;
+        });
+      }
+      return state;
+    } catch {
+      return this.#setState({
+        phase: 'error',
+        availableVersion: null,
+        releaseUrl: null,
+        latestVersion,
+        latestReleaseUrl: result.releaseUrl,
+        percent: null,
+        message: 'The update metadata did not identify a compatible release edge.',
+      });
+    }
   }
 
   apply(): ApplicationUpdateState {
@@ -151,26 +183,13 @@ export class ApplicationUpdateController {
     try {
       const backend = this.#backend;
       if (backend === null) throw new Error('The update backend is unavailable');
-      const checked = await backend.checkForUpdates();
-      const checkedVersion = checked === null ? null : normalizeVersion(checked.version);
-      const checkedReleaseUrl = checked?.releaseUrl ?? null;
-      if (
-        this.#disposed ||
-        checkedVersion === null ||
-        compareVersions(checkedVersion, this.#currentVersion) <= 0 ||
-        compareVersions(checkedVersion, expectedVersion) > 0 ||
-        (checkedVersion !== expectedVersion && checkedReleaseUrl === null)
-      ) {
-        throw new Error('The update metadata did not identify a compatible release edge');
-      }
       const update = await backend.downloadUpdate();
       if (this.#isDisposed()) return;
       if (update === undefined) throw new Error('The updater did not identify its candidate');
-      this.#downloaded = { version: checkedVersion, update };
+      this.#downloaded = { version: expectedVersion, update };
       this.#setState({
         phase: 'available',
-        availableVersion: checkedVersion,
-        releaseUrl: checkedReleaseUrl ?? this.#state.releaseUrl,
+        availableVersion: expectedVersion,
         percent: null,
         message: null,
       });

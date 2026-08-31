@@ -64,6 +64,12 @@ const available = {
 describe('application update consent and installation controller', () => {
   it('automatically checks/downloads, then requests a drained maintenance install on consent', async () => {
     const updater = backend();
+    let finishDownload!: (value: DownloadedApplicationUpdate) => void;
+    updater.downloadUpdate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishDownload = resolve;
+      }),
+    );
     const publish = vi.fn();
     const requestInstall = vi.fn();
     const controller = new ApplicationUpdateController({
@@ -73,13 +79,14 @@ describe('application update consent and installation controller', () => {
       requestInstall,
     });
 
-    expect(controller.acceptCheckResult(available)).toMatchObject({
+    await expect(controller.acceptCheckResult(available)).resolves.toMatchObject({
       phase: 'available',
       availableVersion: '1.1.0',
     });
     expect(updater.checkForUpdates).toHaveBeenCalledOnce();
     updater.progress(52.5);
     expect(controller.getState()).toMatchObject({ phase: 'downloading', percent: 52.5 });
+    finishDownload({ files: ['/tmp/Talking-Quill-update'] });
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     expect(updater.downloadUpdate).toHaveBeenCalledOnce();
     expect(controller.apply().phase).toBe('installing');
@@ -90,15 +97,26 @@ describe('application update consent and installation controller', () => {
     expect(publish).toHaveBeenCalled();
   });
 
-  it('downloads the next compatible edge when the signed latest release is farther ahead', async () => {
+  it('publishes the compatible edge and URL before its download starts', async () => {
     const updater = backend('1.1.0');
+    const publish = vi.fn();
     const controller = new ApplicationUpdateController({
       currentVersion: '1.0.0',
       backend: updater.value,
-      publish: vi.fn(),
+      publish,
       requestInstall: vi.fn(),
     });
-    controller.acceptCheckResult({ ...available, latestVersion: '1.2.0' });
+    await controller.acceptCheckResult({ ...available, latestVersion: '1.2.0' });
+    expect(publish).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        releaseUrl: 'https://github.com/gee666/talking-quill/releases/tag/v1.1.0',
+        latestVersion: '1.2.0',
+      }),
+    );
+    expect(publish.mock.invocationCallOrder[0]).toBeLessThan(
+      updater.downloadUpdate.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     expect(controller.getState()).toMatchObject({
       availableVersion: '1.1.0',
@@ -120,7 +138,7 @@ describe('application update consent and installation controller', () => {
       requestInstall,
       prepareInstall,
     });
-    controller.acceptCheckResult(available);
+    await controller.acceptCheckResult(available);
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     controller.apply();
     await vi.waitFor(() => expect(requestInstall).toHaveBeenCalledOnce());
@@ -140,7 +158,7 @@ describe('application update consent and installation controller', () => {
       publish: vi.fn(),
       requestInstall,
     });
-    controller.acceptCheckResult(available);
+    await controller.acceptCheckResult(available);
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     controller.apply();
     await vi.waitFor(() => expect(controller.getState().message).toContain('cancelled'));
@@ -164,7 +182,7 @@ describe('application update consent and installation controller', () => {
       publish: vi.fn(),
       requestInstall,
     });
-    controller.acceptCheckResult(available);
+    await controller.acceptCheckResult(available);
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     controller.apply();
     await vi.waitFor(() => expect(updater.requestElevation).toHaveBeenCalledOnce());
@@ -185,7 +203,7 @@ describe('application update consent and installation controller', () => {
       requestInstall,
       prepareInstall: () => Promise.reject(new MacosMaintenancePostponedError()),
     });
-    controller.acceptCheckResult(available);
+    await controller.acceptCheckResult(available);
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
     controller.apply();
     await vi.waitFor(() => expect(controller.getState().phase).toBe('error'));
@@ -202,20 +220,20 @@ describe('application update consent and installation controller', () => {
       publish: vi.fn(),
       requestInstall,
     });
-    controller.acceptCheckResult(available);
+    await controller.acceptCheckResult(available);
     await vi.waitFor(() => expect(controller.getState().phase).toBe('error'));
     expect(updater.downloadUpdate).not.toHaveBeenCalled();
     expect(requestInstall).not.toHaveBeenCalled();
   });
 
-  it('never claims automatic installation without a packaged updater backend', () => {
+  it('never claims automatic installation without a packaged updater backend', async () => {
     const controller = new ApplicationUpdateController({
       currentVersion: '1.0.0',
       backend: null,
       publish: vi.fn(),
       requestInstall: vi.fn(),
     });
-    expect(controller.acceptCheckResult(available)).toMatchObject({
+    await expect(controller.acceptCheckResult(available)).resolves.toMatchObject({
       phase: 'unsupported',
       availableVersion: '1.1.0',
     });

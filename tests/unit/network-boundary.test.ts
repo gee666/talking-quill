@@ -197,8 +197,9 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
     expect(coordinator).toContain("execFileAsync('/usr/bin/ditto'");
     expect(coordinator).toContain("['--macos-owner-finalize', ...arguments_]");
     const updater = await readFile('app/src/main/info/electron-update-backend.ts', 'utf8');
-    expect(updater.match(/\bspawn\(/gu)).toHaveLength(1);
+    expect(updater.match(/\bspawn\(/gu)).toHaveLength(2);
     expect(updater).toContain('spawn(executable, arguments_');
+    expect(updater).toContain('spawn(executable, [argument]');
   });
 
   it('scans TypeScript module extensions instead of silently omitting them', async () => {

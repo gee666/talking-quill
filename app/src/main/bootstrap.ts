@@ -15,7 +15,6 @@ import { consumeUninstallResetChallenge } from './data/uninstall-reset-challenge
 import { validateUninstallResetTarget } from './app/runtime-path-policy';
 import { resolveOwnedTreeRemovalExecutable } from './helper';
 import { createNativeOwnedTreeRemoval } from './data/native-owned-tree-removal';
-import { clearStaleWindowsUpdateRelaunchIntent } from './info/windows-update-relaunch-intent';
 const BOOTSTRAP_QUIT_TIMEOUT_MS = 15_000;
 
 export interface MainBootstrapOptions {
@@ -80,9 +79,6 @@ export function startMain(options: MainBootstrapOptions = {}): void {
   let application: TalkingQuillApplication | null = null;
   let restoreRequested: 'second_instance' | 'os_activate' | null = null;
   let machineQuitRequested = process.argv.includes('--talking-quill-request-machine-quit');
-  if (process.platform === 'win32' && app.isPackaged && !machineQuitRequested) {
-    void clearStaleWindowsUpdateRelaunchIntent(app.getPath('userData')).catch(() => undefined);
-  }
   let machineQuitDeadline = machineQuitRequested ? Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS : null;
   let bootstrapQuit: BoundedElectronQuit | null = null;
   const requestBootstrapQuit = (deadline: number, exitCode = 0) => {
