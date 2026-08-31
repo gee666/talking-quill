@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { bindVerifiedChannel } from '../../app/src/main/info/publication-catalog';
 import {
+  selectCompatiblePublication,
   selectHighestPublication,
   type ImmutablePublicationRelease,
+  type InstalledWindowsUpdateIdentity,
   type PublicationEnvelope,
   type PublicationPayload,
 } from '../../app/src/main/info/publication-selection';
@@ -114,6 +116,76 @@ describe('runtime immutable publication selection', () => {
       high.envelope.payload.assets.find(({ name }) => name.includes('win-x64-update.exe'))
         ?.objectSha256,
     );
+  });
+
+  it('walks 0.0.69 to 0.0.70 and then 0.0.71 through exact predecessor edges', async () => {
+    const p69 = publication(41, '0.0.69', '1');
+    const p70 = publication(42, '0.0.70', '3');
+    const p71 = publication(43, '0.0.71', '5');
+    const values = [p69, p70, p71];
+    const identity = (version: string, digit: string): InstalledWindowsUpdateIdentity => ({
+      version,
+      architecture: 'x64',
+      releaseBuildDigest: digest(digit),
+      gatewaySha256: digest(String(Number(digit) + 1)),
+      ownerSha256: digest(String(Number(digit) + 2)),
+    });
+    const i69 = identity('0.0.69', '1');
+    const i70 = identity('0.0.70', '4');
+    const predecessors = new Map([
+      ['0.0.70', i69],
+      ['0.0.71', i70],
+    ]);
+    const select = (installed: InstalledWindowsUpdateIdentity) =>
+      selectCompatiblePublication(
+        values.map(({ release }) => release),
+        'gee666/talking-quill',
+        'x64',
+        installed,
+        (asset) =>
+          Promise.resolve(
+            values.find(({ release }) => asset.browser_download_url.endsWith(String(release.id)))
+              ?.envelope,
+          ),
+        (candidate) => {
+          const predecessor = predecessors.get(candidate.version);
+          if (predecessor === undefined) throw new Error('not an update edge');
+          return Promise.resolve({ predecessor, value: null });
+        },
+        verifier,
+      );
+    await expect(select(i69)).resolves.toMatchObject({
+      publication: { version: '0.0.70' },
+    });
+    await expect(select(i70)).resolves.toMatchObject({
+      publication: { version: '0.0.71' },
+    });
+  });
+
+  it('rejects a signed history with no exact compatible predecessor', async () => {
+    const p70 = publication(42, '0.0.70', '3');
+    const installed: InstalledWindowsUpdateIdentity = {
+      version: '0.0.69',
+      architecture: 'x64',
+      releaseBuildDigest: digest('1'),
+      gatewaySha256: digest('2'),
+      ownerSha256: digest('3'),
+    };
+    await expect(
+      selectCompatiblePublication(
+        [p70.release],
+        'gee666/talking-quill',
+        'x64',
+        installed,
+        () => Promise.resolve(p70.envelope),
+        () =>
+          Promise.resolve({
+            predecessor: { ...installed, releaseBuildDigest: digest('9') },
+            value: null,
+          }),
+        verifier,
+      ),
+    ).rejects.toThrow('No compatible');
   });
 
   it('denies channel metadata size and digest tampering before updater parsing', async () => {

@@ -3,11 +3,14 @@ import { z } from 'zod';
 import { PinnedJsonTransport, type JsonTransport } from '../providers/json-transport';
 import { RELEASE_REPOSITORY } from './release-url-policy';
 import {
-  selectHighestPublication,
+  selectCompatiblePublication,
   type ImmutablePublicationRelease,
+  type InstalledWindowsUpdateIdentity,
   type PublicationAsset,
   type SelectedPublication,
 } from './publication-selection';
+import { parseUnsignedUpdateIdentity } from './unsigned-update-identity';
+import { parseVerifiedChannel } from './signed-publication-provider';
 
 const AssetSchema = z.looseObject({
   name: z.string().min(1).max(255),
@@ -40,7 +43,10 @@ export class PublicationCatalog {
     this.#transport = transport;
   }
 
-  async select(architecture: 'x64' | 'arm64'): Promise<VerifiedPublication> {
+  async select(
+    architecture: 'x64' | 'arm64',
+    installed: InstalledWindowsUpdateIdentity,
+  ): Promise<VerifiedPublication> {
     const controller = new AbortController();
     const releases: ImmutablePublicationRelease[] = [];
     for (let page = 1; page <= 10; page += 1) {
@@ -61,18 +67,52 @@ export class PublicationCatalog {
       if (values.length < 100) break;
       if (page === 10) throw new Error('Immutable publication history exceeds its bound');
     }
-    const selected = await selectHighestPublication(
+    let compatibilityCandidates = 0;
+    let compatibilityBytes = 0;
+    const selected = await selectCompatiblePublication(
       releases,
       RELEASE_REPOSITORY,
       architecture,
+      installed,
       async (asset, tag) => await this.#loadManifest(asset, tag),
+      async (publication) => {
+        const channelBytes = await this.#loadBytes(
+          publication.channelAsset,
+          publication.release.tag_name,
+          4 * 1024 * 1024,
+        );
+        compatibilityCandidates += 1;
+        compatibilityBytes += channelBytes.length;
+        if (compatibilityCandidates > 64 || compatibilityBytes > 16 * 1024 * 1024)
+          throw new Error('Compatible publication search exceeds its bound');
+        const verified = bindVerifiedChannel(publication, channelBytes);
+        const info = parseVerifiedChannel(verified);
+        const identity = parseUnsignedUpdateIdentity(
+          (info as unknown as { talkingQuillRelease?: unknown }).talkingQuillRelease,
+          'win32',
+          architecture,
+          info.version,
+        );
+        if (identity.predecessor === null)
+          throw new Error('Signed Windows update publication has no predecessor');
+        return {
+          predecessor: {
+            version: identity.predecessor.version,
+            architecture,
+            releaseBuildDigest: identity.predecessor.releaseBuildDigest,
+            gatewaySha256: identity.predecessor.gatewaySha256,
+            ownerSha256: identity.predecessor.ownerSha256,
+          },
+          value: verified,
+        };
+      },
     );
-    const channelBytes = await this.#loadBytes(
-      selected.channelAsset,
-      selected.release.tag_name,
-      4 * 1024 * 1024,
+    validateAssetUrl(
+      selected.publication.packageAsset.browser_download_url,
+      selected.publication.packageAsset.name,
+      selected.publication.release.tag_name,
     );
-    return bindVerifiedChannel(selected, channelBytes);
+    return selected.value;
   }
 
   async #loadManifest(asset: PublicationAsset, tag: string): Promise<unknown> {
@@ -128,7 +168,7 @@ export function bindVerifiedChannel(
   return { ...selected, channelBytes: Buffer.from(channelBytes) };
 }
 
-function validateAssetUrl(value: string, name: string, expectedTag?: string): void {
+export function validateAssetUrl(value: string, name: string, expectedTag?: string): void {
   const url = new URL(value);
   const expectedPrefix = `/${RELEASE_REPOSITORY}/releases/download/`;
   if (

@@ -10,6 +10,7 @@ import { parseUnsignedUpdateIdentity } from './unsigned-update-identity';
 import { PublicationCatalog } from './publication-catalog';
 import type { VerifiedPublication } from './publication-catalog';
 import { signedPublicationProviderOptions } from './signed-publication-provider';
+import { readInstalledWindowsUpdateIdentity } from './installed-windows-update-identity';
 import { buildWindowsElevationLaunch, settleWindowsElevation } from './windows-update-launch';
 
 export function createElectronUpdateBackend(
@@ -53,7 +54,12 @@ export function createElectronUpdateBackend(
       checkedIdentity = null;
       selectedPublication = null;
       const selected =
-        process.platform === 'win32' ? await publicationCatalog.select(architecture) : null;
+        process.platform === 'win32'
+          ? await publicationCatalog.select(
+              architecture,
+              await readInstalledWindowsUpdateIdentity(process.resourcesPath, architecture),
+            )
+          : null;
       if (selected !== null) {
         autoUpdater.setFeedURL(signedPublicationProviderOptions(selected));
       }
@@ -141,6 +147,7 @@ export function createElectronUpdateBackend(
     quitAndInstall() {
       if (process.platform === 'win32') {
         if (!windowsElevationAccepted) throw new Error('Windows elevation was not accepted');
+        app.relaunch();
         app.quit();
         return;
       }

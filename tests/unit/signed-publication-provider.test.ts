@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import type { VerifiedPublication } from '../../app/src/main/info/publication-catalog';
+import {
+  validateAssetUrl,
+  type VerifiedPublication,
+} from '../../app/src/main/info/publication-catalog';
 import {
   SignedPublicationProvider,
   signedPublicationProviderOptions,
@@ -79,6 +82,20 @@ describe('signed publication electron-updater provider', () => {
         ),
       }),
     ]);
+  });
+
+  it('rejects package download URLs outside the signed release tag', () => {
+    const name = 'Talking-Quill-0.0.69-win-x64-update.exe';
+    expect(() => validateAssetUrl(`https://example.com/${name}`, name, 'v0.0.69')).toThrow(
+      'URL is invalid',
+    );
+    expect(() =>
+      validateAssetUrl(
+        `https://github.com/gee666/talking-quill/releases/download/v0.0.70/${name}`,
+        name,
+        'v0.0.69',
+      ),
+    ).toThrow('URL is invalid');
   });
 
   it('denies traversal, alternate packages, and mismatched versions', () => {

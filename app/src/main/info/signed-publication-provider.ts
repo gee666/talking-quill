@@ -61,7 +61,7 @@ export function signedPublicationProviderOptions(
   };
 }
 
-function parseVerifiedChannel(publication: VerifiedPublication): ChannelUpdateInfo {
+export function parseVerifiedChannel(publication: VerifiedPublication): ChannelUpdateInfo {
   const decoded = new TextDecoder('utf-8', { fatal: true }).decode(publication.channelBytes);
   const info = parseUpdateInfo(
     decoded,

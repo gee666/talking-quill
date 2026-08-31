@@ -143,18 +143,25 @@ export class ApplicationUpdateController {
       const backend = this.#backend;
       if (backend === null) throw new Error('The update backend is unavailable');
       const checked = await backend.checkForUpdates();
+      const checkedVersion = checked === null ? null : normalizeVersion(checked.version);
       if (
         this.#disposed ||
-        checked === null ||
-        normalizeVersion(checked.version) !== expectedVersion
+        checkedVersion === null ||
+        compareVersions(checkedVersion, this.#currentVersion) <= 0 ||
+        compareVersions(checkedVersion, expectedVersion) > 0
       ) {
-        throw new Error('The update metadata did not match the selected release');
+        throw new Error('The update metadata did not identify a compatible release edge');
       }
       const update = await backend.downloadUpdate();
       if (this.#isDisposed()) return;
       if (update === undefined) throw new Error('The updater did not identify its candidate');
-      this.#downloaded = { version: expectedVersion, update };
-      this.#setState({ phase: 'available', percent: null, message: null });
+      this.#downloaded = { version: checkedVersion, update };
+      this.#setState({
+        phase: 'available',
+        availableVersion: checkedVersion,
+        percent: null,
+        message: null,
+      });
     } catch {
       if (!this.#disposed) {
         this.#downloaded = null;

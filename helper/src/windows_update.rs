@@ -1345,13 +1345,6 @@ fn reclaim_incomplete_launcher_directories(root: &Path) -> Result<(), i32> {
             continue;
         }
         let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-        let marker = path.join(RECOVERY_LAUNCHER_IDENTITY_NAME);
-        if marker.exists()
-            && (std::fs::read_to_string(&marker).map_err(|_| EXIT_IDENTITY_MISMATCH)? != identity
-                || !has_exact_security(&marker, MEDIUM_LAUNCHER_FILE_SDDL)?)
-        {
-            continue;
-        }
         remove_owned_tree(&path, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
     }
     Ok(())
@@ -2000,15 +1993,6 @@ fn reclaim_machine_lock_pending(root: &Path) -> Result<(), i32> {
             continue;
         }
         let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-        let marker = path.join("publication-pending-v1");
-        if marker.exists()
-            && (!has_exact_security(&marker, MACHINE_LOCK_FILE_SDDL)?
-                || !std::fs::read_to_string(&marker)
-                    .map_err(|_| EXIT_IDENTITY_MISMATCH)?
-                    .ends_with(&format!(":{identity}")))
-        {
-            continue;
-        }
         remove_owned_tree(&path, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
     }
     Ok(())
@@ -2045,16 +2029,44 @@ fn create_or_verify_marker(path: &Path, value: &str, sddl: &str) -> Result<(), i
         }
         return Ok(());
     }
+    let parent = path.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let name = path
+        .file_name()
+        .ok_or(EXIT_IDENTITY_MISMATCH)?
+        .to_string_lossy();
+    let temporary = parent.join(format!("{name}.tmp-{}", new_recovery_generation()?));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .share_mode(FILE_SHARE_READ)
-        .open(path)
+        .open(&temporary)
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    apply_restricted_dacl(path, sddl)?;
+    apply_restricted_dacl(&temporary, sddl)?;
     file.write_all(value.as_bytes())
         .and_then(|_| file.sync_all())
-        .map_err(|_| EXIT_LAUNCH_FAILED)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if !has_exact_security(&temporary, sddl)?
+        || std::fs::read_to_string(&temporary).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    if unsafe {
+        MoveFileExW(
+            wide_nul(&temporary)?.as_ptr(),
+            wide_nul(path)?.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    flush_directory(parent)?;
+    if !has_exact_security(path, sddl)?
+        || std::fs::read_to_string(path).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(())
 }
 
 fn file_identity_text(file: &File) -> Result<String, i32> {

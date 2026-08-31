@@ -85,6 +85,19 @@ describe('application update consent and installation controller', () => {
     expect(publish).toHaveBeenCalled();
   });
 
+  it('downloads the next compatible edge when the signed latest release is farther ahead', async () => {
+    const updater = backend('1.1.0');
+    const controller = new ApplicationUpdateController({
+      currentVersion: '1.0.0',
+      backend: updater.value,
+      publish: vi.fn(),
+      requestInstall: vi.fn(),
+    });
+    controller.acceptCheckResult({ ...available, latestVersion: '1.2.0' });
+    await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
+    expect(controller.getState().availableVersion).toBe('1.1.0');
+  });
+
   it('requires native candidate preparation before requesting installation', async () => {
     const updater = backend();
     updater.downloadUpdate.mockResolvedValueOnce({ files: ['/tmp/Talking-Quill.zip'] });

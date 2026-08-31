@@ -47,9 +47,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
     FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FlushFileBuffers,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_DELAY_UNTIL_REBOOT,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WriteFile,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE,
+    SetFileInformationByHandle, WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -202,6 +202,7 @@ fn run_inner() -> Result<i32> {
         let retained = retain_controller_image(&current, relocated)?;
         let mut lifecycle_parent = 0;
         let mut relocation_server = None;
+        let mut relocated_finalizer = false;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
             let original = process_image(parent_process_id()?)?;
@@ -210,6 +211,7 @@ fn run_inner() -> Result<i32> {
             {
                 controller_paths.maintenance_uninstaller.clone()
             } else if is_uninstall_finalizer(&original)? {
+                relocated_finalizer = true;
                 original.clone()
             } else {
                 installed
@@ -287,8 +289,19 @@ fn run_inner() -> Result<i32> {
             }
             Ok(())
         };
-        let before_accept = (relocated && lifecycle_parent != 0)
+        let before_accept = (relocated && lifecycle_parent != 0 && !relocated_finalizer)
             .then_some(&arm_deletion as &dyn Fn() -> Result<()>);
+        if relocated_finalizer {
+            pipe_write(
+                relocation_server
+                    .as_ref()
+                    .ok_or_else(|| fail(EXIT_FAILURE, "Finalizer relocation channel is missing."))?
+                    .as_raw_handle(),
+                b"TQ-KEEP-IMAGE",
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )?;
+        }
         let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
         let result = elevate(&current, silent, &channel, before_accept);
         drop(retained);
@@ -749,10 +762,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             .as_ref()
             .is_some_and(|(_, _, _, lifecycle_parent)| *lifecycle_parent != 0)
         {
-            finalize_uninstall(&paths, &system)?;
-            retire_machine_lock_publication(&paths)?;
-            drop(machine_lock.take());
-            remove_machine_lock_residue(&paths)?;
+            complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;
         }
         return Ok(0);
     }
@@ -760,12 +770,12 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     {
         // A prior finalizer removed the completion journal before crashing. The still-registered
         // maintenance entry is authenticated residue authority and may finish only terminal cleanup.
-        system.unregister()?;
         remove_maintenance_uninstaller(&paths)?;
+        let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
+        system.unregister()?;
         remove_uninstall_finalizer_residue(&paths)?;
-        retire_machine_lock_publication(&paths)?;
-        drop(machine_lock.take());
-        remove_machine_lock_residue(&paths)?;
+        drop(legacy);
+        arm_mapped_image_deletion(&current)?;
         return Ok(0);
     }
     if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
@@ -818,9 +828,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         }
     }?;
     if action == Action::Uninstall {
-        retire_machine_lock_publication(&paths)?;
-        drop(machine_lock.take());
-        remove_machine_lock_residue(&paths)?;
+        complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;
     }
     Ok(0)
 }
@@ -925,6 +933,11 @@ impl MachineLock {
                 Err(_) => return Err(fail(EXIT_FAILURE, "Machine setup lock timed out.")),
             }
         }
+    }
+}
+impl MachineLock {
+    fn take_legacy(&mut self) -> Option<LegacyMutexPair> {
+        self._legacy.take()
     }
 }
 impl Drop for MachineLock {
@@ -1317,15 +1330,6 @@ fn reclaim_machine_lock_pending(program_data: &Path) -> Result<()> {
                 "Pending machine lock identity is unavailable.",
             )
         })?;
-        let marker = path.join("publication-pending-v1");
-        if path_present(&marker)?
-            && (!staged_path_is_protected(&marker, false)?
-                || !fs::read_to_string(&marker)
-                    .map_err(io_failure)?
-                    .ends_with(&format!(":{identity}")))
-        {
-            continue;
-        }
         remove_owned_tree(&path, &identity)
             .map_err(|_| fail(EXIT_FAILURE, "Cannot reclaim pending machine lock state."))?;
     }
@@ -1481,26 +1485,101 @@ fn apply_lock_dacl(path: &Path, descriptor_sddl: &str) -> Result<()> {
 }
 
 fn create_or_verify_lock_marker(path: &Path, value: &str) -> Result<()> {
+    create_atomic_marker(path, value, MACHINE_LOCK_FILE_SDDL)
+}
+
+fn create_atomic_marker(path: &Path, value: &str, sddl: &str) -> Result<()> {
     if path_present(path)? {
-        if !staged_path_is_protected(path, false)?
+        if !marker_security_is_exact(path, sddl)?
             || fs::read_to_string(path).map_err(io_failure)? != value
         {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Machine lock marker identity is invalid.",
-            ));
+            return Err(fail(EXIT_REJECTED, "Protected marker identity is invalid."));
         }
         return Ok(());
     }
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Protected marker has no parent."))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Protected marker has no name."))?
+        .to_string_lossy();
+    let temporary = parent.join(format!("{name}.tmp-{}", new_machine_lock_suffix()?));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .share_mode(FILE_SHARE_READ)
-        .open(path)
+        .open(&temporary)
         .map_err(io_failure)?;
-    apply_lock_dacl(path, MACHINE_LOCK_FILE_SDDL)?;
+    apply_lock_dacl(&temporary, sddl)?;
     file.write_all(value.as_bytes()).map_err(io_failure)?;
-    file.sync_all().map_err(io_failure)
+    file.sync_all().map_err(io_failure)?;
+    if !marker_security_is_exact(&temporary, sddl)?
+        || fs::read_to_string(&temporary).map_err(io_failure)? != value
+    {
+        return Err(fail(EXIT_REJECTED, "Protected marker publication changed."));
+    }
+    if unsafe {
+        MoveFileExW(
+            wide(temporary.as_os_str()).as_ptr(),
+            wide(path.as_os_str()).as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot publish the protected marker."));
+    }
+    flush_setup_directory(parent)?;
+    if !marker_security_is_exact(path, sddl)?
+        || fs::read_to_string(path).map_err(io_failure)? != value
+    {
+        return Err(fail(EXIT_REJECTED, "Published marker identity changed."));
+    }
+    Ok(())
+}
+
+fn marker_security_is_exact(path: &Path, sddl: &str) -> Result<bool> {
+    if sddl == MACHINE_LOCK_FILE_SDDL {
+        return staged_path_is_protected(path, false);
+    }
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        GetNamedSecurityInfoW(
+            wide(path.as_os_str()).as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+        || descriptor.is_null()
+    {
+        return Err(fail(EXIT_REJECTED, "Cannot inspect protected marker ACL."));
+    }
+    let mut text = ptr::null_mut();
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut text,
+            ptr::null_mut(),
+        )
+    };
+    unsafe { LocalFree(descriptor.cast()) };
+    if converted == 0 || text.is_null() {
+        return Err(fail(EXIT_REJECTED, "Cannot encode protected marker ACL."));
+    }
+    let mut length = 0;
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
+    unsafe { LocalFree(text.cast()) };
+    Ok(value.eq_ignore_ascii_case("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;AU)"))
 }
 
 fn file_identity_text(file: &File) -> Result<String> {
@@ -1596,25 +1675,26 @@ impl ControllerChannel {
     }
 
     fn wait_relocated_status(&self, process: &OwnedHandle, image: &Path) -> Result<i32> {
-        if pipe_read::<13>(
+        let operation = pipe_read::<13>(
             self.handle.as_raw_handle(),
             Some(process.as_raw_handle()),
             Instant::now() + Duration::from_secs(30),
-        )? != *b"TQ-ARM-DELETE"
-        {
+        )?;
+        if operation == *b"TQ-ARM-DELETE" {
+            let deletion = arm_mapped_image_deletion(image);
+            pipe_write(
+                self.handle.as_raw_handle(),
+                &[u8::from(deletion.is_ok())],
+                Some(process.as_raw_handle()),
+                Instant::now() + Duration::from_secs(30),
+            )?;
+            deletion?;
+        } else if operation != *b"TQ-KEEP-IMAGE" {
             return Err(fail(
                 EXIT_REJECTED,
                 "Relocated uninstall requested an invalid completion operation.",
             ));
         }
-        let deletion = arm_mapped_image_deletion(image);
-        pipe_write(
-            self.handle.as_raw_handle(),
-            &[u8::from(deletion.is_ok())],
-            Some(process.as_raw_handle()),
-            Instant::now() + Duration::from_secs(30),
-        )?;
-        deletion?;
         Ok(i32::from_le_bytes(pipe_read::<4>(
             self.handle.as_raw_handle(),
             Some(process.as_raw_handle()),
@@ -2422,7 +2502,9 @@ fn pending_uninstall_transaction(paths: &Paths) -> Result<bool> {
                 | "uninstall-quarantined"
                 | "recovering-finish-uninstall"
                 | "uninstall-cleanup-complete"
+                | "uninstall-finalizer-publishing"
                 | "uninstall-finalizer-published"
+                | "uninstall-terminal-committing"
         ))
 }
 
@@ -2469,7 +2551,9 @@ fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-terminal-committing"
             )
         {
             return Err(fail(
@@ -2873,9 +2957,11 @@ fn is_uninstall_finalizer(path: &Path) -> Result<bool> {
     }
     let identity =
         owned_tree_identity(parent).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    let marker = parent.join("finalizer-tree-identity-v1");
     Ok(
-        fs::read_to_string(parent.join("finalizer-tree-identity-v1"))
-            .is_ok_and(|value| value == identity),
+        marker_security_is_exact(&marker, MEDIUM_FINALIZER_FILE_SDDL)?
+            && marker_security_is_exact(path, MEDIUM_FINALIZER_FILE_SDDL)?
+            && fs::read_to_string(marker).is_ok_and(|value| value == identity),
     )
 }
 
@@ -3306,10 +3392,9 @@ fn uninstall(
             return Ok(());
         }
         require_uninstall_cleanup_complete(paths)?;
-        return finalize_uninstall(paths, system);
+        return Ok(());
     }
-    finish_uninstall_machine_cleanup(paths, system)?;
-    finalize_uninstall(paths, system)
+    finish_uninstall_machine_cleanup(paths, system)
 }
 
 fn finish_uninstall_machine_cleanup(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
@@ -3344,15 +3429,45 @@ fn require_uninstall_cleanup_complete(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn retire_and_remove_machine_lock(
+    paths: &Paths,
+    machine_lock: &mut Option<MachineLock>,
+) -> Result<Option<LegacyMutexPair>> {
+    let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
+    retire_machine_lock_publication(paths)?;
+    drop(machine_lock.take());
+    remove_machine_lock_residue(paths)?;
+    Ok(legacy)
+}
+
+fn complete_terminal_uninstall(
+    paths: &Paths,
+    system: &dyn NativeSystemAdapter,
+    current: &Path,
+    machine_lock: &mut Option<MachineLock>,
+) -> Result<()> {
+    require_uninstall_cleanup_complete(paths)?;
+    let legacy = retire_and_remove_machine_lock(paths, machine_lock)?;
+    finalize_uninstall(paths, system)?;
+    drop(legacy);
+    arm_mapped_image_deletion(current)
+}
+
 fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
-    schedule_terminal_uninstall_cleanup(paths)?;
-    // Completion is already durable. Clear the journal first so a crash can leave only a harmless
-    // registered cleanup entry, never an authoritative journal with no executable recovery path.
-    remove_transaction(paths)?;
+    write_transaction(
+        paths,
+        "uninstall-terminal-committing",
+        Action::Uninstall,
+        true,
+    )?;
     remove_maintenance_uninstaller(paths)?;
-    remove_uninstall_finalizer_residue(paths)?;
-    system.unregister()
+    // Until this point both the durable journal and registered finalizer remain callable recovery
+    // authority. Removing the journal leaves that finalizer as the idempotent terminal owner;
+    // unregistering is the terminal commit, after which only non-authoritative residue is removed.
+    remove_transaction(paths)?;
+    system.unregister()?;
+    remove_uninstall_finalizer_residue(paths)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3383,7 +3498,9 @@ fn recovery_plan(
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-terminal-committing"
             ))
     {
         return Err(fail(
@@ -3442,7 +3559,9 @@ fn recovery_plan(
         | "uninstall-quarantined"
         | "recovering-finish-uninstall"
         | "uninstall-cleanup-complete"
-        | "uninstall-finalizer-published" => Ok(RecoveryPlan::FinishUninstall),
+        | "uninstall-finalizer-publishing"
+        | "uninstall-finalizer-published"
+        | "uninstall-terminal-committing" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -3691,9 +3810,18 @@ fn ensure_uninstall_finalizer_registered(current: &Path, paths: &Paths) -> Resul
             .file_name()
             .is_some_and(|name| name.eq_ignore_ascii_case(UNINSTALL_FINALIZER_NAME))
         && path_present(&existing)?
+        && is_uninstall_finalizer(&existing)?
+        && marker_security_is_exact(&existing, MEDIUM_FINALIZER_FILE_SDDL)?
+        && file_hash(&existing)? == file_hash(current)?
     {
         return Ok(existing);
     }
+    write_transaction(
+        paths,
+        "uninstall-finalizer-publishing",
+        Action::Uninstall,
+        true,
+    )?;
     let token = new_machine_lock_suffix()?;
     let suffix = new_machine_lock_suffix()?;
     let pending = paths
@@ -3748,15 +3876,7 @@ fn ensure_uninstall_finalizer_registered(current: &Path, paths: &Paths) -> Resul
 }
 
 fn create_or_verify_finalizer_marker(path: &Path, identity: &str) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)
-        .map_err(io_failure)?;
-    apply_lock_dacl(path, MEDIUM_FINALIZER_FILE_SDDL)?;
-    file.write_all(identity.as_bytes()).map_err(io_failure)?;
-    file.sync_all().map_err(io_failure)
+    create_atomic_marker(path, identity, MEDIUM_FINALIZER_FILE_SDDL)
 }
 
 fn register_uninstall_executable(executable: &Path) -> Result<()> {
@@ -4140,9 +4260,8 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
             } else {
                 fs::read_to_string(path.join("cleanup-tree-identity-v1"))
             };
-            if ((pending || launcher_pending)
-                && recorded.as_ref().is_ok_and(|value| value == &identity))
-                || ((pending || launcher_pending) && recorded.is_err())
+            if pending
+                || launcher_pending
                 || (published && recorded.is_ok_and(|value| value == identity))
             {
                 remove_owned_tree(&path, &identity)
@@ -4164,50 +4283,18 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn schedule_terminal_uninstall_cleanup(paths: &Paths) -> Result<()> {
-    let mut paths_to_delete = vec![paths.maintenance_uninstaller.clone()];
-    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
-        let entry = entry.map_err(io_failure)?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(UNINSTALL_FINALIZER_PREFIX))
-            && medium_launcher_directory_is_protected(&entry.path())?
-        {
-            paths_to_delete.push(entry.path().join(UNINSTALL_FINALIZER_NAME));
-            paths_to_delete.push(entry.path().join("finalizer-tree-identity-v1"));
-            paths_to_delete.push(entry.path());
-        }
-    }
-    for path in paths_to_delete {
-        if path_present(&path)?
-            && unsafe {
-                MoveFileExW(
-                    wide(path.as_os_str()).as_ptr(),
-                    ptr::null(),
-                    MOVEFILE_DELAY_UNTIL_REBOOT,
-                )
-            } == 0
-        {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Cannot durably schedule terminal uninstall cleanup.",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let owned = name
-            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
-            .or_else(|| name.strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX))
+        let pending = name
+            .strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX)
             .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        if !owned {
+        let published = name
+            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !pending && !published {
             continue;
         }
         let path = entry.path();
@@ -4221,9 +4308,11 @@ fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
         let identity =
             owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
         let marker = path.join("finalizer-tree-identity-v1");
-        if !path_present(&marker)?
-            || fs::read_to_string(marker).is_ok_and(|value| value == identity)
-        {
+        if pending || fs::read_to_string(marker).is_ok_and(|value| value == identity) {
+            let executable = path.join(UNINSTALL_FINALIZER_NAME);
+            if path_present(&executable)? {
+                arm_mapped_image_deletion(&executable)?;
+            }
             remove_owned_tree(&path, &identity)
                 .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
         }
@@ -4756,7 +4845,9 @@ mod tests {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-terminal-committing"
                     | "uninstall-cleanup-elevation"
             );
             let had_predecessor = !uninstalling;
@@ -4799,7 +4890,10 @@ mod tests {
                     fs::create_dir(&paths.backup).unwrap();
                     fs::write(paths.backup.join("identity"), b"candidate").unwrap();
                 }
-                "uninstall-cleanup-complete" | "uninstall-finalizer-published" => {}
+                "uninstall-cleanup-complete"
+                | "uninstall-finalizer-publishing"
+                | "uninstall-finalizer-published"
+                | "uninstall-terminal-committing" => {}
                 _ => unreachable!(),
             }
             write_transaction(
@@ -4875,7 +4969,9 @@ mod tests {
             "uninstall-quarantined",
             "recovering-finish-uninstall",
             "uninstall-cleanup-complete",
+            "uninstall-finalizer-publishing",
             "uninstall-finalizer-published",
+            "uninstall-terminal-committing",
             "uninstall-cleanup-elevation",
         ] {
             let root =
@@ -4890,7 +4986,9 @@ mod tests {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
+                    | "uninstall-terminal-committing"
                     | "uninstall-cleanup-elevation"
             );
             let channel = ControllerChannel::create(

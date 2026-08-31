@@ -69,6 +69,31 @@ describe('Windows elevated updater launch', () => {
     }
   });
 
+  it('keeps a callable finalizer through terminal commit and uses native POSIX self-removal', async () => {
+    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    expect(setup).toContain('uninstall-finalizer-publishing');
+    expect(setup).toContain('uninstall-terminal-committing');
+    expect(setup).toContain('TQ-KEEP-IMAGE');
+    expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
+    expect(setup).not.toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
+    const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
+    expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
+      finalize.indexOf('system.unregister()?'),
+    );
+  });
+
+  it('publishes protected marker files through validated write-through temporary names', async () => {
+    const [helper, setup] = await Promise.all([
+      readFile('helper/src/windows_update.rs', 'utf8'),
+      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
+    ]);
+    for (const source of [helper, setup]) {
+      expect(source).toContain('.tmp-{}');
+      expect(source).toContain('MOVEFILE_WRITE_THROUGH');
+      expect(source).toContain('sync_all()');
+    }
+  });
+
   it('elevates the installed bootstrap with an opaque exact package request', () => {
     const hash = 'ab'.repeat(32);
     const launch = buildWindowsElevationLaunch(
