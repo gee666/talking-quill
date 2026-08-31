@@ -22,15 +22,18 @@ describe('Windows native publication policy', () => {
     expect(draftVerifier).toContain('manifest.promotable !== true');
     expect(workflow).not.toMatch(/^\s+--prerelease\s*$/mu);
     const verify = workflow.indexOf('node scripts/verify-draft-release.mjs');
-    const promote = workflow.indexOf('gh api --method PATCH');
+    const promote = workflow.indexOf('curl --fail-with-body --silent --show-error --request PATCH');
     expect(verify).toBeGreaterThan(-1);
     expect(promote).toBeGreaterThan(verify);
-    expect(workflow).toContain('-F draft=false -F prerelease=false -f make_latest=true');
+    expect(workflow).toContain('-H "If-Match: $etag"');
+    expect(workflow).toContain('"draft":false,"prerelease":false,"make_latest":"true"');
     expect(workflow).not.toContain('gh release edit');
-    const identityCheck = workflow.indexOf('Draft release identity mismatch');
-    const inventoryCheck = workflow.indexOf('Draft release asset inventory mismatch');
-    expect(identityCheck).toBeGreaterThan(verify);
-    expect(inventoryCheck).toBeGreaterThan(identityCheck);
+    const freshFetch = workflow.indexOf(
+      'https://api.github.com/repos/$REPOSITORY/releases/$RELEASE_ID',
+    );
+    const inventoryCheck = workflow.indexOf('Fresh promotion release metadata differs');
+    expect(freshFetch).toBeGreaterThan(verify);
+    expect(inventoryCheck).toBeGreaterThan(freshFetch);
     expect(promote).toBeGreaterThan(inventoryCheck);
   });
 
@@ -39,22 +42,21 @@ describe('Windows native publication policy', () => {
       .split(/\r?\n/u)
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.startsWith('#'));
-    expect(executableLines.at(-1)).toBe(
-      'gh api --method PATCH "repos/$REPOSITORY/releases/$RELEASE_ID" -F draft=false -F prerelease=false -f make_latest=true >/dev/null',
+    expect(executableLines.at(-1)).toContain(
+      'curl --fail-with-body --silent --show-error --request PATCH',
     );
-    const promote = workflow.indexOf('gh api --method PATCH');
-    expect(workflow.slice(promote).match(/\bgh\s/gu)).toHaveLength(1);
-    expect(workflow.slice(promote)).not.toContain('node ');
-    expect(workflow.indexOf('release.draft')).toBeLessThan(promote);
-    expect(workflow.indexOf('release.assets')).toBeLessThan(promote);
+    const promote = workflow.indexOf('curl --fail-with-body --silent --show-error --request PATCH');
+    expect(workflow.slice(promote).match(/\bcurl\s/gu)).toHaveLength(1);
+    expect(workflow.slice(promote)).toContain(
+      'Published release response identity or asset metadata mismatch',
+    );
+    expect(workflow.indexOf('fresh.draft')).toBeLessThan(promote);
+    expect(workflow.indexOf('fresh.assets')).toBeLessThan(promote);
     expect(workflow.indexOf('release_id="$(jq -er')).toBeLessThan(promote);
-    expect(workflow).toContain(
-      'VERIFIED_RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}',
-    );
+    expect(workflow).toContain('RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}');
     expect(workflow).toContain('releases/assets/$asset_id');
     expect(workflow).not.toContain('gh release download');
-    expect(workflow).toContain('RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}');
-    expect(workflow.slice(promote)).not.toMatch(/verify|download|release\.assets|release\.draft/iu);
+    expect(workflow.slice(promote)).not.toMatch(/verify|download|fresh\.assets|fresh\.draft/iu);
   });
 
   it('keeps the assembled producer and draft consumer inventories identical', () => {
@@ -69,6 +71,7 @@ describe('Windows native publication policy', () => {
       'THIRD_PARTY_NOTICES.txt',
       'release-manifest.json',
       'SHA256SUMS.txt',
+      'windows-promotion-lifecycle-evidence-v1.json',
     ]) {
       expect(producer, `producer ${name}`).toContain(name);
       expect(workflow, `consumer ${name}`).toContain(name);

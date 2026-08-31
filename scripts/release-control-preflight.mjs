@@ -203,6 +203,7 @@ async function main() {
           'WINDOWS_CSC_LINK',
           'WINDOWS_CSC_KEY_PASSWORD',
           'WINDOWS_SIGNING_THUMBPRINT',
+          'TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64',
           'MACOS_CSC_LINK',
           'MACOS_CSC_KEY_PASSWORD',
           'APPLE_ID',

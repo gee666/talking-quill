@@ -94,6 +94,13 @@ export async function verifyWindowsInstallerSuccessEvidence({
   const finalEntries = provenance.entries.filter(({ role }) => role === 'final-artifact');
   if (
     evidence.passed !== true ||
+    evidence.installedIdentityBound !== true ||
+    evidence.registrationsExact !== true ||
+    evidence.terminalTopology !== true ||
+    !Array.isArray(evidence.interpreterProcessStarts) ||
+    evidence.interpreterProcessStarts.length !== 0 ||
+    !Array.isArray(evidence.observerErrors) ||
+    evidence.observerErrors.length !== 0 ||
     evidence.pipeObserved !== true ||
     evidence.exitCode !== 0 ||
     receipt.schemaVersion !== 2 ||
@@ -112,6 +119,10 @@ export async function verifyWindowsInstallerSuccessEvidence({
     worker.parentPid !== controller.pid ||
     controller.imageSha256 !== evidence.installerSha256 ||
     worker.imageSha256 !== evidence.installerSha256 ||
+    typeof controller.userSid !== 'string' ||
+    controller.userSid.length === 0 ||
+    typeof controller.logonId !== 'string' ||
+    controller.logonId.length === 0 ||
     controller.userSid !== worker.userSid ||
     controller.sessionId !== worker.sessionId ||
     controller.logonId !== worker.logonId ||

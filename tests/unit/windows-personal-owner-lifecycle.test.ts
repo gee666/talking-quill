@@ -72,7 +72,11 @@ describe('Windows gateway and owner lifecycle contract', () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
     expect(setup).toContain('wait_relocated_status');
     expect(setup).toContain('uninstall-quarantined');
-    expect(setup).toContain('wait_for_process_exit(lifecycle_parent)');
+    expect(setup).toContain('arm_mapped_image_deletion');
+    expect(setup).toContain(':tq-uninstall-');
+    expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
+    expect(setup).toContain('launch_same_token_uninstall_cleanup');
+    expect(setup).not.toContain('let _ = elevate(&current, true');
     expect(setup).not.toContain('return Ok(if silent { ERROR_IO_PENDING');
   });
 

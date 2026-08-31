@@ -378,7 +378,9 @@ jobs:
           if (-not $updateInterrupted) { throw 'Production update mutation was not interrupted.' }
           $resume = @(Get-ChildItem "$env:ProgramData\.Talking Quill.update-bootstrap-*\talking-quill-update-bootstrap.exe")
           if ($resume.Count -ne 1) { throw 'Protected staged predecessor recovery owner is not exact.' }
-          $resumed = Start-Process -FilePath $resume[0].FullName -ArgumentList '--windows-update-resume-v2' -Wait -PassThru
+          $generation = Get-Content -LiteralPath (Join-Path $resume[0].DirectoryName 'active-recovery-generation-v1') -Raw
+          if ($generation -notmatch '^[0-9a-f]{32}$') { throw 'Protected update recovery generation is invalid.' }
+          $resumed = Start-Process -FilePath $resume[0].FullName -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
           if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
           $expectedDigest = $identity.releaseBuildDigest
           $deadline = (Get-Date).AddMinutes(3)
@@ -565,18 +567,6 @@ jobs:
           $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
           $uninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -Wait -PassThru
           if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
-          $cleanupDeadline = (Get-Date).AddSeconds(30)
-          do {
-            $cleanupPending = @(
-              "$env:ProgramFiles\Talking Quill",
-              "$env:ProgramFiles\.Talking Quill.native-staging",
-              "$env:ProgramFiles\.Talking Quill.native-backup",
-              $transaction,
-              $maintenance
-            ) | Where-Object { Test-Path -LiteralPath $_ }
-            if ($cleanupPending.Count -eq 0) { break }
-            Start-Sleep -Milliseconds 100
-          } while ((Get-Date) -lt $cleanupDeadline)
           $machineResidue = @(
             "$env:ProgramFiles\Talking Quill",
             "$env:ProgramFiles\.Talking Quill.native-staging",
@@ -606,6 +596,7 @@ jobs:
     name: Checksum preserved Windows x64 installer
     needs: [validate, package, smoke, lifecycle, fresh-lifecycle]
     runs-on: ubuntu-latest
+    environment: release-signing
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -645,6 +636,8 @@ jobs:
           path: fresh-evidence
           merge-multiple: true
       - name: Assemble immutable native release files
+        env:
+          TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -669,6 +662,7 @@ jobs:
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
           cp installed-evidence/*.json release-artifacts/
+          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --public-key build/windows-update-public-key.sec1
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
           node --input-type=module - <<'NODE'

@@ -39,13 +39,15 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
-    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle,
-    WriteFile,
+    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
+    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandleEx,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -213,7 +215,8 @@ fn run_inner() -> Result<i32> {
             let (path, lock) = create_relocated_image(&current)?;
             let channel = ControllerChannel::create(Action::Uninstall, silent, std::process::id())?;
             let process = launch_relocated(&path, &channel)?;
-            let code = channel.wait_relocated_status(&process)?;
+            drop(retained);
+            let code = channel.wait_relocated_status(&process, &current)?;
             drop(lock);
             return Ok(code);
         }
@@ -238,8 +241,36 @@ fn run_inner() -> Result<i32> {
         } else {
             retained
         };
+        let arm_deletion = || -> Result<()> {
+            let server = relocation_server.as_ref().ok_or_else(|| {
+                fail(
+                    EXIT_FAILURE,
+                    "Relocated uninstall status channel is missing.",
+                )
+            })?;
+            pipe_write(
+                server.as_raw_handle(),
+                b"TQ-ARM-DELETE",
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )?;
+            if pipe_read::<1>(
+                server.as_raw_handle(),
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )? != [1]
+            {
+                return Err(fail(
+                    EXIT_FAILURE,
+                    "Installed uninstall image deletion was not armed.",
+                ));
+            }
+            Ok(())
+        };
+        let before_accept = (relocated && lifecycle_parent != 0)
+            .then_some(&arm_deletion as &dyn Fn() -> Result<()>);
         let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
-        let result = elevate(&current, silent, &channel);
+        let result = elevate(&current, silent, &channel, before_accept);
         drop(retained);
         if relocated && lifecycle_parent != 0 {
             let status = result.as_ref().copied().unwrap_or_else(|error| error.code);
@@ -255,11 +286,6 @@ fn run_inner() -> Result<i32> {
                 None,
                 Instant::now() + Duration::from_secs(30),
             )?;
-            wait_for_process_exit(lifecycle_parent)?;
-            if status == 0 {
-                let cleanup = ControllerChannel::create(Action::Uninstall, true, 0)?;
-                let _ = elevate(&current, true, &cleanup);
-            }
         }
         if result.as_ref().is_ok_and(|code| *code == 0) && delete_profile {
             remove_plain_tree(&controller_paths.profile)?;
@@ -389,6 +415,97 @@ fn retain_controller_image(path: &Path, delete_on_close: bool) -> Result<OwnedHa
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
+fn rename_retained(handle: &OwnedHandle, destination: &Path) -> Result<()> {
+    let name: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    let name_bytes = name
+        .len()
+        .checked_mul(mem::size_of::<u16>())
+        .ok_or_else(|| fail(EXIT_FAILURE, "Mapped uninstall path is too long."))?;
+    let fixed = mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let total = fixed
+        .checked_add(name_bytes)
+        .ok_or_else(|| fail(EXIT_FAILURE, "Mapped uninstall path is too long."))?;
+    let mut storage = vec![0_usize; total.div_ceil(mem::size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = ptr::null_mut();
+        (*info).FileNameLength = u32::try_from(name_bytes)
+            .map_err(|_| fail(EXIT_FAILURE, "Mapped uninstall path is too long."))?;
+        ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+    }
+    if unsafe {
+        SetFileInformationByHandle(
+            handle.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            u32::try_from(total)
+                .map_err(|_| fail(EXIT_FAILURE, "Mapped uninstall path is too long."))?,
+        )
+    } == 0
+    {
+        return Err(io_failure(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn arm_mapped_image_deletion(path: &Path) -> Result<()> {
+    let rename_handle = open_plain_handle(path, false, true)?;
+    let stream = PathBuf::from(format!(":tq-uninstall-{:08x}", std::process::id()));
+    rename_retained(&rename_handle, &stream).map_err(|error| {
+        fail(
+            error.code,
+            format!("Mapped image stream rename failed: {}", error.message),
+        )
+    })?;
+    drop(rename_handle);
+    let raw = unsafe {
+        CreateFileW(
+            wide(path.as_os_str()).as_ptr(),
+            DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(fail(
+            EXIT_FAILURE,
+            format!(
+                "Renamed mapped image reopen failed: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    let delete_handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    if unsafe {
+        SetFileInformationByHandle(
+            delete_handle.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&raw const disposition).cast(),
+            mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    } == 0
+    {
+        return Err(io_failure(std::io::Error::last_os_error()));
+    }
+    drop(delete_handle);
+    if path_present(path)? {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Windows did not commit mapped uninstall image deletion.",
+        ));
+    }
+    Ok(())
+}
+
 fn create_relocated_image(source: &Path) -> Result<(PathBuf, File)> {
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce)
@@ -428,25 +545,56 @@ fn launch_relocated(executable: &Path, channel: &ControllerChannel) -> Result<Ow
         ));
     }
     let shell_process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    channel.authenticate(&shell_process, executable)
+    channel.authenticate(&shell_process, executable, None)
 }
 
-fn wait_for_process_exit(pid: u32) -> Result<()> {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
-    if process.is_null() {
-        return Ok(());
-    }
-    let process = unsafe { OwnedHandle::from_raw_handle(process) };
-    if unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) } != 0 {
+fn launch_same_token_uninstall_cleanup(image: &Path) -> Result<()> {
+    let channel = ControllerChannel::create(Action::Uninstall, true, 0)?;
+    let mut child = Command::new(image).arg("/S").spawn().map_err(io_failure)?;
+    let mut duplicate = ptr::null_mut();
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            child.as_raw_handle(),
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        let _ = child.kill();
         return Err(fail(
             EXIT_FAILURE,
-            "Installed uninstall controller did not exit.",
+            "Cannot retain the elevated uninstall cleanup process.",
         ));
     }
+    let shell = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+    let process = channel.authenticate(&shell, image, None)?;
+    let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 700_000) };
+    if wait != WAIT_OBJECT_0 {
+        unsafe { TerminateProcess(process.as_raw_handle(), EXIT_FAILURE as u32) };
+        unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
+        return Err(fail(
+            EXIT_FAILURE,
+            "Elevated uninstall cleanup did not complete.",
+        ));
+    }
+    let mut code = EXIT_FAILURE as u32;
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 || code != 0 {
+        return Err(fail(code as i32, "Elevated uninstall cleanup failed."));
+    }
+    let _ = child.wait();
     Ok(())
 }
 
-fn elevate(executable: &Path, silent: bool, channel: &ControllerChannel) -> Result<i32> {
+fn elevate(
+    executable: &Path,
+    silent: bool,
+    channel: &ControllerChannel,
+    before_accept: Option<&dyn Fn() -> Result<()>>,
+) -> Result<i32> {
     let file = wide(executable.as_os_str());
     let verb = wide(OsStr::new("runas"));
     let parameters = wide(OsStr::new(if silent { "/S" } else { "" }));
@@ -474,7 +622,7 @@ fn elevate(executable: &Path, silent: bool, channel: &ControllerChannel) -> Resu
         ));
     }
     let shell_process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    let process = channel.authenticate(&shell_process, executable)?;
+    let process = channel.authenticate(&shell_process, executable, before_accept)?;
     let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 600_000) };
     if wait != WAIT_OBJECT_0 {
         unsafe { TerminateProcess(process.as_raw_handle(), EXIT_ELEVATION as u32) };
@@ -549,13 +697,47 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         false
     };
     let uninstall_authorized = if requested_action == Some(Action::Uninstall) {
-        authorize_uninstall_controller(&paths)?;
+        authorize_uninstall_controller(&paths, &current)?;
         true
     } else {
         false
     };
     let system = WindowsNativeSystem;
-    recover_with_adapter(&paths, &system)?;
+    let armed_here = if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
+        authenticated_controller.as_ref()
+        && *lifecycle_parent != 0
+    {
+        if path_present(&paths.transaction)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Existing installer recovery must complete before uninstall can arm deletion.",
+            ));
+        }
+        write_transaction(&paths, "uninstall-armed", Action::Uninstall, true)?;
+        pipe_write(
+            server.as_raw_handle(),
+            b"TQ-UNINSTALL-JOURNALED",
+            None,
+            Instant::now() + Duration::from_secs(30),
+        )?;
+        if pipe_read::<18>(
+            server.as_raw_handle(),
+            None,
+            Instant::now() + Duration::from_secs(30),
+        )? != *b"TQ-UNINSTALL-ARMED"
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Uninstall controller did not commit mapped-image deletion ownership.",
+            ));
+        }
+        true
+    } else {
+        false
+    };
+    if !armed_here {
+        recover_with_adapter(&paths, &system)?;
+    }
     let mut action = if uninstall_authorized {
         Action::Uninstall
     } else {
@@ -748,7 +930,26 @@ impl ControllerChannel {
         })
     }
 
-    fn wait_relocated_status(&self, process: &OwnedHandle) -> Result<i32> {
+    fn wait_relocated_status(&self, process: &OwnedHandle, image: &Path) -> Result<i32> {
+        if pipe_read::<13>(
+            self.handle.as_raw_handle(),
+            Some(process.as_raw_handle()),
+            Instant::now() + Duration::from_secs(30),
+        )? != *b"TQ-ARM-DELETE"
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Relocated uninstall requested an invalid completion operation.",
+            ));
+        }
+        let deletion = arm_mapped_image_deletion(image);
+        pipe_write(
+            self.handle.as_raw_handle(),
+            &[u8::from(deletion.is_ok())],
+            Some(process.as_raw_handle()),
+            Instant::now() + Duration::from_secs(30),
+        )?;
+        deletion?;
         Ok(i32::from_le_bytes(pipe_read::<4>(
             self.handle.as_raw_handle(),
             Some(process.as_raw_handle()),
@@ -756,7 +957,12 @@ impl ControllerChannel {
         )?))
     }
 
-    fn authenticate(&self, shell_process: &OwnedHandle, image: &Path) -> Result<OwnedHandle> {
+    fn authenticate(
+        &self,
+        shell_process: &OwnedHandle,
+        image: &Path,
+        before_accept: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<OwnedHandle> {
         let expected_worker = unsafe { GetProcessId(shell_process.as_raw_handle()) };
         let deadline = Instant::now() + Duration::from_secs(30);
         pipe_connect(
@@ -870,6 +1076,23 @@ impl ControllerChannel {
             monitor,
             deadline,
         )?;
+        if let Some(before_accept) = before_accept {
+            if pipe_read::<22>(self.handle.as_raw_handle(), monitor, deadline)?
+                != *b"TQ-UNINSTALL-JOURNALED"
+            {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Elevated uninstall worker did not persist cleanup authority.",
+                ));
+            }
+            before_accept()?;
+            pipe_write(
+                self.handle.as_raw_handle(),
+                b"TQ-UNINSTALL-ARMED",
+                monitor,
+                deadline,
+            )?;
+        }
         let mut transcript = Sha256::new();
         transcript.update(b"TalkingQuill/setup-authenticated-transcript/v1");
         transcript.update(nonce);
@@ -1511,13 +1734,31 @@ fn retained_file_hash(path: &Path) -> Result<(File, [u8; 32])> {
     Ok((file, hash))
 }
 
-fn authorize_uninstall_controller(paths: &Paths) -> Result<()> {
+fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
     let controller = process_image(parent_process_id()?)?;
     let installed = paths.install.join("Uninstall Talking Quill.exe");
     let expected = if path_present(&installed)? {
         installed
-    } else {
+    } else if path_present(&paths.maintenance_uninstaller)? {
         paths.maintenance_uninstaller.clone()
+    } else {
+        assert_plain_file(&paths.transaction)?;
+        let transaction: Transaction =
+            serde_json::from_slice(&fs::read(&paths.transaction).map_err(io_failure)?)
+                .map_err(|_| fail(EXIT_REJECTED, "Installer transaction is invalid."))?;
+        if transaction.schema_version != TRANSACTION_SCHEMA
+            || transaction.action != "uninstall"
+            || !matches!(
+                transaction.phase.as_str(),
+                "uninstall-quarantined" | "recovering-finish-uninstall"
+            )
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Uninstall cleanup lacks a protected durable authorization.",
+            ));
+        }
+        current.to_owned()
     };
     assert_plain_file(&expected)?;
     if file_hash(&controller)? != file_hash(&expected)? {
@@ -2242,10 +2483,9 @@ fn uninstall(
         durable_rename(&paths.install, &paths.backup)?;
         write_transaction(paths, "uninstall-quarantined", Action::Uninstall, true)?;
         remove_plain_tree(&paths.staging)?;
-        // The authenticated relocated controller remains the live cleanup owner. It reports
-        // this durable topology, waits for the mapped installed controller, then elevates a
-        // second authenticated recovery pass which removes the quarantine and journal.
-        return Ok(());
+        // The first elevated worker launches an authenticated same-token cleanup worker.
+        // That worker recovers this exact journal and must finish before success propagates.
+        return launch_same_token_uninstall_cleanup(&std::env::current_exe().map_err(io_failure)?);
     }
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
@@ -2277,7 +2517,10 @@ fn recovery_plan(
         || (value.action == "uninstall"
             && !matches!(
                 value.phase.as_str(),
-                "uninstalling" | "uninstall-quarantined" | "recovering-finish-uninstall"
+                "uninstall-armed"
+                    | "uninstalling"
+                    | "uninstall-quarantined"
+                    | "recovering-finish-uninstall"
             ))
     {
         return Err(fail(
@@ -2330,9 +2573,10 @@ fn recovery_plan(
             Ok(RecoveryPlan::RemoveFreshCandidate)
         }
         "recovering-finish-commit" if install_exists => Ok(RecoveryPlan::FinishCommit),
-        "uninstalling" | "uninstall-quarantined" | "recovering-finish-uninstall" => {
-            Ok(RecoveryPlan::FinishUninstall)
-        }
+        "uninstall-armed"
+        | "uninstalling"
+        | "uninstall-quarantined"
+        | "recovering-finish-uninstall" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -3037,12 +3281,55 @@ mod tests {
                 "{phase}"
             );
         }
-        assert_eq!(
-            recovery_plan(&transaction("uninstalling", "uninstall", true), true, true).unwrap(),
-            RecoveryPlan::FinishUninstall
-        );
+        for phase in ["uninstall-armed", "uninstalling", "uninstall-quarantined"] {
+            assert_eq!(
+                recovery_plan(&transaction(phase, "uninstall", true), true, true).unwrap(),
+                RecoveryPlan::FinishUninstall,
+                "{phase}"
+            );
+        }
         assert!(recovery_plan(&transaction("prepared", "repair", true), false, false).is_err());
         assert!(recovery_plan(&transaction("unknown", "repair", true), true, true).is_err());
+    }
+
+    #[test]
+    fn mapped_uninstall_image_is_kernel_owned_before_machine_cleanup() {
+        if let Some(marker) = std::env::var_os("TQ_SETUP_MAPPED_DELETE_MARKER") {
+            let current = std::env::current_exe().unwrap();
+            arm_mapped_image_deletion(&current).unwrap();
+            fs::write(marker, b"armed").unwrap();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("tq-mapped-uninstall-delete-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let image = root.join("Uninstall Talking Quill.exe");
+        fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
+        let marker = root.join("armed");
+        let mut child = Command::new(&image)
+            .args([
+                "--exact",
+                "windows::tests::mapped_uninstall_image_is_kernel_owned_before_machine_cleanup",
+                "--nocapture",
+            ])
+            .env("TQ_SETUP_MAPPED_DELETE_MARKER", &marker)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists());
+        assert!(
+            !image.exists(),
+            "mapped image must be unlinked before success"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3083,7 +3370,7 @@ mod tests {
             0
         );
         let child_handle = unsafe { OwnedHandle::from_raw_handle(duplicate) };
-        let retained = channel.authenticate(&child_handle, &image).unwrap();
+        let retained = channel.authenticate(&child_handle, &image, None).unwrap();
         assert_eq!(
             unsafe { GetProcessId(retained.as_raw_handle()) },
             child.id()
@@ -3108,6 +3395,15 @@ mod tests {
 
     #[test]
     fn controller_worker_kill_recovers_every_durable_phase() {
+        if std::env::var_os("TQ_SETUP_SECOND_CLEANUP_CHILD").is_some() {
+            let image = std::env::current_exe().unwrap();
+            let (action, _, silent, lifecycle_parent) =
+                WorkerChannel::connect_and_authenticate(&image, None).unwrap();
+            assert!(action == Action::Uninstall && silent && lifecycle_parent == 0);
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
         if let (Some(root), Some(phase)) = (
             std::env::var_os("TQ_SETUP_FAULT_ROOT"),
             std::env::var_os("TQ_SETUP_FAULT_PHASE"),
@@ -3116,9 +3412,19 @@ mod tests {
             let (_action, _, _, _) = WorkerChannel::connect_and_authenticate(&image, None).unwrap();
             let paths = test_paths(Path::new(&root));
             let phase = phase.to_string_lossy();
-            let uninstalling = matches!(phase.as_ref(), "uninstalling" | "uninstall-quarantined");
+            let uninstalling = matches!(
+                phase.as_ref(),
+                "uninstall-armed"
+                    | "uninstalling"
+                    | "uninstall-quarantined"
+                    | "uninstall-cleanup-elevation"
+            );
             let had_predecessor = !uninstalling;
-            let journal_phase = phase.as_ref();
+            let journal_phase = if phase == "uninstall-cleanup-elevation" {
+                "uninstall-quarantined"
+            } else {
+                phase.as_ref()
+            };
             match phase.as_ref() {
                 "staging" | "staged" | "prepared" => {
                     fs::create_dir(&paths.install).unwrap();
@@ -3143,11 +3449,11 @@ mod tests {
                     fs::create_dir(&paths.install).unwrap();
                     fs::write(paths.install.join("identity"), b"candidate").unwrap();
                 }
-                "uninstalling" => {
+                "uninstall-armed" | "uninstalling" => {
                     fs::create_dir(&paths.install).unwrap();
                     fs::write(paths.install.join("identity"), b"candidate").unwrap();
                 }
-                "uninstall-quarantined" => {
+                "uninstall-quarantined" | "uninstall-cleanup-elevation" => {
                     fs::create_dir(&paths.backup).unwrap();
                     fs::write(paths.backup.join("identity"), b"candidate").unwrap();
                 }
@@ -3164,8 +3470,46 @@ mod tests {
                 had_predecessor,
             )
             .unwrap();
-            loop {
-                std::thread::sleep(Duration::from_secs(1));
+            if phase == "uninstall-cleanup-elevation" {
+                let channel = ControllerChannel::create(Action::Uninstall, true, 0).unwrap();
+                let mut child = Command::new(&image)
+                    .args([
+                        "--exact",
+                        "windows::tests::controller_worker_kill_recovers_every_durable_phase",
+                        "--nocapture",
+                    ])
+                    .env("TQ_SETUP_SECOND_CLEANUP_CHILD", "1")
+                    .spawn()
+                    .unwrap();
+                let mut duplicate = ptr::null_mut();
+                assert_ne!(
+                    unsafe {
+                        DuplicateHandle(
+                            GetCurrentProcess(),
+                            child.as_raw_handle(),
+                            GetCurrentProcess(),
+                            &mut duplicate,
+                            0,
+                            0,
+                            DUPLICATE_SAME_ACCESS,
+                        )
+                    },
+                    0
+                );
+                let shell = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+                let cleanup = channel.authenticate(&shell, &image, None).unwrap();
+                fs::create_dir(&paths.program_data).unwrap();
+                fs::write(
+                    paths.program_data.join("cleanup-pid"),
+                    child.id().to_string(),
+                )
+                .unwrap();
+                drop(cleanup);
+                let _ = child.wait();
+            } else {
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
             }
         }
         let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
@@ -3182,14 +3526,22 @@ mod tests {
             "committed",
             "legacy-retiring",
             "legacy-retired",
+            "uninstall-armed",
             "uninstalling",
             "uninstall-quarantined",
+            "uninstall-cleanup-elevation",
         ] {
             let root =
                 std::env::temp_dir().join(format!("tq-setup-fault-{}-{phase}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir(&root).unwrap();
-            let uninstalling = matches!(phase, "uninstalling" | "uninstall-quarantined");
+            let uninstalling = matches!(
+                phase,
+                "uninstall-armed"
+                    | "uninstalling"
+                    | "uninstall-quarantined"
+                    | "uninstall-cleanup-elevation"
+            );
             let channel = ControllerChannel::create(
                 if uninstalling {
                     Action::Uninstall
@@ -3226,13 +3578,32 @@ mod tests {
                 0
             );
             let shell = unsafe { OwnedHandle::from_raw_handle(duplicate) };
-            let worker = channel.authenticate(&shell, &image).unwrap();
+            let worker = channel.authenticate(&shell, &image, None).unwrap();
             let transaction = root.join("transaction.json");
             let deadline = Instant::now() + Duration::from_secs(10);
             while !transaction.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(transaction.exists(), "{phase}");
+            if phase == "uninstall-cleanup-elevation" {
+                let marker = root.join("program-data/cleanup-pid");
+                while !marker.exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let pid: u32 = fs::read_to_string(marker).unwrap().parse().unwrap();
+                let cleanup = unsafe {
+                    OwnedHandle::from_raw_handle(OpenProcess(
+                        windows_sys::Win32::System::Threading::PROCESS_TERMINATE | SYNCHRONIZE,
+                        0,
+                        pid,
+                    ))
+                };
+                assert_ne!(unsafe { TerminateProcess(cleanup.as_raw_handle(), 197) }, 0);
+                assert_eq!(
+                    unsafe { WaitForSingleObject(cleanup.as_raw_handle(), 30_000) },
+                    WAIT_OBJECT_0
+                );
+            }
             assert_ne!(unsafe { TerminateProcess(worker.as_raw_handle(), 197) }, 0);
             assert_eq!(
                 unsafe { WaitForSingleObject(worker.as_raw_handle(), 30_000) },

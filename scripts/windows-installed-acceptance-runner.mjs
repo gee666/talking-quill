@@ -420,19 +420,6 @@ export async function runProductionPhase(phase, input, state, os) {
         timeoutMs: 180_000,
         acceptedExitCodes: [0],
       });
-      const cleanupDeadline = Date.now() + 30_000;
-      const cleanupPaths = [
-        state.installedRoot,
-        resolve(state.installedRoot, '..', '.Talking Quill.native-backup'),
-        resolve(state.installedRoot, '..', '.Talking Quill.native-transaction-v2.json'),
-        resolve(state.installedRoot, '..', 'Talking Quill Maintenance.exe'),
-      ];
-      while (
-        (await Promise.all(cleanupPaths.map((path) => os.pathExists(path)))).some(Boolean) &&
-        Date.now() < cleanupDeadline
-      ) {
-        await (os.sleep?.(100) ?? new Promise((resolvePromise) => setTimeout(resolvePromise, 100)));
-      }
     }
     const residue = observe('final-residue', await os.observeMachineResidue());
     const processes = observe('final-processes', await os.processSnapshot());
