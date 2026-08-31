@@ -81,16 +81,18 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
     expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     expect(setup).toContain('PendingFileRenameOperations');
+    expect(setup).toContain('for target in [&paths.maintenance_uninstaller, current]');
+    expect(setup).toContain('collect_finalizer_deletion_paths(&launcher, &mut tree)?');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
     expect(
       finalize.indexOf('register_uninstall_executable(&paths.maintenance_uninstaller)?'),
-    ).toBeLessThan(finalize.indexOf('establish_finalizer_deletion_ownership(paths)?'));
-    expect(finalize.indexOf('establish_finalizer_deletion_ownership(paths)?')).toBeLessThan(
-      finalize.indexOf('remove_transaction(paths)?'),
-    );
+    ).toBeLessThan(finalize.indexOf('establish_finalizer_deletion_ownership(paths, current)?'));
+    expect(
+      finalize.indexOf('establish_finalizer_deletion_ownership(paths, current)?'),
+    ).toBeLessThan(finalize.indexOf('remove_transaction(paths)?'));
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
@@ -101,18 +103,27 @@ describe('Windows elevated updater launch', () => {
   });
 
   it('persists a nonce-bound native relaunch wrapper before elevation', async () => {
-    const [main, helper, application] = await Promise.all([
+    const [main, helper, application, setup] = await Promise.all([
       readFile('helper/src/main.rs', 'utf8'),
       readFile('helper/src/windows_update.rs', 'utf8'),
       readFile('app/src/main/app/application.ts', 'utf8'),
+      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
     ]);
     expect(main).toContain('--windows-update-bootstrap-v3=');
     expect(main).toContain('--windows-update-app-ready-v1=');
-    expect(helper).toContain('RELAUNCH_RUN_VALUE');
+    expect(helper).toContain('RELAUNCH_RUN_VALUE_PREFIX');
+    expect(helper).toContain('--windows-update-relaunch-v1={generation}');
+    expect(helper).toContain('command.encode_utf16().count() > 260');
+    expect(helper).not.toContain('--windows-update-bootstrap-v3={encoded}');
+    expect(helper).toContain('relaunch-record-marker-v1');
+    expect(helper).toContain('MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH');
+    expect(helper).toContain('let Ok(mut record) = read_persisted_relaunch_record');
+    expect(setup).toContain('protected launcher is a stable machine component');
     expect(helper).toContain('"setup-complete"');
     expect(helper).toContain('"launch-started"');
     expect(helper).toContain('defer_launch_until_parent_exit');
     expect(helper).toContain('verified_surviving_version');
+    expect(helper).toContain('for recovery_generation in owned_recovery_generations()?');
     expect(helper).toContain('verify_app_ready_parent');
     expect(application.indexOf("this.#lifecycle = 'running'")).toBeLessThan(
       application.lastIndexOf('acknowledgeWindowsUpdateAppReady('),

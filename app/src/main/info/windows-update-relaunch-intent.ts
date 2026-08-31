@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { writeJsonAtomic } from '../persistence/atomic-json';
 
@@ -34,34 +34,13 @@ export async function createWindowsUpdateRelaunchIntent(
 }
 
 export async function acknowledgeWindowsUpdateAppReady(
-  userDataRoot: string,
+  _userDataRoot: string,
   helperExecutable: string,
   currentVersion: string,
   launch: (executable: string, argument: string) => Promise<void>,
 ): Promise<void> {
-  const intentPath = join(resolve(userDataRoot), INTENT_NAME);
-  let value: unknown;
-  try {
-    value = JSON.parse(await readFile(intentPath, 'utf8'));
-  } catch {
-    return;
-  }
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('schemaVersion' in value) ||
-    value.schemaVersion !== 1 ||
-    !('nonce' in value) ||
-    typeof value.nonce !== 'string' ||
-    !('completedVersion' in value) ||
-    value.completedVersion !== currentVersion ||
-    !('phase' in value) ||
-    !['setup-complete', 'launch-started'].includes(String(value.phase))
-  ) {
-    return;
-  }
   const argument = `--windows-update-app-ready-v1=${Buffer.from(
-    JSON.stringify({ intentPath, nonce: value.nonce, version: currentVersion }),
+    JSON.stringify({ version: currentVersion }),
     'utf8',
   ).toString('base64')}`;
   await launch(helperExecutable, argument);

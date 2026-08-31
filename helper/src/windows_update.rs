@@ -49,8 +49,8 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    SHGetKnownFolderPath, ShellExecuteExW,
+    FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles, SEE_MASK_NOCLOSEPROCESS,
+    SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
 
@@ -125,9 +125,20 @@ struct RelaunchIntent {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AppReadyRequest {
-    intent_path: String,
-    nonce: String,
     version: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct PersistedRelaunchRecord {
+    schema_version: u8,
+    generation: String,
+    request: String,
+    nonce: String,
+    source_version: String,
+    target_version: String,
+    phase: String,
+    completed_version: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -297,6 +308,13 @@ pub fn run_recovery_launcher_argument(argument: &std::ffi::OsStr) -> i32 {
 
 fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
+        if is_elevated() {
+            return Err(EXIT_INVALID_REQUEST);
+        }
+        validate_generation(generation)?;
+        return run_persisted_relaunch(generation);
+    }
     let generation = if let Some(generation) = argument.strip_prefix("--windows-update-resume-v2=")
     {
         validate_generation(generation)?;
@@ -369,6 +387,13 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
 
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
+        if is_elevated() {
+            return Err(EXIT_INVALID_REQUEST);
+        }
+        validate_generation(generation)?;
+        return run_persisted_relaunch(generation);
+    }
     if let Some(encoded) = argument.strip_prefix("--windows-update-launch-after-parent-v1=") {
         if is_elevated() {
             return Err(EXIT_INVALID_REQUEST);
@@ -453,8 +478,11 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     result
 }
 
-const RELAUNCH_RUN_VALUE: &str = "Talking Quill Update Relaunch";
+const RELAUNCH_RUN_VALUE_PREFIX: &str = "Talking Quill Update Relaunch ";
 const RELAUNCH_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RELAUNCH_RECORD_NAME: &str = "relaunch-record-v1.json";
+const RELAUNCH_MARKER_NAME: &str = "relaunch-record-marker-v1";
+const RELAUNCH_USER_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
 
 fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     if encoded.len() > 16_384 {
@@ -469,51 +497,103 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     if wrapper.request.len() > 12_288 || !valid_nonce(&wrapper.nonce) {
         return Err(EXIT_INVALID_REQUEST);
     }
-    let request = parse_request_envelope(suffix)?;
+    let request = parse_and_authorize_request(suffix)?;
     let intent_path = PathBuf::from(&wrapper.intent_path);
     let _intent_lock = acquire_relaunch_intent_lock(&intent_path)?;
-    let mut intent = read_relaunch_intent(&intent_path, &wrapper.nonce)?;
-    let target_committed = verify_post_install_request(&request).is_ok();
-    if intent.phase == "armed" || (intent.phase == "setup-started" && !target_committed) {
-        verify_update_relation(&request.candidate, &request.sha256)?;
-        verify_update_authorization(&request.candidate)?;
-    } else if !target_committed {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
+    let intent = read_relaunch_intent(&intent_path, &wrapper.nonce)?;
     if intent.source_version != request.candidate.predecessor.version
         || intent.target_version != request.candidate.version
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    arm_relaunch_run_owner(encoded)?;
-    if matches!(intent.phase.as_str(), "armed" | "setup-started") && !target_committed {
-        if intent.phase == "armed" {
-            intent.phase = "setup-started".into();
-            write_relaunch_intent(&intent_path, &intent)?;
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let launcher = ensure_medium_launcher(&current)?;
+    let generation = new_recovery_generation()?;
+    let record = PersistedRelaunchRecord {
+        schema_version: 1,
+        generation: generation.clone(),
+        request: wrapper.request,
+        nonce: wrapper.nonce,
+        source_version: intent.source_version,
+        target_version: intent.target_version,
+        phase: "armed".into(),
+        completed_version: None,
+    };
+    publish_relaunch_record(&record)?;
+    arm_relaunch_run_owner(&generation, &launcher)?;
+    std::fs::remove_file(&intent_path).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let result = run_persisted_relaunch(&generation);
+    drop(_intent_lock);
+    let _ =
+        std::fs::remove_file(intent_path.with_file_name("windows-update-relaunch-intent-v1.lock"));
+    result
+}
+
+fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
+    let directory = relaunch_generation_directory(generation)?;
+    let _lock = acquire_relaunch_record_lock(&directory)?;
+    let mut record = read_persisted_relaunch_record(generation)?;
+    if record.phase == "app-ready" {
+        clear_relaunch_run_owner(generation)?;
+        drop(_lock);
+        remove_relaunch_record_directory(&directory)?;
+        return Ok(0);
+    }
+    let suffix = record
+        .request
+        .strip_prefix("--windows-update-bootstrap-v2=")
+        .ok_or(EXIT_INVALID_REQUEST)?;
+    let request = parse_request_envelope(suffix)?;
+    verify_update_authorization(&request.candidate)?;
+    if record.source_version != request.candidate.predecessor.version
+        || record.target_version != request.candidate.version
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    if matches!(record.phase.as_str(), "setup-complete" | "launch-started") {
+        let surviving = verified_surviving_version(&request.candidate)?;
+        if record.completed_version.as_deref() != Some(surviving.as_str()) {
+            return Err(EXIT_IDENTITY_MISMATCH);
         }
-        let setup_result = launch_elevated_bootstrap(&wrapper.request);
+        if record.phase == "setup-complete" {
+            record.phase = "launch-started".into();
+            write_persisted_relaunch_record(&directory, &record)?;
+        }
+        defer_launch_until_parent_exit(&surviving)?;
+        return Ok(0);
+    }
+    let target_committed = verify_post_install_request(&request).is_ok();
+    let recovering_setup = record.phase == "setup-started";
+    if recovering_setup && verified_surviving_version(&request.candidate).is_err() {
+        for recovery_generation in owned_recovery_generations()? {
+            let resume = format!("--windows-update-resume-v2={recovery_generation}");
+            if launch_elevated_bootstrap(&resume).is_ok() {
+                break;
+            }
+        }
+    }
+    let recovered_survivor =
+        recovering_setup && verified_surviving_version(&request.candidate).is_ok();
+    if !target_committed && !recovered_survivor {
+        verify_update_relation(&request.candidate, &request.sha256)?;
+        if record.phase == "armed" {
+            record.phase = "setup-started".into();
+            write_persisted_relaunch_record(&directory, &record)?;
+        }
+        let setup_result = launch_elevated_installed_helper(&record.request);
         if setup_result == Err(1223) {
-            clear_relaunch_run_owner()?;
-            std::fs::remove_file(&intent_path).map_err(|_| EXIT_LAUNCH_FAILED)?;
-            drop(_intent_lock);
-            let _ = std::fs::remove_file(
-                intent_path.with_file_name("windows-update-relaunch-intent-v1.lock"),
-            );
+            clear_relaunch_run_owner(generation)?;
+            drop(_lock);
+            remove_relaunch_record_directory(&directory)?;
             return Err(1223);
-        }
-        if verified_surviving_version(&request.candidate).is_err()
-            && let Ok(generation) = read_active_generation(&recovery_directory()?)
-        {
-            let resume = format!("--windows-update-resume-v2={generation}");
-            let _ = launch_elevated_bootstrap(&resume);
         }
     }
     let surviving = verified_surviving_version(&request.candidate)?;
-    intent.phase = "setup-complete".into();
-    intent.completed_version = Some(surviving.clone());
-    write_relaunch_intent(&intent_path, &intent)?;
-    intent.phase = "launch-started".into();
-    write_relaunch_intent(&intent_path, &intent)?;
+    record.phase = "setup-complete".into();
+    record.completed_version = Some(surviving.clone());
+    write_persisted_relaunch_record(&directory, &record)?;
+    record.phase = "launch-started".into();
+    write_persisted_relaunch_record(&directory, &record)?;
     defer_launch_until_parent_exit(&surviving)?;
     Ok(0)
 }
@@ -521,28 +601,210 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
 fn acknowledge_app_ready(encoded: &str) -> Result<u32, i32> {
     let request: AppReadyRequest =
         serde_json::from_slice(&decode_base64(encoded)?).map_err(|_| EXIT_INVALID_REQUEST)?;
-    if !valid_nonce(&request.nonce) || !valid_version(&request.version) {
+    if !valid_version(&request.version) {
         return Err(EXIT_INVALID_REQUEST);
     }
-    let path = PathBuf::from(request.intent_path);
-    let _intent_lock = acquire_relaunch_intent_lock(&path)?;
-    let mut intent = read_relaunch_intent(&path, &request.nonce)?;
     verify_app_ready_parent()?;
-    if !matches!(intent.phase.as_str(), "launch-started" | "app-ready")
-        || intent.completed_version.as_deref() != Some(request.version.as_str())
-        || installed_manifest_version()? != request.version
+    if installed_manifest_version()? != request.version {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let mut matched = false;
+    for generation in relaunch_generations()? {
+        let directory = relaunch_generation_directory(&generation)?;
+        let Ok(lock) = acquire_relaunch_record_lock(&directory) else {
+            continue;
+        };
+        let Ok(mut record) = read_persisted_relaunch_record(&generation) else {
+            continue;
+        };
+        if record.completed_version.as_deref() != Some(request.version.as_str())
+            || !matches!(record.phase.as_str(), "launch-started" | "app-ready")
+        {
+            continue;
+        }
+        matched = true;
+        if record.phase != "app-ready" {
+            record.phase = "app-ready".into();
+            write_persisted_relaunch_record(&directory, &record)?;
+        }
+        clear_relaunch_run_owner(&generation)?;
+        drop(lock);
+        remove_relaunch_record_directory(&directory)?;
+    }
+    if matched {
+        Ok(0)
+    } else {
+        Err(EXIT_IDENTITY_MISMATCH)
+    }
+}
+
+fn relaunch_root() -> Result<PathBuf, i32> {
+    Ok(known_folder(&FOLDERID_LocalAppData)?.join("Talking Quill/Windows Update Recovery"))
+}
+
+fn relaunch_generation_directory(generation: &str) -> Result<PathBuf, i32> {
+    validate_generation(generation)?;
+    Ok(relaunch_root()?.join(generation))
+}
+
+fn relaunch_marker_value(record: &PersistedRelaunchRecord) -> String {
+    format!(
+        "{}:{}:{}",
+        record.generation,
+        record.nonce,
+        hex_digest(&Sha256::digest(record.request.as_bytes()))
+    )
+}
+
+fn publish_relaunch_record(record: &PersistedRelaunchRecord) -> Result<(), i32> {
+    let root = relaunch_root()?;
+    if !root.exists() {
+        std::fs::create_dir_all(&root).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    apply_relaunch_dacl(&root)?;
+    let directory = relaunch_generation_directory(&record.generation)?;
+    std::fs::create_dir(&directory).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_relaunch_dacl(&directory)?;
+    write_persisted_relaunch_record(&directory, record)?;
+    write_protected_relaunch_file(
+        &directory.join(RELAUNCH_MARKER_NAME),
+        relaunch_marker_value(record).as_bytes(),
+    )?;
+    flush_directory(&directory)?;
+    Ok(())
+}
+
+fn write_persisted_relaunch_record(
+    directory: &Path,
+    record: &PersistedRelaunchRecord,
+) -> Result<(), i32> {
+    let bytes = serde_json::to_vec(record).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    write_protected_relaunch_file(&directory.join(RELAUNCH_RECORD_NAME), &bytes)
+}
+
+fn write_protected_relaunch_file(path: &Path, bytes: &[u8]) -> Result<(), i32> {
+    let parent = path.parent().ok_or(EXIT_INVALID_REQUEST)?;
+    let temporary = parent.join(format!(".relaunch-pending-{}", new_recovery_generation()?));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(&temporary)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_relaunch_dacl(&temporary)?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    drop(file);
+    verify_protected_relaunch_file(&temporary, bytes)?;
+    if unsafe {
+        MoveFileExW(
+            wide_nul(&temporary)?.as_ptr(),
+            wide_nul(path)?.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        let _ = std::fs::remove_file(temporary);
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    flush_directory(parent)?;
+    verify_protected_relaunch_file(path, bytes)
+}
+
+fn verify_protected_relaunch_file(path: &Path, expected: &[u8]) -> Result<(), i32> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let mut actual = Vec::new();
+    file.read_to_end(&mut actual)
+        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if actual == expected && has_relaunch_dacl(path)? {
+        Ok(())
+    } else {
+        Err(EXIT_IDENTITY_MISMATCH)
+    }
+}
+
+fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchRecord, i32> {
+    let directory = relaunch_generation_directory(generation)?;
+    if !has_relaunch_dacl(&directory)? {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let path = directory.join(RELAUNCH_RECORD_NAME);
+    let bytes = std::fs::read(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    verify_protected_relaunch_file(&path, &bytes)?;
+    let record: PersistedRelaunchRecord =
+        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if record.schema_version != 1
+        || record.generation != generation
+        || !valid_nonce(&record.nonce)
+        || !valid_version(&record.source_version)
+        || !valid_version(&record.target_version)
+        || !matches!(
+            record.phase.as_str(),
+            "armed" | "setup-started" | "setup-complete" | "launch-started" | "app-ready"
+        )
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    if intent.phase != "app-ready" {
-        intent.phase = "app-ready".into();
-        write_relaunch_intent(&path, &intent)?;
+    let marker = directory.join(RELAUNCH_MARKER_NAME);
+    verify_protected_relaunch_file(&marker, relaunch_marker_value(&record).as_bytes())?;
+    Ok(record)
+}
+
+fn acquire_relaunch_record_lock(directory: &Path) -> Result<std::fs::File, i32> {
+    let path = directory.join("relaunch-state-v1.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&path)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_relaunch_dacl(&path)?;
+    Ok(file)
+}
+
+fn relaunch_generations() -> Result<Vec<String>, i32> {
+    let root = relaunch_root()?;
+    if !root.exists() {
+        return Ok(Vec::new());
     }
-    clear_relaunch_run_owner()?;
-    std::fs::remove_file(&path).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    drop(_intent_lock);
-    let _ = std::fs::remove_file(path.with_file_name("windows-update-relaunch-intent-v1.lock"));
-    Ok(0)
+    let mut values = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(|_| EXIT_LAUNCH_FAILED)? {
+        let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().map_err(|_| EXIT_LAUNCH_FAILED)?.is_dir()
+            && validate_generation(&name).is_ok()
+        {
+            values.push(name);
+        }
+    }
+    Ok(values)
+}
+
+fn remove_relaunch_record_directory(directory: &Path) -> Result<(), i32> {
+    for name in [
+        RELAUNCH_RECORD_NAME,
+        RELAUNCH_MARKER_NAME,
+        "relaunch-state-v1.lock",
+    ] {
+        let path = directory.join(name);
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        }
+    }
+    std::fs::remove_dir(directory).map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
+fn launch_elevated_installed_helper(argument: &str) -> Result<(), i32> {
+    let helper = known_folder(&FOLDERID_ProgramFiles)?
+        .join("Talking Quill/resources/helper/talking-quill-helper.exe");
+    launch_elevated_executable(&helper, argument)
 }
 
 fn defer_launch_until_parent_exit(version: &str) -> Result<(), i32> {
@@ -555,11 +817,14 @@ fn defer_launch_until_parent_exit(version: &str) -> Result<(), i32> {
         version: version.into(),
     };
     let encoded = base64_encode(&serde_json::to_vec(&request).map_err(|_| EXIT_LAUNCH_FAILED)?);
-    std::process::Command::new(std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?)
-        .arg(format!("--windows-update-launch-after-parent-v1={encoded}"))
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| EXIT_LAUNCH_FAILED)
+    std::process::Command::new(
+        known_folder(&FOLDERID_ProgramFiles)?
+            .join("Talking Quill/resources/helper/talking-quill-helper.exe"),
+    )
+    .arg(format!("--windows-update-launch-after-parent-v1={encoded}"))
+    .spawn()
+    .map(|_| ())
+    .map_err(|_| EXIT_LAUNCH_FAILED)
 }
 
 fn launch_after_parent_exit(encoded: &str) -> Result<u32, i32> {
@@ -718,36 +983,6 @@ fn read_relaunch_intent(path: &Path, expected_nonce: &str) -> Result<RelaunchInt
     Ok(intent)
 }
 
-fn write_relaunch_intent(path: &Path, intent: &RelaunchIntent) -> Result<(), i32> {
-    let temporary = path.with_extension(format!(
-        "tmp-{:016x}",
-        getrandom::u64().map_err(|_| EXIT_LAUNCH_FAILED)?
-    ));
-    let bytes = serde_json::to_vec(intent).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .share_mode(0)
-        .open(&temporary)
-        .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    drop(file);
-    if unsafe {
-        MoveFileExW(
-            wide_nul(&temporary)?.as_ptr(),
-            wide_nul(path)?.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        let _ = std::fs::remove_file(temporary);
-        return Err(EXIT_LAUNCH_FAILED);
-    }
-    Ok(())
-}
-
 fn installed_manifest() -> Result<InstalledManifest, i32> {
     let path = known_folder(&FOLDERID_ProgramFiles)?
         .join("Talking Quill/resources/keyboard-owner-release-v1.json");
@@ -785,20 +1020,34 @@ fn verified_surviving_version(candidate: &UpdateCandidate) -> Result<String, i32
     }
 }
 
-fn arm_relaunch_run_owner(encoded: &str) -> Result<(), i32> {
-    let executable = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+fn relaunch_run_value_name(generation: &str) -> Result<String, i32> {
+    validate_generation(generation)?;
+    Ok(format!("{RELAUNCH_RUN_VALUE_PREFIX}{generation}"))
+}
+
+fn relaunch_run_command(generation: &str, launcher: &Path) -> Result<String, i32> {
+    validate_generation(generation)?;
     let command = format!(
-        "\"{}\" --windows-update-bootstrap-v3={encoded}",
-        executable.display()
+        "\"{}\" --windows-update-relaunch-v1={generation}",
+        launcher.display()
     );
-    set_current_user_run_value(Some(&command))
+    if command.encode_utf16().count() > 260 {
+        Err(EXIT_LAUNCH_FAILED)
+    } else {
+        Ok(command)
+    }
 }
 
-fn clear_relaunch_run_owner() -> Result<(), i32> {
-    set_current_user_run_value(None)
+fn arm_relaunch_run_owner(generation: &str, launcher: &Path) -> Result<(), i32> {
+    let command = relaunch_run_command(generation, launcher)?;
+    set_current_user_run_value(generation, Some(&command))
 }
 
-fn set_current_user_run_value(command: Option<&str>) -> Result<(), i32> {
+fn clear_relaunch_run_owner(generation: &str) -> Result<(), i32> {
+    set_current_user_run_value(generation, None)
+}
+
+fn set_current_user_run_value(generation: &str, command: Option<&str>) -> Result<(), i32> {
     let mut key = std::ptr::null_mut();
     if unsafe {
         RegCreateKeyExW(
@@ -816,7 +1065,8 @@ fn set_current_user_run_value(command: Option<&str>) -> Result<(), i32> {
     {
         return Err(EXIT_LAUNCH_FAILED);
     }
-    let name = wide_nul(Path::new(RELAUNCH_RUN_VALUE))?;
+    let value_name = relaunch_run_value_name(generation)?;
+    let name = wide_nul(Path::new(&value_name))?;
     let status = if let Some(command) = command {
         let value = wide_nul(Path::new(command))?;
         unsafe {
@@ -830,8 +1080,20 @@ fn set_current_user_run_value(command: Option<&str>) -> Result<(), i32> {
             )
         }
     } else {
-        let status = unsafe { RegDeleteValueW(key, name.as_ptr()) };
-        if status == 2 { 0 } else { status }
+        let expected = medium_launcher_path()
+            .and_then(|launcher| relaunch_run_command(generation, &launcher))?;
+        let actual = read_registry_string(key, &value_name)?;
+        match actual.as_deref() {
+            None => 0,
+            Some(value) if value == expected => {
+                let status = unsafe { RegDeleteValueW(key, name.as_ptr()) };
+                if status == 2 { 0 } else { status }
+            }
+            Some(_) => {
+                unsafe { RegCloseKey(key) };
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+        }
     };
     let flushed = unsafe { RegFlushKey(key) };
     unsafe { RegCloseKey(key) };
@@ -861,8 +1123,12 @@ fn launch_application(application: PathBuf) -> Result<(), i32> {
 
 fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
     let executable = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    launch_elevated_executable(&executable, argument)
+}
+
+fn launch_elevated_executable(executable: &Path, argument: &str) -> Result<(), i32> {
     let verb = wide_nul(Path::new("runas"))?;
-    let file = wide_nul(&executable)?;
+    let file = wide_nul(executable)?;
     let parameters = wide_nul(Path::new(argument))?;
     let mut execute = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -1625,6 +1891,56 @@ fn has_exact_security(path: &Path, sddl: &str) -> Result<bool, i32> {
         GetFileSecurityW(
             path.as_ptr(),
             information,
+            actual.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(security_descriptor_text(actual.as_mut_ptr().cast())?.eq_ignore_ascii_case(&expected))
+}
+
+fn apply_relaunch_dacl(path: &Path) -> Result<(), i32> {
+    let descriptor = SecurityDescriptor::restricted(RELAUNCH_USER_SDDL)?;
+    let path = wide_nul(path)?;
+    if unsafe {
+        SetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        Err(EXIT_LAUNCH_FAILED)
+    } else {
+        Ok(())
+    }
+}
+
+fn has_relaunch_dacl(path: &Path) -> Result<bool, i32> {
+    let expected = SecurityDescriptor::restricted(RELAUNCH_USER_SDDL)?;
+    let expected = security_descriptor_text(expected.0)?;
+    let path = wide_nul(path)?;
+    let mut needed = 0_u32;
+    unsafe {
+        GetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let mut actual = vec![0_u8; needed as usize];
+    if unsafe {
+        GetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION,
             actual.as_mut_ptr().cast(),
             needed,
             &mut needed,
@@ -3334,58 +3650,53 @@ fn base64_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MEDIUM_LAUNCHER_DIRECTORY_SDDL, RECOVERY_LAUNCHER_PENDING_PREFIX, RUN_ONCE_VALUE_PREFIX,
-        RelaunchIntent, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
+        MEDIUM_LAUNCHER_DIRECTORY_SDDL, PersistedRelaunchRecord, RECOVERY_LAUNCHER_PENDING_PREFIX,
+        RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
         UpdatePredecessor, UpdateRole, authorization_transcript, canonical_candidate_layout,
         create_directory_with_sddl, create_restricted_directory, decode_base64,
-        read_relaunch_intent, reclaim_incomplete_launcher_directories,
-        reclaim_incomplete_recovery_directories, recovery_value_name, validate_generation,
-        write_relaunch_intent,
+        publish_relaunch_record, read_persisted_relaunch_record,
+        reclaim_incomplete_launcher_directories, reclaim_incomplete_recovery_directories,
+        recovery_value_name, remove_relaunch_record_directory, validate_generation,
+        write_persisted_relaunch_record,
     };
     #[test]
-    fn relaunch_intent_is_nonce_bound_and_each_phase_is_power_loss_safe() {
-        let root = std::env::temp_dir().join("Talking Quill");
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("windows-update-relaunch-intent-v1.json");
-        let _ = std::fs::remove_file(&path);
-        let nonce = "11".repeat(16);
-        let mut intent = RelaunchIntent {
+    fn relaunch_record_marker_and_each_phase_are_power_loss_safe() {
+        let generation = super::new_recovery_generation().unwrap();
+        let mut record = PersistedRelaunchRecord {
             schema_version: 1,
-            nonce: nonce.clone(),
+            generation: generation.clone(),
+            request: "--windows-update-bootstrap-v2=dGVzdA==".into(),
+            nonce: "11".repeat(16),
             source_version: "0.0.69".into(),
             target_version: "0.0.70".into(),
             phase: "armed".into(),
             completed_version: None,
         };
-        write_relaunch_intent(&path, &intent).unwrap();
-        assert!(read_relaunch_intent(&path, &"22".repeat(16)).is_err());
-        assert_eq!(read_relaunch_intent(&path, &nonce).unwrap().phase, "armed");
-        intent.phase = "setup-started".into();
-        write_relaunch_intent(&path, &intent).unwrap();
-        assert_eq!(
-            read_relaunch_intent(&path, &nonce).unwrap().phase,
-            "setup-started"
-        );
-        intent.phase = "setup-complete".into();
-        intent.completed_version = Some("0.0.70".into());
-        write_relaunch_intent(&path, &intent).unwrap();
-        assert_eq!(
-            read_relaunch_intent(&path, &nonce).unwrap().phase,
-            "setup-complete"
-        );
-        intent.phase = "launch-started".into();
-        write_relaunch_intent(&path, &intent).unwrap();
-        assert_eq!(
-            read_relaunch_intent(&path, &nonce).unwrap().phase,
-            "launch-started"
-        );
-        intent.phase = "app-ready".into();
-        write_relaunch_intent(&path, &intent).unwrap();
-        assert_eq!(
-            read_relaunch_intent(&path, &nonce).unwrap().phase,
-            "app-ready"
-        );
-        std::fs::remove_file(path).unwrap();
+        publish_relaunch_record(&record).unwrap();
+        for phase in [
+            "setup-started",
+            "setup-complete",
+            "launch-started",
+            "app-ready",
+        ] {
+            record.phase = phase.into();
+            if phase == "setup-complete" {
+                record.completed_version = Some("0.0.69".into());
+            }
+            write_persisted_relaunch_record(
+                &super::relaunch_generation_directory(&generation).unwrap(),
+                &record,
+            )
+            .unwrap();
+            assert_eq!(
+                read_persisted_relaunch_record(&generation).unwrap().phase,
+                phase
+            );
+        }
+        remove_relaunch_record_directory(
+            &super::relaunch_generation_directory(&generation).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

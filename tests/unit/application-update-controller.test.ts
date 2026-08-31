@@ -11,7 +11,9 @@ import {
 function backend(version = '1.1.0') {
   let progress: ((percent: number) => void) | null = null;
   let error: (() => void) | null = null;
-  const checkForUpdates = vi.fn(() =>
+  const checkForUpdates = vi.fn<
+    () => Promise<{ readonly version: string; readonly releaseUrl: string | null } | null>
+  >(() =>
     Promise.resolve({
       version,
       releaseUrl: `https://github.com/gee666/talking-quill/releases/tag/v${version}`,
@@ -126,6 +128,36 @@ describe('application update consent and installation controller', () => {
     });
   });
 
+  it('preserves macOS owner updates when the backend has no Windows publication URL', async () => {
+    const updater = backend('1.1.0');
+    updater.checkForUpdates.mockResolvedValueOnce({ version: '1.1.0', releaseUrl: null });
+    const controller = new ApplicationUpdateController({
+      currentVersion: '1.0.0',
+      backend: updater.value,
+      publish: vi.fn(),
+      requestInstall: vi.fn(),
+    });
+    await expect(controller.acceptCheckResult(available)).resolves.toMatchObject({
+      availableVersion: '1.1.0',
+      releaseUrl: available.releaseUrl,
+    });
+    expect(updater.downloadUpdate).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an intermediate edge without its own signed publication URL', async () => {
+    const updater = backend('1.1.0');
+    updater.checkForUpdates.mockResolvedValueOnce({ version: '1.1.0', releaseUrl: null });
+    const controller = new ApplicationUpdateController({
+      currentVersion: '1.0.0',
+      backend: updater.value,
+      publish: vi.fn(),
+      requestInstall: vi.fn(),
+    });
+    await controller.acceptCheckResult({ ...available, latestVersion: '1.2.0' });
+    expect(controller.getState()).toMatchObject({ phase: 'error', releaseUrl: null });
+    expect(updater.downloadUpdate).not.toHaveBeenCalled();
+  });
+
   it('requires native candidate preparation before requesting installation', async () => {
     const updater = backend();
     updater.downloadUpdate.mockResolvedValueOnce({ files: ['/tmp/Talking-Quill.zip'] });
@@ -209,6 +241,28 @@ describe('application update consent and installation controller', () => {
     await vi.waitFor(() => expect(controller.getState().phase).toBe('error'));
     expect(controller.getState().message).toContain('Release all Talking Quill shortcut keys');
     expect(requestInstall).not.toHaveBeenCalled();
+  });
+
+  it('serializes compatible-edge selection before download ownership', async () => {
+    const updater = backend('1.1.0');
+    let finishCheck!: (value: { version: string; releaseUrl: string }) => void;
+    updater.checkForUpdates.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCheck = resolve;
+      }),
+    );
+    const controller = new ApplicationUpdateController({
+      currentVersion: '1.0.0',
+      backend: updater.value,
+      publish: vi.fn(),
+      requestInstall: vi.fn(),
+    });
+    const first = controller.acceptCheckResult(available);
+    await expect(controller.acceptCheckResult(available)).resolves.toMatchObject({ phase: 'idle' });
+    expect(updater.checkForUpdates).toHaveBeenCalledOnce();
+    finishCheck({ version: '1.1.0', releaseUrl: available.releaseUrl });
+    await first;
+    expect(updater.downloadUpdate).toHaveBeenCalledOnce();
   });
 
   it('fails closed when updater metadata does not match the release check', async () => {

@@ -39,6 +39,7 @@ export class ApplicationUpdateController {
   readonly #prepareInstall: ((download: DownloadedApplicationUpdate) => Promise<void>) | null;
   readonly #removeBackendListeners: (() => void)[] = [];
   #state: ApplicationUpdateState;
+  #checking = false;
   #operation: Promise<void> | null = null;
   #downloaded: { readonly version: string; readonly update: DownloadedApplicationUpdate } | null =
     null;
@@ -75,7 +76,11 @@ export class ApplicationUpdateController {
   }
 
   async acceptCheckResult(result: UpdateCheckResult): Promise<ApplicationUpdateState> {
-    if (this.#disposed || ['downloading', 'installing'].includes(this.#state.phase)) {
+    if (
+      this.#disposed ||
+      this.#checking ||
+      ['downloading', 'installing'].includes(this.#state.phase)
+    ) {
       return this.#state;
     }
     if (
@@ -105,10 +110,12 @@ export class ApplicationUpdateController {
         message: 'Install this release manually from its GitHub release page.',
       });
     }
+    this.#checking = true;
     try {
       const checked = await this.#backend.checkForUpdates();
       const availableVersion = checked === null ? null : normalizeVersion(checked.version);
-      const compatibleReleaseUrl = checked?.releaseUrl ?? null;
+      const compatibleReleaseUrl =
+        checked?.releaseUrl ?? (availableVersion === latestVersion ? result.releaseUrl : null);
       if (
         this.#isDisposed() ||
         availableVersion === null ||
@@ -144,6 +151,8 @@ export class ApplicationUpdateController {
         percent: null,
         message: 'The update metadata did not identify a compatible release edge.',
       });
+    } finally {
+      this.#checking = false;
     }
   }
 

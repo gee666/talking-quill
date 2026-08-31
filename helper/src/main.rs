@@ -47,6 +47,9 @@ fn main() {
                     .starts_with("--windows-update-launch-after-parent-v1=")
                 || value
                     .to_string_lossy()
+                    .starts_with("--windows-update-relaunch-v1=")
+                || value
+                    .to_string_lossy()
                     .starts_with("--windows-update-resume-v2=")
                 || value
                     .to_string_lossy()

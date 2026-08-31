@@ -774,6 +774,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
         system.unregister_uninstall()?;
         remove_maintenance_uninstaller(&paths)?;
+        remove_update_recovery_launcher_residue(&paths)?;
         remove_uninstall_finalizer_residue(&paths)?;
         drop(legacy);
         arm_mapped_image_deletion(&current)?;
@@ -3473,12 +3474,16 @@ fn complete_terminal_uninstall(
 ) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
     let legacy = retire_and_remove_machine_lock(paths, machine_lock)?;
-    finalize_uninstall(paths, system)?;
+    finalize_uninstall(paths, system, current)?;
     drop(legacy);
     arm_mapped_image_deletion(current)
 }
 
-fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
+fn finalize_uninstall(
+    paths: &Paths,
+    system: &dyn NativeSystemAdapter,
+    current: &Path,
+) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
     write_transaction(
         paths,
@@ -3491,7 +3496,7 @@ fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result
     // Move callable recovery authority to the maintenance image before Windows
     // takes reboot-time ownership of the finalizer tree.
     register_uninstall_executable(&paths.maintenance_uninstaller)?;
-    establish_finalizer_deletion_ownership(paths)?;
+    establish_finalizer_deletion_ownership(paths, current)?;
     write_transaction(
         paths,
         "uninstall-finalizer-deletion-owned",
@@ -3510,6 +3515,7 @@ fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result
     remove_transaction(paths)?;
     system.unregister_uninstall()?;
     remove_maintenance_uninstaller(paths)?;
+    remove_update_recovery_launcher_residue(paths)?;
     remove_uninstall_finalizer_residue(paths)
 }
 
@@ -4321,21 +4327,32 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
             }
         }
     }
-    let launcher = paths.program_data.join("Talking Quill Update Recovery");
-    if path_present(&launcher)? {
-        let identity = owned_tree_identity(&launcher)
-            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-        if fs::read_to_string(launcher.join("launcher-tree-identity-v1"))
-            .is_ok_and(|value| value == identity)
-        {
-            remove_owned_tree(&launcher, &identity)
-                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-        }
-    }
+    // The protected launcher is a stable machine component. Per-user relaunch
+    // ownership may live in a different HKCU hive under over-the-shoulder UAC,
+    // so update cleanup must not infer that no relaunch owner exists.
     Ok(())
 }
 
-fn establish_finalizer_deletion_ownership(paths: &Paths) -> Result<()> {
+fn remove_update_recovery_launcher_residue(paths: &Paths) -> Result<()> {
+    let launcher = paths.program_data.join("Talking Quill Update Recovery");
+    if !path_present(&launcher)? {
+        return Ok(());
+    }
+    let identity =
+        owned_tree_identity(&launcher).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    if !medium_launcher_directory_is_protected(&launcher)?
+        || !fs::read_to_string(launcher.join("launcher-tree-identity-v1"))
+            .is_ok_and(|value| value == identity)
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Update recovery launcher identity is invalid.",
+        ));
+    }
+    remove_owned_tree(&launcher, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))
+}
+
+fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Result<()> {
     let mut scheduled = Vec::new();
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
@@ -4384,6 +4401,74 @@ fn establish_finalizer_deletion_ownership(paths: &Paths) -> Result<()> {
             }
             scheduled.push(target);
         }
+    }
+    let launcher = paths.program_data.join("Talking Quill Update Recovery");
+    if path_present(&launcher)? {
+        let identity = owned_tree_identity(&launcher)
+            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        if !medium_launcher_directory_is_protected(&launcher)?
+            || !fs::read_to_string(launcher.join("launcher-tree-identity-v1"))
+                .is_ok_and(|value| value == identity)
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Update recovery launcher identity is invalid.",
+            ));
+        }
+        let mut tree = Vec::new();
+        collect_finalizer_deletion_paths(&launcher, &mut tree)?;
+        for target in tree {
+            if unsafe {
+                MoveFileExW(
+                    wide(target.as_os_str()).as_ptr(),
+                    ptr::null(),
+                    MOVEFILE_DELAY_UNTIL_REBOOT,
+                )
+            } == 0
+            {
+                return Err(fail(
+                    EXIT_FAILURE,
+                    "Windows could not take ownership of update launcher deletion.",
+                ));
+            }
+            scheduled.push(target);
+        }
+    }
+    for target in [&paths.maintenance_uninstaller, current] {
+        if !path_present(target)? {
+            continue;
+        }
+        assert_plain_file(target)?;
+        let canonical_target = canonical(target)?;
+        let authorized = canonical_target == canonical(&paths.maintenance_uninstaller)?
+            || is_uninstall_finalizer(target)?;
+        if !authorized {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal uninstall executable identity is invalid.",
+            ));
+        }
+        let already_scheduled = scheduled
+            .iter()
+            .filter_map(|path| canonical(path).ok())
+            .any(|path| path == canonical_target);
+        if already_scheduled {
+            continue;
+        }
+        if unsafe {
+            MoveFileExW(
+                wide(target.as_os_str()).as_ptr(),
+                ptr::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        } == 0
+        {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Windows could not take ownership of terminal executable deletion.",
+            ));
+        }
+        scheduled.push(target.to_path_buf());
     }
     verify_pending_finalizer_deletions(&scheduled)
 }
