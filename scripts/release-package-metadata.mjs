@@ -38,7 +38,9 @@ export async function createPackageReleaseMetadata({
   outerIdentity,
   freshInstall = process.env.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1',
   packageMode = process.env.TALKING_QUILL_PACKAGE_MODE ?? (freshInstall ? 'fresh' : 'update'),
-  predecessor = packageMode === 'update' ? readPackagePredecessor(process.env, platform, architecture) : null,
+  predecessor = packageMode === 'update'
+    ? readPackagePredecessor(process.env, platform, architecture)
+    : null,
 }) {
   requireIdentity(version, platform, architecture);
   requireSourceIdentity(sourceIdentity);

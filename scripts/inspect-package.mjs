@@ -572,11 +572,16 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
     !/^[0-9a-f]{64}$/u.test(manifest.target?.releaseBuildDigest ?? '') ||
     !/^[0-9a-f]{64}$/u.test(manifest.target?.gatewaySha256 ?? '') ||
     !/^[0-9a-f]{64}$/u.test(manifest.target?.ownerSha256 ?? '') ||
-    !Array.isArray(manifest.files) || manifest.files.length === 0 || manifest.files.length > 200_000
+    !Array.isArray(manifest.files) ||
+    manifest.files.length === 0 ||
+    manifest.files.length > 200_000
   ) {
     throw new Error('Windows TQPKG2 manifest is not canonical');
   }
-  if (process.env.TALKING_QUILL_PACKAGE_MODE !== undefined && manifest.packageMode !== process.env.TALKING_QUILL_PACKAGE_MODE) {
+  if (
+    process.env.TALKING_QUILL_PACKAGE_MODE !== undefined &&
+    manifest.packageMode !== process.env.TALKING_QUILL_PACKAGE_MODE
+  ) {
     throw new Error('Windows TQPKG2 package mode does not match the requested producer mode');
   }
   const folded = new Set();
@@ -588,21 +593,48 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
     if (
       !path ||
       path.includes('\\') ||
-      path.includes(':') || path.length > 1024 || !/^[\x20-\x7e]+$/u.test(path) ||
-      path.split('/').some((part) => !part || part === '.' || part === '..' || part.endsWith('.') || part.endsWith(' ') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part) || /[<>"|?*]/u.test(part))
+      path.includes(':') ||
+      path.length > 1024 ||
+      !/^[\x20-\x7e]+$/u.test(path) ||
+      path
+        .split('/')
+        .some(
+          (part) =>
+            !part ||
+            part === '.' ||
+            part === '..' ||
+            part.endsWith('.') ||
+            part.endsWith(' ') ||
+            /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part) ||
+            /[<>"|?*]/u.test(part),
+        )
     )
       throw new Error('Windows TQPKG2 path is invalid');
     const key = path.toLowerCase();
     if (folded.has(key)) throw new Error('Windows TQPKG2 has a case collision');
     folded.add(key);
-    if (file.mode !== 0 || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 4 * 1024 ** 3 || !Number.isSafeInteger(file.blockOffset) || file.blockOffset !== expectedOffset || !Number.isSafeInteger(file.blockSize) || file.blockSize <= 0 || !/^[0-9a-f]{64}$/u.test(file.sha256 ?? '')) {
+    if (
+      file.mode !== 0 ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      file.size > 4 * 1024 ** 3 ||
+      !Number.isSafeInteger(file.blockOffset) ||
+      file.blockOffset !== expectedOffset ||
+      !Number.isSafeInteger(file.blockSize) ||
+      file.blockSize <= 0 ||
+      !/^[0-9a-f]{64}$/u.test(file.sha256 ?? '')
+    ) {
       throw new Error('Windows TQPKG2 block framing is invalid');
     }
     expectedOffset += file.blockSize;
     treeBytes += file.size;
-    if (treeBytes > 16 * 1024 ** 3 || expectedOffset > size) throw new Error('Windows TQPKG2 size limit is invalid');
+    if (treeBytes > 16 * 1024 ** 3 || expectedOffset > size)
+      throw new Error('Windows TQPKG2 size limit is invalid');
     for (const value of [path, String(file.mode), String(file.size), file.sha256]) {
-      const framed = Buffer.from(value); const length = Buffer.alloc(8); length.writeBigUInt64LE(BigInt(framed.length)); tree.update(length).update(framed);
+      const framed = Buffer.from(value);
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64LE(BigInt(framed.length));
+      tree.update(length).update(framed);
     }
     const compressed = packageBytes.subarray(file.blockOffset, file.blockOffset + file.blockSize);
     const content = zstdDecompressSync(compressed, { maxOutputLength: file.size });
@@ -617,18 +649,32 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(destination, content, { flag: 'wx' });
   }
-  if (expectedOffset !== size || tree.digest('hex') !== manifest.treeSha256) throw new Error('Windows TQPKG2 tree digest is invalid');
-  const ownerManifest = JSON.parse(await readFile(resolve(output, 'resources/keyboard-owner-release-v1.json'), 'utf8'));
+  if (expectedOffset !== size || tree.digest('hex') !== manifest.treeSha256)
+    throw new Error('Windows TQPKG2 tree digest is invalid');
+  const ownerManifest = JSON.parse(
+    await readFile(resolve(output, 'resources/keyboard-owner-release-v1.json'), 'utf8'),
+  );
   bindTqpkg2OwnerManifest(exactPackage.manifest, ownerManifest);
   const role = (name) => ownerManifest.roles?.find((value) => value.role === name)?.sha256;
-  if (ownerManifest.version !== manifest.version || ownerManifest.architecture !== manifest.architecture || ownerManifest.sourceCommit !== manifest.sourceCommit || ownerManifest.sourceTree !== manifest.sourceTree || ownerManifest.releaseBuildDigest !== manifest.target.releaseBuildDigest || role('gateway') !== manifest.target.gatewaySha256 || role('owner') !== manifest.target.ownerSha256 || !predecessorMatches(ownerManifest.predecessor, manifest.predecessor)) {
+  if (
+    ownerManifest.version !== manifest.version ||
+    ownerManifest.architecture !== manifest.architecture ||
+    ownerManifest.sourceCommit !== manifest.sourceCommit ||
+    ownerManifest.sourceTree !== manifest.sourceTree ||
+    ownerManifest.releaseBuildDigest !== manifest.target.releaseBuildDigest ||
+    role('gateway') !== manifest.target.gatewaySha256 ||
+    role('owner') !== manifest.target.ownerSha256 ||
+    !predecessorMatches(ownerManifest.predecessor, manifest.predecessor)
+  ) {
     throw new Error('Windows TQPKG2 identity is not bound to the owner release manifest');
   }
 }
 
 function predecessorMatches(owner, embedded) {
   if (owner == null || embedded == null) return owner == null && embedded == null;
-  return ['version', 'releaseBuildDigest', 'gatewaySha256', 'ownerSha256'].every((key) => owner[key] === embedded[key]);
+  return ['version', 'releaseBuildDigest', 'gatewaySha256', 'ownerSha256'].every(
+    (key) => owner[key] === embedded[key],
+  );
 }
 
 function canonicalJsonForInspection(value) {

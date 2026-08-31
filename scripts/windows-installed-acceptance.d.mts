@@ -42,6 +42,7 @@ export function createInstalledAcceptancePlan(
       predecessor: FrozenArtifactInput;
       candidate: FrozenCandidateArtifactInput;
       fresh: FrozenArtifactInput;
+      repair: FrozenArtifactInput;
       fault: FrozenArtifactInput;
     }>;
     readonly acceptance: {

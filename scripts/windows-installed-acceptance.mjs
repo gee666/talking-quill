@@ -44,7 +44,7 @@ export const ACCEPTANCE_MATRIX = Object.freeze([
   'normal-quit',
   'login-marker',
   'running-silent-repair',
-  'injected-precommit-replacement-failure-rollback',
+  'injected-repair-failure-recovery',
   'uninstall-preserving-data',
   'reinstall',
   'diagnostics-disabled-failure',
@@ -66,7 +66,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     throw new Error('Acceptance requires an exact native x64 or arm64 architecture');
   }
   const artifacts = {};
-  for (const name of ['predecessor', 'candidate', 'fresh', 'fault']) {
+  for (const name of ['predecessor', 'candidate', 'fresh', 'repair', 'fault']) {
     artifacts[name] = await freezeArtifact(
       name,
       input.artifacts?.[name],
@@ -76,15 +76,31 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
   }
   if (input.artifacts?.faults !== undefined) {
     artifacts.faults = {};
-    for (const phase of ['staged', 'prepared', 'published', 'registered', 'committed', 'legacyRetiring', 'legacyRetired']) {
+    for (const phase of [
+      'staged',
+      'prepared',
+      'predecessorMoved',
+      'published',
+      'registered',
+      'committed',
+      'legacyRetiring',
+      'legacyRetired',
+    ]) {
       const faultInput = input.artifacts.faults[phase];
-      if (faultInput === undefined) throw new Error(`Acceptance fault artifact is missing for ${phase}`);
-      artifacts.faults[phase] = await freezeArtifact('fault', faultInput, input.architecture, fileSystem);
+      if (faultInput === undefined)
+        throw new Error(`Acceptance fault artifact is missing for ${phase}`);
+      artifacts.faults[phase] = await freezeArtifact(
+        'fault',
+        faultInput,
+        input.architecture,
+        fileSystem,
+      );
     }
   }
   const predecessor = artifacts.predecessor.metadata;
   const candidate = artifacts.candidate.metadata;
   const fresh = artifacts.fresh.metadata;
+  const repair = artifacts.repair.metadata;
   if (
     candidate.packageMode !== 'update' ||
     candidate.predecessor?.version !== predecessor.version ||
@@ -95,6 +111,20 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     throw new Error('Candidate does not authenticate the exact frozen predecessor');
   if (fresh.packageMode !== 'fresh' || fresh.freshInstall !== true || fresh.predecessor !== null) {
     throw new Error('Reinstall artifact is not a fresh installer');
+  }
+  if (
+    repair.packageMode !== 'repair' ||
+    repair.predecessor !== null ||
+    repair.version !== candidate.version ||
+    repair.sourceCommit !== candidate.sourceCommit ||
+    repair.sourceTree !== candidate.sourceTree ||
+    artifacts.repair.packageManifest?.target.releaseBuildDigest !== candidate.releaseBuildDigest ||
+    artifacts.repair.packageManifest?.target.gatewaySha256 !== role(candidate, 'gateway').sha256 ||
+    artifacts.repair.packageManifest?.target.ownerSha256 !== role(candidate, 'owner').sha256 ||
+    role(repair, 'gateway').sha256 !== role(candidate, 'gateway').sha256 ||
+    role(repair, 'owner').sha256 !== role(candidate, 'owner').sha256
+  ) {
+    throw new Error('Repair artifact is not bound to the exact candidate identity');
   }
   if (
     artifacts.fault.metadata.version !== candidate.version ||
@@ -295,9 +325,9 @@ function validatePhase(phase, value, plan) {
       sameCandidate: true,
       sentinelPreserved: true,
     },
-    'injected-precommit-replacement-failure-rollback': {
+    'injected-repair-failure-recovery': {
       failureInjected: true,
-      predecessorRestored: true,
+      candidateRecoveryCompleted: true,
       mixedAuthorityAbsent: true,
     },
     'uninstall-preserving-data': { machineFilesAbsent: true, sentinelPreserved: true },
@@ -397,7 +427,9 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     throw new Error(`${name} release identity is required`);
   }
   const nativePackage = /\.exe$/iu.test(installer.path)
-    ? parseTqpkg2(await fileSystem.readFile(installer.path), metadata.architecture, { allowAcceptanceFaults: name === 'fault' })
+    ? parseTqpkg2(await fileSystem.readFile(installer.path), metadata.architecture, {
+        allowAcceptanceFaults: name === 'fault',
+      })
     : null;
   if (nativePackage !== null && nativePackage.manifest.packageMode !== metadata.packageMode) {
     throw new Error(`${name} TQPKG2 mode does not match release metadata`);
@@ -415,7 +447,16 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     if (
       validation.isolatedInstallValidation !== true ||
       validation.failurePoint !== nativePackage?.manifest.faultPhase ||
-      !['staged', 'prepared', 'published', 'registered', 'committed', 'legacyRetiring', 'legacyRetired'].includes(validation.failurePoint) ||
+      ![
+        'staged',
+        'prepared',
+        'predecessorMoved',
+        'published',
+        'registered',
+        'committed',
+        'legacyRetiring',
+        'legacyRetired',
+      ].includes(validation.failurePoint) ||
       validation.candidatePackageLayoutDigest !== metadata.packageLayoutDigest
     ) {
       throw new Error('Fault artifact validation evidence is invalid');
@@ -432,6 +473,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     electron,
     appAsar,
     isolatedValidation,
+    packageManifest: nativePackage?.manifest ?? null,
   });
 }
 

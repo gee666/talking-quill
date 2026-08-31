@@ -154,11 +154,9 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         .strip_prefix("--windows-update-bootstrap-staged-v2=")
         .ok_or(EXIT_INVALID_REQUEST)?;
     let result = execute_staged_request(encoded);
-    // A timed-out installer still owns the protected staged directory. Keep it
-    // intact for the running native setup process and a later repair/recovery attempt.
-    if result != Err(EXIT_INSTALLER_STILL_RUNNING) {
-        schedule_staged_cleanup();
-    }
+    // The supervised installer is terminal on every return path, including timeout.
+    // Schedule identity-bound cleanup even when setup failed.
+    schedule_staged_cleanup();
     result
 }
 
@@ -191,7 +189,10 @@ fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
         return Err(EXIT_LAUNCH_FAILED);
     }
     let mut code = 0;
-    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 || code != 0 {
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    if code != 0 {
         return Err(code as i32);
     }
     Ok(())
@@ -365,7 +366,10 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
         return Err(EXIT_LAUNCH_FAILED);
     }
     let mut code = 0;
-    if unsafe { GetExitCodeProcess(process_handle.as_raw_handle(), &mut code) } == 0 || code != 0 {
+    if unsafe { GetExitCodeProcess(process_handle.as_raw_handle(), &mut code) } == 0 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    if code != 0 {
         return Err(code as i32);
     }
     Ok(())

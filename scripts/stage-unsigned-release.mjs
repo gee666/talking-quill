@@ -9,7 +9,10 @@ import {
   RELEASE_PACKAGE_METADATA_NAME,
   validatePackageReleaseMetadata,
 } from './release-package-metadata.mjs';
-import { verifyArtifactProvenanceManifest } from './artifact-provenance.mjs';
+import {
+  validateArtifactProvenanceManifest,
+  verifyArtifactProvenanceManifest,
+} from './artifact-provenance.mjs';
 
 async function main() {
   const [platform, arch] = process.argv.slice(2).filter((value) => value !== '--');
@@ -26,8 +29,11 @@ async function main() {
     throw new Error('Application version must be strict three-part semver.');
   }
   const stem = `Talking-Quill-${version}-${platform}-${arch}`;
-  const finalNames = platform === 'win' ? [`${stem}.exe`] : [`${stem}.dmg`, `${stem}.zip`];
-  const updateName = platform === 'win' ? `${stem}.exe` : `${stem}.zip`;
+  const finalNames =
+    platform === 'win'
+      ? [`${stem}-setup.exe`, `${stem}-update.exe`]
+      : [`${stem}.dmg`, `${stem}.zip`];
+  const updateName = platform === 'win' ? `${stem}-update.exe` : `${stem}.zip`;
   const blockmapName = `${updateName}.blockmap`;
   const rawMetadataName = platform === 'win' ? 'latest.yml' : 'latest-mac.yml';
   const channelMetadataName = platform === 'win' ? `latest-${arch}.yml` : `latest-${arch}-mac.yml`;
@@ -98,22 +104,44 @@ async function main() {
     `${JSON.stringify(releaseBinding, null, 2)}\n`,
     'utf8',
   );
-  await copyFile(
-    resolve(root, 'artifact-provenance.json'),
-    resolve(pendingOutput, `provenance-${platform}-${arch}.json`),
-  );
+  const freshProvenance =
+    platform === 'win'
+      ? JSON.parse(
+          await readFile(
+            resolve(root, process.env.TALKING_QUILL_FRESH_PROVENANCE_PATH ?? ''),
+            'utf8',
+          ),
+        )
+      : provenance;
+  validateArtifactProvenanceManifest(freshProvenance);
+  const provenanceDocuments =
+    platform === 'win'
+      ? [
+          [`${platform}-${arch}-setup`, freshProvenance],
+          [`${platform}-${arch}-update`, provenance],
+        ]
+      : [[`${platform}-${arch}`, provenance]];
+  for (const [name, document] of provenanceDocuments) {
+    await writeFile(
+      resolve(pendingOutput, `provenance-${name}.json`),
+      `${JSON.stringify(document, null, 2)}\n`,
+      'utf8',
+    );
+  }
   if (platform === 'win') {
     await copyFile(
       resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt'),
       resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt'),
     );
   }
-  const finalEntries = provenance.entries.filter(({ role }) => role === 'final-artifact');
+  const finalEntries = provenanceDocuments.flatMap(([, document]) =>
+    document.entries.filter(({ role }) => role === 'final-artifact'),
+  );
   if (
     JSON.stringify(finalEntries.map(({ path }) => basename(path)).sort()) !==
     JSON.stringify([...finalNames].sort())
   ) {
-    throw new Error('Provenance final-artifact inventory does not match staged release files.');
+    throw new Error('Mode-specific provenance does not match staged release files.');
   }
   for (const entry of finalEntries) {
     const name = basename(entry.path);

@@ -250,15 +250,18 @@ export async function runProductionPhase(phase, input, state, os) {
       sentinelPreserved: true,
     });
   }
-  if (phase === 'injected-precommit-replacement-failure-rollback') {
+  if (phase === 'injected-repair-failure-recovery') {
     const before = observe('fault-before', await installed());
     const machineBefore = observe('fault-machine-before', await os.observeMachineResidue());
     const faults = input.artifacts.faults ?? { published: input.artifacts.fault };
     const crashPhases = [];
     for (const [phaseName, artifact] of Object.entries(faults)) {
-      requireValue(artifact.isolatedValidation === true, `${phaseName} fault artifact is not an authenticated isolated-validation build`);
+      requireValue(
+        artifact.isolatedValidation === true,
+        `${phaseName} fault artifact is not an authenticated isolated-validation build`,
+      );
       await spawnFrozen(artifact, ['/S'], os, observations, [197]);
-      await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [0]);
+      await spawnFrozen(input.artifacts.repair, ['/S'], os, observations, [0]);
       crashPhases.push(phaseName);
     }
     const after = observe('fault-after', await installed());
@@ -267,7 +270,7 @@ export async function runProductionPhase(phase, input, state, os) {
       before.releaseBuildDigest === after.releaseBuildDigest &&
         before.gatewaySha256 === after.gatewaySha256 &&
         before.ownerSha256 === after.ownerSha256,
-      'Precommit rollback did not restore predecessor hashes',
+      'Fault recovery did not restore the same candidate identity',
     );
     requireValue(
       machineAfter.mixedAuthorityAbsent &&
@@ -278,7 +281,7 @@ export async function runProductionPhase(phase, input, state, os) {
     return pass(observations, {
       failureInjected: true,
       crashPhases,
-      predecessorRestored: true,
+      candidateRecoveryCompleted: true,
       mixedAuthorityAbsent: true,
     });
   }
@@ -289,10 +292,21 @@ export async function runProductionPhase(phase, input, state, os) {
       executable: resolve(state.installedRoot, 'Uninstall Talking Quill.exe'),
       arguments: ['/S'],
       timeoutMs: 180_000,
-      acceptedExitCodes: [0],
+      acceptedExitCodes: [0, 997],
     });
+    const deadline = Date.now() + 180_000;
+    let residue;
+    while (Date.now() < deadline) {
+      residue = await os.observeMachineResidue();
+      if (residue.machineFilesAbsent && residue.transactionsAbsent) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+    requireValue(
+      residue?.machineFilesAbsent === true && residue.transactionsAbsent === true,
+      'Durable silent uninstall did not complete',
+    );
     const afterSentinel = observe('uninstall-sentinel-after', await sentinel());
-    const residue = observe('uninstall-machine-state', await os.observeMachineResidue());
+    observe('uninstall-machine-state', residue);
     requireValue(
       beforeSentinel.preserved && afterSentinel.preserved && residue.machineFilesAbsent,
       'Uninstall did not preserve profile or remove machine files',
@@ -440,7 +454,11 @@ async function spawnAuthenticatedUpdate(artifact, os, observations) {
     'Frozen installer was substituted before authenticated update launch',
   );
   const launch = await os.spawnAuthenticatedUpdate(artifact);
-  observations.push({ kind: 'authenticated-predecessor-update', observedAt: os.utcNow(), value: launch });
+  observations.push({
+    kind: 'authenticated-predecessor-update',
+    observedAt: os.utcNow(),
+    value: launch,
+  });
 }
 
 async function spawnFrozen(artifact, arguments_, os, observations, acceptedExitCodes) {
@@ -1183,7 +1201,7 @@ function loginRegistrationScript(root) {
 }
 
 function residueScript(root) {
-  return `$pf=Split-Path -Parent '${ps(root)}';$pd=[Environment]::GetFolderPath('CommonApplicationData');$paths=@('${ps(root)}',(Join-Path $pf '.Talking Quill.stage1-backup'),(Join-Path $pf '.Talking Quill.stage1-ambiguous-replacement'),(Join-Path $pf '.Talking Quill.stage1-transaction.json'),(Join-Path $pd 'Talking Quill\\KeyboardAuthority'),(Join-Path $pd 'Talking Quill\\.KeyboardAuthority.retirement-quarantine'));$present=@($paths|?{Test-Path -LiteralPath $_});$service=Get-Service -Name '${LEGACY_SERVICE}' -ErrorAction SilentlyContinue;$task=Get-ScheduledTask -TaskName '${LEGACY_TASK}' -ErrorAction SilentlyContinue;$uninstall=@(Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue|?{$_.DisplayName -eq 'Talking Quill'});$transactions=@($paths|?{$_ -like '*.stage1-*' -and (Test-Path -LiteralPath $_)});[pscustomobject]@{machineFilesAbsent=$present.Count-eq0;registrationsAbsent=$uninstall.Count-eq0;legacyAbsent=$null-eq$service-and$null-eq$task-and-not(Test-Path (Join-Path $pd 'Talking Quill\\KeyboardAuthority'));mixedAuthorityAbsent=$null-eq$service-and$null-eq$task;transactionsAbsent=$transactions.Count-eq0;legacyServiceRunning=$null-ne$service-and$service.Status-eq'Running'}|ConvertTo-Json -Compress`;
+  return `$pf=Split-Path -Parent '${ps(root)}';$pd=[Environment]::GetFolderPath('CommonApplicationData');$paths=@('${ps(root)}',(Join-Path $pf '.Talking Quill.native-staging'),(Join-Path $pf '.Talking Quill.native-backup'),(Join-Path $pf '.Talking Quill.native-transaction-v2.json'),(Join-Path $pd 'Talking Quill\\KeyboardAuthority'),(Join-Path $pd 'Talking Quill\\.KeyboardAuthority.retirement-quarantine'));$paths+=@(Get-ChildItem -LiteralPath $pf -Force -ErrorAction SilentlyContinue|?{$_.Name -like '.Talking Quill.native-transaction-v2.tmp-*'}|%{$_.FullName});$paths+=@(Get-ChildItem -LiteralPath $pd -Force -Directory -ErrorAction SilentlyContinue|?{$_.Name -like '.Talking Quill.update-bootstrap-*'}|%{$_.FullName});$present=@($paths|?{Test-Path -LiteralPath $_});$service=Get-Service -Name '${LEGACY_SERVICE}' -ErrorAction SilentlyContinue;$task=Get-ScheduledTask -TaskName '${LEGACY_TASK}' -ErrorAction SilentlyContinue;$uninstall=@(Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue|?{$_.DisplayName -eq 'Talking Quill'});$appPath=Get-Item 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Talking Quill.exe' -ErrorAction SilentlyContinue;$transactions=@($present|?{$_ -like '*.native-transaction-v2*'});[pscustomobject]@{machineFilesAbsent=$present.Count-eq0;registrationsAbsent=$uninstall.Count-eq0-and$null-eq$appPath;legacyAbsent=$null-eq$service-and$null-eq$task-and-not(Test-Path (Join-Path $pd 'Talking Quill\\KeyboardAuthority'));mixedAuthorityAbsent=$null-eq$service-and$null-eq$task;transactionsAbsent=$transactions.Count-eq0;legacyServiceRunning=$null-ne$service-and$service.Status-eq'Running'}|ConvertTo-Json -Compress`;
 }
 function ps(value) {
   return String(value).replaceAll("'", "''");

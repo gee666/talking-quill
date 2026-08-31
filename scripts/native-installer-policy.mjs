@@ -25,8 +25,19 @@ for (const evidence of ['TQPKG2', 'canonicalJson', 'zstdCompressSync', 'blockMap
   if (!packer.includes(evidence))
     throw new Error(`native package evidence is missing: ${evidence}`);
 }
-for (const evidence of ['FILE_FLAG_OVERLAPPED', 'NtSuspendProcess', 'diffie_hellman', 'Hmac', 'TokenIntegrityLevel', 'OpenSCManagerW', 'ITaskService', 'FOLDERID_RoamingAppData', 'FILE_FLAG_OPEN_REPARSE_POINT']) {
-  if (!setup.includes(evidence)) throw new Error(`native setup security mechanism is missing: ${evidence}`);
+for (const evidence of [
+  'FILE_FLAG_OVERLAPPED',
+  'NtSuspendProcess',
+  'diffie_hellman',
+  'Hmac',
+  'TokenIntegrityLevel',
+  'OpenSCManagerW',
+  'ITaskService',
+  'FOLDERID_RoamingAppData',
+  'FILE_FLAG_OPEN_REPARSE_POINT',
+]) {
+  if (!setup.includes(evidence))
+    throw new Error(`native setup security mechanism is missing: ${evidence}`);
 }
 for (const forbidden of ['powershell', 'cmd.exe', 'wscript', 'cscript']) {
   if (setup.toLowerCase().includes(forbidden))

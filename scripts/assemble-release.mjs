@@ -27,12 +27,15 @@ if (!/^[0-9a-f]{40}$/u.test(sourceTree) || sourceTree !== checkedOutTree) {
 
 const architecture = process.env.TALKING_QUILL_PACKAGE_ARCH ?? 'x64';
 if (!['x64', 'arm64'].includes(architecture)) throw new Error('Invalid Windows architecture');
-const installer = `Talking-Quill-${version}-win-${architecture}.exe`;
+const freshInstaller = `Talking-Quill-${version}-win-${architecture}-setup.exe`;
+const updateInstaller = `Talking-Quill-${version}-win-${architecture}-update.exe`;
 const expectedInputs = [
-  installer,
-  `${installer}.blockmap`,
+  freshInstaller,
+  updateInstaller,
+  `${updateInstaller}.blockmap`,
   `latest-${architecture}.yml`,
-  `provenance-win-${architecture}.json`,
+  `provenance-win-${architecture}-setup.json`,
+  `provenance-win-${architecture}-update.json`,
   `release-identity-win-${architecture}.json`,
   'THIRD_PARTY_NOTICES.txt',
 ].sort();
@@ -47,7 +50,8 @@ for (const name of actualInputs) {
   }
 }
 
-const provenanceName = `provenance-win-${architecture}.json`;
+const provenanceName = `provenance-win-${architecture}-update.json`;
+const freshProvenanceName = `provenance-win-${architecture}-setup.json`;
 const identityName = `release-identity-win-${architecture}.json`;
 const provenance = JSON.parse(readFileSync(resolve(directory, provenanceName), 'utf8'));
 try {
@@ -55,18 +59,30 @@ try {
 } catch (error) {
   throw new Error(`Provenance schema mismatch: ${provenanceName}`, { cause: error });
 }
-const finalEntry = provenance.entries.filter((entry) => entry.role === 'final-artifact');
+const freshProvenance = JSON.parse(readFileSync(resolve(directory, freshProvenanceName), 'utf8'));
+validateArtifactProvenanceManifest(freshProvenance);
+const finalEntry = [...provenance.entries, ...freshProvenance.entries].filter(
+  (entry) => entry.role === 'final-artifact',
+);
 const sourceTreeSha256 = await currentSourceTreeHash();
 if (
   provenance.sourceCommit !== commit ||
   provenance.sourceTree !== sourceTree ||
+  freshProvenance.sourceCommit !== commit ||
+  freshProvenance.sourceTree !== sourceTree ||
+  freshProvenance.package.version !== version ||
+  freshProvenance.package.platform !== 'win' ||
+  freshProvenance.package.arch !== architecture ||
   provenance.sourceTreeSha256 !== sourceTreeSha256 ||
   provenance.package.version !== version ||
   provenance.package.platform !== 'win' ||
   provenance.package.arch !== architecture ||
-  finalEntry.length !== 1 ||
-  finalEntry[0]?.path.split('/').at(-1) !== installer ||
-  finalEntry[0]?.sha256 !== sha256(resolve(directory, installer))
+  ![freshInstaller, updateInstaller].every((name) =>
+    finalEntry.some(
+      (entry) =>
+        entry.path.split('/').at(-1) === name && entry.sha256 === sha256(resolve(directory, name)),
+    ),
+  )
 ) {
   throw new Error(`Windows ${architecture} provenance identity mismatch`);
 }
@@ -78,7 +94,7 @@ if (
   identity?.version !== version ||
   identity?.platform !== 'win' ||
   identity?.architecture !== architecture ||
-  identity?.packageSha256 !== sha256(resolve(directory, installer)) ||
+  identity?.packageSha256 !== sha256(resolve(directory, updateInstaller)) ||
   identity?.predecessor === null ||
   identity?.authorization?.scheme !== 'p256-sha256-v1' ||
   !/^[0-9a-f]{64}$/u.test(identity?.authorization?.verificationKeySha256 ?? '') ||

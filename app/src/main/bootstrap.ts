@@ -64,7 +64,7 @@ export function startMain(options: MainBootstrapOptions = {}): void {
       uninstallResetTargetArgument,
       isolatedUninstallTest
         ? { isolatedTestBase: resolve(app.getPath('temp'), 'TQTests') }
-        : { expectedTarget: resolveSignedInWindowsUserDataTarget() },
+        : { expectedTarget: resolveSignedInWindowsUserDataTarget(app.getPath('appData')) },
     );
     // Chromium opens files in userData during app readiness. Keep its transient reset-helper runtime
     // outside the owned target so Windows can atomically rename and remove the target directory.

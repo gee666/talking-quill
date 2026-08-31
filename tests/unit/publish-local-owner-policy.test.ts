@@ -9,11 +9,13 @@ describe('Windows native publication policy', () => {
   it('publishes only the preserved checksum-verified x64 and ARM64 candidates', () => {
     expect(workflow).toContain('windows-native-release-candidates');
     expect(workflow).toContain('sha256sum --check SHA256SUMS.txt');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch.exe');
+    expect(workflow).toContain('Talking-Quill-$version-win-$arch-setup.exe');
+    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe');
     expect(workflow).toContain('for arch in x64 arm64');
     expect(workflow).not.toContain('mac-x64');
     expect(workflow).toContain('release-identity-win-${arch}.json');
-    expect(workflow).toContain('provenance-win-$arch.json');
+    expect(workflow).toContain('provenance-win-$arch-setup.json');
+    expect(workflow).toContain('provenance-win-$arch-update.json');
     expect(workflow).toContain('talkingQuillRelease:');
     expect(workflow).toContain('gateway,owner');
     expect(workflow).toContain('--draft');
@@ -62,7 +64,8 @@ describe('Windows native publication policy', () => {
     for (const name of [
       'latest-$arch.yml',
       'release-identity-win-$arch.json',
-      'provenance-win-$arch.json',
+      'provenance-win-$arch-setup.json',
+      'provenance-win-$arch-update.json',
       'THIRD_PARTY_NOTICES.txt',
       'release-manifest.json',
       'SHA256SUMS.txt',
@@ -71,8 +74,9 @@ describe('Windows native publication policy', () => {
       expect(workflow, `consumer ${name}`).toContain(name);
     }
     expect(draftVerifier).toContain('...manifest.assets.map((asset) => asset.name)');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch.exe');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch.exe.blockmap');
+    expect(workflow).toContain('Talking-Quill-$version-win-$arch-setup.exe');
+    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe');
+    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe.blockmap');
     expect(workflow).toContain('SHA256SUMS.txt');
     expect(draftVerifier).toContain('SHA256SUMS.txt');
   });

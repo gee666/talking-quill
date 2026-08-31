@@ -25,7 +25,7 @@ export function createWindowsInstallerUiSmokePlan({
   return Object.freeze({
     installer: resolve(
       root,
-      installer ?? `${outputDirectory}/Talking-Quill-${version}-win-${architecture}.exe`,
+      installer ?? `${outputDirectory}/Talking-Quill-${version}-win-${architecture}-setup.exe`,
     ),
     provenance: resolve(root, provenance ?? 'artifact-provenance.json'),
     output: resolve(root, output ?? `tmp/windows-installer-ui-smoke-${architecture}.json`),

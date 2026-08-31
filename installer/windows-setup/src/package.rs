@@ -103,7 +103,7 @@ pub fn parse<R: Read + Seek>(
     if &footer[..8] != FOOTER_MAGIC
         || u32::from_le_bytes(footer[8..12].try_into().unwrap()) != 2
         || footer[12..16] != [0; 4]
-        || footer[112..].iter().any(|byte| *byte != 0)
+        || footer[104..].iter().any(|byte| *byte != 0)
     {
         return Err(PackageError::Footer);
     }
@@ -263,6 +263,7 @@ fn validate_manifest(
                 phase,
                 "staged"
                     | "prepared"
+                    | "predecessorMoved"
                     | "published"
                     | "registered"
                     | "committed"
@@ -315,7 +316,26 @@ fn validate_manifest(
         frame(&mut tree, &file.size.to_string());
         frame(&mut tree, &file.sha256);
     }
-    if expected_offset != package_size || hex(&tree.finalize()) != manifest.tree_sha256 {
+    let role_hash = |path: &str| {
+        manifest
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| file.sha256.as_str())
+    };
+    if role_hash("resources/helper/talking-quill-helper.exe")
+        != Some(manifest.target.gateway_sha256.as_str())
+        || role_hash("resources/helper/talking-quill-keyboard-owner.exe")
+            != Some(manifest.target.owner_sha256.as_str())
+        || manifest
+            .files
+            .iter()
+            .filter(|file| file.path == "resources/keyboard-owner-release-v1.json")
+            .count()
+            != 1
+        || expected_offset != package_size
+        || hex(&tree.finalize()) != manifest.tree_sha256
+    {
         return Err(PackageError::Digest);
     }
     Ok(())
@@ -420,25 +440,47 @@ mod tests {
     use super::*;
 
     fn fixture() -> Vec<u8> {
-        let content = b"native package payload";
-        let block = zstd::stream::encode_all(&content[..], 3).unwrap();
-        let path = "resources/app.asar";
-        let content_hash = hex(&Sha256::digest(content));
+        let payloads: [(&str, &[u8]); 3] = [
+            ("resources/helper/talking-quill-helper.exe", b"gateway"),
+            (
+                "resources/helper/talking-quill-keyboard-owner.exe",
+                b"owner",
+            ),
+            ("resources/keyboard-owner-release-v1.json", b"release"),
+        ];
+        let blocks: Vec<Vec<u8>> = payloads
+            .iter()
+            .map(|(_, bytes)| zstd::stream::encode_all(*bytes, 3).unwrap())
+            .collect();
         let mut tree = Sha256::new();
-        for value in [path, "0", &content.len().to_string(), &content_hash] {
-            frame(&mut tree, value);
+        let mut files = Vec::new();
+        for ((path, content), block) in payloads.iter().zip(&blocks) {
+            let content_hash = hex(&Sha256::digest(content));
+            for value in [*path, "0", &content.len().to_string(), &content_hash] {
+                frame(&mut tree, value);
+            }
+            files.push(serde_json::json!({"blockOffset":0,"blockSize":block.len(),"mode":0,"path":path,"sha256":content_hash,"size":content.len()}));
         }
         let mut value = serde_json::json!({
-            "architecture":"x64", "files":[{"blockOffset":0,"blockSize":block.len(),"mode":0,"path":path,"sha256":content_hash,"size":content.len()}],
+            "architecture":"x64", "files":files,
             "faultPhase":null, "packageMode":"fresh", "predecessor":null, "schemaVersion":2, "sourceCommit":"ab".repeat(20),
-            "sourceTree":"cd".repeat(20), "target":{"gatewaySha256":"11".repeat(32),"ownerSha256":"22".repeat(32),"releaseBuildDigest":"33".repeat(32)},
+            "sourceTree":"cd".repeat(20), "target":{"gatewaySha256":hex(&Sha256::digest(b"gateway")),"ownerSha256":hex(&Sha256::digest(b"owner")),"releaseBuildDigest":"33".repeat(32)},
             "treeSha256":hex(&tree.finalize()), "version":"0.0.69"
         });
         let mut manifest = serde_json::to_vec(&value).unwrap();
-        value["files"][0]["blockOffset"] = serde_json::json!(manifest.len());
-        manifest = serde_json::to_vec(&value).unwrap();
-        value["files"][0]["blockOffset"] = serde_json::json!(manifest.len());
-        manifest = serde_json::to_vec(&value).unwrap();
+        for _ in 0..4 {
+            let mut offset = manifest.len();
+            for (file, block) in value["files"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .zip(&blocks)
+            {
+                file["blockOffset"] = serde_json::json!(offset);
+                offset += block.len();
+            }
+            manifest = serde_json::to_vec(&value).unwrap();
+        }
         let mut image = vec![0_u8; 512];
         image[..2].copy_from_slice(b"MZ");
         image[60..64].copy_from_slice(&64_u32.to_le_bytes());
@@ -446,7 +488,9 @@ mod tests {
         image[88..90].copy_from_slice(&0x20b_u16.to_le_bytes());
         let package_offset = image.len() as u64;
         let mut package = manifest.clone();
-        package.extend_from_slice(&block);
+        for block in blocks {
+            package.extend_from_slice(&block);
+        }
         image.extend_from_slice(&package);
         let mut footer = [0_u8; FOOTER_SIZE];
         footer[..8].copy_from_slice(FOOTER_MAGIC);
@@ -467,7 +511,7 @@ mod tests {
         let parsed = parse(&mut reader, bytes.len() as u64).unwrap();
         let mut output = Vec::new();
         extract_file(&mut reader, &parsed, &parsed.manifest.files[0], &mut output).unwrap();
-        assert_eq!(output, b"native package payload");
+        assert_eq!(output, b"gateway");
     }
 
     #[test]
@@ -492,7 +536,7 @@ mod tests {
             Err(PackageError::Footer)
         ));
         let mut reserved_mutation = fixture();
-        let position = reserved_mutation.len() - 1;
+        let position = reserved_mutation.len() - FOOTER_SIZE + 104;
         reserved_mutation[position] = 1;
         assert!(matches!(
             parse(

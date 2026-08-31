@@ -26,7 +26,7 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
 
   it('keeps every production networking primitive in the reviewed closed inventory', async () => {
     const inventory = await verifyNetworkBoundary();
-    expect(inventory).toHaveLength(16);
+    expect(inventory).toHaveLength(15);
     expect(Object.keys(APPROVED_NETWORK_BOUNDARIES)).toEqual(
       expect.arrayContaining([
         'app/src/main/providers/json-transport.ts',
@@ -37,7 +37,6 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
         'app/src/main/providers/pi-rpc-operation.ts',
         'app/src/main/providers/pi-rpc-transport.ts',
         'app/src/main/app/application.ts',
-        'app/src/main/app/windows-uninstall-target.ts',
         'app/src/main/info/electron-update-backend.ts',
         'app/src/main/info/macos-owner-update-coordinator.ts',
       ]),

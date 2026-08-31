@@ -22,8 +22,8 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, Interface};
 use windows_sys::Win32::Foundation::{
     DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_CANCELLED, ERROR_IO_PENDING,
-    ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    ERROR_PIPE_CONNECTED, GetHandleInformation, GetLastError, INVALID_HANDLE_VALUE, LocalFree,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
@@ -94,7 +94,15 @@ unsafe extern "system" {
 }
 
 pub fn run() -> i32 {
-    let silent = std::env::args_os().skip(1).any(|value| value == "/S");
+    let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // Internal relocated and elevated roles never own UI. Authentication still
+    // determines operation authority inside run_inner.
+    let silent = arguments
+        .iter()
+        .any(|value| value == "/S" || value == "/TQ-RELOCATED")
+        || arguments
+            .iter()
+            .any(|value| value.to_string_lossy().starts_with("/TQUPDATE="));
     match run_inner() {
         Ok(code) => code,
         Err(error) => {
@@ -150,11 +158,15 @@ struct Paths {
 fn run_inner() -> Result<i32> {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let elevated = token_is_elevated()?;
-    let relocated = arguments.len() == 1 && arguments[0] == "/TQ-RELOCATED";
+    let relocated = !elevated
+        && arguments.iter().any(|value| value == "/TQ-RELOCATED")
+        && arguments
+            .iter()
+            .all(|value| value == "/TQ-RELOCATED" || value == "/S");
     let legacy_predecessor = elevated && legacy_predecessor_arguments(&arguments);
     if !((arguments.is_empty() || (arguments.len() == 1 && arguments[0] == "/S"))
         || legacy_predecessor
-        || (!elevated && relocated))
+        || relocated)
     {
         return Err(fail(EXIT_USAGE, "The native setup accepts only /S."));
     }
@@ -164,28 +176,39 @@ fn run_inner() -> Result<i32> {
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
         let retained = retain_controller_image(&current, relocated)?;
         let controller_paths = paths()?;
+        let mut lifecycle_parent = 0;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
-            let (action, parent, requested_silent) =
+            let (action, parent, requested_silent, _) =
                 WorkerChannel::connect_and_authenticate(&current, Some(&installed))?;
             silent = requested_silent;
+            lifecycle_parent = parent;
             if action != Action::Uninstall {
                 return Err(fail(
                     EXIT_REJECTED,
                     "Relocation requested an invalid operation.",
                 ));
             }
-            wait_for_process_exit(parent)?;
             Action::Uninstall
         } else {
             derive_action(&current, &controller_paths)?
         };
         if action == Action::Uninstall && !relocated {
             let (path, lock) = create_relocated_image(&current)?;
-            let channel = ControllerChannel::create(Action::Uninstall, silent)?;
+            let channel = ControllerChannel::create(Action::Uninstall, silent, 0)?;
             launch_relocated(&path, &channel)?;
             drop(lock);
-            return Ok(0);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline && !path_present(&controller_paths.transaction)? {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if !path_present(&controller_paths.transaction)? {
+                return Err(fail(
+                    EXIT_FAILURE,
+                    "Relocated uninstall did not publish durable status.",
+                ));
+            }
+            return Ok(if silent { ERROR_IO_PENDING as i32 } else { 0 });
         }
         if !silent && !confirm_controller(action)? {
             return Ok(ERROR_CANCELLED as i32);
@@ -199,7 +222,7 @@ fn run_inner() -> Result<i32> {
         if action != Action::Install {
             request_runtime_exit(&controller_paths)?;
         }
-        let channel = ControllerChannel::create(action, silent)?;
+        let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
         let result = elevate(&current, silent, &channel);
         drop(retained);
         if result.as_ref().is_ok_and(|code| *code == 0) && delete_profile {
@@ -257,7 +280,12 @@ fn runtime_process_active(paths: &Paths) -> Result<bool> {
             && let Ok(image) = process_image(entry.th32ProcessID)
         {
             let value = image.as_os_str().to_string_lossy().to_lowercase();
-            if value.starts_with(&paths.install.as_os_str().to_string_lossy().to_lowercase()) {
+            let root = paths.install.as_os_str().to_string_lossy().to_lowercase();
+            if value == root
+                || value
+                    .strip_prefix(&root)
+                    .is_some_and(|suffix| suffix.starts_with('\\'))
+            {
                 return Ok(true);
             }
         }
@@ -349,7 +377,11 @@ fn create_relocated_image(source: &Path) -> Result<(PathBuf, File)> {
 
 fn launch_relocated(executable: &Path, channel: &ControllerChannel) -> Result<()> {
     let file = wide(executable.as_os_str());
-    let parameters = wide(OsStr::new("/TQ-RELOCATED"));
+    let parameters = wide(OsStr::new(if channel.silent {
+        "/TQ-RELOCATED /S"
+    } else {
+        "/TQ-RELOCATED"
+    }));
     let mut info: SHELLEXECUTEINFOW = unsafe { mem::zeroed() };
     info.cbSize = mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     info.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -411,12 +443,17 @@ fn elevate(executable: &Path, silent: bool, channel: &ControllerChannel) -> Resu
     }
     let shell_process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let process = channel.authenticate(&shell_process, executable)?;
-    if unsafe { WaitForSingleObject(process.as_raw_handle(), 600_000) } == WAIT_TIMEOUT {
+    let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 600_000) };
+    if wait != WAIT_OBJECT_0 {
         unsafe { TerminateProcess(process.as_raw_handle(), EXIT_ELEVATION as u32) };
-        unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
+        let _ = unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
         return Err(fail(
             EXIT_ELEVATION,
-            "The elevated worker exceeded its absolute lifecycle deadline.",
+            if wait == WAIT_TIMEOUT {
+                "The elevated worker exceeded its absolute lifecycle deadline."
+            } else {
+                "Waiting for the elevated worker failed."
+            },
         ));
     }
     let mut code = 0;
@@ -432,11 +469,12 @@ fn elevate(executable: &Path, silent: bool, channel: &ControllerChannel) -> Resu
 fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     let current = std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
     // A normal elevated worker proves its controller before touching attacker-sized package data.
-    let requested_action = if legacy_predecessor {
+    let authenticated_controller = if legacy_predecessor {
         None
     } else {
-        Some(WorkerChannel::connect_and_authenticate(&current, None)?.0)
+        Some(WorkerChannel::connect_and_authenticate(&current, None)?)
     };
+    let requested_action = authenticated_controller.map(|value| value.0);
     let mut image = File::open(&current).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
     let length = image
         .metadata()
@@ -498,7 +536,25 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     }
     match action {
         Action::Install | Action::Repair => install(&mut image, &package, &current, &paths, action),
-        Action::Uninstall => uninstall(&paths),
+        Action::Uninstall => {
+            write_transaction(&paths, "uninstalling", Action::Uninstall, true)?;
+            let original_controller = authenticated_controller
+                .ok_or_else(|| {
+                    fail(
+                        EXIT_REJECTED,
+                        "Uninstall controller authentication is missing.",
+                    )
+                })?
+                .3;
+            if original_controller == 0 {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Uninstall lifecycle parent is missing.",
+                ));
+            }
+            wait_for_process_exit(original_controller)?;
+            uninstall(&paths)
+        }
     }?;
     Ok(0)
 }
@@ -556,10 +612,53 @@ struct ControllerChannel {
     handle: OwnedHandle,
     action: Action,
     silent: bool,
+    lifecycle_parent: u32,
+}
+
+fn duplicate_delegated_process_handle(value: u64, expected_process: u32) -> Result<OwnedHandle> {
+    let raw = value as usize as *mut c_void;
+    let mut flags = 0;
+    if value == 0
+        || value >= usize::MAX.saturating_sub(15) as u64
+        || unsafe { GetHandleInformation(raw, &mut flags) } == 0
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Worker delegated an invalid process handle.",
+        ));
+    }
+    let mut duplicate = ptr::null_mut();
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            raw,
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+        || duplicate.is_null()
+        || duplicate == INVALID_HANDLE_VALUE
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Worker process handle cannot be retained safely.",
+        ));
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+    if unsafe { GetProcessId(process.as_raw_handle()) } != expected_process {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Worker delegated a handle for the wrong process.",
+        ));
+    }
+    Ok(process)
 }
 
 impl ControllerChannel {
-    fn create(action: Action, silent: bool) -> Result<Self> {
+    fn create(action: Action, silent: bool, lifecycle_parent: u32) -> Result<Self> {
         let pid = std::process::id();
         let name = wide(OsStr::new(&format!(r"\\.\pipe\TalkingQuill.Setup.{pid}")));
         let handle = unsafe {
@@ -584,6 +683,7 @@ impl ControllerChannel {
             handle: unsafe { OwnedHandle::from_raw_handle(handle) },
             action,
             silent,
+            lifecycle_parent,
         })
     }
 
@@ -600,14 +700,7 @@ impl ControllerChannel {
             Some(shell_process.as_raw_handle()),
             deadline,
         )?);
-        let worker_process =
-            unsafe { OwnedHandle::from_raw_handle(delegated_value as usize as *mut c_void) };
-        if unsafe { GetProcessId(worker_process.as_raw_handle()) } != expected_worker {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Worker delegated a handle for the wrong process.",
-            ));
-        }
+        let worker_process = duplicate_delegated_process_handle(delegated_value, expected_worker)?;
         if unsafe { NtSuspendProcess(worker_process.as_raw_handle()) } < 0 {
             return Err(fail(
                 EXIT_REJECTED,
@@ -668,14 +761,16 @@ impl ControllerChannel {
                 "The elevated worker transcript proof is invalid.",
             ));
         }
-        let request = [
+        let mut request = Vec::with_capacity(6);
+        request.extend_from_slice(&[
             match self.action {
                 Action::Install => 1,
                 Action::Repair => 2,
                 Action::Uninstall => 3,
             },
             u8::from(self.silent),
-        ];
+        ]);
+        request.extend_from_slice(&self.lifecycle_parent.to_le_bytes());
         pipe_write(
             self.handle.as_raw_handle(),
             b"TQ-SETUP-ACCEPTED",
@@ -704,7 +799,7 @@ impl WorkerChannel {
     fn connect_and_authenticate(
         image: &Path,
         expected_server: Option<&Path>,
-    ) -> Result<(Action, u32, bool)> {
+    ) -> Result<(Action, u32, bool, u32)> {
         let server = parent_process_id()?;
         let name = wide(OsStr::new(&format!(
             r"\\.\pipe\TalkingQuill.Setup.{server}"
@@ -816,7 +911,7 @@ impl WorkerChannel {
                 "The medium setup controller rejected the worker.",
             ));
         }
-        let request = pipe_read::<2>(handle.as_raw_handle(), monitor, deadline)?;
+        let request = pipe_read::<6>(handle.as_raw_handle(), monitor, deadline)?;
         let controller_proof = pipe_read::<32>(handle.as_raw_handle(), monitor, deadline)?;
         let expected = authenticated_proof(
             shared.raw_secret_bytes(),
@@ -845,10 +940,11 @@ impl WorkerChannel {
                 ));
             }
         };
+        let lifecycle_parent = u32::from_le_bytes(request[2..6].try_into().unwrap());
         match request[0] {
-            1 => Ok((Action::Install, server, silent)),
-            2 => Ok((Action::Repair, server, silent)),
-            3 => Ok((Action::Uninstall, server, silent)),
+            1 if lifecycle_parent == 0 => Ok((Action::Install, server, silent, 0)),
+            2 if lifecycle_parent == 0 => Ok((Action::Repair, server, silent, 0)),
+            3 => Ok((Action::Uninstall, server, silent, lifecycle_parent)),
             _ => Err(fail(
                 EXIT_REJECTED,
                 "The setup controller requested an invalid operation.",
@@ -1360,6 +1456,10 @@ fn authenticate_predecessor_helper(package: &ParsedPackage, paths: &Paths) -> Re
 }
 
 fn parent_process_id() -> Result<u32> {
+    process_parent_id(std::process::id())
+}
+
+fn process_parent_id(process_id: u32) -> Result<u32> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(fail(
@@ -1372,7 +1472,7 @@ fn parent_process_id() -> Result<u32> {
     entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
     let mut available = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
     while available {
-        if entry.th32ProcessID == std::process::id() {
+        if entry.th32ProcessID == process_id {
             return Ok(entry.th32ParentProcessID);
         }
         available = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
@@ -1415,7 +1515,7 @@ fn installed_matches_target(
     assert_plain_file(&installed_setup)?;
     let exact_setup = file_hash(candidate)? == file_hash(&installed_setup)?;
     let acceptance_fault =
-        cfg!(feature = "acceptance-faults") && package.manifest.fault_phase.is_some();
+        cfg!(feature = "acceptance-faults") && package.manifest.package_mode == "repair";
     Ok((exact_setup || acceptance_fault)
         && installed.get("version").and_then(|value| value.as_str())
             == Some(package.manifest.version.as_str())
@@ -1438,16 +1538,12 @@ fn authorize_package_mode(
     predecessor_authorized: bool,
     requested: Action,
 ) -> Result<Action> {
-    if paths.install.exists()
-        && requested == Action::Repair
-        && installed_matches_target(package, paths, candidate)?
-    {
-        return Ok(Action::Repair);
-    }
     match package.manifest.package_mode.as_str() {
         "fresh" if !paths.install.exists() => Ok(Action::Install),
         "repair"
-            if paths.install.exists() && installed_matches_target(package, paths, candidate)? =>
+            if requested == Action::Repair
+                && paths.install.exists()
+                && installed_matches_target(package, paths, candidate)? =>
         {
             Ok(Action::Repair)
         }
@@ -1533,7 +1629,8 @@ fn install(
     action: Action,
 ) -> Result<()> {
     assert_plain_absent(&paths.staging)?;
-    write_transaction(paths, "staging", action, paths.install.exists())?;
+    let had_predecessor = path_present(&paths.install)?;
+    write_transaction(paths, "staging", action, had_predecessor)?;
     fs::create_dir(&paths.staging).map_err(io_failure)?;
     assert_plain_directory(&paths.staging)?;
     for entry in &package.manifest.files {
@@ -1551,30 +1648,110 @@ fn install(
             .map_err(|error| fail(EXIT_REJECTED, format!("Package block failed: {error:?}")))?;
         output.sync_all().map_err(io_failure)?;
     }
-    fs::copy(current, paths.staging.join("Uninstall Talking Quill.exe")).map_err(io_failure)?;
-    write_transaction(paths, "staged", action, paths.install.exists())?;
+    validate_staged_release_identity(package, &paths.staging)?;
+    let uninstaller_path = paths.staging.join("Uninstall Talking Quill.exe");
+    let mut uninstaller = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&uninstaller_path)
+        .map_err(io_failure)?;
+    let mut setup_image = File::open(current).map_err(io_failure)?;
+    std::io::copy(&mut setup_image, &mut uninstaller).map_err(io_failure)?;
+    uninstaller.sync_all().map_err(io_failure)?;
+    drop(uninstaller);
+    if file_hash(&uninstaller_path)? != file_hash(current)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Staged uninstaller verification failed.",
+        ));
+    }
+    write_transaction(paths, "staged", action, had_predecessor)?;
     crash_at(package, "staged");
-    write_transaction(paths, "prepared", action, paths.install.exists())?;
+    write_transaction(paths, "prepared", action, had_predecessor)?;
     crash_at(package, "prepared");
-    if paths.install.exists() {
+    if had_predecessor {
         durable_rename(&paths.install, &paths.backup)?;
+        write_transaction(paths, "predecessor-moved", action, had_predecessor)?;
+        crash_at(package, "predecessorMoved");
     }
     durable_rename(&paths.staging, &paths.install)?;
-    write_transaction(paths, "published", action, paths.backup.exists())?;
+    write_transaction(paths, "published", action, had_predecessor)?;
     crash_at(package, "published");
     register_uninstall(paths, &package.manifest.version)?;
     register_app_path(paths)?;
-    write_transaction(paths, "registered", action, paths.backup.exists())?;
+    write_transaction(paths, "registered", action, had_predecessor)?;
     crash_at(package, "registered");
-    write_transaction(paths, "committed", action, paths.backup.exists())?;
+    write_transaction(paths, "committed", action, had_predecessor)?;
     crash_at(package, "committed");
-    write_transaction(paths, "legacy-retiring", action, paths.backup.exists())?;
+    write_transaction(paths, "legacy-retiring", action, had_predecessor)?;
     crash_at(package, "legacyRetiring");
     retire_legacy_authority(paths)?;
-    write_transaction(paths, "legacy-retired", action, paths.backup.exists())?;
+    write_transaction(paths, "legacy-retired", action, had_predecessor)?;
     crash_at(package, "legacyRetired");
     remove_plain_tree(&paths.backup)?;
     remove_transaction(paths)?;
+    Ok(())
+}
+
+fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> Result<()> {
+    let path = staging.join("resources/keyboard-owner-release-v1.json");
+    assert_plain_file(&path)?;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).map_err(io_failure)?)
+        .map_err(|_| fail(EXIT_REJECTED, "Staged release identity is invalid."))?;
+    let role = |name: &str| {
+        value
+            .get("roles")
+            .and_then(|roles| roles.as_array())
+            .and_then(|roles| {
+                roles
+                    .iter()
+                    .find(|role| role.get("role").and_then(|role| role.as_str()) == Some(name))
+            })
+            .and_then(|role| role.get("sha256"))
+            .and_then(|hash| hash.as_str())
+    };
+    let predecessor_matches = match (&package.manifest.predecessor, value.get("predecessor")) {
+        (None, Some(previous)) => previous.is_null(),
+        (Some(expected), Some(previous)) => {
+            previous.get("version").and_then(|item| item.as_str())
+                == Some(expected.version.as_str())
+                && previous
+                    .get("releaseBuildDigest")
+                    .and_then(|item| item.as_str())
+                    == Some(expected.release_build_digest.as_str())
+                && previous.get("gatewaySha256").and_then(|item| item.as_str())
+                    == Some(expected.gateway_sha256.as_str())
+                && previous.get("ownerSha256").and_then(|item| item.as_str())
+                    == Some(expected.owner_sha256.as_str())
+        }
+        _ => false,
+    };
+    let acceptance_repair =
+        cfg!(feature = "acceptance-faults") && package.manifest.package_mode == "repair";
+    if value.get("version").and_then(|item| item.as_str())
+        != Some(package.manifest.version.as_str())
+        || value.get("architecture").and_then(|item| item.as_str())
+            != Some(package.manifest.architecture.as_str())
+        || value.get("sourceCommit").and_then(|item| item.as_str())
+            != Some(package.manifest.source_commit.as_str())
+        || value.get("sourceTree").and_then(|item| item.as_str())
+            != Some(package.manifest.source_tree.as_str())
+        || (!acceptance_repair
+            && value.get("packageMode").and_then(|item| item.as_str())
+                != Some(package.manifest.package_mode.as_str()))
+        || value
+            .get("releaseBuildDigest")
+            .and_then(|item| item.as_str())
+            != Some(package.manifest.target.release_build_digest.as_str())
+        || role("gateway") != Some(package.manifest.target.gateway_sha256.as_str())
+        || role("owner") != Some(package.manifest.target.owner_sha256.as_str())
+        || (!acceptance_repair && !predecessor_matches)
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Staged release identity does not match TQPKG2.",
+        ));
+    }
     Ok(())
 }
 
@@ -1818,27 +1995,55 @@ enum RecoveryPlan {
     FinishUninstall,
 }
 
-fn recovery_plan(phase: &str, backup_exists: bool, install_exists: bool) -> Result<RecoveryPlan> {
-    match phase {
-        "staging" | "staged" | "prepared" | "published" | "registered" if backup_exists => {
+fn recovery_plan(
+    value: &Transaction,
+    backup_exists: bool,
+    install_exists: bool,
+) -> Result<RecoveryPlan> {
+    if !matches!(value.action.as_str(), "install" | "repair" | "uninstall")
+        || (value.action == "install" && value.had_predecessor)
+        || (value.action == "repair" && !value.had_predecessor)
+        || (value.action == "uninstall" && value.phase != "uninstalling")
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Installer transaction action is invalid.",
+        ));
+    }
+    match value.phase.as_str() {
+        "staging" | "staged" | "prepared"
+            if !backup_exists && install_exists == value.had_predecessor =>
+        {
+            Ok(RecoveryPlan::DiscardStaging)
+        }
+        "staging" | "staged" | "prepared" | "predecessor-moved" | "published" | "registered"
+            if value.had_predecessor && backup_exists =>
+        {
             Ok(RecoveryPlan::RestorePredecessor)
         }
-        "prepared" | "published" | "registered" if install_exists => {
+        "published" | "registered"
+            if !value.had_predecessor && !backup_exists && install_exists =>
+        {
             Ok(RecoveryPlan::RemoveFreshCandidate)
         }
-        "staging" | "staged" | "prepared" => Ok(RecoveryPlan::DiscardStaging),
-        "committed" | "legacy-retiring" | "legacy-retired" => Ok(RecoveryPlan::FinishCommit),
+        "committed" | "legacy-retiring" | "legacy-retired" if install_exists => {
+            Ok(RecoveryPlan::FinishCommit)
+        }
         "uninstalling" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
-            "Installer transaction phase is invalid.",
+            "Installer transaction topology is invalid.",
         )),
     }
 }
 
 fn recover(paths: &Paths) -> Result<()> {
-    if !paths.transaction.exists() {
-        if paths.backup.exists() && !paths.install.exists() {
+    recover_with_system(paths, true)
+}
+
+fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
+    if !path_present(&paths.transaction)? {
+        if path_present(&paths.backup)? && !path_present(&paths.install)? {
             durable_rename(&paths.backup, &paths.install)?;
         }
         remove_plain_tree(&paths.staging)?;
@@ -1854,30 +2059,42 @@ fn recover(paths: &Paths) -> Result<()> {
             "Installer transaction schema is invalid.",
         ));
     }
-    match recovery_plan(&value.phase, paths.backup.exists(), paths.install.exists())? {
+    match recovery_plan(
+        &value,
+        path_present(&paths.backup)?,
+        path_present(&paths.install)?,
+    )? {
         RecoveryPlan::RestorePredecessor => {
             remove_plain_tree(&paths.staging)?;
             remove_plain_tree(&paths.install)?;
             durable_rename(&paths.backup, &paths.install)?;
-            register_installed_uninstall(paths)?;
-            register_app_path(paths)?;
+            if update_system_state {
+                register_installed_uninstall(paths)?;
+                register_app_path(paths)?;
+            }
         }
         RecoveryPlan::DiscardStaging => remove_plain_tree(&paths.staging)?,
         RecoveryPlan::RemoveFreshCandidate => {
-            unregister_uninstall()?;
-            unregister_app_path()?;
+            if update_system_state {
+                unregister_uninstall()?;
+                unregister_app_path()?;
+            }
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
         }
         RecoveryPlan::FinishCommit => {
-            retire_legacy_authority(paths)?;
+            if update_system_state {
+                retire_legacy_authority(paths)?;
+            }
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
         }
         RecoveryPlan::FinishUninstall => {
-            unregister_uninstall()?;
-            retire_legacy_authority(paths)?;
-            unregister_app_path()?;
+            if update_system_state {
+                unregister_uninstall()?;
+                retire_legacy_authority(paths)?;
+                unregister_app_path()?;
+            }
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
@@ -2194,8 +2411,16 @@ fn delete_retained(handle: &OwnedHandle) -> Result<()> {
     Ok(())
 }
 
+fn path_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_failure(error)),
+    }
+}
+
 fn remove_plain_tree(path: &Path) -> Result<()> {
-    if !path.exists() {
+    if !path_present(path)? {
         return Ok(());
     }
     let identity =
@@ -2204,7 +2429,7 @@ fn remove_plain_tree(path: &Path) -> Result<()> {
 }
 
 fn assert_plain_absent(path: &Path) -> Result<()> {
-    if path.exists() {
+    if path_present(path)? {
         Err(fail(EXIT_REJECTED, "Installer staging already exists."))
     } else {
         Ok(())
@@ -2300,45 +2525,286 @@ fn wide(value: &OsStr) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static CHANNEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn transaction(phase: &str, action: &str, had_predecessor: bool) -> Transaction {
+        Transaction {
+            schema_version: TRANSACTION_SCHEMA,
+            phase: phase.into(),
+            action: action.into(),
+            had_predecessor,
+        }
+    }
 
     #[test]
     fn every_durable_phase_has_a_bounded_recovery_direction() {
-        assert_eq!(
-            recovery_plan("staging", false, false).unwrap(),
-            RecoveryPlan::DiscardStaging
-        );
-        assert_eq!(
-            recovery_plan("prepared", false, false).unwrap(),
-            RecoveryPlan::DiscardStaging
-        );
-        assert_eq!(
-            recovery_plan("prepared", false, true).unwrap(),
-            RecoveryPlan::RemoveFreshCandidate
-        );
-        assert_eq!(
-            recovery_plan("staging", true, false).unwrap(),
-            RecoveryPlan::RestorePredecessor
-        );
-        assert_eq!(
-            recovery_plan("prepared", true, true).unwrap(),
-            RecoveryPlan::RestorePredecessor
-        );
-        for phase in ["staged", "published", "registered"] {
+        for phase in ["staging", "staged", "prepared"] {
             assert_eq!(
-                recovery_plan(phase, true, true).unwrap(),
+                recovery_plan(&transaction(phase, "install", false), false, false).unwrap(),
+                RecoveryPlan::DiscardStaging,
+                "{phase}"
+            );
+            assert_eq!(
+                recovery_plan(&transaction(phase, "repair", true), false, true).unwrap(),
+                RecoveryPlan::DiscardStaging,
+                "{phase}"
+            );
+        }
+        for phase in ["predecessor-moved", "published", "registered"] {
+            assert_eq!(
+                recovery_plan(
+                    &transaction(phase, "repair", true),
+                    true,
+                    phase != "predecessor-moved"
+                )
+                .unwrap(),
                 RecoveryPlan::RestorePredecessor,
                 "{phase}"
             );
         }
+        for phase in ["published", "registered"] {
+            assert_eq!(
+                recovery_plan(&transaction(phase, "install", false), false, true).unwrap(),
+                RecoveryPlan::RemoveFreshCandidate,
+                "{phase}"
+            );
+        }
+        for phase in ["committed", "legacy-retiring", "legacy-retired"] {
+            assert_eq!(
+                recovery_plan(&transaction(phase, "repair", true), true, true).unwrap(),
+                RecoveryPlan::FinishCommit,
+                "{phase}"
+            );
+        }
         assert_eq!(
-            recovery_plan("committed", true, true).unwrap(),
-            RecoveryPlan::FinishCommit
-        );
-        assert_eq!(
-            recovery_plan("uninstalling", true, true).unwrap(),
+            recovery_plan(&transaction("uninstalling", "uninstall", true), true, true).unwrap(),
             RecoveryPlan::FinishUninstall
         );
-        assert!(recovery_plan("unknown", true, true).is_err());
+        assert!(recovery_plan(&transaction("prepared", "repair", true), false, false).is_err());
+        assert!(recovery_plan(&transaction("unknown", "repair", true), true, true).is_err());
+    }
+
+    #[test]
+    fn controller_worker_cross_process_authenticates() {
+        if std::env::var_os("TQ_SETUP_CHANNEL_CHILD").is_some() {
+            let image = std::env::current_exe().unwrap();
+            let (action, _, silent, lifecycle_parent) =
+                WorkerChannel::connect_and_authenticate(&image, None).unwrap();
+            assert_eq!(lifecycle_parent, 0);
+            assert!(action == Action::Repair && silent);
+            return;
+        }
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        let channel = ControllerChannel::create(Action::Repair, true, 0).unwrap();
+        let image = std::env::current_exe().unwrap();
+        let mut child = Command::new(&image)
+            .args([
+                "--exact",
+                "windows::tests::controller_worker_cross_process_authenticates",
+                "--nocapture",
+            ])
+            .env("TQ_SETUP_CHANNEL_CHILD", "1")
+            .spawn()
+            .unwrap();
+        let mut duplicate = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    child.as_raw_handle(),
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        let child_handle = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+        let retained = channel.authenticate(&child_handle, &image).unwrap();
+        assert_eq!(
+            unsafe { GetProcessId(retained.as_raw_handle()) },
+            child.id()
+        );
+        assert!(child.wait().unwrap().success());
+    }
+
+    fn test_paths(root: &Path) -> Paths {
+        Paths {
+            install: root.join("Talking Quill"),
+            staging: root.join("staging"),
+            backup: root.join("backup"),
+            transaction: root.join("transaction.json"),
+            profile: root.join("profile"),
+            legacy_authority: root.join("legacy"),
+            legacy_quarantine: root.join("quarantine"),
+            legacy_task_file: root.join("task"),
+            program_data: root.join("program-data"),
+        }
+    }
+
+    #[test]
+    fn controller_worker_kill_recovers_every_durable_phase() {
+        if let (Some(root), Some(phase)) = (
+            std::env::var_os("TQ_SETUP_FAULT_ROOT"),
+            std::env::var_os("TQ_SETUP_FAULT_PHASE"),
+        ) {
+            let image = std::env::current_exe().unwrap();
+            let (action, _, _, _) = WorkerChannel::connect_and_authenticate(&image, None).unwrap();
+            let paths = test_paths(Path::new(&root));
+            let phase = phase.to_string_lossy();
+            let uninstalling = phase == "uninstalling";
+            let had_predecessor = !uninstalling;
+            match phase.as_ref() {
+                "staging" | "staged" | "prepared" => {
+                    fs::create_dir(&paths.install).unwrap();
+                    fs::write(paths.install.join("identity"), b"predecessor").unwrap();
+                    fs::create_dir(&paths.staging).unwrap();
+                    fs::write(paths.staging.join("identity"), b"candidate").unwrap();
+                }
+                "predecessor-moved" => {
+                    fs::create_dir(&paths.backup).unwrap();
+                    fs::write(paths.backup.join("identity"), b"predecessor").unwrap();
+                    fs::create_dir(&paths.staging).unwrap();
+                    fs::write(paths.staging.join("identity"), b"candidate").unwrap();
+                }
+                "published" | "registered" | "committed" | "legacy-retiring" | "legacy-retired" => {
+                    fs::create_dir(&paths.backup).unwrap();
+                    fs::write(paths.backup.join("identity"), b"predecessor").unwrap();
+                    fs::create_dir(&paths.install).unwrap();
+                    fs::write(paths.install.join("identity"), b"candidate").unwrap();
+                }
+                "uninstalling" => {
+                    fs::create_dir(&paths.install).unwrap();
+                    fs::write(paths.install.join("identity"), b"candidate").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            write_transaction(
+                &paths,
+                &phase,
+                if uninstalling {
+                    Action::Uninstall
+                } else {
+                    action
+                },
+                had_predecessor,
+            )
+            .unwrap();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        let image = std::env::current_exe().unwrap();
+        for phase in [
+            "staging",
+            "staged",
+            "prepared",
+            "predecessor-moved",
+            "published",
+            "registered",
+            "committed",
+            "legacy-retiring",
+            "legacy-retired",
+            "uninstalling",
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("tq-setup-fault-{}-{phase}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let channel = ControllerChannel::create(
+                if phase == "uninstalling" {
+                    Action::Uninstall
+                } else {
+                    Action::Repair
+                },
+                true,
+                if phase == "uninstalling" {
+                    std::process::id()
+                } else {
+                    0
+                },
+            )
+            .unwrap();
+            let mut child = Command::new(&image)
+                .args([
+                    "--exact",
+                    "windows::tests::controller_worker_kill_recovers_every_durable_phase",
+                    "--nocapture",
+                ])
+                .env("TQ_SETUP_FAULT_ROOT", &root)
+                .env("TQ_SETUP_FAULT_PHASE", phase)
+                .spawn()
+                .unwrap();
+            let mut duplicate = ptr::null_mut();
+            assert_ne!(
+                unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        child.as_raw_handle(),
+                        GetCurrentProcess(),
+                        &mut duplicate,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS,
+                    )
+                },
+                0
+            );
+            let shell = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+            let worker = channel.authenticate(&shell, &image).unwrap();
+            let transaction = root.join("transaction.json");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !transaction.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(transaction.exists(), "{phase}");
+            assert_ne!(unsafe { TerminateProcess(worker.as_raw_handle(), 197) }, 0);
+            assert_eq!(
+                unsafe { WaitForSingleObject(worker.as_raw_handle(), 30_000) },
+                WAIT_OBJECT_0
+            );
+            let _ = child.wait();
+            let paths = test_paths(&root);
+            recover_with_system(&paths, false).unwrap();
+            if phase == "uninstalling" {
+                assert!(!paths.install.exists(), "{phase}");
+            } else {
+                let expected =
+                    if matches!(phase, "committed" | "legacy-retiring" | "legacy-retired") {
+                        b"candidate".as_slice()
+                    } else {
+                        b"predecessor".as_slice()
+                    };
+                assert_eq!(
+                    fs::read(paths.install.join("identity")).unwrap(),
+                    expected,
+                    "{phase}"
+                );
+            }
+            assert!(
+                !paths.backup.exists() && !paths.staging.exists() && !paths.transaction.exists(),
+                "{phase}"
+            );
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn delegated_handle_validation_never_owns_or_closes_the_callers_handle() {
+        assert!(duplicate_delegated_process_handle(0, std::process::id()).is_err());
+        assert!(duplicate_delegated_process_handle(u64::MAX, std::process::id()).is_err());
+        let event =
+            unsafe { OwnedHandle::from_raw_handle(CreateEventW(ptr::null(), 1, 0, ptr::null())) };
+        let value = event.as_raw_handle() as usize as u64;
+        assert!(duplicate_delegated_process_handle(value, std::process::id()).is_err());
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { GetHandleInformation(event.as_raw_handle(), &mut flags) },
+            0
+        );
     }
 
     #[test]

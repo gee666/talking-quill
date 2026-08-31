@@ -56,7 +56,7 @@ function frozenSignedRequests() {
 const plan = {
   architecture: 'x64',
   artifacts: Object.fromEntries(
-    ['predecessor', 'candidate', 'fresh', 'fault'].map((name) => [
+    ['predecessor', 'candidate', 'fresh', 'repair', 'fault'].map((name) => [
       name,
       {
         installer: { path: `${name}.exe`, bytes: 1, sha256: name.padEnd(64, '0') },
@@ -121,10 +121,10 @@ function passingPhase(phase: string): Record<string, unknown> {
         sameCandidate: true,
         sentinelPreserved: true,
       },
-      'injected-precommit-replacement-failure-rollback': {
+      'injected-repair-failure-recovery': {
         ...common,
         failureInjected: true,
-        predecessorRestored: true,
+        candidateRecoveryCompleted: true,
         mixedAuthorityAbsent: true,
       },
       'uninstall-preserving-data': { ...common, machineFilesAbsent: true, sentinelPreserved: true },

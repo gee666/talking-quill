@@ -5,7 +5,11 @@ import { zstdCompressSync, constants as zlibConstants } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dump, load } from 'js-yaml';
-import { canonicalJson as tqpkg2CanonicalJson, tqpkg2TreeDigest, validateTqpkg2Path } from './tqpkg2.mjs';
+import {
+  canonicalJson as tqpkg2CanonicalJson,
+  tqpkg2TreeDigest,
+  validateTqpkg2Path,
+} from './tqpkg2.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const architecture = process.argv[2];
@@ -18,16 +22,18 @@ const input = resolve(
   outputDirectory,
   architecture === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked',
 );
-const output = resolve(
-  outputDirectory,
-  `Talking-Quill-${packageJson.version}-win-${architecture}.exe`,
-);
-const stub = resolve(root, 'tmp', 'windows-setup', architecture, 'talking-quill-windows-setup.exe');
 const packageMode = process.env.TALKING_QUILL_PACKAGE_MODE;
 if (!['fresh', 'update', 'repair'].includes(packageMode)) {
   throw new Error('TALKING_QUILL_PACKAGE_MODE must be fresh, update, or repair');
 }
 const faultPhase = process.env.TALKING_QUILL_NATIVE_FAULT_PHASE ?? null;
+const artifactKind =
+  faultPhase === null ? (packageMode === 'fresh' ? 'setup' : packageMode) : `repair-${faultPhase}`;
+const output = resolve(
+  outputDirectory,
+  `Talking-Quill-${packageJson.version}-win-${architecture}-${artifactKind}.exe`,
+);
+const stub = resolve(root, 'tmp', 'windows-setup', architecture, 'talking-quill-windows-setup.exe');
 if (faultPhase !== null && process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1') {
   throw new Error('native fault phase is permitted only in an installed-acceptance build');
 }
@@ -69,7 +75,8 @@ for (const item of paths) {
 const treeSha256 = tqpkg2TreeDigest(files);
 const roleHash = (role) => {
   const match = sourceManifest.roles?.find((value) => value.role === role);
-  if (!/^[0-9a-f]{64}$/u.test(match?.sha256 ?? '')) throw new Error(`native package target ${role} hash is invalid`);
+  if (!/^[0-9a-f]{64}$/u.test(match?.sha256 ?? ''))
+    throw new Error(`native package target ${role} hash is invalid`);
   return match.sha256;
 };
 if (!/^[0-9a-f]{64}$/u.test(sourceManifest.releaseBuildDigest ?? '')) {
@@ -130,7 +137,7 @@ await rm(pending, { force: true });
 await writeFile(pending, Buffer.concat([stubBytes, packageBytes, footer]), { flag: 'wx' });
 await rm(output, { force: true });
 await rename(pending, output);
-await rebuildUpdateMetadata(output);
+if (packageMode === 'update') await rebuildUpdateMetadata(output);
 console.log(`Packed ${paths.length} files into ${output}`);
 
 async function collect(directory) {
@@ -203,13 +210,18 @@ async function rebuildUpdateMetadata(path) {
     const metadataPath = resolve(dirname(path), name);
     const metadata = load(await readFile(metadataPath, 'utf8'));
     let changed = false;
-    for (const file of Array.isArray(metadata?.files) ? metadata.files : []) {
-      if (basename(file.url ?? file.path ?? '') !== basename(path)) continue;
-      Object.assign(file, { sha512, size: bytes.length, blockMapSize: blockmapMetadata.size });
+    const files = Array.isArray(metadata?.files) ? metadata.files : [];
+    if (files.length === 1) {
+      Object.assign(files[0], {
+        url: basename(path),
+        sha512,
+        size: bytes.length,
+        blockMapSize: blockmapMetadata.size,
+      });
       changed = true;
     }
-    if (basename(metadata?.path ?? '') === basename(path)) {
-      Object.assign(metadata, { sha512, size: bytes.length });
+    if (typeof metadata?.path === 'string') {
+      Object.assign(metadata, { path: basename(path), sha512, size: bytes.length });
       changed = true;
     }
     if (changed) {

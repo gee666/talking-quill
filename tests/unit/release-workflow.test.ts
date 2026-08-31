@@ -91,7 +91,23 @@ describe('Windows native release workflow', () => {
     expect(immediateUpload).toBeGreaterThan(assembleCommand);
     expect(packageJob).toContain('tmp/release-upload/latest-${{ matrix.arch }}.yml');
     expect(packageJob).toContain('tmp/release-upload/release-identity-win-${{ matrix.arch }}.json');
-    expect(packageJob).toContain('tmp/release-upload/provenance-win-${{ matrix.arch }}.json');
+    expect(packageJob).toContain('tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json');
+    expect(packageJob).toContain(
+      'tmp/release-upload/provenance-win-${{ matrix.arch }}-update.json',
+    );
+    expect(packageJob).toContain('TALKING_QUILL_PACKAGE_MODE=fresh');
+    expect(packageJob).toContain('Build explicit predecessor-bound update');
+    for (const phase of [
+      'staged',
+      'prepared',
+      'predecessorMoved',
+      'published',
+      'registered',
+      'committed',
+      'legacyRetiring',
+      'legacyRetired',
+    ])
+      expect(packageJob).toContain(phase);
     expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
     expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
     expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
@@ -120,8 +136,10 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('Start-Process -FilePath $helper');
     expect(lifecycle).toContain('--mode installed --root');
     expect(lifecycle).toContain('Uninstall Talking Quill.exe');
+    expect(lifecycle).toContain('@(0,997)');
+    expect(lifecycle).toContain('Durable silent uninstall did not complete');
     const assemble = section('assemble');
-    expect(assemble).toContain('needs: [validate, package, smoke, lifecycle]');
+    expect(assemble).toContain('needs: [validate, package, smoke, lifecycle, fresh-lifecycle]');
     expect(assemble).toContain('windows-x64-exact-native-setup-input');
     expect(assemble).toContain('windows-arm64-exact-native-setup-input');
     expect(assemble).toContain('windows-x64-native-ui-smoke-evidence');

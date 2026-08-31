@@ -13,7 +13,7 @@ export const ACCEPTANCE_PHASE_SCHEDULE = Object.freeze([
   phase('normal-quit', 28 * 60_000, 29 * 60_000),
   phase('login-marker', 30 * 60_000, 31 * 60_000),
   phase('running-silent-repair', 32 * 60_000, 36 * 60_000),
-  phase('injected-precommit-replacement-failure-rollback', 36 * 60_000, 41 * 60_000),
+  phase('injected-repair-failure-recovery', 36 * 60_000, 41 * 60_000),
   phase('uninstall-preserving-data', 41 * 60_000, 46 * 60_000),
   phase('reinstall', 46 * 60_000, 52 * 60_000),
   phase('diagnostics-disabled-failure', 53 * 60_000, 55 * 60_000),

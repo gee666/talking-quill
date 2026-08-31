@@ -91,7 +91,7 @@ describe('active release tooling', () => {
         TALKING_QUILL_RELEASE_COMMIT: commit,
         TALKING_QUILL_DETERMINISTIC: '1',
       }),
-    ).toContain('6 validated Windows x64 inputs plus release-manifest.json');
+    ).toContain('8 validated Windows x64 inputs plus release-manifest.json');
     const manifest = JSON.parse(
       readFileSync(resolve(fixture, 'release-manifest.json'), 'utf8'),
     ) as {
@@ -100,7 +100,7 @@ describe('active release tooling', () => {
       provenance: { platform: string; arch: string }[];
     };
     expect(manifest.promotable).toBe(true);
-    expect(manifest.assets).toHaveLength(6);
+    expect(manifest.assets).toHaveLength(8);
     expect(manifest.provenance.map(({ platform, arch }) => `${platform}-${arch}`)).toEqual([
       'win-x64',
     ]);
@@ -109,7 +109,7 @@ describe('active release tooling', () => {
 
   it('rejects stale source-tree provenance before producing a manifest', () => {
     createAssemblyFixture();
-    const path = resolve(fixture, 'provenance-win-x64.json');
+    const path = resolve(fixture, 'provenance-win-x64-update.json');
     const provenance = JSON.parse(readFileSync(path, 'utf8')) as {
       sourceTreeSha256: string;
     };
@@ -126,7 +126,7 @@ describe('active release tooling', () => {
 
   it('rejects malformed current provenance before producing a manifest', () => {
     createAssemblyFixture();
-    const path = resolve(fixture, 'provenance-win-x64.json');
+    const path = resolve(fixture, 'provenance-win-x64-update.json');
     const provenance = JSON.parse(readFileSync(path, 'utf8')) as {
       sourceTreeSha256?: string;
     };
@@ -138,7 +138,7 @@ describe('active release tooling', () => {
         TALKING_QUILL_RELEASE_COMMIT: commit,
         TALKING_QUILL_DETERMINISTIC: '1',
       }),
-    ).toThrow('Provenance schema mismatch: provenance-win-x64.json');
+    ).toThrow('Provenance schema mismatch: provenance-win-x64-update.json');
   });
 
   it('keeps assembly commit-bound and exact-input allowlisted', () => {
@@ -155,8 +155,10 @@ function createAssemblyFixture(): void {
   rmSync(fixture, { recursive: true, force: true });
   mkdirSync(fixture, { recursive: true });
 
-  const installer = 'Talking-Quill-1.0.0-win-x64.exe';
+  const installer = 'Talking-Quill-1.0.0-win-x64-update.exe';
+  const freshInstaller = 'Talking-Quill-1.0.0-win-x64-setup.exe';
   writeFileSync(resolve(fixture, installer), `${installer} bytes`);
+  writeFileSync(resolve(fixture, freshInstaller), `${freshInstaller} bytes`);
   const blockmap = `${installer}.blockmap`;
   writeFileSync(resolve(fixture, blockmap), `${blockmap} bytes`);
   const entries = [
@@ -168,20 +170,28 @@ function createAssemblyFixture(): void {
       sha256: sha256(resolve(fixture, installer)),
     },
   ];
+  const provenance = {
+    schemaVersion: 2,
+    sourceCommit: commit,
+    sourceTree,
+    sourceTreeSha256,
+    package: { version: '1.0.0', platform: 'win', arch: 'x64', root: 'release/win-x64-unpacked' },
+    entries,
+  };
+  writeFileSync(resolve(fixture, 'provenance-win-x64-update.json'), JSON.stringify(provenance));
   writeFileSync(
-    resolve(fixture, 'provenance-win-x64.json'),
+    resolve(fixture, 'provenance-win-x64-setup.json'),
     JSON.stringify({
-      schemaVersion: 2,
-      sourceCommit: commit,
-      sourceTree,
-      sourceTreeSha256,
-      package: {
-        version: '1.0.0',
-        platform: 'win',
-        arch: 'x64',
-        root: 'release/win-x64-unpacked',
-      },
-      entries,
+      ...provenance,
+      entries: [
+        {
+          role: 'final-artifact',
+          path: `release/${freshInstaller}`,
+          kind: 'file',
+          size: readFileSync(resolve(fixture, freshInstaller)).length,
+          sha256: sha256(resolve(fixture, freshInstaller)),
+        },
+      ],
     }),
   );
 

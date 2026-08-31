@@ -77,17 +77,6 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
     reason: 'Executes only the bundled helper identity-bound reset mode with fixed arguments.',
     tokens: Object.freeze(['node:child_process']),
   }),
-  'app/src/main/app/windows-uninstall-target.ts': Object.freeze({
-    category: 'windows-uninstall-target-only',
-    reason:
-      'Runs fixed System32 PowerShell arguments to resolve the signed-in desktop profile for explicit uninstall data removal.',
-    tokens: Object.freeze(['node:child_process']),
-    childProcessMembers: Object.freeze([
-      'SpawnSyncOptionsWithStringEncoding',
-      'SpawnSyncReturns',
-      'spawnSync',
-    ]),
-  }),
   'app/src/main/app/application.ts': Object.freeze({
     category: 'macos-owner-lifecycle-only',
     reason:
