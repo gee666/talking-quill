@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   SOURCE_COMMIT_MARKER,
@@ -14,6 +14,23 @@ import {
   createPackageReleaseMetadata,
   validatePackageReleaseMetadata,
 } from '../../scripts/release-package-metadata.mjs';
+
+export function resolveHelperHarnessSource({
+  repositoryRoot,
+  helperArgument,
+  platform = process.platform,
+}) {
+  if (helperArgument !== null && helperArgument !== undefined) {
+    if (!isAbsolute(helperArgument)) throw new Error('--helper must be an absolute path');
+    return helperArgument;
+  }
+  return resolve(
+    repositoryRoot,
+    'app',
+    'native',
+    platform === 'win32' ? 'talking-quill-helper.exe' : 'talking-quill-helper',
+  );
+}
 
 export const FAILURE_CLEANUP_REQUESTS = Object.freeze([
   Object.freeze(['session.set_capture', Object.freeze({ mode: 'off' })]),

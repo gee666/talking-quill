@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, writeFile } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
 import {
   FAILURE_CLEANUP_REQUESTS,
   prepareHelperHarnessExecutable,
+  resolveHelperHarnessSource,
 } from './helper-harness-support.mjs';
 
 const arguments_ = process.argv.slice(2);
@@ -15,11 +16,7 @@ const interactive = arguments_.includes('--interactive');
 const helperArgument = valueAfter('--helper');
 const evidenceArgument = valueAfter('--evidence');
 const repositoryRoot = resolve(import.meta.dirname, '..', '..');
-const sourceHelper = resolve(
-  helperArgument ??
-    `app/native/${process.platform === 'win32' ? 'talking-quill-helper.exe' : 'talking-quill-helper'}`,
-);
-if (!isAbsolute(sourceHelper)) throw new Error('Helper path must resolve to an absolute path');
+const sourceHelper = resolveHelperHarnessSource({ repositoryRoot, helperArgument });
 await access(sourceHelper);
 const preparedHelper = await prepareHelperHarnessExecutable({
   helper: sourceHelper,

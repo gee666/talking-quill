@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FAILURE_CLEANUP_REQUESTS,
   prepareHelperHarnessExecutable,
+  resolveHelperHarnessSource,
 } from '../native/helper-harness-support.mjs';
 
 describe('native helper harness support', () => {
@@ -14,6 +15,24 @@ describe('native helper harness support', () => {
       ['activation.configure', { enabled: false, bindings: [] }],
       ['shutdown', {}],
     ]);
+  });
+
+  it('anchors the default helper to the repository instead of the caller cwd', () => {
+    const repositoryRoot = resolve('repository-root');
+    expect(
+      resolveHelperHarnessSource({
+        repositoryRoot,
+        helperArgument: null,
+        platform: 'win32',
+      }),
+    ).toBe(resolve(repositoryRoot, 'app/native/talking-quill-helper.exe'));
+    expect(() =>
+      resolveHelperHarnessSource({
+        repositoryRoot,
+        helperArgument: 'relative/helper.exe',
+        platform: 'win32',
+      }),
+    ).toThrow('--helper must be an absolute path');
   });
 
   it('does not repackage an explicit non-source helper', async () => {
