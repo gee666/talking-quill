@@ -8,14 +8,22 @@ license = "MIT"
 
 [workspace]
 
+[features]
+acceptance-faults = []
+
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
+thiserror = "=2.0.19"
 sha2 = "=0.11.0"
+sha2_10 = { package = "sha2", version = "=0.10.9" }
+hmac = "=0.12.1"
+p256 = { version = "=0.13.2", features = ["ecdh"] }
 zstd = "=0.13.3"
 
 [target.'cfg(windows)'.dependencies]
 getrandom = "=0.4.3"
+windows = { version = "=0.61.3", features = ["Win32_System_Com", "Win32_System_TaskScheduler", "Win32_System_Variant", "Win32_System_Ole"] }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -27,6 +35,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_IO",
   "Win32_System_Pipes",
   "Win32_System_Registry",
+  "Win32_System_Services",
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

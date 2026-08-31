@@ -5,7 +5,7 @@ describe('native Windows uninstall profile policy', () => {
   it('preserves the signed-in profile by default', async () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
     expect(setup).toContain('delete_profile');
-    expect(setup).toContain('FOLDERID_LocalAppData');
+    expect(setup).toContain('FOLDERID_RoamingAppData');
     expect(setup).toContain('remove_plain_tree(&controller_paths.profile)');
   });
 

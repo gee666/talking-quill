@@ -231,18 +231,21 @@ export async function runProductionPhase(phase, input, state, os) {
   if (phase === 'running-silent-repair') {
     await os.ensureApplicationRunning();
     const before = observe('repair-before', await installed());
+    const repairProbe = await os.createRepairProbe();
     const beforeSentinel = observe('repair-sentinel-before', await sentinel());
-    await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [78]);
+    await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [0]);
     const after = observe('repair-after', await installed());
     const afterSentinel = observe('repair-sentinel-after', await sentinel());
+    const repairProbeRemoved = !(await os.pathExists(repairProbe));
     assertInstalled(before, input.artifacts.candidate);
     assertInstalled(after, input.artifacts.candidate);
     requireValue(
-      beforeSentinel.preserved && afterSentinel.preserved,
-      'Repair changed profile sentinel',
+      beforeSentinel.preserved && afterSentinel.preserved && repairProbeRemoved,
+      'Repair did not replace the installed tree while preserving the profile sentinel',
     );
     return pass(observations, {
-      unauthorizedDirectRepairRejected: true,
+      authenticatedRepair: true,
+      installedTreeReplacementObserved: repairProbeRemoved,
       sameCandidate: true,
       sentinelPreserved: true,
     });
@@ -250,19 +253,16 @@ export async function runProductionPhase(phase, input, state, os) {
   if (phase === 'injected-precommit-replacement-failure-rollback') {
     const before = observe('fault-before', await installed());
     const machineBefore = observe('fault-machine-before', await os.observeMachineResidue());
-    await spawnFrozen(
-      input.artifacts.fault,
-      ['/TALKINGQUILLTESTCOMMITFAIL=before-program-files-replace'],
-      os,
-      observations,
-      [64],
-    );
+    const faults = input.artifacts.faults ?? { published: input.artifacts.fault };
+    const crashPhases = [];
+    for (const [phaseName, artifact] of Object.entries(faults)) {
+      requireValue(artifact.isolatedValidation === true, `${phaseName} fault artifact is not an authenticated isolated-validation build`);
+      await spawnFrozen(artifact, ['/S'], os, observations, [197]);
+      await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [0]);
+      crashPhases.push(phaseName);
+    }
     const after = observe('fault-after', await installed());
     const machineAfter = observe('fault-machine-after', await os.observeMachineResidue());
-    requireValue(
-      input.artifacts.fault.isolatedValidation === true,
-      'Rejected legacy fault artifact is not an isolated-validation build',
-    );
     requireValue(
       before.releaseBuildDigest === after.releaseBuildDigest &&
         before.gatewaySha256 === after.gatewaySha256 &&
@@ -276,8 +276,9 @@ export async function runProductionPhase(phase, input, state, os) {
       'Rollback machine state is invalid',
     );
     return pass(observations, {
-      unsupportedFaultAuthorityRejected: true,
-      predecessorPreserved: true,
+      failureInjected: true,
+      crashPhases,
+      predecessorRestored: true,
       mixedAuthorityAbsent: true,
     });
   }
@@ -710,6 +711,11 @@ export function createWindowsOsAdapter(acceptance = {}) {
       }),
     mkdir: (path) => mkdir(path, { recursive: true }),
     writeFile,
+    createRepairProbe: async () => {
+      const path = resolve(installedRoot, '.talking-quill-repair-corruption-probe');
+      await writeFile(path, randomBytes(64));
+      return path;
+    },
     pathExists: async (path) =>
       stat(path).then(
         () => true,

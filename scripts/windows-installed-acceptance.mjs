@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validatePackageReleaseMetadata } from './release-package-metadata.mjs';
+import { parseTqpkg2 } from './tqpkg2.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import {
   ACCEPTANCE_PHASE_SCHEDULE,
@@ -72,6 +73,14 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
       input.architecture,
       fileSystem,
     );
+  }
+  if (input.artifacts?.faults !== undefined) {
+    artifacts.faults = {};
+    for (const phase of ['staged', 'prepared', 'published', 'registered', 'committed', 'legacyRetiring', 'legacyRetired']) {
+      const faultInput = input.artifacts.faults[phase];
+      if (faultInput === undefined) throw new Error(`Acceptance fault artifact is missing for ${phase}`);
+      artifacts.faults[phase] = await freezeArtifact('fault', faultInput, input.architecture, fileSystem);
+    }
   }
   const predecessor = artifacts.predecessor.metadata;
   const candidate = artifacts.candidate.metadata;
@@ -387,6 +396,12 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
   } else if (name === 'candidate' || name === 'predecessor') {
     throw new Error(`${name} release identity is required`);
   }
+  const nativePackage = /\.exe$/iu.test(installer.path)
+    ? parseTqpkg2(await fileSystem.readFile(installer.path), metadata.architecture, { allowAcceptanceFaults: name === 'fault' })
+    : null;
+  if (nativePackage !== null && nativePackage.manifest.packageMode !== metadata.packageMode) {
+    throw new Error(`${name} TQPKG2 mode does not match release metadata`);
+  }
   let isolatedValidation = false;
   if (name === 'fault') {
     const validationFile = await regularIdentity(
@@ -399,7 +414,8 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     );
     if (
       validation.isolatedInstallValidation !== true ||
-      validation.failurePoint !== 'before-program-files-replace' ||
+      validation.failurePoint !== nativePackage?.manifest.faultPhase ||
+      !['staged', 'prepared', 'published', 'registered', 'committed', 'legacyRetiring', 'legacyRetired'].includes(validation.failurePoint) ||
       validation.candidatePackageLayoutDigest !== metadata.packageLayoutDigest
     ) {
       throw new Error('Fault artifact validation evidence is invalid');

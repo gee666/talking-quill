@@ -5,6 +5,7 @@ import { zstdCompressSync, constants as zlibConstants } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dump, load } from 'js-yaml';
+import { canonicalJson as tqpkg2CanonicalJson, tqpkg2TreeDigest, validateTqpkg2Path } from './tqpkg2.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const architecture = process.argv[2];
@@ -22,7 +23,14 @@ const output = resolve(
   `Talking-Quill-${packageJson.version}-win-${architecture}.exe`,
 );
 const stub = resolve(root, 'tmp', 'windows-setup', architecture, 'talking-quill-windows-setup.exe');
-const packageMode = process.env.TALKING_QUILL_PACKAGE_MODE ?? 'update';
+const packageMode = process.env.TALKING_QUILL_PACKAGE_MODE;
+if (!['fresh', 'update', 'repair'].includes(packageMode)) {
+  throw new Error('TALKING_QUILL_PACKAGE_MODE must be fresh, update, or repair');
+}
+const faultPhase = process.env.TALKING_QUILL_NATIVE_FAULT_PHASE ?? null;
+if (faultPhase !== null && process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1') {
+  throw new Error('native fault phase is permitted only in an installed-acceptance build');
+}
 const sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '';
 const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '';
 if (!/^[0-9a-f]{40}$/u.test(sourceCommit) || !/^[0-9a-f]{40}$/u.test(sourceTree)) {
@@ -32,8 +40,8 @@ const paths = await collect(input);
 const sourceManifest = JSON.parse(
   await readFile(resolve(input, 'resources', 'keyboard-owner-release-v1.json'), 'utf8'),
 );
-const predecessor = ['update', 'release'].includes(packageMode) ? sourceManifest.predecessor : null;
-if (['update', 'release'].includes(packageMode) !== (predecessor !== null && predecessor !== undefined)) {
+const predecessor = packageMode === 'update' ? sourceManifest.predecessor : null;
+if ((packageMode === 'update') !== (predecessor !== null && predecessor !== undefined)) {
   throw new Error('native update package requires one exact predecessor');
 }
 const blocks = [];
@@ -58,13 +66,18 @@ for (const item of paths) {
     blockSize: compressed.length,
   });
 }
-const tree = createHash('sha256');
-for (const file of files) {
-  for (const value of [file.path, String(file.mode), String(file.size), file.sha256])
-    frame(tree, value);
+const treeSha256 = tqpkg2TreeDigest(files);
+const roleHash = (role) => {
+  const match = sourceManifest.roles?.find((value) => value.role === role);
+  if (!/^[0-9a-f]{64}$/u.test(match?.sha256 ?? '')) throw new Error(`native package target ${role} hash is invalid`);
+  return match.sha256;
+};
+if (!/^[0-9a-f]{64}$/u.test(sourceManifest.releaseBuildDigest ?? '')) {
+  throw new Error('native package target release build digest is invalid');
 }
 const manifest = {
   architecture,
+  faultPhase,
   files,
   packageMode,
   predecessor:
@@ -79,7 +92,12 @@ const manifest = {
   schemaVersion: 2,
   sourceCommit,
   sourceTree,
-  treeSha256: tree.digest('hex'),
+  target: {
+    gatewaySha256: roleHash('gateway'),
+    ownerSha256: roleHash('owner'),
+    releaseBuildDigest: sourceManifest.releaseBuildDigest,
+  },
+  treeSha256,
   version: packageJson.version,
 };
 let manifestBytes;
@@ -143,52 +161,13 @@ async function collect(directory) {
 }
 
 export function validatePath(path) {
-  if (
-    !path ||
-    !/^[\x20-\x7e]+$/u.test(path) ||
-    path.startsWith('/') ||
-    path.includes('\\') ||
-    path.includes(':') ||
-    path.length > 1024
-  )
-    throw new Error(`invalid native package path: ${path}`);
-  const reserved = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
-  for (const part of path.split('/')) {
-    if (
-      !part ||
-      part === '.' ||
-      part === '..' ||
-      part.endsWith('.') ||
-      part.endsWith(' ') ||
-      reserved.test(part) ||
-      /[<>"|?*]/u.test(part) ||
-      [...part].some((character) => character.codePointAt(0) < 32)
-    )
-      throw new Error(`invalid native package path: ${path}`);
-  }
+  validateTqpkg2Path(path);
 }
 
 function canonicalJson(value) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean')
-    return JSON.stringify(value);
-  if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value) || value < 0)
-      throw new Error('native manifest number is invalid');
-    return String(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  return `{${Object.keys(value)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-    .join(',')}}`;
+  return tqpkg2CanonicalJson(value);
 }
 
-function frame(digest, value) {
-  const bytes = Buffer.from(value);
-  const length = Buffer.alloc(8);
-  length.writeBigUInt64LE(BigInt(bytes.length));
-  digest.update(length).update(bytes);
-}
 function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }

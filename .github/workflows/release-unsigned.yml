@@ -152,7 +152,7 @@ jobs:
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: native-setup
       TALKING_QUILL_PACKAGE_TARGET: win
       TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
-      TALKING_QUILL_PACKAGE_MODE: release
+      TALKING_QUILL_PACKAGE_MODE: update
       TALKING_QUILL_PREDECESSOR_VERSION: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_version || inputs.predecessor_arm64_version }}
       TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_release_build || inputs.predecessor_arm64_release_build }}
       TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_gateway_sha256 || inputs.predecessor_arm64_gateway_sha256 }}

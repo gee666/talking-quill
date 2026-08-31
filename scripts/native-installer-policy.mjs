@@ -9,6 +9,7 @@ const required = [
   'installer/windows-setup/src/package.rs',
   'installer/windows-setup/src/windows.rs',
   'scripts/pack-windows-native.mjs',
+  'scripts/tqpkg2.mjs',
 ];
 for (const path of required) await access(resolve(root, path));
 const [builder, application, packer, setup] = await Promise.all([
@@ -23,6 +24,9 @@ if (!builder.includes('- target: dir') || !application.includes('pack-windows-na
 for (const evidence of ['TQPKG2', 'canonicalJson', 'zstdCompressSync', 'blockMapSize']) {
   if (!packer.includes(evidence))
     throw new Error(`native package evidence is missing: ${evidence}`);
+}
+for (const evidence of ['FILE_FLAG_OVERLAPPED', 'NtSuspendProcess', 'diffie_hellman', 'Hmac', 'TokenIntegrityLevel', 'OpenSCManagerW', 'ITaskService', 'FOLDERID_RoamingAppData', 'FILE_FLAG_OPEN_REPARSE_POINT']) {
+  if (!setup.includes(evidence)) throw new Error(`native setup security mechanism is missing: ${evidence}`);
 }
 for (const forbidden of ['powershell', 'cmd.exe', 'wscript', 'cscript']) {
   if (setup.toLowerCase().includes(forbidden))

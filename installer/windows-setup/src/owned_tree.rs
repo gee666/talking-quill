@@ -5,6 +5,7 @@ use thiserror::Error;
 pub enum OwnedTreeError {
     #[error("invalid expected directory identity")]
     InvalidIdentity,
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[error("identity-bound deletion is unsupported on this platform")]
     Unsupported,
     #[error("owned directory identity did not match")]

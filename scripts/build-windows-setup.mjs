@@ -10,9 +10,13 @@ if (!['x64', 'arm64'].includes(architecture ?? '')) {
 }
 const target = architecture === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
 const manifest = resolve(repositoryRoot, 'installer', 'windows-setup', 'Cargo.toml');
+const cargoArguments = ['build', '--manifest-path', manifest, '--target', target, '--release', '--locked'];
+if (process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD === '1') {
+  cargoArguments.push('--features', 'acceptance-faults');
+}
 const result = spawnSync(
   'cargo',
-  ['build', '--manifest-path', manifest, '--target', target, '--release', '--locked'],
+  cargoArguments,
   { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true },
 );
 if (result.status !== 0)

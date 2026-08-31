@@ -8,20 +8,23 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY,
-    TokenElevation,
+    DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_SHARE_READ, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ, GetFileInformationByHandle,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Threading::{
@@ -39,8 +42,8 @@ static WINDOWS_UPDATE_PRIMARY_KEY_MARKER: &str = concat!(
     "TALKING_QUILL_WINDOWS_UPDATE_PRIMARY_KEY_V1=",
     env!("TALKING_QUILL_WINDOWS_UPDATE_PUBLIC_KEY_SEC1")
 );
-const RESTRICTED_STAGING_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-const RESTRICTED_FILE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
+const RESTRICTED_STAGING_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+const RESTRICTED_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
 
 const EXIT_INVALID_REQUEST: i32 = 64;
 const EXIT_NOT_ELEVATED: i32 = 77;
@@ -176,13 +179,29 @@ fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
     if unsafe { ShellExecuteExW(&mut execute) } == 0 || execute.hProcess.is_null() {
         return Err(EXIT_LAUNCH_FAILED);
     }
-    unsafe { CloseHandle(execute.hProcess) };
+    let process = unsafe { OwnedHandle::from_raw_handle(execute.hProcess) };
+    let wait =
+        unsafe { WaitForSingleObject(process.as_raw_handle(), INSTALLER_SUPERVISION_TIMEOUT_MS) };
+    if wait == WAIT_TIMEOUT {
+        unsafe { TerminateProcess(process.as_raw_handle(), EXIT_INSTALLER_STILL_RUNNING as u32) };
+        unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
+        return Err(EXIT_INSTALLER_STILL_RUNNING);
+    }
+    if wait != WAIT_OBJECT_0 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let mut code = 0;
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 || code != 0 {
+        return Err(code as i32);
+    }
     Ok(())
 }
 
 fn run_native_cleanup(encoded: &str) -> Result<(), i32> {
     let bytes = decode_base64(encoded)?;
-    let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| EXIT_INVALID_REQUEST)?);
+    let binding = String::from_utf8(bytes).map_err(|_| EXIT_INVALID_REQUEST)?;
+    let (path, expected_identity) = binding.split_once('\0').ok_or(EXIT_INVALID_REQUEST)?;
+    let path = PathBuf::from(path);
     let program_data = known_folder(&FOLDERID_ProgramData)?;
     if path
         .parent()
@@ -207,9 +226,13 @@ fn run_native_cleanup(encoded: &str) -> Result<(), i32> {
             {
                 return Err(EXIT_IDENTITY_MISMATCH);
             }
-            Ok(_) => {
-                let _ = std::fs::remove_dir_all(&path);
-            }
+            Ok(_) => match remove_owned_tree(&path, expected_identity) {
+                Ok(()) => return Ok(()),
+                Err(crate::owned_tree::OwnedTreeError::IdentityMismatch) => {
+                    return Err(EXIT_IDENTITY_MISMATCH);
+                }
+                Err(_) => {}
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(_) => {}
         }
@@ -222,7 +245,7 @@ fn execute_staged_request(encoded: &str) -> Result<u32, i32> {
     let request = parse_and_authorize_request(encoded)?;
     let expected_hash = decode_hash(&request.sha256).ok_or(EXIT_INVALID_REQUEST)?;
     let staged = copy_verified_installer(Path::new(&request.installer_path), expected_hash)?;
-    launch_verified_installer(&staged, expected_hash)
+    launch_verified_installer(&staged, expected_hash, &request.candidate)
 }
 
 fn stage_bootstrap(argument: &str) -> Result<(), i32> {
@@ -321,6 +344,29 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     if unsafe { ResumeThread(thread_handle.as_raw_handle()) } == u32::MAX {
         unsafe { TerminateProcess(process_handle.as_raw_handle(), EXIT_LAUNCH_FAILED as u32) };
         return Err(EXIT_LAUNCH_FAILED);
+    }
+    let wait = unsafe {
+        WaitForSingleObject(
+            process_handle.as_raw_handle(),
+            INSTALLER_SUPERVISION_TIMEOUT_MS,
+        )
+    };
+    if wait == WAIT_TIMEOUT {
+        unsafe {
+            TerminateProcess(
+                process_handle.as_raw_handle(),
+                EXIT_INSTALLER_STILL_RUNNING as u32,
+            )
+        };
+        unsafe { WaitForSingleObject(process_handle.as_raw_handle(), 30_000) };
+        return Err(EXIT_INSTALLER_STILL_RUNNING);
+    }
+    if wait != WAIT_OBJECT_0 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let mut code = 0;
+    if unsafe { GetExitCodeProcess(process_handle.as_raw_handle(), &mut code) } == 0 || code != 0 {
+        return Err(code as i32);
     }
     Ok(())
 }
@@ -647,7 +693,9 @@ fn apply_restricted_dacl(path: &Path, sddl: &str) -> Result<(), i32> {
     if unsafe {
         SetFileSecurityW(
             path.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
             descriptor.0,
         )
     } == 0
@@ -730,7 +778,11 @@ fn copy_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<PathB
     Ok(target)
 }
 
-fn launch_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<u32, i32> {
+fn launch_verified_installer(
+    path: &Path,
+    expected_hash: [u8; 32],
+    candidate: &UpdateCandidate,
+) -> Result<u32, i32> {
     if !path.is_absolute() {
         return Err(EXIT_INVALID_REQUEST);
     }
@@ -745,7 +797,14 @@ fn launch_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<u32
     // The candidate derives update mode and predecessor identity from its
     // authenticated TQPKG2 manifest and installed machine state. Arguments
     // carry no install authority.
-    let mut command = wide_nul(&PathBuf::from(format!("\"{}\" /S", canonical.display())))?;
+    let mut command = wide_nul(&PathBuf::from(format!(
+        "\"{}\" /S /TQUPDATE={} /TQGATEWAYHASH={} /TQOWNERHASH={} /TQLAYOUT={}",
+        canonical.display(),
+        candidate.package_sha256,
+        candidate.predecessor.gateway_sha256,
+        candidate.predecessor.owner_sha256,
+        candidate.predecessor.release_build_digest,
+    )))?;
     let startup = STARTUPINFOW {
         cb: size_of::<STARTUPINFOW>() as u32,
         ..unsafe { std::mem::zeroed() }
@@ -801,6 +860,13 @@ fn launch_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<u32
         )
     };
     if wait == WAIT_TIMEOUT {
+        unsafe {
+            TerminateProcess(
+                process_handle.as_raw_handle(),
+                EXIT_INSTALLER_STILL_RUNNING as u32,
+            )
+        };
+        unsafe { WaitForSingleObject(process_handle.as_raw_handle(), 30_000) };
         return Err(EXIT_INSTALLER_STILL_RUNNING);
     }
     if wait != WAIT_OBJECT_0 {
@@ -819,7 +885,11 @@ fn spawn_staged_cleanup(directory: &Path) {
     }) else {
         return;
     };
-    let encoded = encode_base64(directory.to_string_lossy().as_bytes());
+    let Ok(identity) = owned_tree_identity(directory) else {
+        return;
+    };
+    let binding = format!("{}\0{}", directory.to_string_lossy(), identity);
+    let encoded = encode_base64(binding.as_bytes());
     let _ = std::process::Command::new(installed)
         .arg(format!("--windows-update-cleanup-v1={encoded}"))
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
@@ -875,12 +945,28 @@ fn verify_suspended_process(
 }
 
 fn open_locked(path: &Path) -> std::io::Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("installer is not a regular file"));
+    let raw = unsafe {
+        CreateFileW(
+            wide_nul(path)
+                .map_err(|_| std::io::Error::other("invalid installer path"))?
+                .as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_handle(raw) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::other(
+            "installer is not a plain regular file",
+        ));
     }
     Ok(file)
 }

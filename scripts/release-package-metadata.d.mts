@@ -29,7 +29,7 @@ export interface PackageReleaseMetadata {
   readonly platform: ReleasePlatform;
   readonly architecture: ReleaseArchitecture;
   readonly ownerMode: 'local-unsigned-enabled';
-  readonly packageMode: 'fresh' | 'update';
+  readonly packageMode: 'fresh' | 'update' | 'repair';
   readonly sourceCommit: string;
   readonly sourceTree: string;
   readonly roles: readonly ReleaseRole[];
@@ -57,7 +57,7 @@ export function createPackageReleaseMetadata(options: {
   readonly sourceIdentity?: { readonly sourceCommit: string; readonly sourceTree: string };
   readonly outerIdentity?: MacosOuterIdentity | null;
   readonly freshInstall?: boolean;
-  readonly packageMode?: 'fresh' | 'update';
+  readonly packageMode?: 'fresh' | 'update' | 'repair';
 }): Promise<PackageReleaseMetadata>;
 export function writePackageReleaseMetadata(
   path: string,

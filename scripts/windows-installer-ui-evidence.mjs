@@ -3,18 +3,20 @@ import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
+import { parseTqpkg2 } from './tqpkg2.mjs';
 
 const HEX_40 = /^[0-9a-f]{40}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
 
 export function validateWindowsInstallerUiEvidence(value, expected) {
-  const roles = ['medium-controller', 'elevated-worker'];
-  const exits = value?.installerRoleExits;
-  const pids = roles.map((role) => exits?.[role]?.pid);
-  const pipe = value?.authenticatedPipe;
-  const manifest = value?.packageManifest;
+  const cancel = value?.cancel;
+  const residueBefore = Array.isArray(value?.residueBefore) ? [...value.residueBefore].sort() : null;
+  const residueAfter = Array.isArray(value?.residueAfter) ? [...value.residueAfter].sort() : null;
+  const computedNewResidue = residueBefore !== null && residueAfter !== null
+    ? residueAfter.filter((entry) => !residueBefore.includes(entry))
+    : null;
   if (
-    value?.schemaVersion !== 3 ||
+    value?.schemaVersion !== 4 ||
     value.installer !== expected.installer ||
     value.architecture !== expected.architecture ||
     value.sourceCommit !== expected.sourceCommit ||
@@ -27,43 +29,15 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
     value.bytes !== expected.bytes ||
     value.outerPeSubsystem !== 'windows-gui' ||
     value.outerPeSubsystemValue !== 2 ||
-    value.setupWindow?.processId !== exits?.['medium-controller']?.pid ||
+    !Number.isSafeInteger(value.setupWindow?.processId) || value.setupWindow.processId <= 0 ||
     value.setupWindow?.className !== '#32770' ||
-    !roles.every(
-      (role) =>
-        Number.isSafeInteger(exits?.[role]?.pid) &&
-        exits[role].pid > 0 &&
-        exits[role].exitCode === 0,
-    ) ||
-    new Set(pids).size !== 2 ||
-    !roles.every((role) =>
-      value.processes?.some(
-        (process) =>
-          process.pid === exits[role].pid &&
-          process.role === role &&
-          process.consoleWindow === false,
-      ),
-    ) ||
-    pipe?.oneShot !== true ||
-    pipe?.controllerPid !== exits['medium-controller'].pid ||
-    pipe?.workerPid !== exits['elevated-worker'].pid ||
-    pipe?.clientProcessIdVerified !== true ||
-    pipe?.serverProcessIdVerified !== true ||
-    pipe?.sameImageSha256Verified !== true ||
-    pipe?.challengeProofVerified !== true ||
-    manifest?.magic !== 'TQPKG2' ||
-    manifest?.canonical !== true ||
-    manifest?.fullTreeVerified !== true ||
-    manifest?.architecture !== expected.architecture ||
-    value.powershellProcessStarts !== 0 ||
-    value.interpreterProcessStarts !== 0 ||
-    value.successfulDefaultLifecycle !== true ||
+    cancel?.commandSent !== true || cancel?.exitCode !== 1223 || cancel?.workerStarted !== false || cancel?.pipeObserved !== false ||
+    !Array.isArray(value.processStarts) || !Array.isArray(value.interpreterProcessStarts) || value.interpreterProcessStarts.length !== 0 ||
+    !Array.isArray(value.observerErrors) || value.observerErrors.length !== 0 ||
     value.forcedCleanup !== false ||
-    value.authoritativeZeroResidue !== true ||
-    !Array.isArray(value.activeProcessesAfterTeardown) ||
-    value.activeProcessesAfterTeardown.length !== 0 ||
-    !Array.isArray(value.residueAfterTeardown) ||
-    value.residueAfterTeardown.length !== 0 ||
+    !Array.isArray(value.activeProcessesAfterTeardown) || value.activeProcessesAfterTeardown.length !== 0 ||
+    residueBefore === null || residueAfter === null || JSON.stringify(residueBefore) !== JSON.stringify(residueAfter) ||
+    !Array.isArray(value.newResidueAfterCancel) || JSON.stringify([...value.newResidueAfterCancel].sort()) !== JSON.stringify(computedNewResidue) || computedNewResidue.length !== 0 ||
     value.passed !== true
   ) {
     throw new Error('Windows native setup UI evidence is not promotable');
@@ -84,6 +58,7 @@ export async function verifyWindowsInstallerUiEvidence({
   ]);
   const provenance = JSON.parse(provenanceSource.toString('utf8'));
   validateArtifactProvenanceManifest(provenance);
+  parseTqpkg2(installerBytes, architecture);
   const installerSha256 = createHash('sha256').update(installerBytes).digest('hex');
   const provenanceDocumentSha256 = createHash('sha256').update(provenanceSource).digest('hex');
   const finalEntries = provenance.entries.filter(({ role }) => role === 'final-artifact');

@@ -34,7 +34,11 @@ pub struct Manifest {
     pub source_commit: String,
     pub source_tree: String,
     pub package_mode: String,
+    #[serde(deserialize_with = "required_option")]
     pub predecessor: Option<Predecessor>,
+    pub target: TargetIdentity,
+    #[serde(deserialize_with = "required_option")]
+    pub fault_phase: Option<String>,
     pub tree_sha256: String,
     pub files: Vec<ManifestFile>,
 }
@@ -46,6 +50,22 @@ pub struct Predecessor {
     pub release_build_digest: String,
     pub gateway_sha256: String,
     pub owner_sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TargetIdentity {
+    pub release_build_digest: String,
+    pub gateway_sha256: String,
+    pub owner_sha256: String,
+}
+
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -210,6 +230,10 @@ pub fn extract_file<R: Read + Seek, W: std::io::Write>(
             .write_all(&buffer[..count])
             .map_err(|_| PackageError::Block)?;
     }
+    let remaining = decoder.finish().into_inner().limit();
+    if remaining != 0 {
+        return Err(PackageError::Block);
+    }
     if written != file.size || hex(&hash.finalize()) != file.sha256 {
         return Err(PackageError::Digest);
     }
@@ -228,13 +252,28 @@ fn validate_manifest(
         || !git_object_id(&manifest.source_tree)
         || !matches!(
             manifest.package_mode.as_str(),
-            "fresh" | "update" | "repair" | "release"
+            "fresh" | "update" | "repair"
         )
+        || !hex_digest(&manifest.target.release_build_digest)
+        || !hex_digest(&manifest.target.gateway_sha256)
+        || !hex_digest(&manifest.target.owner_sha256)
+        || (manifest.fault_phase.is_some() && !cfg!(feature = "acceptance-faults"))
+        || manifest.fault_phase.as_deref().is_some_and(|phase| {
+            !matches!(
+                phase,
+                "staged"
+                    | "prepared"
+                    | "published"
+                    | "registered"
+                    | "committed"
+                    | "legacyRetiring"
+                    | "legacyRetired"
+            )
+        })
         || !hex_digest(&manifest.tree_sha256)
         || manifest.files.is_empty()
         || manifest.files.len() > MAX_FILES
-        || matches!(manifest.package_mode.as_str(), "update" | "release")
-            != manifest.predecessor.is_some()
+        || (manifest.package_mode == "update") != manifest.predecessor.is_some()
     {
         return Err(PackageError::Identity);
     }
@@ -391,8 +430,9 @@ mod tests {
         }
         let mut value = serde_json::json!({
             "architecture":"x64", "files":[{"blockOffset":0,"blockSize":block.len(),"mode":0,"path":path,"sha256":content_hash,"size":content.len()}],
-            "packageMode":"fresh", "predecessor":null, "schemaVersion":2, "sourceCommit":"ab".repeat(20),
-            "sourceTree":"cd".repeat(20), "treeSha256":hex(&tree.finalize()), "version":"0.0.69"
+            "faultPhase":null, "packageMode":"fresh", "predecessor":null, "schemaVersion":2, "sourceCommit":"ab".repeat(20),
+            "sourceTree":"cd".repeat(20), "target":{"gatewaySha256":"11".repeat(32),"ownerSha256":"22".repeat(32),"releaseBuildDigest":"33".repeat(32)},
+            "treeSha256":hex(&tree.finalize()), "version":"0.0.69"
         });
         let mut manifest = serde_json::to_vec(&value).unwrap();
         value["files"][0]["blockOffset"] = serde_json::json!(manifest.len());
@@ -451,6 +491,131 @@ mod tests {
             ),
             Err(PackageError::Footer)
         ));
+        let mut reserved_mutation = fixture();
+        let position = reserved_mutation.len() - 1;
+        reserved_mutation[position] = 1;
+        assert!(matches!(
+            parse(
+                &mut std::io::Cursor::new(&reserved_mutation),
+                reserved_mutation.len() as u64
+            ),
+            Err(PackageError::Footer)
+        ));
+    }
+
+    #[test]
+    fn rejects_trailing_compressed_frame_bytes() {
+        let content = b"payload";
+        let mut block = zstd::stream::encode_all(&content[..], 3).unwrap();
+        block.extend_from_slice(b"trailing");
+        let file = ManifestFile {
+            path: "a".into(),
+            mode: 0,
+            size: content.len() as u64,
+            sha256: hex(&Sha256::digest(content)),
+            block_offset: 0,
+            block_size: block.len() as u64,
+        };
+        let package = ParsedPackage {
+            package_offset: 0,
+            manifest: Manifest {
+                schema_version: 2,
+                architecture: "x64".into(),
+                version: "0.0.69".into(),
+                source_commit: "11".repeat(20),
+                source_tree: "22".repeat(20),
+                package_mode: "fresh".into(),
+                predecessor: None,
+                target: TargetIdentity {
+                    release_build_digest: "33".repeat(32),
+                    gateway_sha256: "44".repeat(32),
+                    owner_sha256: "55".repeat(32),
+                },
+                fault_phase: None,
+                tree_sha256: "66".repeat(32),
+                files: vec![file.clone()],
+            },
+        };
+        assert_eq!(
+            extract_file(
+                &mut std::io::Cursor::new(block),
+                &package,
+                &file,
+                &mut Vec::new()
+            ),
+            Err(PackageError::Block)
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_modes_targets_and_fault_seams() {
+        let bytes = fixture();
+        let mut reader = std::io::Cursor::new(&bytes);
+        let mut parsed = parse(&mut reader, bytes.len() as u64).unwrap();
+        let footer = bytes.len() - FOOTER_SIZE;
+        let package_size = u64::from_le_bytes(bytes[footer + 24..footer + 32].try_into().unwrap());
+        let manifest_size = u64::from_le_bytes(bytes[footer + 32..footer + 40].try_into().unwrap());
+        parsed.manifest.package_mode = "release".into();
+        assert_eq!(
+            validate_manifest(&parsed.manifest, package_size, manifest_size),
+            Err(PackageError::Identity)
+        );
+        parsed.manifest.package_mode = "fresh".into();
+        parsed.manifest.predecessor = Some(Predecessor {
+            version: "0.0.68".into(),
+            release_build_digest: "11".repeat(32),
+            gateway_sha256: "22".repeat(32),
+            owner_sha256: "33".repeat(32),
+        });
+        assert_eq!(
+            validate_manifest(&parsed.manifest, package_size, manifest_size),
+            Err(PackageError::Identity)
+        );
+        parsed.manifest.predecessor = None;
+        for phase in [
+            "staged",
+            "prepared",
+            "published",
+            "registered",
+            "committed",
+            "legacyRetiring",
+            "legacyRetired",
+        ] {
+            parsed.manifest.fault_phase = Some(phase.into());
+            assert_eq!(
+                validate_manifest(&parsed.manifest, package_size, manifest_size),
+                if cfg!(feature = "acceptance-faults") {
+                    Ok(())
+                } else {
+                    Err(PackageError::Identity)
+                },
+                "{phase}"
+            );
+        }
+        parsed.manifest.fault_phase = Some("arbitrary".into());
+        assert_eq!(
+            validate_manifest(&parsed.manifest, package_size, manifest_size),
+            Err(PackageError::Identity)
+        );
+    }
+
+    #[test]
+    fn nullable_manifest_fields_are_required_on_the_wire() {
+        let bytes = fixture();
+        let footer = bytes.len() - FOOTER_SIZE;
+        let offset =
+            u64::from_le_bytes(bytes[footer + 16..footer + 24].try_into().unwrap()) as usize;
+        let size = u64::from_le_bytes(bytes[footer + 32..footer + 40].try_into().unwrap()) as usize;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes[offset..offset + size]).unwrap();
+        for field in ["predecessor", "faultPhase"] {
+            let mut mutation = value.clone();
+            mutation.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Manifest>(mutation).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -498,6 +663,12 @@ mod tests {
             source_tree: "11".repeat(20),
             package_mode: "fresh".into(),
             predecessor: None,
+            target: TargetIdentity {
+                release_build_digest: "33".repeat(32),
+                gateway_sha256: "44".repeat(32),
+                owner_sha256: "55".repeat(32),
+            },
+            fault_phase: None,
             tree_sha256: "22".repeat(32),
             files,
         };

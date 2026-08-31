@@ -33,12 +33,12 @@ export async function createPackageReleaseMetadata({
   platform,
   architecture,
   packageRoot,
-  predecessor = readPackagePredecessor(process.env, platform, architecture),
   releaseBuildDigest,
   sourceIdentity = currentSourceIdentity(),
   outerIdentity,
   freshInstall = process.env.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1',
   packageMode = process.env.TALKING_QUILL_PACKAGE_MODE ?? (freshInstall ? 'fresh' : 'update'),
+  predecessor = packageMode === 'update' ? readPackagePredecessor(process.env, platform, architecture) : null,
 }) {
   requireIdentity(version, platform, architecture);
   requireSourceIdentity(sourceIdentity);
@@ -51,8 +51,8 @@ export async function createPackageReleaseMetadata({
       suppressionCapable,
     })),
   );
-  if (!['fresh', 'update'].includes(packageMode)) {
-    throw new Error('Package mode must be explicitly fresh or update');
+  if (!['fresh', 'update', 'repair'].includes(packageMode)) {
+    throw new Error('Package mode must be explicitly fresh, update, or repair');
   }
   if ((packageMode === 'fresh') !== freshInstall) {
     throw new Error('Package mode and fresh-install marker disagree');
@@ -261,7 +261,7 @@ export function validatePackageReleaseMetadata(value) {
   if (value.ownerMode !== 'local-unsigned-enabled') {
     throw new Error('Package release metadata is not owner-enabled');
   }
-  if (!['fresh', 'update'].includes(value.packageMode)) {
+  if (!['fresh', 'update', 'repair'].includes(value.packageMode)) {
     throw new Error('Package release mode is invalid');
   }
   const layout = ROLE_LAYOUT[value.platform];
