@@ -10,7 +10,10 @@ import {
 } from './macos-owner-update-coordinator';
 
 export interface ApplicationUpdateBackend {
-  checkForUpdates(): Promise<{ readonly version: string } | null>;
+  checkForUpdates(): Promise<{
+    readonly version: string;
+    readonly releaseUrl: string | null;
+  } | null>;
   downloadUpdate(): Promise<DownloadedApplicationUpdate | undefined>;
   requestElevation?(): Promise<'accepted' | 'cancelled'>;
   quitAndInstall(): void;
@@ -52,6 +55,8 @@ export class ApplicationUpdateController {
       currentVersion: this.#currentVersion,
       availableVersion: null,
       releaseUrl: null,
+      latestVersion: null,
+      latestReleaseUrl: null,
       percent: null,
       message:
         options.backend === null ? 'This build requires updates to be installed manually.' : null,
@@ -81,6 +86,8 @@ export class ApplicationUpdateController {
         phase: this.#backend === null ? 'unsupported' : 'current',
         availableVersion: null,
         releaseUrl: null,
+        latestVersion: normalizeVersion(result.latestVersion),
+        latestReleaseUrl: result.releaseUrl,
         percent: null,
         message:
           this.#backend === null ? 'This build requires updates to be installed manually.' : null,
@@ -91,6 +98,8 @@ export class ApplicationUpdateController {
       phase: this.#backend === null ? 'unsupported' : 'available',
       availableVersion,
       releaseUrl: result.releaseUrl,
+      latestVersion: availableVersion,
+      latestReleaseUrl: result.releaseUrl,
       percent: null,
       message:
         this.#backend === null
@@ -144,11 +153,13 @@ export class ApplicationUpdateController {
       if (backend === null) throw new Error('The update backend is unavailable');
       const checked = await backend.checkForUpdates();
       const checkedVersion = checked === null ? null : normalizeVersion(checked.version);
+      const checkedReleaseUrl = checked?.releaseUrl ?? null;
       if (
         this.#disposed ||
         checkedVersion === null ||
         compareVersions(checkedVersion, this.#currentVersion) <= 0 ||
-        compareVersions(checkedVersion, expectedVersion) > 0
+        compareVersions(checkedVersion, expectedVersion) > 0 ||
+        (checkedVersion !== expectedVersion && checkedReleaseUrl === null)
       ) {
         throw new Error('The update metadata did not identify a compatible release edge');
       }
@@ -159,6 +170,7 @@ export class ApplicationUpdateController {
       this.#setState({
         phase: 'available',
         availableVersion: checkedVersion,
+        releaseUrl: checkedReleaseUrl ?? this.#state.releaseUrl,
         percent: null,
         message: null,
       });

@@ -15,6 +15,7 @@ export interface PublicationAsset {
 export interface ImmutablePublicationRelease {
   readonly id: number;
   readonly tag_name: string;
+  readonly html_url: string;
   readonly draft: boolean;
   readonly prerelease: boolean;
   readonly immutable: boolean;

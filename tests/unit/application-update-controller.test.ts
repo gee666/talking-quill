@@ -11,7 +11,12 @@ import {
 function backend(version = '1.1.0') {
   let progress: ((percent: number) => void) | null = null;
   let error: (() => void) | null = null;
-  const checkForUpdates = vi.fn(() => Promise.resolve({ version }));
+  const checkForUpdates = vi.fn(() =>
+    Promise.resolve({
+      version,
+      releaseUrl: `https://github.com/gee666/talking-quill/releases/tag/v${version}`,
+    }),
+  );
   const downloadUpdate = vi.fn<() => Promise<DownloadedApplicationUpdate | undefined>>(() =>
     Promise.resolve({ files: ['/tmp/Talking-Quill-update'] }),
   );
@@ -95,7 +100,12 @@ describe('application update consent and installation controller', () => {
     });
     controller.acceptCheckResult({ ...available, latestVersion: '1.2.0' });
     await vi.waitFor(() => expect(controller.getState().phase).toBe('available'));
-    expect(controller.getState().availableVersion).toBe('1.1.0');
+    expect(controller.getState()).toMatchObject({
+      availableVersion: '1.1.0',
+      releaseUrl: 'https://github.com/gee666/talking-quill/releases/tag/v1.1.0',
+      latestVersion: '1.2.0',
+      latestReleaseUrl: available.releaseUrl,
+    });
   });
 
   it('requires native candidate preparation before requesting installation', async () => {

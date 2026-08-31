@@ -771,8 +771,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         // A prior finalizer removed the completion journal before crashing. The still-registered
         // maintenance entry is authenticated residue authority and may finish only terminal cleanup.
         remove_maintenance_uninstaller(&paths)?;
+        system.unregister_app_path()?;
         let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
-        system.unregister()?;
+        system.unregister_uninstall()?;
         remove_uninstall_finalizer_residue(&paths)?;
         drop(legacy);
         arm_mapped_image_deletion(&current)?;
@@ -836,7 +837,8 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
 trait NativeSystemAdapter {
     fn register_version(&self, paths: &Paths, version: &str) -> Result<()>;
     fn register_installed(&self, paths: &Paths) -> Result<()>;
-    fn unregister(&self) -> Result<()>;
+    fn unregister_app_path(&self) -> Result<()>;
+    fn unregister_uninstall(&self) -> Result<()>;
     fn retire_legacy(&self, paths: &Paths) -> Result<()>;
     fn clear_update_recovery(&self, paths: &Paths) -> Result<()>;
 }
@@ -851,9 +853,11 @@ impl NativeSystemAdapter for WindowsNativeSystem {
     fn register_installed(&self, paths: &Paths) -> Result<()> {
         register_installed_uninstall(paths)
     }
-    fn unregister(&self) -> Result<()> {
-        unregister_uninstall()?;
+    fn unregister_app_path(&self) -> Result<()> {
         unregister_app_path()
+    }
+    fn unregister_uninstall(&self) -> Result<()> {
+        unregister_uninstall()
     }
     fn retire_legacy(&self, paths: &Paths) -> Result<()> {
         retire_legacy_authority(paths)
@@ -1340,7 +1344,7 @@ fn flush_setup_directory(path: &Path) -> Result<()> {
     let handle = unsafe {
         CreateFileW(
             wide(path.as_os_str()).as_ptr(),
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             OPEN_EXISTING,
@@ -1490,12 +1494,7 @@ fn create_or_verify_lock_marker(path: &Path, value: &str) -> Result<()> {
 
 fn create_atomic_marker(path: &Path, value: &str, sddl: &str) -> Result<()> {
     if path_present(path)? {
-        if !marker_security_is_exact(path, sddl)?
-            || fs::read_to_string(path).map_err(io_failure)? != value
-        {
-            return Err(fail(EXIT_REJECTED, "Protected marker identity is invalid."));
-        }
-        return Ok(());
+        return verify_atomic_marker(path, value, sddl, None);
     }
     let parent = path
         .parent()
@@ -1514,11 +1513,9 @@ fn create_atomic_marker(path: &Path, value: &str, sddl: &str) -> Result<()> {
     apply_lock_dacl(&temporary, sddl)?;
     file.write_all(value.as_bytes()).map_err(io_failure)?;
     file.sync_all().map_err(io_failure)?;
-    if !marker_security_is_exact(&temporary, sddl)?
-        || fs::read_to_string(&temporary).map_err(io_failure)? != value
-    {
-        return Err(fail(EXIT_REJECTED, "Protected marker publication changed."));
-    }
+    let identity = file_identity_text(&file)?;
+    drop(file);
+    verify_atomic_marker(&temporary, value, sddl, Some(&identity))?;
     if unsafe {
         MoveFileExW(
             wide(temporary.as_os_str()).as_ptr(),
@@ -1530,10 +1527,28 @@ fn create_atomic_marker(path: &Path, value: &str, sddl: &str) -> Result<()> {
         return Err(fail(EXIT_FAILURE, "Cannot publish the protected marker."));
     }
     flush_setup_directory(parent)?;
-    if !marker_security_is_exact(path, sddl)?
-        || fs::read_to_string(path).map_err(io_failure)? != value
+    verify_atomic_marker(path, value, sddl, Some(&identity))
+}
+
+fn verify_atomic_marker(
+    path: &Path,
+    value: &str,
+    sddl: &str,
+    expected_identity: Option<&str>,
+) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(io_failure)?;
+    let identity = file_identity_text(&file)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(io_failure)?;
+    if expected_identity.is_some_and(|expected| expected != identity)
+        || content != value
+        || !marker_security_is_exact(path, sddl)?
     {
-        return Err(fail(EXIT_REJECTED, "Published marker identity changed."));
+        return Err(fail(EXIT_REJECTED, "Protected marker identity changed."));
     }
     Ok(())
 }
@@ -2505,6 +2520,10 @@ fn pending_uninstall_transaction(paths: &Paths) -> Result<bool> {
                 | "uninstall-finalizer-publishing"
                 | "uninstall-finalizer-published"
                 | "uninstall-terminal-committing"
+                | "uninstall-app-path-retiring"
+                | "uninstall-app-path-retired"
+                | "uninstall-registration-retiring"
+                | "uninstall-registration-retired"
         ))
 }
 
@@ -2554,6 +2573,10 @@ fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
                     | "uninstall-terminal-committing"
+                    | "uninstall-app-path-retiring"
+                    | "uninstall-app-path-retired"
+                    | "uninstall-registration-retiring"
+                    | "uninstall-registration-retired"
             )
         {
             return Err(fail(
@@ -3457,16 +3480,24 @@ fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result
     require_uninstall_cleanup_complete(paths)?;
     write_transaction(
         paths,
-        "uninstall-terminal-committing",
+        "uninstall-app-path-retiring",
         Action::Uninstall,
         true,
     )?;
+    system.unregister_app_path()?;
+    write_transaction(paths, "uninstall-app-path-retired", Action::Uninstall, true)?;
     remove_maintenance_uninstaller(paths)?;
-    // Until this point both the durable journal and registered finalizer remain callable recovery
-    // authority. Removing the journal leaves that finalizer as the idempotent terminal owner;
-    // unregistering is the terminal commit, after which only non-authoritative residue is removed.
+    write_transaction(
+        paths,
+        "uninstall-registration-retiring",
+        Action::Uninstall,
+        true,
+    )?;
+    // Commit the journal while the finalizer remains registered and callable.
+    // Removing that registration is then the terminal commit: no crash can
+    // leave an authoritative journal without a registered owner.
     remove_transaction(paths)?;
-    system.unregister()?;
+    system.unregister_uninstall()?;
     remove_uninstall_finalizer_residue(paths)
 }
 
@@ -3501,6 +3532,10 @@ fn recovery_plan(
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
                     | "uninstall-terminal-committing"
+                    | "uninstall-app-path-retiring"
+                    | "uninstall-app-path-retired"
+                    | "uninstall-registration-retiring"
+                    | "uninstall-registration-retired"
             ))
     {
         return Err(fail(
@@ -3561,7 +3596,11 @@ fn recovery_plan(
         | "uninstall-cleanup-complete"
         | "uninstall-finalizer-publishing"
         | "uninstall-finalizer-published"
-        | "uninstall-terminal-committing" => Ok(RecoveryPlan::FinishUninstall),
+        | "uninstall-terminal-committing"
+        | "uninstall-app-path-retiring"
+        | "uninstall-app-path-retired"
+        | "uninstall-registration-retiring"
+        | "uninstall-registration-retired" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -3625,7 +3664,8 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
         }
         RecoveryPlan::DiscardStaging => remove_plain_tree(&paths.staging)?,
         RecoveryPlan::RemoveFreshCandidate => {
-            system.unregister()?;
+            system.unregister_app_path()?;
+            system.unregister_uninstall()?;
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
             remove_maintenance_uninstaller(paths)?;
@@ -3659,7 +3699,10 @@ impl NativeSystemAdapter for InjectedNativeSystem {
     fn register_installed(&self, _paths: &Paths) -> Result<()> {
         Ok(())
     }
-    fn unregister(&self) -> Result<()> {
+    fn unregister_app_path(&self) -> Result<()> {
+        Ok(())
+    }
+    fn unregister_uninstall(&self) -> Result<()> {
         Ok(())
     }
     fn retire_legacy(&self, _paths: &Paths) -> Result<()> {
@@ -4141,16 +4184,11 @@ fn register_app_path(paths: &Paths) -> Result<()> {
 }
 
 fn unregister_app_path() -> Result<()> {
-    let status =
-        unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(APP_PATH_KEY)).as_ptr()) };
-    if status == 0 || status == 2 {
-        Ok(())
-    } else {
-        Err(fail(
-            EXIT_FAILURE,
-            "Cannot remove the native application registration.",
-        ))
-    }
+    delete_registry_tree_durable(
+        APP_PATH_KEY,
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+        "native application registration",
+    )
 }
 
 fn clear_update_recovery(paths: &Paths) -> Result<()> {
@@ -4369,14 +4407,62 @@ fn remove_machine_lock_residue(paths: &Paths) -> Result<()> {
 }
 
 fn unregister_uninstall() -> Result<()> {
-    let status =
-        unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(UNINSTALL_KEY)).as_ptr()) };
-    if status == 0 || status == 2 {
+    delete_registry_tree_durable(
+        UNINSTALL_KEY,
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        "native uninstall registration",
+    )
+}
+
+fn delete_registry_tree_durable(path: &str, parent: &str, label: &str) -> Result<()> {
+    let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(path)).as_ptr()) };
+    if status != 0 && status != 2 {
+        return Err(fail(EXIT_FAILURE, format!("Cannot remove the {label}.")));
+    }
+    let mut deleted = ptr::null_mut();
+    let observed = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(path)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut deleted,
+        )
+    };
+    if observed == 0 {
+        unsafe { RegCloseKey(deleted) };
+        return Err(fail(EXIT_FAILURE, format!("Windows retained the {label}.")));
+    }
+    if observed != 2 {
+        return Err(fail(
+            EXIT_FAILURE,
+            format!("Cannot verify removal of the {label}."),
+        ));
+    }
+    let mut parent_key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(parent)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut parent_key,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            format!("Cannot open the {label} parent."),
+        ));
+    }
+    let flushed = unsafe { RegFlushKey(parent_key) } == 0;
+    unsafe { RegCloseKey(parent_key) };
+    if flushed {
         Ok(())
     } else {
         Err(fail(
             EXIT_FAILURE,
-            "Cannot remove the native uninstall registration.",
+            format!("Cannot flush removal of the {label}."),
         ))
     }
 }
@@ -4643,6 +4729,20 @@ mod tests {
     use super::*;
     static CHANNEL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn atomic_marker_rename_reopens_the_same_identity_on_windows() {
+        let root =
+            std::env::temp_dir().join(format!("tq-marker-publication-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let marker = root.join("identity-v1");
+        create_atomic_marker(&marker, "expected", MACHINE_LOCK_FILE_SDDL).unwrap();
+        verify_atomic_marker(&marker, "expected", MACHINE_LOCK_FILE_SDDL, None).unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "expected");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn transaction(phase: &str, action: &str, had_predecessor: bool) -> Transaction {
         Transaction {
             schema_version: TRANSACTION_SCHEMA,
@@ -4848,6 +4948,10 @@ mod tests {
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
                     | "uninstall-terminal-committing"
+                    | "uninstall-app-path-retiring"
+                    | "uninstall-app-path-retired"
+                    | "uninstall-registration-retiring"
+                    | "uninstall-registration-retired"
                     | "uninstall-cleanup-elevation"
             );
             let had_predecessor = !uninstalling;
@@ -4893,7 +4997,11 @@ mod tests {
                 "uninstall-cleanup-complete"
                 | "uninstall-finalizer-publishing"
                 | "uninstall-finalizer-published"
-                | "uninstall-terminal-committing" => {}
+                | "uninstall-terminal-committing"
+                | "uninstall-app-path-retiring"
+                | "uninstall-app-path-retired"
+                | "uninstall-registration-retiring"
+                | "uninstall-registration-retired" => {}
                 _ => unreachable!(),
             }
             write_transaction(
@@ -4972,6 +5080,10 @@ mod tests {
             "uninstall-finalizer-publishing",
             "uninstall-finalizer-published",
             "uninstall-terminal-committing",
+            "uninstall-app-path-retiring",
+            "uninstall-app-path-retired",
+            "uninstall-registration-retiring",
+            "uninstall-registration-retired",
             "uninstall-cleanup-elevation",
         ] {
             let root =
@@ -4989,6 +5101,10 @@ mod tests {
                     | "uninstall-finalizer-publishing"
                     | "uninstall-finalizer-published"
                     | "uninstall-terminal-committing"
+                    | "uninstall-app-path-retiring"
+                    | "uninstall-app-path-retired"
+                    | "uninstall-registration-retiring"
+                    | "uninstall-registration-retired"
                     | "uninstall-cleanup-elevation"
             );
             let channel = ControllerChannel::create(

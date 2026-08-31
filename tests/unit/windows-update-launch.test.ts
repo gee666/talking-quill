@@ -5,6 +5,7 @@ import {
   buildWindowsElevationLaunch,
   settleWindowsElevation,
 } from '../../app/src/main/info/windows-update-launch';
+import { wrapWindowsUpdateRelaunchRequest } from '../../app/src/main/info/windows-update-relaunch-intent';
 
 const candidate = {
   version: '0.0.69',
@@ -72,17 +73,41 @@ describe('Windows elevated updater launch', () => {
   it('keeps a callable finalizer through terminal commit and uses native POSIX self-removal', async () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
     expect(setup).toContain('uninstall-finalizer-publishing');
-    expect(setup).toContain('uninstall-terminal-committing');
+    expect(setup).toContain('uninstall-app-path-retiring');
+    expect(setup).toContain('uninstall-app-path-retired');
+    expect(setup).toContain('uninstall-registration-retiring');
+    expect(setup).toContain('uninstall-registration-retired');
     expect(setup).toContain('TQ-KEEP-IMAGE');
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
     expect(setup).not.toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
+    expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
+      finalize.indexOf('system.unregister_uninstall()?'),
+    );
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
-      finalize.indexOf('system.unregister()?'),
+      finalize.indexOf('system.unregister_uninstall()?'),
     );
   });
 
-  it('publishes protected marker files through validated write-through temporary names', async () => {
+  it('persists a nonce-bound native relaunch wrapper before elevation', () => {
+    const request = '--windows-update-bootstrap-v2=YWJjZA==';
+    const wrapped = wrapWindowsUpdateRelaunchRequest(
+      request,
+      'C:\\Users\\Test\\AppData\\Roaming\\Talking Quill\\windows-update-relaunch-intent-v1.json',
+      '11'.repeat(16),
+    );
+    const payload = JSON.parse(
+      Buffer.from(wrapped.split('=').slice(1).join('='), 'base64').toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(payload).toEqual({
+      request,
+      intentPath:
+        'C:\\Users\\Test\\AppData\\Roaming\\Talking Quill\\windows-update-relaunch-intent-v1.json',
+      nonce: '11'.repeat(16),
+    });
+  });
+
+  it('publishes protected marker files through closed handles and verifies identity after rename', async () => {
     const [helper, setup] = await Promise.all([
       readFile('helper/src/windows_update.rs', 'utf8'),
       readFile('installer/windows-setup/src/windows.rs', 'utf8'),
@@ -91,6 +116,9 @@ describe('Windows elevated updater launch', () => {
       expect(source).toContain('.tmp-{}');
       expect(source).toContain('MOVEFILE_WRITE_THROUGH');
       expect(source).toContain('sync_all()');
+      expect(source).toContain('drop(file)');
+      expect(source).toContain('Some(&identity)');
+      expect(source).toContain('.share_mode(0)');
     }
   });
 
@@ -187,18 +215,23 @@ describe('Windows elevated updater launch', () => {
 
   it('acknowledges bootstrap elevation without forcing Electron to quit', () => {
     const accepted = vi.fn();
-    const rejected = vi.fn();
-    settleWindowsElevation(0, accepted, rejected);
+    const cancelled = vi.fn();
+    const failed = vi.fn();
+    settleWindowsElevation(0, accepted, cancelled, failed);
     expect(accepted).toHaveBeenCalledOnce();
-    expect(rejected).not.toHaveBeenCalled();
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
   });
 
-  it.each([1, 3, null])('keeps the application alive for UAC cancellation/failure (%s)', (code) => {
+  it('distinguishes confirmed UAC cancellation from recoverable native failures', () => {
     const accepted = vi.fn();
-    const rejected = vi.fn();
-    settleWindowsElevation(code, accepted, rejected);
+    const cancelled = vi.fn();
+    const failed = vi.fn();
+    settleWindowsElevation(1223, accepted, cancelled, failed);
+    expect(cancelled).toHaveBeenCalledOnce();
+    settleWindowsElevation(70, accepted, cancelled, failed);
+    expect(failed).toHaveBeenCalledOnce();
     expect(accepted).not.toHaveBeenCalled();
-    expect(rejected).toHaveBeenCalledOnce();
   });
 
   it.each([

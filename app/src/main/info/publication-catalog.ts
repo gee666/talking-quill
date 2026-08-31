@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { PinnedJsonTransport, type JsonTransport } from '../providers/json-transport';
-import { RELEASE_REPOSITORY } from './release-url-policy';
+import { RELEASE_REPOSITORY, validateReleaseUrl } from './release-url-policy';
 import {
   selectCompatiblePublication,
   type ImmutablePublicationRelease,
@@ -24,6 +24,7 @@ const AssetSchema = z.looseObject({
 const ReleaseSchema = z.looseObject({
   id: z.number().int().positive(),
   tag_name: z.string().min(1).max(64),
+  html_url: z.url().max(2_048),
   draft: z.boolean(),
   prerelease: z.boolean(),
   immutable: z.boolean(),
@@ -106,6 +107,10 @@ export class PublicationCatalog {
           value: verified,
         };
       },
+    );
+    validateReleaseUrl(
+      selected.publication.release.html_url,
+      selected.publication.release.tag_name,
     );
     validateAssetUrl(
       selected.publication.packageAsset.browser_download_url,

@@ -13,7 +13,9 @@ use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    GetLastError, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -26,9 +28,10 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FlushFileBuffers, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+    GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
@@ -94,6 +97,23 @@ struct UpdateRequest {
     installer_path: String,
     sha256: String,
     candidate: UpdateCandidate,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RelaunchWrapper {
+    request: String,
+    intent_path: String,
+    nonce: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RelaunchIntent {
+    schema_version: u8,
+    nonce: String,
+    source_version: String,
+    target_version: String,
 }
 
 #[derive(Deserialize)]
@@ -281,7 +301,11 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
                 return Err(EXIT_LAUNCH_FAILED);
             }
         }
-        return launch_elevated_bootstrap(argument).map(|()| 0);
+        launch_elevated_bootstrap(argument)?;
+        if cleanup_binding.is_none() {
+            launch_program_files_application()?;
+        }
+        return Ok(0);
     }
     if let Some(binding) = cleanup_binding {
         let _state = RecoveryStateLock::acquire()?;
@@ -324,6 +348,12 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
 
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if let Some(encoded) = argument.strip_prefix("--windows-update-bootstrap-v3=") {
+        if is_elevated() {
+            return Err(EXIT_INVALID_REQUEST);
+        }
+        return run_relaunch_wrapper(encoded);
+    }
     if (argument.starts_with("--windows-update-bootstrap-v2=")
         || argument.starts_with("--windows-update-resume-v2=")
         || argument.starts_with("--windows-update-cleanup-v1="))
@@ -390,6 +420,114 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     result
 }
 
+fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
+    if encoded.len() > 16_384 {
+        return Err(EXIT_INVALID_REQUEST);
+    }
+    let wrapper: RelaunchWrapper =
+        serde_json::from_slice(&decode_base64(encoded)?).map_err(|_| EXIT_INVALID_REQUEST)?;
+    if !wrapper
+        .request
+        .starts_with("--windows-update-bootstrap-v2=")
+        || wrapper.request.len() > 12_288
+        || !valid_nonce(&wrapper.nonce)
+    {
+        return Err(EXIT_INVALID_REQUEST);
+    }
+    let intent_path = PathBuf::from(&wrapper.intent_path);
+    if !intent_path.is_absolute()
+        || intent_path.file_name().and_then(|value| value.to_str())
+            != Some("windows-update-relaunch-intent-v1.json")
+    {
+        return Err(EXIT_INVALID_REQUEST);
+    }
+    match launch_elevated_bootstrap(&wrapper.request) {
+        Ok(()) => {
+            launch_updated_application()?;
+            Ok(0)
+        }
+        Err(code) => {
+            if code == 1223 {
+                let _ = consume_relaunch_intent(&intent_path, &wrapper.nonce);
+            }
+            Err(code)
+        }
+    }
+}
+
+fn valid_version(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == &"0" || !part.starts_with('0'))
+        })
+}
+
+fn valid_nonce(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn consume_relaunch_intent(path: &Path, expected_nonce: &str) -> Result<(), i32> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || metadata.len() > 4096
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let intent: RelaunchIntent =
+        serde_json::from_slice(&std::fs::read(path).map_err(|_| EXIT_IDENTITY_MISMATCH)?)
+            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if intent.schema_version != 1
+        || intent.nonce != expected_nonce
+        || !valid_version(&intent.source_version)
+        || !valid_version(&intent.target_version)
+        || intent.source_version == intent.target_version
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    std::fs::remove_file(path).map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
+fn launch_updated_application() -> Result<(), i32> {
+    let helper = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if helper
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_none_or(|value| !value.eq_ignore_ascii_case("talking-quill-helper.exe"))
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let root = helper
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or(EXIT_IDENTITY_MISMATCH)?;
+    launch_application(root.join("Talking Quill.exe"))
+}
+
+fn launch_program_files_application() -> Result<(), i32> {
+    launch_application(
+        known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill/Talking Quill.exe"),
+    )
+}
+
+fn launch_application(application: PathBuf) -> Result<(), i32> {
+    let metadata = std::fs::symlink_metadata(&application).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    std::process::Command::new(application)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
 fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
     let executable = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
     let verb = wide_nul(Path::new("runas"))?;
@@ -405,7 +543,12 @@ fn launch_elevated_bootstrap(argument: &str) -> Result<(), i32> {
         ..unsafe { std::mem::zeroed() }
     };
     if unsafe { ShellExecuteExW(&mut execute) } == 0 || execute.hProcess.is_null() {
-        return Err(EXIT_LAUNCH_FAILED);
+        let error = unsafe { GetLastError() } as i32;
+        return Err(if error == 1223 {
+            1223
+        } else {
+            EXIT_LAUNCH_FAILED
+        });
     }
     let process = unsafe { OwnedHandle::from_raw_handle(execute.hProcess) };
     let wait =
@@ -2002,7 +2145,7 @@ fn flush_directory(path: &Path) -> Result<(), i32> {
     let handle = unsafe {
         CreateFileW(
             wide_nul(path)?.as_ptr(),
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -2022,12 +2165,7 @@ fn flush_directory(path: &Path) -> Result<(), i32> {
 
 fn create_or_verify_marker(path: &Path, value: &str, sddl: &str) -> Result<(), i32> {
     if path.exists() {
-        if !has_exact_security(path, sddl)?
-            || std::fs::read_to_string(path).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
-        {
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-        return Ok(());
+        return verify_marker(path, value, sddl, None);
     }
     let parent = path.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
     let name = path
@@ -2045,11 +2183,9 @@ fn create_or_verify_marker(path: &Path, value: &str, sddl: &str) -> Result<(), i
     file.write_all(value.as_bytes())
         .and_then(|_| file.sync_all())
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    if !has_exact_security(&temporary, sddl)?
-        || std::fs::read_to_string(&temporary).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
+    let identity = file_identity_text(&file)?;
+    drop(file);
+    verify_marker(&temporary, value, sddl, Some(&identity))?;
     if unsafe {
         MoveFileExW(
             wide_nul(&temporary)?.as_ptr(),
@@ -2061,8 +2197,27 @@ fn create_or_verify_marker(path: &Path, value: &str, sddl: &str) -> Result<(), i
         return Err(EXIT_LAUNCH_FAILED);
     }
     flush_directory(parent)?;
-    if !has_exact_security(path, sddl)?
-        || std::fs::read_to_string(path).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
+    verify_marker(path, value, sddl, Some(&identity))
+}
+
+fn verify_marker(
+    path: &Path,
+    value: &str,
+    sddl: &str,
+    expected_identity: Option<&str>,
+) -> Result<(), i32> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let identity = file_identity_text(&file)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if expected_identity.is_some_and(|expected| expected != identity)
+        || content != value
+        || !has_exact_security(path, sddl)?
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
@@ -2833,10 +2988,31 @@ mod tests {
     use super::{
         MEDIUM_LAUNCHER_DIRECTORY_SDDL, RECOVERY_LAUNCHER_PENDING_PREFIX, RUN_ONCE_VALUE_PREFIX,
         StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate, UpdatePredecessor, UpdateRole,
-        authorization_transcript, canonical_candidate_layout, create_directory_with_sddl,
-        create_restricted_directory, decode_base64, reclaim_incomplete_launcher_directories,
-        reclaim_incomplete_recovery_directories, recovery_value_name, validate_generation,
+        authorization_transcript, canonical_candidate_layout, consume_relaunch_intent,
+        create_directory_with_sddl, create_restricted_directory, decode_base64,
+        reclaim_incomplete_launcher_directories, reclaim_incomplete_recovery_directories,
+        recovery_value_name, validate_generation,
     };
+    #[test]
+    fn relaunch_intent_is_nonce_bound_and_consumed_once() {
+        let path =
+            std::env::temp_dir().join(format!("tq-relaunch-intent-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let nonce = "11".repeat(16);
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"schemaVersion\":1,\"nonce\":\"{nonce}\",\"sourceVersion\":\"0.0.69\",\"targetVersion\":\"0.0.70\"}}"
+            ),
+        )
+        .unwrap();
+        assert!(consume_relaunch_intent(&path, &"22".repeat(16)).is_err());
+        assert!(path.exists());
+        consume_relaunch_intent(&path, &nonce).unwrap();
+        assert!(!path.exists());
+        assert!(consume_relaunch_intent(&path, &nonce).is_err());
+    }
+
     #[test]
     fn terminated_bootstrap_publish_seams_leave_only_reclaimable_owned_residue() {
         let root_variable = "TQ_TERMINATED_BOOTSTRAP_TEST_ROOT";

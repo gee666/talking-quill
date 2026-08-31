@@ -17,6 +17,7 @@ function fixture(metadata: string): VerifiedPublication {
     release: {
       id: 69,
       tag_name: 'v0.0.69',
+      html_url: 'https://github.com/gee666/talking-quill/releases/tag/v0.0.69',
       draft: false,
       prerelease: false,
       immutable: true,

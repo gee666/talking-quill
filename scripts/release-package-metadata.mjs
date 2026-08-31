@@ -306,7 +306,7 @@ export function validatePackageReleaseMetadata(value) {
   }
   const predecessorRequired = value.packageMode === 'update';
   if (
-    (freshInstall && value.predecessor !== null) ||
+    (!predecessorRequired && value.predecessor !== null) ||
     (predecessorRequired &&
       (value.predecessor?.platform !== value.platform ||
         value.predecessor?.architecture !== value.architecture ||

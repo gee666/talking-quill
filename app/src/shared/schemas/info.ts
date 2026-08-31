@@ -25,6 +25,8 @@ export const ApplicationUpdateStateSchema = z
     currentVersion: z.string().min(1).max(64),
     availableVersion: z.string().min(1).max(64).nullable(),
     releaseUrl: z.url().max(2_048).nullable(),
+    latestVersion: z.string().min(1).max(64).nullable(),
+    latestReleaseUrl: z.url().max(2_048).nullable(),
     percent: z.number().min(0).max(100).nullable(),
     message: z.string().min(1).max(240).nullable(),
     revision: z.number().int().nonnegative(),

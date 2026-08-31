@@ -10,6 +10,8 @@ const available: ApplicationUpdateState = {
   currentVersion: '1.0.0',
   availableVersion: '1.1.0',
   releaseUrl: 'https://github.com/gee666/talking-quill/releases/tag/v1.1.0',
+  latestVersion: '1.1.0',
+  latestReleaseUrl: 'https://github.com/gee666/talking-quill/releases/tag/v1.1.0',
   percent: null,
   message: null,
   revision: 1,

@@ -110,8 +110,10 @@ function isValidCandidate(candidate: WindowsUpdateCandidateIdentity): boolean {
 export function settleWindowsElevation(
   exitCode: number | null,
   accepted: () => void,
-  rejected: () => void,
+  cancelled: () => void,
+  failed: () => void,
 ): void {
   if (exitCode === 0) accepted();
-  else rejected();
+  else if (exitCode === 1223) cancelled();
+  else failed();
 }

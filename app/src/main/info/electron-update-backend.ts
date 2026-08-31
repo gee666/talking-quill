@@ -12,6 +12,11 @@ import type { VerifiedPublication } from './publication-catalog';
 import { signedPublicationProviderOptions } from './signed-publication-provider';
 import { readInstalledWindowsUpdateIdentity } from './installed-windows-update-identity';
 import { buildWindowsElevationLaunch, settleWindowsElevation } from './windows-update-launch';
+import {
+  clearWindowsUpdateRelaunchIntent,
+  createWindowsUpdateRelaunchIntent,
+  wrapWindowsUpdateRelaunchRequest,
+} from './windows-update-relaunch-intent';
 
 export function createElectronUpdateBackend(
   architecture: NodeJS.Architecture,
@@ -79,7 +84,10 @@ export function createElectronUpdateBackend(
       }
       checkedIdentity = identity;
       selectedPublication = selected;
-      return { version: result.updateInfo.version };
+      return {
+        version: result.updateInfo.version,
+        releaseUrl: selected?.release.html_url ?? null,
+      };
     },
     async downloadUpdate() {
       const identity = checkedIdentity;
@@ -140,14 +148,24 @@ export function createElectronUpdateBackend(
           predecessor: { ...checkedIdentity.predecessor, platform: 'win' },
         },
       );
-      const accepted = await launchWindowsElevation(launch.executable, launch.arguments);
+      const relaunch = await createWindowsUpdateRelaunchIntent(
+        app.getPath('userData'),
+        app.getVersion(),
+        checkedIdentity.version,
+      );
+      const argument = launch.arguments.at(0);
+      if (argument === undefined)
+        throw new Error('Windows update bootstrap request is unavailable');
+      const accepted = await launchWindowsElevation(launch.executable, [
+        wrapWindowsUpdateRelaunchRequest(argument, relaunch.path, relaunch.intent.nonce),
+      ]);
       windowsElevationAccepted = accepted;
+      if (!accepted) await clearWindowsUpdateRelaunchIntent(relaunch.path);
       return accepted ? 'accepted' : 'cancelled';
     },
     quitAndInstall() {
       if (process.platform === 'win32') {
         if (!windowsElevationAccepted) throw new Error('Windows elevation was not accepted');
-        app.relaunch();
         app.quit();
         return;
       }
@@ -177,7 +195,7 @@ async function launchWindowsElevation(
   executable: string,
   arguments_: readonly string[],
 ): Promise<boolean> {
-  return await new Promise<boolean>((resolveLaunch) => {
+  return await new Promise<boolean>((resolveLaunch, rejectLaunch) => {
     const child = spawn(executable, arguments_, { stdio: 'ignore', windowsHide: true });
     let settled = false;
     const settle = (accepted: boolean): void => {
@@ -185,12 +203,18 @@ async function launchWindowsElevation(
       settled = true;
       resolveLaunch(accepted);
     };
-    child.once('error', () => settle(false));
+    const fail = (): void => {
+      if (settled) return;
+      settled = true;
+      rejectLaunch(new Error('The Windows update bootstrap failed'));
+    };
+    child.once('error', fail);
     child.once('exit', (code) =>
       settleWindowsElevation(
         code,
         () => settle(true),
         () => settle(false),
+        fail,
       ),
     );
   });

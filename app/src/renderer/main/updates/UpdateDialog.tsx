@@ -84,10 +84,18 @@ export function UpdateDialog() {
         ) : update.phase === 'installing' ? (
           <p role="status">The download is complete. Talking Quill is restarting to install it…</p>
         ) : (
-          <p>
-            {update.message ??
-              'The update will download in the background, then Talking Quill will restart and install it.'}
-          </p>
+          <>
+            <p>
+              {update.message ??
+                'The update will download in the background, then Talking Quill will restart and install it.'}
+            </p>
+            {update.latestVersion !== null && update.latestVersion !== availableVersion ? (
+              <p>
+                Newest published version: {update.latestVersion}. Compatible updates install in
+                order.
+              </p>
+            ) : null}
+          </>
         )}
       </Dialog>
       {notice === null ? null : (

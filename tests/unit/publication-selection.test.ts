@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { bindVerifiedChannel } from '../../app/src/main/info/publication-catalog';
+import { validateInstalledWindowsUpdateManifest } from '../../app/src/main/info/installed-windows-update-identity';
 import {
   selectCompatiblePublication,
   selectHighestPublication,
@@ -59,6 +60,7 @@ function publication(
     release: {
       id: sequence,
       tag_name: `v${version}`,
+      html_url: `https://github.com/gee666/talking-quill/releases/tag/v${version}`,
       draft: false,
       prerelease: false,
       immutable: true,
@@ -83,6 +85,51 @@ function publication(
 const verifier = (value: unknown): PublicationEnvelope => value as PublicationEnvelope;
 
 describe('runtime immutable publication selection', () => {
+  it('accepts canonical fresh metadata and rejects mode, marker, and predecessor mismatches', () => {
+    const base = {
+      schemaVersion: 1,
+      kind: 'talking-quill-local-owner-release',
+      version: '0.0.69',
+      platform: 'win',
+      architecture: 'x64',
+      ownerMode: 'local-unsigned-enabled',
+      packageMode: 'fresh',
+      freshInstall: true,
+      sourceCommit: 'a'.repeat(40),
+      sourceTree: 'b'.repeat(40),
+      roles: [
+        {
+          role: 'gateway',
+          path: 'resources/helper/gateway.exe',
+          sha256: digest('1'),
+          suppressionCapable: false,
+        },
+        {
+          role: 'owner',
+          path: 'resources/helper/owner.exe',
+          sha256: digest('2'),
+          suppressionCapable: true,
+        },
+      ],
+      predecessor: null,
+      releaseBuildDigest: digest('3'),
+      packageLayoutDigest: digest('4'),
+      update: {},
+    } as const;
+    expect(() => validateInstalledWindowsUpdateManifest(base)).not.toThrow();
+    expect(() =>
+      validateInstalledWindowsUpdateManifest({ ...base, freshInstall: undefined }),
+    ).toThrow('Fresh-install');
+    expect(() =>
+      validateInstalledWindowsUpdateManifest({
+        ...base,
+        packageMode: 'repair',
+        freshInstall: undefined,
+        predecessor: { version: '0.0.68' },
+      }),
+    ).toThrow('Predecessor');
+  });
+
   it('pins the dedicated repository publication key in the updater verifier', async () => {
     const [source, pin] = await Promise.all([
       readFile('app/src/main/info/publication-selection.ts', 'utf8'),
