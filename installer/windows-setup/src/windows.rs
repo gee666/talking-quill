@@ -56,7 +56,7 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteTreeW, RegSetValueExW,
+    RegDeleteTreeW, RegFlushKey, RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW,
@@ -130,6 +130,7 @@ fn fail(code: i32, message: impl Into<String>) -> SetupError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Install,
+    Update,
     Repair,
     Uninstall,
 }
@@ -148,6 +149,7 @@ struct Paths {
     staging: PathBuf,
     backup: PathBuf,
     transaction: PathBuf,
+    maintenance_uninstaller: PathBuf,
     profile: PathBuf,
     legacy_authority: PathBuf,
     legacy_quarantine: PathBuf,
@@ -174,8 +176,10 @@ fn run_inner() -> Result<i32> {
     if !elevated {
         let current =
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
-        let retained = retain_controller_image(&current, relocated)?;
         let controller_paths = paths()?;
+        let stable_uninstaller =
+            canonical(&current).ok() == canonical(&controller_paths.maintenance_uninstaller).ok();
+        let retained = retain_controller_image(&current, relocated)?;
         let mut lifecycle_parent = 0;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
@@ -193,7 +197,7 @@ fn run_inner() -> Result<i32> {
         } else {
             derive_action(&current, &controller_paths)?
         };
-        if action == Action::Uninstall && !relocated {
+        if action == Action::Uninstall && !relocated && !stable_uninstaller {
             let (path, lock) = create_relocated_image(&current)?;
             let channel = ControllerChannel::create(Action::Uninstall, silent, 0)?;
             launch_relocated(&path, &channel)?;
@@ -222,6 +226,12 @@ fn run_inner() -> Result<i32> {
         if action != Action::Install {
             request_runtime_exit(&controller_paths)?;
         }
+        let retained = if stable_uninstaller {
+            drop(retained);
+            retain_controller_image(&current, true)?
+        } else {
+            retained
+        };
         let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
         let result = elevate(&current, silent, &channel);
         drop(retained);
@@ -315,7 +325,8 @@ fn legacy_predecessor_arguments(arguments: &[OsString]) -> bool {
 
 fn confirm_controller(action: Action) -> Result<bool> {
     let text = match action {
-        Action::Install => "Install or update Talking Quill for all users?",
+        Action::Install => "Install Talking Quill for all users?",
+        Action::Update => "Update Talking Quill for all users?",
         Action::Repair => "Repair Talking Quill for all users?",
         Action::Uninstall => {
             "Uninstall Talking Quill?\n\nYour profile is preserved unless you delete it in the application first."
@@ -501,6 +512,15 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     }
     let paths = paths()?;
     let _machine_lock = MachineLock::acquire()?;
+    let state_root = paths
+        .transaction
+        .parent()
+        .ok_or_else(|| fail(EXIT_FAILURE, "Installer state root is invalid."))?;
+    assert_plain_directory(state_root)?;
+    cleanup_transaction_residue(state_root)?;
+    // Recovery authority comes from the protected journal and retained tree identities.
+    // Restore an interrupted predecessor before authorizing a new update request.
+    recover(&paths)?;
     let predecessor_authorized = if legacy_predecessor {
         authenticate_predecessor_helper(&package, &paths)?;
         validate_predecessor_arguments(&package, &current)?;
@@ -508,19 +528,6 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     } else {
         false
     };
-    if legacy_predecessor && !predecessor_authorized {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy update arguments require the exact authenticated predecessor helper.",
-        ));
-    }
-    let state_root = paths
-        .transaction
-        .parent()
-        .ok_or_else(|| fail(EXIT_FAILURE, "Installer state root is invalid."))?;
-    assert_plain_directory(state_root)?;
-    cleanup_transaction_residue(state_root)?;
-    recover(&paths)?;
     let mut action = if requested_action == Some(Action::Uninstall) {
         authorize_uninstall_controller(&paths)?;
         Action::Uninstall
@@ -535,7 +542,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         request_runtime_exit(&paths)?;
     }
     match action {
-        Action::Install | Action::Repair => install(&mut image, &package, &current, &paths, action),
+        Action::Install | Action::Update | Action::Repair => {
+            install(&mut image, &package, &current, &paths, action)
+        }
         Action::Uninstall => {
             write_transaction(&paths, "uninstalling", Action::Uninstall, true)?;
             let original_controller = authenticated_controller
@@ -546,13 +555,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
                     )
                 })?
                 .3;
-            if original_controller == 0 {
-                return Err(fail(
-                    EXIT_REJECTED,
-                    "Uninstall lifecycle parent is missing.",
-                ));
+            if original_controller != 0 {
+                wait_for_process_exit(original_controller)?;
             }
-            wait_for_process_exit(original_controller)?;
             uninstall(&paths)
         }
     }?;
@@ -767,6 +772,12 @@ impl ControllerChannel {
                 Action::Install => 1,
                 Action::Repair => 2,
                 Action::Uninstall => 3,
+                Action::Update => {
+                    return Err(fail(
+                        EXIT_REJECTED,
+                        "Update authority cannot come from a controller request.",
+                    ));
+                }
             },
             u8::from(self.silent),
         ]);
@@ -1514,8 +1525,11 @@ fn installed_matches_target(
     let installed_setup = paths.install.join("Uninstall Talking Quill.exe");
     assert_plain_file(&installed_setup)?;
     let exact_setup = file_hash(candidate)? == file_hash(&installed_setup)?;
+    // Fault-bearing packages are non-promotable process-test artifacts. Their crash
+    // seam is package-bound (never command-line authority) and can only target the
+    // exact installed release identity.
     let acceptance_fault =
-        cfg!(feature = "acceptance-faults") && package.manifest.package_mode == "repair";
+        package.manifest.fault_phase.is_some() && package.manifest.package_mode == "repair";
     Ok((exact_setup || acceptance_fault)
         && installed.get("version").and_then(|value| value.as_str())
             == Some(package.manifest.version.as_str())
@@ -1538,6 +1552,17 @@ fn authorize_package_mode(
     predecessor_authorized: bool,
     requested: Action,
 ) -> Result<Action> {
+    // The installed image is its own production repair authority. A renamed exact copy
+    // may repair the same target without introducing a separately trusted repair binary.
+    let installed_setup = paths.install.join("Uninstall Talking Quill.exe");
+    if requested == Action::Repair
+        && paths.install.exists()
+        && installed_setup.exists()
+        && file_hash(candidate)? == file_hash(&installed_setup)?
+        && installed_matches_target(package, paths, candidate)?
+    {
+        return Ok(Action::Repair);
+    }
     match package.manifest.package_mode.as_str() {
         "fresh" if !paths.install.exists() => Ok(Action::Install),
         "repair"
@@ -1589,7 +1614,7 @@ fn authorize_package_mode(
                     "Update does not authorize the exact installed predecessor.",
                 ));
             }
-            Ok(Action::Install)
+            Ok(Action::Update)
         }
         _ => Err(fail(
             EXIT_REJECTED,
@@ -1599,14 +1624,16 @@ fn authorize_package_mode(
 }
 
 fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
-    if current
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case("Uninstall Talking Quill.exe"))
+    let maintenance = canonical(current).ok() == canonical(&paths.maintenance_uninstaller).ok();
+    if maintenance
+        || current
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Uninstall Talking Quill.exe"))
     {
         let parent = current
             .parent()
             .ok_or_else(|| fail(EXIT_REJECTED, "Invalid installed setup path."))?;
-        if canonical(parent)? != canonical(&paths.install)? {
+        if !maintenance && canonical(parent)? != canonical(&paths.install)? {
             return Err(fail(
                 EXIT_REJECTED,
                 "Uninstall image is outside the installed tree.",
@@ -1674,9 +1701,13 @@ fn install(
         write_transaction(paths, "predecessor-moved", action, had_predecessor)?;
         crash_at(package, "predecessorMoved");
     }
+    write_transaction(paths, "publishing", action, had_predecessor)?;
+    crash_at(package, "publishing");
     durable_rename(&paths.staging, &paths.install)?;
+    crash_at(package, "publishedBeforePersist");
     write_transaction(paths, "published", action, had_predecessor)?;
     crash_at(package, "published");
+    ensure_maintenance_uninstaller(paths)?;
     register_uninstall(paths, &package.manifest.version)?;
     register_app_path(paths)?;
     write_transaction(paths, "registered", action, had_predecessor)?;
@@ -1727,7 +1758,7 @@ fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> 
         _ => false,
     };
     let acceptance_repair =
-        cfg!(feature = "acceptance-faults") && package.manifest.package_mode == "repair";
+        package.manifest.fault_phase.is_some() && package.manifest.package_mode == "repair";
     if value.get("version").and_then(|item| item.as_str())
         != Some(package.manifest.version.as_str())
         || value.get("architecture").and_then(|item| item.as_str())
@@ -1982,6 +2013,8 @@ fn uninstall(paths: &Paths) -> Result<()> {
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
+    // The synchronous maintenance controller owns a delete-on-close handle. The worker
+    // must not fail final commit by trying to unlink its executing controller image.
     remove_transaction(paths)?;
     Ok(())
 }
@@ -2000,10 +2033,16 @@ fn recovery_plan(
     backup_exists: bool,
     install_exists: bool,
 ) -> Result<RecoveryPlan> {
-    if !matches!(value.action.as_str(), "install" | "repair" | "uninstall")
-        || (value.action == "install" && value.had_predecessor)
+    if !matches!(
+        value.action.as_str(),
+        "install" | "update" | "repair" | "uninstall"
+    ) || (value.action == "update" && !value.had_predecessor)
         || (value.action == "repair" && !value.had_predecessor)
-        || (value.action == "uninstall" && value.phase != "uninstalling")
+        || (value.action == "uninstall"
+            && !matches!(
+                value.phase.as_str(),
+                "uninstalling" | "recovering-finish-uninstall"
+            ))
     {
         return Err(fail(
             EXIT_REJECTED,
@@ -2011,12 +2050,16 @@ fn recovery_plan(
         ));
     }
     match value.phase.as_str() {
-        "staging" | "staged" | "prepared"
+        "staging" | "staged" | "prepared" | "publishing"
             if !backup_exists && install_exists == value.had_predecessor =>
         {
             Ok(RecoveryPlan::DiscardStaging)
         }
-        "staging" | "staged" | "prepared" | "predecessor-moved" | "published" | "registered"
+        "prepared" | "publishing" if !value.had_predecessor && !backup_exists && install_exists => {
+            Ok(RecoveryPlan::RemoveFreshCandidate)
+        }
+        "staging" | "staged" | "prepared" | "predecessor-moved" | "publishing" | "published"
+        | "registered"
             if value.had_predecessor && backup_exists =>
         {
             Ok(RecoveryPlan::RestorePredecessor)
@@ -2029,7 +2072,21 @@ fn recovery_plan(
         "committed" | "legacy-retiring" | "legacy-retired" if install_exists => {
             Ok(RecoveryPlan::FinishCommit)
         }
-        "uninstalling" => Ok(RecoveryPlan::FinishUninstall),
+        "recovering-restore-predecessor"
+            if value.had_predecessor && (backup_exists || install_exists) =>
+        {
+            Ok(RecoveryPlan::RestorePredecessor)
+        }
+        "recovering-discard-staging"
+            if !backup_exists && install_exists == value.had_predecessor =>
+        {
+            Ok(RecoveryPlan::DiscardStaging)
+        }
+        "recovering-remove-fresh" if !value.had_predecessor && !backup_exists => {
+            Ok(RecoveryPlan::RemoveFreshCandidate)
+        }
+        "recovering-finish-commit" if install_exists => Ok(RecoveryPlan::FinishCommit),
+        "uninstalling" | "recovering-finish-uninstall" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -2059,15 +2116,36 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             "Installer transaction schema is invalid.",
         ));
     }
-    match recovery_plan(
+    let plan = recovery_plan(
         &value,
         path_present(&paths.backup)?,
         path_present(&paths.install)?,
-    )? {
+    )?;
+    let progress_phase = match plan {
+        RecoveryPlan::RestorePredecessor => "recovering-restore-predecessor",
+        RecoveryPlan::DiscardStaging => "recovering-discard-staging",
+        RecoveryPlan::RemoveFreshCandidate => "recovering-remove-fresh",
+        RecoveryPlan::FinishCommit => "recovering-finish-commit",
+        RecoveryPlan::FinishUninstall => "recovering-finish-uninstall",
+    };
+    if value.phase != progress_phase {
+        write_transaction(
+            paths,
+            progress_phase,
+            transaction_action(&value)?,
+            value.had_predecessor,
+        )?;
+    }
+    match plan {
         RecoveryPlan::RestorePredecessor => {
             remove_plain_tree(&paths.staging)?;
-            remove_plain_tree(&paths.install)?;
-            durable_rename(&paths.backup, &paths.install)?;
+            if path_present(&paths.backup)? {
+                remove_plain_tree(&paths.install)?;
+                durable_rename(&paths.backup, &paths.install)?;
+            }
+            if !path_present(&paths.install)? {
+                return Err(fail(EXIT_REJECTED, "Recovered predecessor is missing."));
+            }
             if update_system_state {
                 register_installed_uninstall(paths)?;
                 register_app_path(paths)?;
@@ -2081,9 +2159,14 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             }
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
+            remove_maintenance_uninstaller(paths)?;
         }
         RecoveryPlan::FinishCommit => {
+            if value.action == "repair" && path_present(&paths.backup)? {
+                restore_repair_controller(paths)?;
+            }
             if update_system_state {
+                register_installed_uninstall(paths)?;
                 retire_legacy_authority(paths)?;
             }
             remove_plain_tree(&paths.backup)?;
@@ -2098,6 +2181,7 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
+            remove_maintenance_uninstaller(paths)?;
         }
     }
     remove_transaction(paths)
@@ -2113,6 +2197,7 @@ fn paths() -> Result<Paths> {
         staging: program_files.join(".Talking Quill.native-staging"),
         backup: program_files.join(".Talking Quill.native-backup"),
         transaction: program_files.join(".Talking Quill.native-transaction-v2.json"),
+        maintenance_uninstaller: program_files.join("Talking Quill Maintenance.exe"),
         profile,
         legacy_authority: program_data.join("Talking Quill/KeyboardAuthority"),
         legacy_quarantine: program_data
@@ -2125,7 +2210,82 @@ fn paths() -> Result<Paths> {
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill";
 const APP_PATH_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe";
 
+fn restore_repair_controller(paths: &Paths) -> Result<()> {
+    let source = paths.backup.join("Uninstall Talking Quill.exe");
+    let target = paths.install.join("Uninstall Talking Quill.exe");
+    assert_plain_file(&source)?;
+    assert_plain_file(&target)?;
+    let temporary = paths.install.join(".repair-controller-recovery.tmp");
+    if path_present(&temporary)? {
+        assert_plain_file(&temporary)?;
+        if file_hash(&temporary)? == file_hash(&source)? {
+            return durable_replace(&temporary, &target);
+        }
+        // The fixed plain file is installer-owned inside the protected target tree;
+        // a mismatched value is an interrupted copy and is safe to recreate.
+        fs::remove_file(&temporary).map_err(io_failure)?;
+    }
+    let mut input = File::open(source).map_err(io_failure)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(io_failure)?;
+    std::io::copy(&mut input, &mut output).map_err(io_failure)?;
+    output.sync_all().map_err(io_failure)?;
+    drop(output);
+    durable_replace(&temporary, &target)
+}
+
+fn remove_maintenance_uninstaller(paths: &Paths) -> Result<()> {
+    if path_present(&paths.maintenance_uninstaller)? {
+        assert_plain_file(&paths.maintenance_uninstaller)?;
+        fs::remove_file(&paths.maintenance_uninstaller).map_err(io_failure)?;
+    }
+    Ok(())
+}
+
+fn ensure_maintenance_uninstaller(paths: &Paths) -> Result<()> {
+    let source = paths.install.join("Uninstall Talking Quill.exe");
+    assert_plain_file(&source)?;
+    let replacing = path_present(&paths.maintenance_uninstaller)?;
+    if replacing {
+        assert_plain_file(&paths.maintenance_uninstaller)?;
+        if file_hash(&source)? == file_hash(&paths.maintenance_uninstaller)? {
+            return Ok(());
+        }
+    }
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|_| fail(EXIT_FAILURE, "Windows randomness is unavailable."))?;
+    let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = paths
+        .maintenance_uninstaller
+        .with_extension(format!("{suffix}.tmp"));
+    let mut input = File::open(&source).map_err(io_failure)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(io_failure)?;
+    std::io::copy(&mut input, &mut output).map_err(io_failure)?;
+    output.sync_all().map_err(io_failure)?;
+    drop(output);
+    if file_hash(&source)? != file_hash(&temporary)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Maintenance uninstaller verification failed.",
+        ));
+    }
+    if replacing {
+        durable_replace(&temporary, &paths.maintenance_uninstaller)
+    } else {
+        durable_rename(&temporary, &paths.maintenance_uninstaller)
+    }
+}
+
 fn register_installed_uninstall(paths: &Paths) -> Result<()> {
+    ensure_maintenance_uninstaller(paths)?;
     let manifest = paths
         .install
         .join("resources/keyboard-owner-release-v1.json");
@@ -2168,10 +2328,11 @@ fn register_uninstall(paths: &Paths, version: &str) -> Result<()> {
         ("InstallLocation", paths.install.display().to_string()),
         (
             "UninstallString",
-            format!(
-                "\"{}\"",
-                paths.install.join("Uninstall Talking Quill.exe").display()
-            ),
+            format!("\"{}\"", paths.maintenance_uninstaller.display()),
+        ),
+        (
+            "QuietUninstallString",
+            format!("\"{}\" /S", paths.maintenance_uninstaller.display()),
         ),
     ];
     let result = values.iter().try_for_each(|(name, value)| {
@@ -2195,8 +2356,16 @@ fn register_uninstall(paths: &Paths, version: &str) -> Result<()> {
             ))
         }
     });
+    let flushed = result.is_ok() && unsafe { RegFlushKey(key) } == 0;
     unsafe { RegCloseKey(key) };
-    result
+    if flushed {
+        result
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Cannot durably write the native uninstall registration.",
+        ))
+    }
 }
 
 fn register_app_path(paths: &Paths) -> Result<()> {
@@ -2242,8 +2411,9 @@ fn register_app_path(paths: &Paths) -> Result<()> {
             (directory.len() * 2) as u32,
         )
     };
+    let flushed = first == 0 && second == 0 && unsafe { RegFlushKey(key) } == 0;
     unsafe { RegCloseKey(key) };
-    if first == 0 && second == 0 {
+    if flushed {
         Ok(())
     } else {
         Err(fail(
@@ -2279,6 +2449,19 @@ fn unregister_uninstall() -> Result<()> {
     }
 }
 
+fn transaction_action(value: &Transaction) -> Result<Action> {
+    match value.action.as_str() {
+        "install" => Ok(Action::Install),
+        "update" => Ok(Action::Update),
+        "repair" => Ok(Action::Repair),
+        "uninstall" => Ok(Action::Uninstall),
+        _ => Err(fail(
+            EXIT_REJECTED,
+            "Installer transaction action is invalid.",
+        )),
+    }
+}
+
 fn write_transaction(
     paths: &Paths,
     phase: &str,
@@ -2290,6 +2473,7 @@ fn write_transaction(
         .with_extension(format!("tmp-{}", std::process::id()));
     let action = match action {
         Action::Install => "install",
+        Action::Update => "update",
         Action::Repair => "repair",
         Action::Uninstall => "uninstall",
     };
@@ -2550,19 +2734,21 @@ mod tests {
                 "{phase}"
             );
         }
-        for phase in ["predecessor-moved", "published", "registered"] {
-            assert_eq!(
-                recovery_plan(
-                    &transaction(phase, "repair", true),
-                    true,
-                    phase != "predecessor-moved"
-                )
-                .unwrap(),
-                RecoveryPlan::RestorePredecessor,
-                "{phase}"
-            );
+        for phase in ["predecessor-moved", "publishing", "published", "registered"] {
+            for action in ["install", "update", "repair"] {
+                assert_eq!(
+                    recovery_plan(
+                        &transaction(phase, action, true),
+                        true,
+                        phase != "predecessor-moved"
+                    )
+                    .unwrap(),
+                    RecoveryPlan::RestorePredecessor,
+                    "{action}:{phase}"
+                );
+            }
         }
-        for phase in ["published", "registered"] {
+        for phase in ["prepared", "publishing", "published", "registered"] {
             assert_eq!(
                 recovery_plan(&transaction(phase, "install", false), false, true).unwrap(),
                 RecoveryPlan::RemoveFreshCandidate,
@@ -2636,6 +2822,7 @@ mod tests {
             staging: root.join("staging"),
             backup: root.join("backup"),
             transaction: root.join("transaction.json"),
+            maintenance_uninstaller: root.join("Talking Quill Maintenance.exe"),
             profile: root.join("profile"),
             legacy_authority: root.join("legacy"),
             legacy_quarantine: root.join("quarantine"),
@@ -2651,11 +2838,16 @@ mod tests {
             std::env::var_os("TQ_SETUP_FAULT_PHASE"),
         ) {
             let image = std::env::current_exe().unwrap();
-            let (action, _, _, _) = WorkerChannel::connect_and_authenticate(&image, None).unwrap();
+            let (_action, _, _, _) = WorkerChannel::connect_and_authenticate(&image, None).unwrap();
             let paths = test_paths(Path::new(&root));
             let phase = phase.to_string_lossy();
             let uninstalling = phase == "uninstalling";
             let had_predecessor = !uninstalling;
+            let journal_phase = if phase == "published-before-persist" {
+                "publishing"
+            } else {
+                phase.as_ref()
+            };
             match phase.as_ref() {
                 "staging" | "staged" | "prepared" => {
                     fs::create_dir(&paths.install).unwrap();
@@ -2663,13 +2855,18 @@ mod tests {
                     fs::create_dir(&paths.staging).unwrap();
                     fs::write(paths.staging.join("identity"), b"candidate").unwrap();
                 }
-                "predecessor-moved" => {
+                "predecessor-moved" | "publishing" => {
                     fs::create_dir(&paths.backup).unwrap();
                     fs::write(paths.backup.join("identity"), b"predecessor").unwrap();
                     fs::create_dir(&paths.staging).unwrap();
                     fs::write(paths.staging.join("identity"), b"candidate").unwrap();
                 }
-                "published" | "registered" | "committed" | "legacy-retiring" | "legacy-retired" => {
+                "published-before-persist"
+                | "published"
+                | "registered"
+                | "committed"
+                | "legacy-retiring"
+                | "legacy-retired" => {
                     fs::create_dir(&paths.backup).unwrap();
                     fs::write(paths.backup.join("identity"), b"predecessor").unwrap();
                     fs::create_dir(&paths.install).unwrap();
@@ -2683,11 +2880,11 @@ mod tests {
             }
             write_transaction(
                 &paths,
-                &phase,
+                journal_phase,
                 if uninstalling {
                     Action::Uninstall
                 } else {
-                    action
+                    Action::Update
                 },
                 had_predecessor,
             )
@@ -2703,6 +2900,8 @@ mod tests {
             "staged",
             "prepared",
             "predecessor-moved",
+            "publishing",
+            "published-before-persist",
             "published",
             "registered",
             "committed",
@@ -2790,6 +2989,37 @@ mod tests {
             );
             fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn recovery_progress_states_accept_every_terminal_topology() {
+        let root =
+            std::env::temp_dir().join(format!("tq-recovery-progress-{}", std::process::id()));
+        for (phase, action, had_predecessor, installed) in [
+            ("recovering-restore-predecessor", Action::Update, true, true),
+            ("recovering-discard-staging", Action::Update, true, true),
+            ("recovering-remove-fresh", Action::Install, false, false),
+            ("recovering-finish-commit", Action::Update, true, true),
+            (
+                "recovering-finish-uninstall",
+                Action::Uninstall,
+                true,
+                false,
+            ),
+        ] {
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let paths = test_paths(&root);
+            if installed {
+                fs::create_dir(&paths.install).unwrap();
+                fs::write(paths.install.join("identity"), b"terminal").unwrap();
+            }
+            write_transaction(&paths, phase, action, had_predecessor).unwrap();
+            recover_with_system(&paths, false).unwrap();
+            assert!(!paths.transaction.exists(), "{phase}");
+            assert_eq!(paths.install.exists(), installed, "{phase}");
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

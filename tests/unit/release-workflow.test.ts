@@ -63,7 +63,8 @@ describe('Windows native release workflow', () => {
     expect(jobEnvironment).not.toContain(signingSecret);
     expect(workflow).not.toContain('secrets.TALKING_QUILL_WINDOWS_UPDATE_PUBLIC_KEY_SEC1');
     expect(workflow).not.toContain('TALKING_QUILL_WINDOWS_UPDATE_BRIDGE_PUBLIC_KEY_SEC1');
-    expect(workflow).not.toContain('TalkingQuillKeyboardAuthority');
+    expect(workflow).not.toContain('New-Service');
+    expect(workflow).not.toContain('sc.exe create');
     expect(workflow).not.toMatch(/gh release (?:create|edit|upload)/u);
     expect(stageScript).not.toContain("platform === 'win' && arch !== 'x64'");
     expect(stageScript).toContain("!['x64', 'arm64'].includes(arch)");
@@ -101,6 +102,8 @@ describe('Windows native release workflow', () => {
       'staged',
       'prepared',
       'predecessorMoved',
+      'publishing',
+      'publishedBeforePersist',
       'published',
       'registered',
       'committed',
@@ -135,9 +138,10 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('--windows-update-bootstrap-v2=');
     expect(lifecycle).toContain('Start-Process -FilePath $helper');
     expect(lifecycle).toContain('--mode installed --root');
-    expect(lifecycle).toContain('Uninstall Talking Quill.exe');
-    expect(lifecycle).toContain('@(0,997)');
-    expect(lifecycle).toContain('Durable silent uninstall did not complete');
+    expect(lifecycle).toContain('Talking Quill Maintenance.exe');
+    expect(lifecycle).toContain('QuietUninstallString');
+    expect(lifecycle).toContain('Synchronous native setup uninstall failed');
+    expect(lifecycle).toContain('Recovery was not terminal before repair');
     const assemble = section('assemble');
     expect(assemble).toContain('needs: [validate, package, smoke, lifecycle, fresh-lifecycle]');
     expect(assemble).toContain('windows-x64-exact-native-setup-input');
@@ -145,6 +149,7 @@ describe('Windows native release workflow', () => {
     expect(assemble).toContain('windows-x64-native-ui-smoke-evidence');
     expect(assemble).toContain('windows-arm64-native-ui-smoke-evidence');
     expect(assemble.match(/windows-installer-ui-evidence\.mjs/gu)).toHaveLength(1);
+    expect(assemble).toContain('cp installed-evidence/*.json release-artifacts/');
     expect(assemble).toContain('windows-installer-ui-smoke-$arch.json release-artifacts/');
     expect(publishWorkflow).toContain('windows-installer-ui-evidence.mjs');
     expect(publishWorkflow.indexOf('windows-installer-ui-evidence.mjs')).toBeLessThan(

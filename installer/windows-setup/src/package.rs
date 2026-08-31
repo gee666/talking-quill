@@ -210,7 +210,9 @@ pub fn extract_file<R: Read + Seek, W: std::io::Write>(
         .seek(SeekFrom::Start(package.package_offset + file.block_offset))
         .map_err(|_| PackageError::Block)?;
     let limited = reader.take(file.block_size);
-    let mut decoder = zstd::stream::read::Decoder::new(limited).map_err(|_| PackageError::Block)?;
+    let mut decoder = zstd::stream::read::Decoder::new(limited)
+        .map_err(|_| PackageError::Block)?
+        .single_frame();
     let mut hash = Sha256::new();
     let mut written = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
@@ -230,8 +232,10 @@ pub fn extract_file<R: Read + Seek, W: std::io::Write>(
             .write_all(&buffer[..count])
             .map_err(|_| PackageError::Block)?;
     }
-    let remaining = decoder.finish().into_inner().limit();
-    if remaining != 0 {
+    let compressed = decoder.finish();
+    let buffered = compressed.buffer().len() as u64;
+    let remaining = compressed.into_inner().limit();
+    if buffered.checked_add(remaining) != Some(0) {
         return Err(PackageError::Block);
     }
     if written != file.size || hex(&hash.finalize()) != file.sha256 {
@@ -257,13 +261,15 @@ fn validate_manifest(
         || !hex_digest(&manifest.target.release_build_digest)
         || !hex_digest(&manifest.target.gateway_sha256)
         || !hex_digest(&manifest.target.owner_sha256)
-        || (manifest.fault_phase.is_some() && !cfg!(feature = "acceptance-faults"))
+        || (manifest.fault_phase.is_some() && manifest.package_mode != "repair")
         || manifest.fault_phase.as_deref().is_some_and(|phase| {
             !matches!(
                 phase,
                 "staged"
                     | "prepared"
                     | "predecessorMoved"
+                    | "publishing"
+                    | "publishedBeforePersist"
                     | "published"
                     | "registered"
                     | "committed"
@@ -548,10 +554,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_trailing_compressed_frame_bytes() {
+    fn rejects_concatenated_valid_compressed_frames() {
         let content = b"payload";
         let mut block = zstd::stream::encode_all(&content[..], 3).unwrap();
-        block.extend_from_slice(b"trailing");
+        block.extend_from_slice(&zstd::stream::encode_all(&b"second"[..], 3).unwrap());
         let file = ManifestFile {
             path: "a".into(),
             mode: 0,
@@ -616,9 +622,13 @@ mod tests {
             Err(PackageError::Identity)
         );
         parsed.manifest.predecessor = None;
+        parsed.manifest.package_mode = "repair".into();
         for phase in [
             "staged",
             "prepared",
+            "predecessorMoved",
+            "publishing",
+            "publishedBeforePersist",
             "published",
             "registered",
             "committed",
@@ -628,11 +638,7 @@ mod tests {
             parsed.manifest.fault_phase = Some(phase.into());
             assert_eq!(
                 validate_manifest(&parsed.manifest, package_size, manifest_size),
-                if cfg!(feature = "acceptance-faults") {
-                    Ok(())
-                } else {
-                    Err(PackageError::Identity)
-                },
+                Ok(()),
                 "{phase}"
             );
         }

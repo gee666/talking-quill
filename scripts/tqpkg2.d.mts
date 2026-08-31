@@ -40,6 +40,7 @@ export interface Tqpkg2Manifest {
 }
 export function canonicalJson(value: unknown): string;
 export function validateTqpkg2Path(path: string): void;
+export function zstdFrameLength(bytes: Buffer): number;
 export function tqpkg2TreeDigest(files: readonly Tqpkg2File[]): string;
 export function parseTqpkg2(
   bytes: Buffer,

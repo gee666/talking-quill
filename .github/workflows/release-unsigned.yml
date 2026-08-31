@@ -224,14 +224,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-setup.mjs ${{ matrix.arch }}
           mkdir -p tmp/windows-fault-artifacts/${{ matrix.arch }}
-          for phase in staged prepared predecessorMoved published registered committed legacyRetiring legacyRetired; do
+          for phase in staged prepared predecessorMoved publishing publishedBeforePersist published registered committed legacyRetiring legacyRetired; do
             TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE="$phase" node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
             mv release/Talking-Quill-*-repair-"$phase".exe tmp/windows-fault-artifacts/${{ matrix.arch }}/
           done
-          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
-          mv release/Talking-Quill-*-repair.exe tmp/windows-fault-artifacts/${{ matrix.arch }}/
+          # Fault-bearing packages are diagnostics only; successful repair is exercised with
+          # an exact copy of the installed production image in the lifecycle job.
       # Transfer the provenance-bound bytes to the architecture-native smoke
       # runner. No evidence exists until that runner exercises these exact bytes.
       - name: Upload provenance-bound exact native setup smoke input
@@ -373,37 +372,54 @@ jobs:
           } while ($true)
           node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
           $faultRoot = 'preserved/tmp/windows-fault-artifacts/${{ matrix.arch }}'
-          $repair = @(Get-ChildItem $faultRoot/Talking-Quill-*-repair.exe)
-          if ($repair.Count -ne 1) { throw 'Expected one authenticated recovery repair artifact.' }
+          $productionRepair = Join-Path $env:RUNNER_TEMP 'talking-quill-production-repair.exe'
+          Copy-Item -LiteralPath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -Destination $productionRepair
+          $setupProbe = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
+          if ($setupProbe.Count -ne 1) { throw 'Expected one production fresh setup recovery probe.' }
+          $faultEvidence = @()
           foreach ($fault in @(Get-ChildItem $faultRoot/Talking-Quill-*-repair-*.exe | Sort-Object Name)) {
             $crash = Start-Process -FilePath $fault.FullName -ArgumentList '/S' -Wait -PassThru
             if ($crash.ExitCode -ne 197) { throw "Fault lifecycle did not terminate at its authenticated seam: $($fault.Name)" }
-            $recovery = Start-Process -FilePath $repair[0].FullName -ArgumentList '/S' -Wait -PassThru
-            if ($recovery.ExitCode -ne 0) { throw "Fault lifecycle recovery failed: $($fault.Name)" }
+            # The production candidate runs protected journal recovery, then truthfully rejects
+            # update mode against the already-installed target before any new mutation.
+            $recovery = Start-Process -FilePath $setupProbe[0].FullName -ArgumentList '/S' -Wait -PassThru
+            if ($recovery.ExitCode -ne 78) { throw "Production recovery probe did not reject after recovery: $($fault.Name) / $($recovery.ExitCode)" }
+            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
+            if (Test-Path -LiteralPath $transaction) { throw "Recovery was not terminal before repair: $($fault.Name)" }
+            $recoveredIdentity = Get-Content -LiteralPath "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json" -Raw | ConvertFrom-Json
+            if ($recoveredIdentity.releaseBuildDigest -cne $expectedDigest) { throw "Recovered identity was neither the exact candidate nor an accepted terminal topology: $($fault.Name)" }
+            $appPath = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe' -Name '(default)').'(default)'
+            $quiet = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString).QuietUninstallString
+            $legacyServiceAbsent = $null -eq (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
+            & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
+            $legacyTaskAbsent = $LASTEXITCODE -ne 0
+            if ($appPath -cne "$env:ProgramFiles\Talking Quill\Talking Quill.exe" -or $quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S') -or -not $legacyServiceAbsent -or -not $legacyTaskAbsent) { throw "Recovered registrations or legacy authority are invalid: $($fault.Name)" }
+            $faultEvidence += @{ fault = $fault.Name; crashExitCode = 197; recoveryExitCode = 78; recoveredReleaseBuildDigest = $recoveredIdentity.releaseBuildDigest; inspectedBeforeRepair = $true; appPathExact = $true; quietUninstallExact = $true; legacyServiceAbsent = $true; legacyTaskAbsent = $true }
+            $postRecoveryRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
+            if ($postRecoveryRepair.ExitCode -ne 0) { throw "Fault lifecycle repair failed: $($fault.Name)" }
             node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
           }
+          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
           & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
           if ($LASTEXITCODE -ne 0) { throw 'Successful lifecycle observer compilation failed.' }
-          $repairHash = (Get-FileHash -LiteralPath $repair[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          & tmp/windows-installer-success-observer.exe $repair[0].FullName tmp/windows-installer-success-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' repair $repairHash
+          $repairHash = (Get-FileHash -LiteralPath $productionRepair -Algorithm SHA256).Hash.ToLowerInvariant()
+          & tmp/windows-installer-success-observer.exe $productionRepair tmp/windows-installer-success-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' update $repairHash
           if ($LASTEXITCODE -ne 0) { throw 'Successful authenticated repair observation failed.' }
-          $uninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
-          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
-          if ($uninstall.ExitCode -notin @(0,997)) { throw "native setup uninstall failed: $($uninstall.ExitCode)" }
-          $deadline = (Get-Date).AddMinutes(3)
-          do {
-            $pending = Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill" -or Test-Path -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
-            if (-not $pending) { break }
-            if ((Get-Date) -ge $deadline) { throw 'Durable silent uninstall did not complete before timeout.' }
-            Start-Sleep -Milliseconds 100
-          } while ($true)
+          $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
+          $quiet = (Get-ItemProperty -LiteralPath $uninstallKey -Name QuietUninstallString).QuietUninstallString
+          if ($quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S')) { throw 'QuietUninstallString is not exact.' }
+          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
+          if ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") -or (Test-Path -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json")) { throw 'Synchronous uninstall returned before final removal.' }
 
       - name: Upload successful authenticated lifecycle evidence
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}-native-installed-lifecycle-evidence
-          path: tmp/windows-installer-success-${{ matrix.arch }}.json
+          path: |
+            tmp/windows-installer-success-${{ matrix.arch }}.json
+            tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -442,11 +458,9 @@ jobs:
           & tmp/windows-installer-success-observer.exe $setup[0].FullName tmp/windows-installer-success-fresh-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' fresh $hash
           if ($LASTEXITCODE -ne 0) { throw 'Authenticated fresh setup observation failed.' }
           node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -Wait -PassThru
-          if ($uninstall.ExitCode -notin @(0,997)) { throw "Fresh lifecycle uninstall failed: $($uninstall.ExitCode)" }
-          $deadline = (Get-Date).AddMinutes(3)
-          while ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
-          if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") { throw 'Fresh lifecycle cleanup timed out.' }
+          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Fresh synchronous lifecycle uninstall failed: $($uninstall.ExitCode)" }
+          if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") { throw 'Fresh synchronous uninstall returned before cleanup.' }
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}-fresh-installed-evidence
@@ -516,6 +530,7 @@ jobs:
             ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
+          cp installed-evidence/*.json release-artifacts/
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
           node --input-type=module - <<'NODE'
@@ -547,7 +562,7 @@ jobs:
             throw new Error('Architecture provenance source-tree hashes disagree');
           }
           manifest.architecture = 'x64+arm64';
-          manifest.provenance = provenance.filter(({ mode }) => mode === 'update');
+          manifest.provenance = provenance;
           manifest.assets = fs.readdirSync(directory).filter((name) => name !== 'release-manifest.json').sort().map((name) => {
             const bytes = fs.readFileSync(`${directory}/${name}`);
             return { name, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };

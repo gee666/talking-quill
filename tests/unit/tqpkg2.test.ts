@@ -6,6 +6,7 @@ import {
   parseTqpkg2,
   tqpkg2TreeDigest,
   validateTqpkg2Path,
+  zstdFrameLength,
 } from '../../scripts/tqpkg2.mjs';
 
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -120,6 +121,13 @@ describe('shared TQPKG2 parser', () => {
         'x64',
       ),
     ).toThrow();
+  });
+  it('rejects concatenated valid Zstd frames', () => {
+    const first = zstdCompressSync(Buffer.from('first'));
+    const second = zstdCompressSync(Buffer.from('second'));
+    const concatenated = Buffer.concat([first, second]);
+    expect(zstdFrameLength(concatenated)).toBe(first.length);
+    expect(zstdFrameLength(concatenated)).not.toBe(concatenated.length);
   });
   it('rejects footer, package, reserved-byte, architecture, and trailing-frame mutations', () => {
     for (const mutate of [

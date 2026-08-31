@@ -233,7 +233,7 @@ export async function runProductionPhase(phase, input, state, os) {
     const before = observe('repair-before', await installed());
     const repairProbe = await os.createRepairProbe();
     const beforeSentinel = observe('repair-sentinel-before', await sentinel());
-    await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [0]);
+    await spawnFrozen(input.artifacts.repair, ['/S'], os, observations, [0]);
     const after = observe('repair-after', await installed());
     const afterSentinel = observe('repair-sentinel-after', await sentinel());
     const repairProbeRemoved = !(await os.pathExists(repairProbe));
@@ -261,6 +261,19 @@ export async function runProductionPhase(phase, input, state, os) {
         `${phaseName} fault artifact is not an authenticated isolated-validation build`,
       );
       await spawnFrozen(artifact, ['/S'], os, observations, [197]);
+      // Relaunch the production candidate to run journal recovery. Its update mode must then
+      // reject the already-installed candidate without beginning another mutation.
+      await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [78]);
+      const recovered = observe(`fault-recovered-${phaseName}`, await installed());
+      const recoveredMachine = observe(
+        `fault-recovered-machine-${phaseName}`,
+        await os.observeMachineResidue(),
+      );
+      assertInstalled(recovered, input.artifacts.candidate);
+      requireValue(
+        recoveredMachine.transactionsAbsent && recoveredMachine.mixedAuthorityAbsent,
+        `${phaseName} recovery was not terminal before repair`,
+      );
       await spawnFrozen(input.artifacts.repair, ['/S'], os, observations, [0]);
       crashPhases.push(phaseName);
     }
@@ -289,18 +302,12 @@ export async function runProductionPhase(phase, input, state, os) {
     const beforeSentinel = observe('uninstall-sentinel-before', await sentinel());
     await os.normalQuitProbe();
     await os.spawn({
-      executable: resolve(state.installedRoot, 'Uninstall Talking Quill.exe'),
+      executable: resolve(state.installedRoot, '..', 'Talking Quill Maintenance.exe'),
       arguments: ['/S'],
       timeoutMs: 180_000,
-      acceptedExitCodes: [0, 997],
+      acceptedExitCodes: [0],
     });
-    const deadline = Date.now() + 180_000;
-    let residue;
-    while (Date.now() < deadline) {
-      residue = await os.observeMachineResidue();
-      if (residue.machineFilesAbsent && residue.transactionsAbsent) break;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-    }
+    const residue = await os.observeMachineResidue();
     requireValue(
       residue?.machineFilesAbsent === true && residue.transactionsAbsent === true,
       'Durable silent uninstall did not complete',

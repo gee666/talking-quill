@@ -69,7 +69,7 @@ export function tqpkg2TreeDigest(files) {
   return tree.digest('hex');
 }
 
-function zstdFrameLength(bytes) {
+export function zstdFrameLength(bytes) {
   if (bytes.length < 6 || bytes.readUInt32LE(0) !== 0xfd2fb528)
     throw new Error('TQPKG2 block is not one Zstandard frame');
   const descriptor = bytes[4];
@@ -190,11 +190,14 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
     !hex(manifest.target?.gatewaySha256) ||
     !hex(manifest.target?.ownerSha256) ||
     (manifest.faultPhase !== null &&
-      (!allowAcceptanceFaults ||
+      (manifest.packageMode !== 'repair' ||
+        !allowAcceptanceFaults ||
         ![
           'staged',
           'prepared',
           'predecessorMoved',
+          'publishing',
+          'publishedBeforePersist',
           'published',
           'registered',
           'committed',

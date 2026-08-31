@@ -27,6 +27,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteValueW, RegFlushKey, RegSetValueExW,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
     PROCESS_INFORMATION, QueryFullProcessImageNameW, ResumeThread, STARTUPINFOW, TerminateProcess,
@@ -138,7 +142,10 @@ pub fn run_from_argument(argument: &std::ffi::OsStr) -> i32 {
 
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
-    if argument.starts_with("--windows-update-bootstrap-v2=") && !is_elevated() {
+    if (argument.starts_with("--windows-update-bootstrap-v2=")
+        || argument == "--windows-update-resume-v2")
+        && !is_elevated()
+    {
         return launch_elevated_bootstrap(argument).map(|()| 0);
     }
     if !is_elevated() {
@@ -150,13 +157,22 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     if argument.starts_with("--windows-update-bootstrap-v2=") {
         return stage_bootstrap(argument).map(|()| 0);
     }
-    let encoded = argument
-        .strip_prefix("--windows-update-bootstrap-staged-v2=")
-        .ok_or(EXIT_INVALID_REQUEST)?;
-    let result = execute_staged_request(encoded);
-    // The supervised installer is terminal on every return path, including timeout.
-    // Schedule identity-bound cleanup even when setup failed.
-    schedule_staged_cleanup();
+    let encoded = if argument == "--windows-update-resume-v2" {
+        read_persisted_request()?
+    } else {
+        argument
+            .strip_prefix("--windows-update-bootstrap-staged-v2=")
+            .ok_or(EXIT_INVALID_REQUEST)?
+            .to_owned()
+    };
+    let result = execute_staged_request(&encoded);
+    // A failed or interrupted replacement may have moved the predecessor and must retain
+    // this protected recovery owner across restart. Only a truthful successful setup exit
+    // proves that staging is no longer needed.
+    if result == Ok(0) || native_transaction_absent()? {
+        clear_restart_recovery()?;
+        schedule_staged_cleanup();
+    }
     result
 }
 
@@ -246,6 +262,8 @@ fn execute_staged_request(encoded: &str) -> Result<u32, i32> {
     let request = parse_and_authorize_request(encoded)?;
     let expected_hash = decode_hash(&request.sha256).ok_or(EXIT_INVALID_REQUEST)?;
     let staged = copy_verified_installer(Path::new(&request.installer_path), expected_hash)?;
+    persist_request(encoded)?;
+    persist_restart_recovery()?;
     launch_verified_installer(&staged, expected_hash, &request.candidate)
 }
 
@@ -278,7 +296,7 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     trusted
         .seek(SeekFrom::Start(0))
         .and_then(|_| std::io::copy(&mut trusted, &mut output).map(|_| ()))
-        .and_then(|_| output.flush())
+        .and_then(|_| output.sync_all())
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
     drop(output);
     let mut retained = open_locked(&staged).map_err(|_| EXIT_LAUNCH_FAILED)?;
@@ -709,6 +727,126 @@ fn apply_restricted_dacl(path: &Path, sddl: &str) -> Result<(), i32> {
     Ok(())
 }
 
+fn native_transaction_absent() -> Result<bool, i32> {
+    let path =
+        known_folder(&FOLDERID_ProgramFiles)?.join(".Talking Quill.native-transaction-v2.json");
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Err(EXIT_LAUNCH_FAILED),
+    }
+}
+
+const RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+const RUN_ONCE_VALUE: &str = "!Talking Quill Update Recovery";
+const RECOVERY_REQUEST_FILE: &str = "update-recovery-request-v2.txt";
+
+fn recovery_request_path() -> Result<PathBuf, i32> {
+    Ok(std::env::current_exe()
+        .map_err(|_| EXIT_LAUNCH_FAILED)?
+        .parent()
+        .ok_or(EXIT_LAUNCH_FAILED)?
+        .join(RECOVERY_REQUEST_FILE))
+}
+
+fn persist_request(encoded: &str) -> Result<(), i32> {
+    let path = recovery_request_path()?;
+    if path.exists() {
+        return if std::fs::read_to_string(path).map_err(|_| EXIT_LAUNCH_FAILED)? == encoded {
+            Ok(())
+        } else {
+            Err(EXIT_IDENTITY_MISMATCH)
+        };
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&path)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_restricted_dacl(&path, RESTRICTED_FILE_SDDL)?;
+    file.write_all(encoded.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
+fn read_persisted_request() -> Result<String, i32> {
+    let value =
+        std::fs::read_to_string(recovery_request_path()?).map_err(|_| EXIT_INVALID_REQUEST)?;
+    if value.is_empty() || value.len() > 64 * 1024 {
+        return Err(EXIT_INVALID_REQUEST);
+    }
+    Ok(value)
+}
+
+fn persist_restart_recovery() -> Result<(), i32> {
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let command = format!("\"{}\" --windows-update-resume-v2", current.display());
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RUN_ONCE_KEY))?.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let command = wide_nul(Path::new(&command))?;
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide_nul(Path::new(RUN_ONCE_VALUE))?.as_ptr(),
+            0,
+            REG_SZ,
+            command.as_ptr().cast(),
+            (command.len() * 2) as u32,
+        )
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(EXIT_LAUNCH_FAILED)
+    }
+}
+
+fn clear_restart_recovery() -> Result<(), i32> {
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RUN_ONCE_KEY))?.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let status = unsafe { RegDeleteValueW(key, wide_nul(Path::new(RUN_ONCE_VALUE))?.as_ptr()) };
+    let flushed = (status == 0 || status == 2) && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(EXIT_LAUNCH_FAILED)
+    }
+}
+
 fn schedule_staged_cleanup() {
     let Ok(current) = std::env::current_exe() else {
         return;
@@ -751,17 +889,24 @@ fn copy_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<PathB
     if !path.is_absolute() {
         return Err(EXIT_INVALID_REQUEST);
     }
-    let canonical = std::fs::canonicalize(path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    let mut source = open_locked(&canonical).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if hash_file(&mut source).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected_hash {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
     let directory = std::env::current_exe()
         .map_err(|_| EXIT_LAUNCH_FAILED)?
         .parent()
         .ok_or(EXIT_LAUNCH_FAILED)?
         .to_owned();
     let target = directory.join("verified-update-installer.exe");
+    if target.exists() {
+        let mut retained = open_locked(&target).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut retained).map_err(|_| EXIT_IDENTITY_MISMATCH)? == expected_hash {
+            return Ok(target);
+        }
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let mut source = open_locked(&canonical).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if hash_file(&mut source).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected_hash {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -773,7 +918,7 @@ fn copy_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<PathB
         .seek(SeekFrom::Start(0))
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
     std::io::copy(&mut source, &mut output).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    output.flush().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    output.sync_all().map_err(|_| EXIT_LAUNCH_FAILED)?;
     drop(output);
     let mut copied = open_locked(&target).map_err(|_| EXIT_LAUNCH_FAILED)?;
     if hash_file(&mut copied).map_err(|_| EXIT_LAUNCH_FAILED)? != expected_hash {
