@@ -66,14 +66,17 @@ internal static class SuccessfulSetupObserver
             if (controller == null) return 65;
             string authenticationReceipt = null;
             Exception authenticationReceiptError = null;
+            byte[] observerChallenge = new byte[32];
+            using (System.Security.Cryptography.RandomNumberGenerator random = System.Security.Cryptography.RandomNumberGenerator.Create()) random.GetBytes(observerChallenge);
             Thread receiptReader = new Thread(delegate() {
                 try {
-                using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", "TalkingQuill.Setup.Receipt." + controller.Id, PipeDirection.In))
+                using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", "TalkingQuill.Setup.Receipt." + controller.Id, PipeDirection.InOut))
                 using (StreamReader reader = new StreamReader(pipe, new UTF8Encoding(false, true))) {
                     pipe.Connect(30000);
                     uint serverPid;
                     if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out serverPid) || serverPid != (uint)controller.Id)
                         throw new InvalidDataException("Authentication receipt pipe server identity mismatch");
+                    pipe.Write(observerChallenge, 0, observerChallenge.Length); pipe.Flush();
                     authenticationReceipt = reader.ReadToEnd();
                 }
                 } catch (Exception error) { authenticationReceiptError = error; }
@@ -109,7 +112,7 @@ internal static class SuccessfulSetupObserver
                 exactController.UserSid == worker.UserSid && exactController.LogonId.Length > 0 &&
                 exactController.LogonId == worker.LogonId && exactController.SessionId == worker.SessionId;
             bool receiptAuthenticated = authenticationReceiptError == null && ReceiptMatches(
-                authenticationReceipt, controller.Id, worker == null ? 0 : worker.Pid, installerHash);
+                authenticationReceipt, controller.Id, worker == null ? 0 : worker.Pid, installerHash, observerChallenge);
             bool protocolAuthenticated = controller.ExitCode == 0 && pipeObserved && exactImages && tokenLineage && receiptAuthenticated;
             string installedRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Talking Quill");
             string gateway = Path.Combine(installedRoot, @"resources\helper\talking-quill-helper.exe");
@@ -159,22 +162,27 @@ internal static class SuccessfulSetupObserver
     static int ParentPid(int pid) { using (ManagementObject value = new ManagementObject("win32_process.handle='" + pid + "'")) { value.Get(); return Convert.ToInt32(value["ParentProcessId"]); } }
     static string OwnerSid(int pid) { try { using (ManagementObject value = new ManagementObject("win32_process.handle='" + pid + "'")) { object[] result = new object[] { "" }; value.InvokeMethod("GetOwnerSid", result); return Convert.ToString(result[0]) ?? ""; } } catch { return ""; } }
     static string IdentityJson(Identity value) { return "{\"pid\":" + value.Pid + ",\"parentPid\":" + value.ParentPid + ",\"sessionId\":" + value.SessionId + ",\"creationUtcTicks\":" + value.CreationUtcTicks + ",\"imagePath\":" + Quote(value.ImagePath) + ",\"imageSha256\":" + Quote(value.Sha256) + ",\"userSid\":" + Quote(value.UserSid) + ",\"logonId\":" + Quote(value.LogonId) + "}"; }
-    static bool ReceiptMatches(string json, int controller, int worker, string packageHash) {
-        if (String.IsNullOrEmpty(json)) return false;
-        Match transcript = Regex.Match(json, "\\\"transcriptSha256\\\":\\\"([0-9a-f]{64})\\\"");
-        Match key = Regex.Match(json, "\\\"evidenceVerifierKey\\\":\\\"([0-9a-f]{64})\\\"");
-        Match proof = Regex.Match(json, "\\\"receiptHmac\\\":\\\"([0-9a-f]{64})\\\"");
-        bool hmacValid = false;
-        if (transcript.Success && key.Success && proof.Success) {
-            using (System.Security.Cryptography.HMACSHA256 hmac = new System.Security.Cryptography.HMACSHA256(Hex(key.Groups[1].Value)))
-                hmacValid = BitConverter.ToString(hmac.ComputeHash(Hex(transcript.Groups[1].Value))).Replace("-", "").ToLowerInvariant() == proof.Groups[1].Value;
-        }
-        return hmacValid && Regex.IsMatch(json, "\\\"schemaVersion\\\":1") &&
-            Regex.IsMatch(json, "\\\"protocol\\\":\\\"P-256-ECDH/HMAC-SHA256-v1\\\"") &&
-            Regex.IsMatch(json, "\\\"controllerPid\\\":" + controller + "(?:[,}])") &&
-            Regex.IsMatch(json, "\\\"workerPid\\\":" + worker + "(?:[,}])") &&
-            json.Contains("\"packageSha256\":\"" + packageHash + "\"") &&
-            json.Contains("\"workerProofVerified\":true") && json.Contains("\"controllerProofSent\":true");
+    static string ReceiptField(string json, string name, int bytes) { Match value = Regex.Match(json, "\\\"" + name + "\\\":\\\"([0-9a-f]{" + (bytes * 2) + "})\\\""); return value.Success ? value.Groups[1].Value : ""; }
+    static byte[] Join(params byte[][] values) { using (MemoryStream output = new MemoryStream()) { foreach (byte[] value in values) output.Write(value, 0, value.Length); return output.ToArray(); } }
+    static bool ReceiptMatches(string json, int controller, int worker, string packageHash, byte[] expectedChallenge) {
+        if (String.IsNullOrEmpty(json) || !Regex.IsMatch(json, "\\\"schemaVersion\\\":2") ||
+            !Regex.IsMatch(json, "\\\"controllerPid\\\":" + controller + "(?:[,}])") ||
+            !Regex.IsMatch(json, "\\\"workerPid\\\":" + worker + "(?:[,}])")) return false;
+        byte[] package = Hex(ReceiptField(json, "packageSha256", 32)), peer = Hex(ReceiptField(json, "peerBinding", 32));
+        byte[] transcript = Hex(ReceiptField(json, "transcriptSha256", 32)), challenge = Hex(ReceiptField(json, "observerChallenge", 32));
+        byte[] nonce = Hex(ReceiptField(json, "nonce", 32)), controllerPublic = Hex(ReceiptField(json, "controllerPublicKey", 65));
+        byte[] workerPublic = Hex(ReceiptField(json, "workerPublicKey", 65)), request = Hex(ReceiptField(json, "request", 6));
+        byte[] workerProof = Hex(ReceiptField(json, "workerProof", 32)), controllerProof = Hex(ReceiptField(json, "controllerProof", 32));
+        byte[] evidencePublic = Hex(ReceiptField(json, "evidencePublicKey", 65)), signature = Hex(ReceiptField(json, "evidenceSignature", 64));
+        if (package.Length != 32 || packageHash != BitConverter.ToString(package).Replace("-", "").ToLowerInvariant() ||
+            !challenge.SequenceEqual(expectedChallenge) || controllerPublic.Length != 65 || workerPublic.Length != 65 || evidencePublic.Length != 65) return false;
+        byte[] transcriptBytes = Join(Encoding.ASCII.GetBytes("TalkingQuill/setup-authenticated-transcript/v1"), nonce, controllerPublic, workerPublic, peer, request, workerProof, controllerProof);
+        using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create()) if (!sha.ComputeHash(transcriptBytes).SequenceEqual(transcript)) return false;
+        byte[] signed = Join(Encoding.ASCII.GetBytes("TalkingQuill/setup-evidence-signature/v1"), challenge, BitConverter.GetBytes(controller), BitConverter.GetBytes(worker), package, peer, transcript, nonce, controllerPublic, workerPublic, request, workerProof, controllerProof);
+        byte[] blob = new byte[72]; blob[0] = 0x45; blob[1] = 0x43; blob[2] = 0x53; blob[3] = 0x31; blob[4] = 32;
+        Buffer.BlockCopy(evidencePublic, 1, blob, 8, 64);
+        try { using (System.Security.Cryptography.CngKey key = System.Security.Cryptography.CngKey.Import(blob, System.Security.Cryptography.CngKeyBlobFormat.EccPublicBlob)) using (System.Security.Cryptography.ECDsaCng verifier = new System.Security.Cryptography.ECDsaCng(key)) return verifier.VerifyData(signed, signature); }
+        catch { return false; }
     }
     [StructLayout(LayoutKind.Sequential)] struct LUID { internal uint LowPart; internal int HighPart; }
     [StructLayout(LayoutKind.Sequential)] struct TOKEN_STATISTICS { internal LUID TokenId, AuthenticationId; internal long ExpirationTime; internal uint TokenType, ImpersonationLevel, DynamicCharged, DynamicAvailable, GroupCount, PrivilegeCount; internal LUID ModifiedId; }

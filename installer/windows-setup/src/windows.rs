@@ -11,6 +11,7 @@ use std::{mem, ptr};
 
 use hmac::{Hmac, Mac};
 use p256::ecdh::diffie_hellman;
+use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 use sha2_10::Sha256 as Sha256V10;
@@ -178,19 +179,25 @@ fn run_inner() -> Result<i32> {
         let current =
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
         let controller_paths = paths()?;
+        let stable_uninstaller =
+            canonical(&current).ok() == canonical(&controller_paths.maintenance_uninstaller).ok();
         let retained = retain_controller_image(&current, relocated)?;
         let mut lifecycle_parent = 0;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
-            let expected = if path_present(&installed)? {
-                &installed
-            } else {
+            let original = process_image(parent_process_id()?)?;
+            let expected = if canonical(&original).ok()
+                == canonical(&controller_paths.maintenance_uninstaller).ok()
+            {
                 &controller_paths.maintenance_uninstaller
+            } else {
+                &installed
             };
-            let (action, parent, requested_silent, _) =
+            assert_plain_file(expected)?;
+            let (action, _, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(expected))?;
             silent = requested_silent;
-            lifecycle_parent = parent;
+            lifecycle_parent = requested_lifecycle_parent;
             if action != Action::Uninstall {
                 return Err(fail(
                     EXIT_REJECTED,
@@ -203,8 +210,20 @@ fn run_inner() -> Result<i32> {
         };
         if action == Action::Uninstall && !relocated {
             let (path, lock) = create_relocated_image(&current)?;
-            let channel = ControllerChannel::create(Action::Uninstall, silent, 0)?;
+            let channel = ControllerChannel::create(
+                Action::Uninstall,
+                silent,
+                if stable_uninstaller {
+                    0
+                } else {
+                    std::process::id()
+                },
+            )?;
             let process = launch_relocated(&path, &channel)?;
+            if !stable_uninstaller {
+                drop(lock);
+                return Ok(if silent { ERROR_IO_PENDING as i32 } else { 0 });
+            }
             let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 700_000) };
             if wait != WAIT_OBJECT_0 {
                 unsafe { TerminateProcess(process.as_raw_handle(), EXIT_FAILURE as u32) };
@@ -529,9 +548,15 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     } else {
         false
     };
-    recover(&paths)?;
-    let mut action = if requested_action == Some(Action::Uninstall) {
+    let uninstall_authorized = if requested_action == Some(Action::Uninstall) {
         authorize_uninstall_controller(&paths)?;
+        true
+    } else {
+        false
+    };
+    let system = WindowsNativeSystem;
+    recover_with_adapter(&paths, &system)?;
+    let mut action = if uninstall_authorized {
         Action::Uninstall
     } else {
         derive_action(&current, &paths)?
@@ -545,7 +570,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     }
     match action {
         Action::Install | Action::Update | Action::Repair => {
-            install(&mut image, &package, &current, &paths, action)
+            install(&mut image, &package, &current, &paths, action, &system)
         }
         Action::Uninstall => {
             write_transaction(&paths, "uninstalling", Action::Uninstall, true)?;
@@ -560,10 +585,36 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             if original_controller != 0 {
                 wait_for_process_exit(original_controller)?;
             }
-            uninstall(&paths)
+            uninstall(&paths, &system)
         }
     }?;
     Ok(0)
+}
+
+trait NativeSystemAdapter {
+    fn register_version(&self, paths: &Paths, version: &str) -> Result<()>;
+    fn register_installed(&self, paths: &Paths) -> Result<()>;
+    fn unregister(&self) -> Result<()>;
+    fn retire_legacy(&self, paths: &Paths) -> Result<()>;
+}
+
+struct WindowsNativeSystem;
+
+impl NativeSystemAdapter for WindowsNativeSystem {
+    fn register_version(&self, paths: &Paths, version: &str) -> Result<()> {
+        register_uninstall(paths, version)?;
+        register_app_path(paths)
+    }
+    fn register_installed(&self, paths: &Paths) -> Result<()> {
+        register_installed_uninstall(paths)
+    }
+    fn unregister(&self) -> Result<()> {
+        unregister_uninstall()?;
+        unregister_app_path()
+    }
+    fn retire_legacy(&self, paths: &Paths) -> Result<()> {
+        retire_legacy_authority(paths)
+    }
 }
 
 struct MachineLock(OwnedHandle);
@@ -761,8 +812,8 @@ impl ControllerChannel {
             b"worker",
             &[],
         );
-        let proof = pipe_read::<32>(self.handle.as_raw_handle(), monitor, deadline)?;
-        if proof != expected {
+        let worker_proof = pipe_read::<32>(self.handle.as_raw_handle(), monitor, deadline)?;
+        if worker_proof != expected {
             return Err(fail(
                 EXIT_REJECTED,
                 "The elevated worker transcript proof is invalid.",
@@ -791,7 +842,7 @@ impl ControllerChannel {
             deadline,
         )?;
         pipe_write(self.handle.as_raw_handle(), &request, monitor, deadline)?;
-        let proof = authenticated_proof(
+        let controller_proof = authenticated_proof(
             shared.raw_secret_bytes(),
             &nonce,
             std::process::id(),
@@ -802,7 +853,12 @@ impl ControllerChannel {
             b"controller",
             &request,
         );
-        pipe_write(self.handle.as_raw_handle(), &proof, monitor, deadline)?;
+        pipe_write(
+            self.handle.as_raw_handle(),
+            &controller_proof,
+            monitor,
+            deadline,
+        )?;
         let mut transcript = Sha256::new();
         transcript.update(b"TalkingQuill/setup-authenticated-transcript/v1");
         transcript.update(nonce);
@@ -810,39 +866,58 @@ impl ControllerChannel {
         transcript.update(worker_public_bytes);
         transcript.update(image_hash);
         transcript.update(&request);
-        transcript.update(proof);
+        transcript.update(worker_proof);
+        transcript.update(controller_proof);
         let transcript_hash: [u8; 32] = transcript.finalize().into();
-        let mut evidence_key_hash = Sha256::new();
-        evidence_key_hash.update(b"TalkingQuill/setup-evidence-verifier/v1");
-        evidence_key_hash.update(shared.raw_secret_bytes());
-        evidence_key_hash.update(nonce);
-        let evidence_key: [u8; 32] = evidence_key_hash.finalize().into();
-        let mut receipt_mac = Hmac::<Sha256V10>::new_from_slice(&evidence_key)
-            .map_err(|_| fail(EXIT_FAILURE, "Cannot create setup evidence proof."))?;
-        receipt_mac.update(&transcript_hash);
-        let receipt_hmac: [u8; 32] = receipt_mac.finalize().into_bytes().into();
-        let _ = publish_authentication_receipt(
-            std::process::id(),
+        let receipt = AuthenticationReceiptInput {
+            controller: std::process::id(),
             worker,
-            &file_hash(image)?,
-            &transcript_hash,
-            &evidence_key,
-            &receipt_hmac,
-            worker_process.as_raw_handle(),
-        );
+            package_sha256: &file_hash(image)?,
+            peer_binding: &image_hash,
+            transcript_sha256: &transcript_hash,
+            nonce: &nonce,
+            controller_public: &public,
+            worker_public: &worker_public_bytes,
+            request: &request,
+            worker_proof: &worker_proof,
+            controller_proof: &controller_proof,
+        };
+        let _ = publish_authentication_receipt(&receipt, worker_process.as_raw_handle());
         Ok(worker_process)
     }
 }
 
-fn publish_authentication_receipt(
+struct AuthenticationReceiptInput<'a> {
     controller: u32,
     worker: u32,
-    package_sha256: &[u8; 32],
-    transcript_sha256: &[u8; 32],
-    evidence_key: &[u8; 32],
-    receipt_hmac: &[u8; 32],
+    package_sha256: &'a [u8; 32],
+    peer_binding: &'a [u8; 32],
+    transcript_sha256: &'a [u8; 32],
+    nonce: &'a [u8; 32],
+    controller_public: &'a [u8],
+    worker_public: &'a [u8; 65],
+    request: &'a [u8],
+    worker_proof: &'a [u8; 32],
+    controller_proof: &'a [u8; 32],
+}
+
+fn publish_authentication_receipt(
+    input: &AuthenticationReceiptInput<'_>,
     worker_process: std::os::windows::io::RawHandle,
 ) -> Result<()> {
+    let AuthenticationReceiptInput {
+        controller,
+        worker,
+        package_sha256,
+        peer_binding,
+        transcript_sha256,
+        nonce,
+        controller_public,
+        worker_public,
+        request,
+        worker_proof,
+        controller_proof,
+    } = *input;
     let name = wide(OsStr::new(&format!(
         r"\\.\pipe\TalkingQuill.Setup.Receipt.{controller}"
     )));
@@ -864,12 +939,38 @@ fn publish_authentication_receipt(
     let pipe = unsafe { OwnedHandle::from_raw_handle(raw) };
     let deadline = Instant::now() + Duration::from_secs(1);
     pipe_connect(pipe.as_raw_handle(), worker_process, deadline)?;
+    let challenge = pipe_read::<32>(pipe.as_raw_handle(), Some(worker_process), deadline)?;
+    let signing_key = evidence_signing_key()?;
+    let evidence_public = signing_key.verifying_key().to_encoded_point(false);
+    let mut signed = Vec::new();
+    signed.extend_from_slice(b"TalkingQuill/setup-evidence-signature/v1");
+    signed.extend_from_slice(&challenge);
+    signed.extend_from_slice(&controller.to_le_bytes());
+    signed.extend_from_slice(&worker.to_le_bytes());
+    signed.extend_from_slice(package_sha256);
+    signed.extend_from_slice(peer_binding);
+    signed.extend_from_slice(transcript_sha256);
+    signed.extend_from_slice(nonce);
+    signed.extend_from_slice(controller_public);
+    signed.extend_from_slice(worker_public);
+    signed.extend_from_slice(request);
+    signed.extend_from_slice(worker_proof);
+    signed.extend_from_slice(controller_proof);
+    let signature: Signature = signing_key.sign(&signed);
     let receipt = format!(
-        "{{\"schemaVersion\":1,\"protocol\":\"P-256-ECDH/HMAC-SHA256-v1\",\"controllerPid\":{controller},\"workerPid\":{worker},\"packageSha256\":\"{}\",\"transcriptSha256\":\"{}\",\"evidenceVerifierKey\":\"{}\",\"receiptHmac\":\"{}\",\"workerProofVerified\":true,\"controllerProofSent\":true}}",
+        "{{\"schemaVersion\":2,\"protocol\":\"P-256-ECDH/HMAC-SHA256-v1\",\"controllerPid\":{controller},\"workerPid\":{worker},\"packageSha256\":\"{}\",\"peerBinding\":\"{}\",\"transcriptSha256\":\"{}\",\"observerChallenge\":\"{}\",\"nonce\":\"{}\",\"controllerPublicKey\":\"{}\",\"workerPublicKey\":\"{}\",\"request\":\"{}\",\"workerProof\":\"{}\",\"controllerProof\":\"{}\",\"evidencePublicKey\":\"{}\",\"evidenceSignature\":\"{}\"}}",
         hex_hash(package_sha256),
+        hex_hash(peer_binding),
         hex_hash(transcript_sha256),
-        hex_hash(evidence_key),
-        hex_hash(receipt_hmac),
+        hex_hash(&challenge),
+        hex_hash(nonce),
+        hex_bytes(controller_public),
+        hex_bytes(worker_public),
+        hex_bytes(request),
+        hex_hash(worker_proof),
+        hex_hash(controller_proof),
+        hex_bytes(evidence_public.as_bytes()),
+        hex_bytes(&signature.to_bytes()),
     );
     pipe_write(
         pipe.as_raw_handle(),
@@ -1043,6 +1144,21 @@ fn peer_binding(image: &[u8; 32], claims: &[u8; 32]) -> [u8; 32] {
     hash.update(image);
     hash.update(claims);
     hash.finalize().into()
+}
+
+fn evidence_signing_key() -> Result<SigningKey> {
+    for _ in 0..16 {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|_| fail(EXIT_FAILURE, "Windows randomness is unavailable."))?;
+        if let Ok(key) = SigningKey::from_bytes((&bytes).into()) {
+            return Ok(key);
+        }
+    }
+    Err(fail(
+        EXIT_FAILURE,
+        "Cannot create setup evidence signing key.",
+    ))
 }
 
 fn ephemeral_secret() -> Result<SecretKey> {
@@ -1578,8 +1694,12 @@ fn process_parent_id(process_id: u32) -> Result<u32> {
     ))
 }
 
-fn hex_hash(value: &[u8; 32]) -> String {
+fn hex_bytes(value: &[u8]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_hash(value: &[u8; 32]) -> String {
+    hex_bytes(value)
 }
 
 fn installed_matches_target(
@@ -1739,6 +1859,7 @@ fn install(
     current: &Path,
     paths: &Paths,
     action: Action,
+    system: &dyn NativeSystemAdapter,
 ) -> Result<()> {
     assert_plain_absent(&paths.staging)?;
     let had_predecessor = path_present(&paths.install)?;
@@ -1789,19 +1910,19 @@ fn install(
     write_transaction(paths, "publishing", action, had_predecessor)?;
     crash_at(package, "publishing");
     durable_rename(&paths.staging, &paths.install)?;
+    write_transaction(paths, "published-before-persist", action, had_predecessor)?;
     crash_at(package, "publishedBeforePersist");
     write_transaction(paths, "published", action, had_predecessor)?;
     crash_at(package, "published");
     ensure_maintenance_uninstaller(paths)?;
-    register_uninstall(paths, &package.manifest.version)?;
-    register_app_path(paths)?;
+    system.register_version(paths, &package.manifest.version)?;
     write_transaction(paths, "registered", action, had_predecessor)?;
     crash_at(package, "registered");
     write_transaction(paths, "committed", action, had_predecessor)?;
     crash_at(package, "committed");
     write_transaction(paths, "legacy-retiring", action, had_predecessor)?;
     crash_at(package, "legacyRetiring");
-    retire_legacy_authority(paths)?;
+    system.retire_legacy(paths)?;
     write_transaction(paths, "legacy-retired", action, had_predecessor)?;
     crash_at(package, "legacyRetired");
     remove_plain_tree(&paths.backup)?;
@@ -2097,11 +2218,10 @@ fn crash_at(package: &ParsedPackage, _phase: &str) {
     debug_assert!(package.manifest.fault_phase.is_none());
 }
 
-fn uninstall(paths: &Paths) -> Result<()> {
+fn uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
     write_transaction(paths, "uninstalling", Action::Uninstall, true)?;
-    unregister_uninstall()?;
-    unregister_app_path()?;
-    retire_legacy_authority(paths)?;
+    system.unregister()?;
+    system.retire_legacy(paths)?;
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
@@ -2148,10 +2268,18 @@ fn recovery_plan(
         {
             Ok(RecoveryPlan::DiscardStaging)
         }
-        "prepared" | "publishing" if !value.had_predecessor && !backup_exists && install_exists => {
+        "prepared" | "publishing" | "published-before-persist"
+            if !value.had_predecessor && !backup_exists && install_exists =>
+        {
             Ok(RecoveryPlan::RemoveFreshCandidate)
         }
-        "staging" | "staged" | "prepared" | "predecessor-moved" | "publishing" | "published"
+        "staging"
+        | "staged"
+        | "prepared"
+        | "predecessor-moved"
+        | "publishing"
+        | "published-before-persist"
+        | "published"
         | "registered"
             if value.had_predecessor && backup_exists =>
         {
@@ -2187,11 +2315,7 @@ fn recovery_plan(
     }
 }
 
-fn recover(paths: &Paths) -> Result<()> {
-    recover_with_system(paths, true)
-}
-
-fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
+fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
     if !path_present(&paths.transaction)? {
         if path_present(&paths.backup)? && !path_present(&paths.install)? {
             durable_rename(&paths.backup, &paths.install)?;
@@ -2240,17 +2364,11 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             if !path_present(&paths.install)? {
                 return Err(fail(EXIT_REJECTED, "Recovered predecessor is missing."));
             }
-            if update_system_state {
-                register_installed_uninstall(paths)?;
-                register_app_path(paths)?;
-            }
+            system.register_installed(paths)?;
         }
         RecoveryPlan::DiscardStaging => remove_plain_tree(&paths.staging)?,
         RecoveryPlan::RemoveFreshCandidate => {
-            if update_system_state {
-                unregister_uninstall()?;
-                unregister_app_path()?;
-            }
+            system.unregister()?;
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
             remove_maintenance_uninstaller(paths)?;
@@ -2259,19 +2377,14 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             if value.action == "repair" && path_present(&paths.backup)? {
                 restore_repair_controller(paths)?;
             }
-            if update_system_state {
-                register_installed_uninstall(paths)?;
-                retire_legacy_authority(paths)?;
-            }
+            system.register_installed(paths)?;
+            system.retire_legacy(paths)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
         }
         RecoveryPlan::FinishUninstall => {
-            if update_system_state {
-                unregister_uninstall()?;
-                retire_legacy_authority(paths)?;
-                unregister_app_path()?;
-            }
+            system.unregister()?;
+            system.retire_legacy(paths)?;
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
@@ -2282,6 +2395,34 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
         remove_maintenance_uninstaller(paths)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+struct InjectedNativeSystem;
+
+#[cfg(test)]
+impl NativeSystemAdapter for InjectedNativeSystem {
+    fn register_version(&self, _paths: &Paths, _version: &str) -> Result<()> {
+        Ok(())
+    }
+    fn register_installed(&self, _paths: &Paths) -> Result<()> {
+        Ok(())
+    }
+    fn unregister(&self) -> Result<()> {
+        Ok(())
+    }
+    fn retire_legacy(&self, _paths: &Paths) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
+    if update_system_state {
+        recover_with_adapter(paths, &WindowsNativeSystem)
+    } else {
+        recover_with_adapter(paths, &InjectedNativeSystem)
+    }
 }
 
 fn paths() -> Result<Paths> {
@@ -2831,7 +2972,13 @@ mod tests {
                 "{phase}"
             );
         }
-        for phase in ["predecessor-moved", "publishing", "published", "registered"] {
+        for phase in [
+            "predecessor-moved",
+            "publishing",
+            "published-before-persist",
+            "published",
+            "registered",
+        ] {
             for action in ["install", "update", "repair"] {
                 assert_eq!(
                     recovery_plan(
@@ -2845,7 +2992,13 @@ mod tests {
                 );
             }
         }
-        for phase in ["prepared", "publishing", "published", "registered"] {
+        for phase in [
+            "prepared",
+            "publishing",
+            "published-before-persist",
+            "published",
+            "registered",
+        ] {
             assert_eq!(
                 recovery_plan(&transaction(phase, "install", false), false, true).unwrap(),
                 RecoveryPlan::RemoveFreshCandidate,
@@ -2940,11 +3093,7 @@ mod tests {
             let phase = phase.to_string_lossy();
             let uninstalling = phase == "uninstalling";
             let had_predecessor = !uninstalling;
-            let journal_phase = if phase == "published-before-persist" {
-                "publishing"
-            } else {
-                phase.as_ref()
-            };
+            let journal_phase = phase.as_ref();
             match phase.as_ref() {
                 "staging" | "staged" | "prepared" => {
                     fs::create_dir(&paths.install).unwrap();

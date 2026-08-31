@@ -133,6 +133,35 @@ struct FileIdentity {
     index_low: u32,
 }
 
+struct StagedDirectoryGuard {
+    path: PathBuf,
+    identity: String,
+    launched: bool,
+}
+
+impl StagedDirectoryGuard {
+    fn new(path: PathBuf) -> Result<Self, i32> {
+        let identity = owned_tree_identity(&path).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        Ok(Self {
+            path,
+            identity,
+            launched: false,
+        })
+    }
+
+    fn transfer_to_launched_recovery(&mut self) {
+        self.launched = true;
+    }
+}
+
+impl Drop for StagedDirectoryGuard {
+    fn drop(&mut self) {
+        if !self.launched {
+            let _ = remove_owned_tree(&self.path, &self.identity);
+        }
+    }
+}
+
 pub fn run_from_argument(argument: &std::ffi::OsStr) -> i32 {
     match run_from_argument_inner(argument) {
         Ok(code) => code as i32,
@@ -285,6 +314,7 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     let random = getrandom::u64().map_err(|_| EXIT_LAUNCH_FAILED)?;
     let directory = program_data.join(format!(".Talking Quill.update-bootstrap-{random:016x}"));
     create_restricted_directory(&directory)?;
+    let mut directory_guard = StagedDirectoryGuard::new(directory.clone())?;
     let staged = directory.join("talking-quill-update-bootstrap.exe");
     let mut output = OpenOptions::new()
         .write(true)
@@ -359,12 +389,15 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
                 EXIT_IDENTITY_MISMATCH as u32,
             )
         };
+        unsafe { WaitForSingleObject(process_handle.as_raw_handle(), 30_000) };
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     if unsafe { ResumeThread(thread_handle.as_raw_handle()) } == u32::MAX {
         unsafe { TerminateProcess(process_handle.as_raw_handle(), EXIT_LAUNCH_FAILED as u32) };
+        unsafe { WaitForSingleObject(process_handle.as_raw_handle(), 30_000) };
         return Err(EXIT_LAUNCH_FAILED);
     }
+    directory_guard.transfer_to_launched_recovery();
     let wait = unsafe {
         WaitForSingleObject(
             process_handle.as_raw_handle(),
@@ -1265,9 +1298,22 @@ fn base64_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAuthorization, UpdateCandidate, UpdatePredecessor, UpdateRole,
+        StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate, UpdatePredecessor, UpdateRole,
         authorization_transcript, canonical_candidate_layout, decode_base64,
     };
+
+    #[test]
+    fn prelaunch_guard_removes_the_exact_abandoned_tree() {
+        let root =
+            std::env::temp_dir().join(format!("tq-staged-bootstrap-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        {
+            let _guard = StagedDirectoryGuard::new(root.clone()).unwrap();
+            std::fs::write(root.join("partial"), b"partial").unwrap();
+        }
+        assert!(!root.exists());
+    }
 
     fn candidate() -> UpdateCandidate {
         UpdateCandidate {

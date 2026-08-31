@@ -492,7 +492,7 @@ jobs:
             $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
             if (Test-Path -LiteralPath $transaction) {
               $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'staging') {
+              if ($state.phase -eq 'published-before-persist') {
                 $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $freshAttempt.Id -and $_.ExecutablePath -ceq $setup[0].FullName } | Select-Object -First 1)
                 if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $freshInterrupted = $true; break }
               }
@@ -501,8 +501,25 @@ jobs:
           }
           $freshAttempt.WaitForExit()
           if (-not $freshInterrupted) { throw 'Production fresh publication was not interrupted.' }
+          $firstFreshRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -PassThru
+          $removeFreshRecoveryInterrupted = $false
+          $freshRecoveryDeadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $freshRecoveryDeadline) {
+            if (Test-Path -LiteralPath $transaction) {
+              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
+              if ($state.phase -eq 'recovering-remove-fresh') {
+                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $firstFreshRecovery.Id -and $_.ExecutablePath -ceq $setup[0].FullName } | Select-Object -First 1)
+                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $removeFreshRecoveryInterrupted = $true; break }
+              }
+            }
+            Start-Sleep -Milliseconds 2
+          }
+          $firstFreshRecovery.WaitForExit()
+          if (-not $removeFreshRecoveryInterrupted) { throw 'recovering-remove-fresh was not interrupted.' }
           $freshRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
           if ($freshRecovery.ExitCode -ne 0) { throw "Production fresh recovery failed: $($freshRecovery.ExitCode)" }
+          node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
+          foreach ($residue in @("$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", $transaction)) { if (Test-Path -LiteralPath $residue) { throw "Fresh recovery retained $residue" } }
           $cleanup = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
           if ($cleanup.ExitCode -ne 0) { throw "Fresh recovery cleanup failed: $($cleanup.ExitCode)" }
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
@@ -529,16 +546,42 @@ jobs:
           $uninstall.WaitForExit()
           if (-not $uninstallInterrupted) { throw 'Production uninstall mutation was not interrupted.' }
           $maintenance = "$env:ProgramFiles\Talking Quill Maintenance.exe"
-          if (Test-Path -LiteralPath $maintenance) {
-            $uninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -Wait -PassThru
-            if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
-          } else {
-            $uninstallRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
-            if ($uninstallRecovery.ExitCode -ne 78) { throw "Setup-driven uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
+          $firstUninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -PassThru
+          $finishUninstallRecoveryInterrupted = $false
+          $finishDeadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $finishDeadline) {
+            if (Test-Path -LiteralPath $transaction) {
+              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
+              if ($state.phase -eq 'recovering-finish-uninstall') {
+                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' -or $_.ExecutablePath -ceq $setup[0].FullName } | Sort-Object CreationDate -Descending)
+                if ($workers.Count -ge 1) { Stop-Process -Id $workers[0].ProcessId -Force; $finishUninstallRecoveryInterrupted = $true; break }
+              }
+            }
+            Start-Sleep -Milliseconds 2
           }
-          if ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") -or (Test-Path -LiteralPath $transaction)) { throw 'Recovered uninstall retained machine state.' }
+          $firstUninstallRecovery.WaitForExit()
+          if (-not $finishUninstallRecoveryInterrupted) { throw 'recovering-finish-uninstall was not interrupted.' }
+          $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
+          $uninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -Wait -PassThru
+          if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          $machineResidue = @(
+            "$env:ProgramFiles\Talking Quill",
+            "$env:ProgramFiles\.Talking Quill.native-staging",
+            "$env:ProgramFiles\.Talking Quill.native-backup",
+            $transaction,
+            $maintenance,
+            "$env:ProgramData\Talking Quill\KeyboardAuthority",
+            "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          $uninstallRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
+          $appPathRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe'
+          $legacyService = $null -ne (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
+          & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
+          $legacyTask = $LASTEXITCODE -eq 0
+          if ($machineResidue.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained machine, registration, service, or task state.' }
           $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
-          $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; uninstall = $uninstallInterrupted }
+          $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; removeFreshRecovery = $removeFreshRecoveryInterrupted; uninstall = $uninstallInterrupted; finishUninstallRecovery = $finishUninstallRecoveryInterrupted }
           $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
