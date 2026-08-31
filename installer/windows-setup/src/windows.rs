@@ -179,10 +179,9 @@ fn run_inner() -> Result<i32> {
         let current =
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
         let controller_paths = paths()?;
-        let stable_uninstaller =
-            canonical(&current).ok() == canonical(&controller_paths.maintenance_uninstaller).ok();
         let retained = retain_controller_image(&current, relocated)?;
         let mut lifecycle_parent = 0;
+        let mut relocation_server = None;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
             let original = process_image(parent_process_id()?)?;
@@ -194,10 +193,11 @@ fn run_inner() -> Result<i32> {
                 &installed
             };
             assert_plain_file(expected)?;
-            let (action, _, requested_silent, requested_lifecycle_parent) =
+            let (action, server, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(expected))?;
             silent = requested_silent;
             lifecycle_parent = requested_lifecycle_parent;
+            relocation_server = Some(server);
             if action != Action::Uninstall {
                 return Err(fail(
                     EXIT_REJECTED,
@@ -209,37 +209,13 @@ fn run_inner() -> Result<i32> {
             derive_action(&current, &controller_paths)?
         };
         if action == Action::Uninstall && !relocated {
+            request_runtime_exit(&controller_paths, None)?;
             let (path, lock) = create_relocated_image(&current)?;
-            let channel = ControllerChannel::create(
-                Action::Uninstall,
-                silent,
-                if stable_uninstaller {
-                    0
-                } else {
-                    std::process::id()
-                },
-            )?;
+            let channel = ControllerChannel::create(Action::Uninstall, silent, std::process::id())?;
             let process = launch_relocated(&path, &channel)?;
-            if !stable_uninstaller {
-                drop(lock);
-                return Ok(if silent { ERROR_IO_PENDING as i32 } else { 0 });
-            }
-            let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 700_000) };
-            if wait != WAIT_OBJECT_0 {
-                unsafe { TerminateProcess(process.as_raw_handle(), EXIT_FAILURE as u32) };
-                unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
-                drop(lock);
-                return Err(fail(EXIT_FAILURE, "Relocated uninstall did not complete."));
-            }
-            let mut code = EXIT_FAILURE as u32;
-            if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
-                return Err(fail(
-                    EXIT_FAILURE,
-                    "Cannot read relocated uninstall status.",
-                ));
-            }
+            let code = channel.wait_relocated_status(&process)?;
             drop(lock);
-            return Ok(code as i32);
+            return Ok(code);
         }
         if !silent && !confirm_controller(action)? {
             return Ok(ERROR_CANCELLED as i32);
@@ -251,7 +227,10 @@ fn run_inner() -> Result<i32> {
                 MB_YESNO | MB_ICONQUESTION,
             ) == IDYES;
         if action != Action::Install {
-            request_runtime_exit(&controller_paths)?;
+            request_runtime_exit(
+                &controller_paths,
+                (lifecycle_parent != 0).then_some(lifecycle_parent),
+            )?;
         }
         let retained = if relocated {
             drop(retained);
@@ -262,6 +241,26 @@ fn run_inner() -> Result<i32> {
         let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
         let result = elevate(&current, silent, &channel);
         drop(retained);
+        if relocated && lifecycle_parent != 0 {
+            let status = result.as_ref().copied().unwrap_or_else(|error| error.code);
+            let server = relocation_server.ok_or_else(|| {
+                fail(
+                    EXIT_FAILURE,
+                    "Relocated uninstall status channel is missing.",
+                )
+            })?;
+            pipe_write(
+                server.as_raw_handle(),
+                &status.to_le_bytes(),
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )?;
+            wait_for_process_exit(lifecycle_parent)?;
+            if status == 0 {
+                let cleanup = ControllerChannel::create(Action::Uninstall, true, 0)?;
+                let _ = elevate(&current, true, &cleanup);
+            }
+        }
         if result.as_ref().is_ok_and(|code| *code == 0) && delete_profile {
             remove_plain_tree(&controller_paths.profile)?;
         }
@@ -270,7 +269,7 @@ fn run_inner() -> Result<i32> {
     run_worker(silent, legacy_predecessor)
 }
 
-fn request_runtime_exit(paths: &Paths) -> Result<()> {
+fn request_runtime_exit(paths: &Paths, ignored_process: Option<u32>) -> Result<()> {
     let application = paths.install.join("Talking Quill.exe");
     if application.exists() {
         assert_plain_file(&application)?;
@@ -292,7 +291,7 @@ fn request_runtime_exit(paths: &Paths) -> Result<()> {
     }
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if !runtime_process_active(paths)? {
+        if !runtime_process_active(paths, ignored_process)? {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -303,7 +302,7 @@ fn request_runtime_exit(paths: &Paths) -> Result<()> {
     ))
 }
 
-fn runtime_process_active(paths: &Paths) -> Result<bool> {
+fn runtime_process_active(paths: &Paths, ignored_process: Option<u32>) -> Result<bool> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(fail(EXIT_FAILURE, "Cannot inspect runtime processes."));
@@ -314,6 +313,7 @@ fn runtime_process_active(paths: &Paths) -> Result<bool> {
     let mut available = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
     while available {
         if entry.th32ProcessID != std::process::id()
+            && Some(entry.th32ProcessID) != ignored_process
             && let Ok(image) = process_image(entry.th32ProcessID)
         {
             let value = image.as_os_str().to_string_lossy().to_lowercase();
@@ -506,7 +506,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     } else {
         Some(WorkerChannel::connect_and_authenticate(&current, None)?)
     };
-    let requested_action = authenticated_controller.map(|value| value.0);
+    let requested_action = authenticated_controller.as_ref().map(|value| value.0);
     let mut image = File::open(&current).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
     let length = image
         .metadata()
@@ -566,7 +566,12 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             authorize_package_mode(&package, &paths, &current, predecessor_authorized, action)?;
     }
     if action != Action::Install || paths.install.exists() {
-        request_runtime_exit(&paths)?;
+        request_runtime_exit(
+            &paths,
+            authenticated_controller
+                .as_ref()
+                .and_then(|value| (value.3 != 0).then_some(value.3)),
+        )?;
     }
     match action {
         Action::Install | Action::Update | Action::Repair => {
@@ -575,6 +580,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         Action::Uninstall => {
             write_transaction(&paths, "uninstalling", Action::Uninstall, true)?;
             let original_controller = authenticated_controller
+                .as_ref()
                 .ok_or_else(|| {
                     fail(
                         EXIT_REJECTED,
@@ -582,10 +588,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
                     )
                 })?
                 .3;
-            if original_controller != 0 {
-                wait_for_process_exit(original_controller)?;
-            }
-            uninstall(&paths, &system)
+            uninstall(&paths, &system, original_controller != 0)
         }
     }?;
     Ok(0)
@@ -743,6 +746,14 @@ impl ControllerChannel {
             silent,
             lifecycle_parent,
         })
+    }
+
+    fn wait_relocated_status(&self, process: &OwnedHandle) -> Result<i32> {
+        Ok(i32::from_le_bytes(pipe_read::<4>(
+            self.handle.as_raw_handle(),
+            Some(process.as_raw_handle()),
+            Instant::now() + Duration::from_secs(700),
+        )?))
     }
 
     fn authenticate(&self, shell_process: &OwnedHandle, image: &Path) -> Result<OwnedHandle> {
@@ -985,7 +996,7 @@ impl WorkerChannel {
     fn connect_and_authenticate(
         image: &Path,
         expected_server: Option<&Path>,
-    ) -> Result<(Action, u32, bool, u32)> {
+    ) -> Result<(Action, OwnedHandle, bool, u32)> {
         let server = parent_process_id()?;
         let name = wide(OsStr::new(&format!(
             r"\\.\pipe\TalkingQuill.Setup.{server}"
@@ -1128,9 +1139,9 @@ impl WorkerChannel {
         };
         let lifecycle_parent = u32::from_le_bytes(request[2..6].try_into().unwrap());
         match request[0] {
-            1 if lifecycle_parent == 0 => Ok((Action::Install, server, silent, 0)),
-            2 if lifecycle_parent == 0 => Ok((Action::Repair, server, silent, 0)),
-            3 => Ok((Action::Uninstall, server, silent, lifecycle_parent)),
+            1 if lifecycle_parent == 0 => Ok((Action::Install, handle, silent, 0)),
+            2 if lifecycle_parent == 0 => Ok((Action::Repair, handle, silent, 0)),
+            3 => Ok((Action::Uninstall, handle, silent, lifecycle_parent)),
             _ => Err(fail(
                 EXIT_REJECTED,
                 "The setup controller requested an invalid operation.",
@@ -2218,15 +2229,27 @@ fn crash_at(package: &ParsedPackage, _phase: &str) {
     debug_assert!(package.manifest.fault_phase.is_none());
 }
 
-fn uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
+fn uninstall(
+    paths: &Paths,
+    system: &dyn NativeSystemAdapter,
+    defer_mapped_controller_cleanup: bool,
+) -> Result<()> {
     write_transaction(paths, "uninstalling", Action::Uninstall, true)?;
     system.unregister()?;
     system.retire_legacy(paths)?;
+    if defer_mapped_controller_cleanup && path_present(&paths.install)? {
+        remove_plain_tree(&paths.backup)?;
+        durable_rename(&paths.install, &paths.backup)?;
+        write_transaction(paths, "uninstall-quarantined", Action::Uninstall, true)?;
+        remove_plain_tree(&paths.staging)?;
+        // The authenticated relocated controller remains the live cleanup owner. It reports
+        // this durable topology, waits for the mapped installed controller, then elevates a
+        // second authenticated recovery pass which removes the quarantine and journal.
+        return Ok(());
+    }
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
-    // Commit the durable uninstall before the relocated worker marks the protected original
-    // for deletion. Until this point the original remains a callable recovery entry point.
     remove_transaction(paths)?;
     remove_maintenance_uninstaller(paths)?;
     Ok(())
@@ -2254,7 +2277,7 @@ fn recovery_plan(
         || (value.action == "uninstall"
             && !matches!(
                 value.phase.as_str(),
-                "uninstalling" | "recovering-finish-uninstall"
+                "uninstalling" | "uninstall-quarantined" | "recovering-finish-uninstall"
             ))
     {
         return Err(fail(
@@ -2307,7 +2330,9 @@ fn recovery_plan(
             Ok(RecoveryPlan::RemoveFreshCandidate)
         }
         "recovering-finish-commit" if install_exists => Ok(RecoveryPlan::FinishCommit),
-        "uninstalling" | "recovering-finish-uninstall" => Ok(RecoveryPlan::FinishUninstall),
+        "uninstalling" | "uninstall-quarantined" | "recovering-finish-uninstall" => {
+            Ok(RecoveryPlan::FinishUninstall)
+        }
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -3091,7 +3116,7 @@ mod tests {
             let (_action, _, _, _) = WorkerChannel::connect_and_authenticate(&image, None).unwrap();
             let paths = test_paths(Path::new(&root));
             let phase = phase.to_string_lossy();
-            let uninstalling = phase == "uninstalling";
+            let uninstalling = matches!(phase.as_ref(), "uninstalling" | "uninstall-quarantined");
             let had_predecessor = !uninstalling;
             let journal_phase = phase.as_ref();
             match phase.as_ref() {
@@ -3121,6 +3146,10 @@ mod tests {
                 "uninstalling" => {
                     fs::create_dir(&paths.install).unwrap();
                     fs::write(paths.install.join("identity"), b"candidate").unwrap();
+                }
+                "uninstall-quarantined" => {
+                    fs::create_dir(&paths.backup).unwrap();
+                    fs::write(paths.backup.join("identity"), b"candidate").unwrap();
                 }
                 _ => unreachable!(),
             }
@@ -3154,23 +3183,21 @@ mod tests {
             "legacy-retiring",
             "legacy-retired",
             "uninstalling",
+            "uninstall-quarantined",
         ] {
             let root =
                 std::env::temp_dir().join(format!("tq-setup-fault-{}-{phase}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir(&root).unwrap();
+            let uninstalling = matches!(phase, "uninstalling" | "uninstall-quarantined");
             let channel = ControllerChannel::create(
-                if phase == "uninstalling" {
+                if uninstalling {
                     Action::Uninstall
                 } else {
                     Action::Repair
                 },
                 true,
-                if phase == "uninstalling" {
-                    std::process::id()
-                } else {
-                    0
-                },
+                if uninstalling { std::process::id() } else { 0 },
             )
             .unwrap();
             let mut child = Command::new(&image)
@@ -3214,7 +3241,7 @@ mod tests {
             let _ = child.wait();
             let paths = test_paths(&root);
             recover_with_system(&paths, false).unwrap();
-            if phase == "uninstalling" {
+            if uninstalling {
                 assert!(!paths.install.exists(), "{phase}");
             } else {
                 let expected =

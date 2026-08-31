@@ -65,8 +65,17 @@ jobs:
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           version="${TAG#v}"
-          mkdir -p release-artifacts
-          gh run download "$RUN_ID" --repo "$REPOSITORY" --name windows-native-release-candidates --dir release-artifacts
+          mkdir -p release-artifacts tmp
+          artifacts="$(gh api --paginate "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts" --jq '[.artifacts[] | select(.name == "windows-native-release-candidates")]')"
+          test "$(jq length <<<"$artifacts")" -eq 1
+          artifact_id="$(jq -r '.[0].id' <<<"$artifacts")"
+          artifact_digest="$(jq -r '.[0].digest' <<<"$artifacts")"
+          test "$(jq -r '.[0].expired' <<<"$artifacts")" = false
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh api "repos/$REPOSITORY/actions/artifacts/$artifact_id/zip" > tmp/windows-native-release-candidates.zip
+          printf '%s  %s\n' "${artifact_digest#sha256:}" tmp/windows-native-release-candidates.zip | sha256sum --check
+          unzip -q tmp/windows-native-release-candidates.zip -d release-artifacts
+          rm tmp/windows-native-release-candidates.zip
           (cd release-artifacts && sha256sum --check SHA256SUMS.txt)
           for arch in x64 arm64; do
             test -f "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe"
@@ -80,13 +89,22 @@ jobs:
             test -f "release-artifacts/windows-installer-success-fresh-$arch.json"
             test -f "release-artifacts/windows-installer-success-$arch.json"
             test -f "release-artifacts/windows-installer-fault-recovery-$arch.json"
-            ARCH=$arch VERSION=$version node -e 'const fs=require("fs"),crypto=require("crypto"),arch=process.env.ARCH; const value=require(`./release-artifacts/windows-installer-success-fresh-${arch}.json`), bytes=fs.readFileSync(`release-artifacts/Talking-Quill-${process.env.VERSION}-win-${arch}-setup.exe`), hash=crypto.createHash("sha256").update(bytes).digest("hex"); if (!value.passed || !value.productionInterruptions?.fresh || !value.productionInterruptions?.removeFreshRecovery || !value.productionInterruptions?.uninstall || !value.productionInterruptions?.finishUninstallRecovery || value.nativeAuthenticationReceipt?.schemaVersion !== 2 || !/^[0-9a-f]{128}$/.test(value.nativeAuthenticationReceipt?.evidenceSignature ?? "") || !/^[0-9a-f]{64}$/.test(value.nativeAuthenticationReceipt?.transcriptSha256 ?? "") || !value.pipeObserved || value.authenticatedSetupPids?.length !== 2 || value.exitCode !== 0 || value.packageMode !== "fresh" || value.architecture !== arch || value.installerSha256 !== hash) process.exit(1)'
-            ARCH=$arch node -e 'const arch=process.env.ARCH, success=require(`./release-artifacts/windows-installer-success-${arch}.json`), fault=require(`./release-artifacts/windows-installer-fault-recovery-${arch}.json`); if (!success.passed || !fault.productionUpdateInterrupted || success.operation !== "repair" || success.packageMode !== "update" || success.architecture !== arch || !fault.passed || fault.architecture !== arch || !Array.isArray(fault.faults) || [...new Set(fault.faults.map(x => x.fault.replace(/^.*repair-|\.exe$/g, "")))].sort().join(",") !== ["committed","legacyRetired","legacyRetiring","predecessorMoved","prepared","published","publishedBeforePersist","publishing","registered","staged"].sort().join(",") || fault.faults.some(x => !x.inspectedBeforeRepair || !x.productionRecoveryInterrupted || !x.appPathExact || !x.quietUninstallExact || !x.legacyServiceAbsent || !x.legacyTaskAbsent || x.crashExitCode !== 197 || x.recoveryExitCode !== 78 || x.recoveredReleaseBuildDigest !== fault.releaseBuildDigest)) process.exit(1)'
+            node scripts/windows-installer-success-evidence.mjs --evidence "release-artifacts/windows-installer-success-fresh-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch" --operation fresh
+            node scripts/windows-installer-success-evidence.mjs --evidence "release-artifacts/windows-installer-success-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-update.exe" --provenance "release-artifacts/provenance-win-$arch-update.json" --arch "$arch" --operation repair
+            ARCH=$arch node -e 'const arch=process.env.ARCH,value=require(`./release-artifacts/windows-installer-success-fresh-${arch}.json`); if (!value.productionInterruptions?.fresh || !value.productionInterruptions?.removeFreshRecovery || !value.productionInterruptions?.uninstall || !value.productionInterruptions?.finishUninstallRecovery) process.exit(1)'
+            ARCH=$arch node -e 'const arch=process.env.ARCH, success=require(`./release-artifacts/windows-installer-success-${arch}.json`), fault=require(`./release-artifacts/windows-installer-fault-recovery-${arch}.json`); if (!success.passed || !fault.productionUpdateInterrupted || fault.candidateSha256 !== success.installerSha256 || fault.sourceCommit !== success.sourceCommit || fault.sourceTree !== success.sourceTree || fault.releaseBuildDigest !== success.targetReleaseBuildDigest || success.operation !== "repair" || success.packageMode !== "update" || success.architecture !== arch || !fault.passed || fault.architecture !== arch || !Array.isArray(fault.faults) || [...new Set(fault.faults.map(x => x.fault.replace(/^.*repair-|\.exe$/g, "")))].sort().join(",") !== ["committed","legacyRetired","legacyRetiring","predecessorMoved","prepared","published","publishedBeforePersist","publishing","registered","staged"].sort().join(",") || fault.faults.some(x => !x.inspectedBeforeRepair || !x.productionRecoveryInterrupted || !x.appPathExact || !x.quietUninstallExact || !x.legacyServiceAbsent || !x.legacyTaskAbsent || x.crashExitCode !== 197 || x.recoveryExitCode !== 78 || x.recoveredReleaseBuildDigest !== fault.releaseBuildDigest)) process.exit(1)'
             node scripts/windows-installer-ui-evidence.mjs --evidence "release-artifacts/windows-installer-ui-smoke-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch"
             grep -q 'talkingQuillRelease:' "release-artifacts/latest-$arch.yml"
             ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
           done
           test -f release-artifacts/THIRD_PARTY_NOTICES.txt
+          RUN_ID="$RUN_ID" node --input-type=module - <<'NODE'
+          import fs from 'node:fs'; import crypto from 'node:crypto';
+          import { validateReleaseManifest } from './scripts/release-manifest.mjs';
+          const manifest=validateReleaseManifest(JSON.parse(fs.readFileSync('release-artifacts/release-manifest.json','utf8')));
+          if (manifest.workflowRunId !== process.env.RUN_ID) throw new Error('Release manifest workflow run does not match promoted run');
+          for (const asset of manifest.assets) { const bytes=fs.readFileSync(`release-artifacts/${asset.name}`); const hash=crypto.createHash('sha256').update(bytes).digest('hex'); if(bytes.length!==asset.bytes||hash!==asset.sha256) throw new Error(`Release asset mismatch: ${asset.name}`); }
+          NODE
 
       - name: Create the unchanged installer as a draft
         env:

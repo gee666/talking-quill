@@ -68,6 +68,14 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(setup).not.toMatch(/powershell|cmd.exe/iu);
   });
 
+  it('reports installed and maintenance uninstall synchronously before deferred mapped-image cleanup', async () => {
+    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    expect(setup).toContain('wait_relocated_status');
+    expect(setup).toContain('uninstall-quarantined');
+    expect(setup).toContain('wait_for_process_exit(lifecycle_parent)');
+    expect(setup).not.toContain('return Ok(if silent { ERROR_IO_PENDING');
+  });
+
   it('has no superseded Windows owner transport or lifecycle seams', async () => {
     const [gateway, ownerRuntime, ownerConnection, diagnostics] = await Promise.all([
       readFile('helper/src/owner/windows.rs', 'utf8'),
@@ -93,7 +101,13 @@ describe('Windows gateway and owner lifecycle contract', () => {
 
   it('keeps durable install recovery inside the native worker', async () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
-    for (const phase of ['staging', 'prepared', 'committed', 'uninstalling']) {
+    for (const phase of [
+      'staging',
+      'prepared',
+      'committed',
+      'uninstalling',
+      'uninstall-quarantined',
+    ]) {
       expect(setup).toContain(`"${phase}"`);
     }
     expect(setup).toContain('package::extract_file');

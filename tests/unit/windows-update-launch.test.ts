@@ -129,7 +129,7 @@ describe('Windows elevated updater launch', () => {
     expect(bootstrap).toContain('INSTALLER_SUPERVISION_TIMEOUT_MS');
     expect(bootstrap).toContain('EXIT_INSTALLER_STILL_RUNNING');
     expect(bootstrap).toContain('if result == Ok(0)');
-    expect(bootstrap).toContain('schedule_staged_cleanup();');
+    expect(bootstrap).toContain('schedule_staged_cleanup()?;');
     expect(bootstrap).toContain('must retain');
     expect(bootstrap).toContain('GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0');
     expect(bootstrap).toContain('return Err(EXIT_LAUNCH_FAILED);');

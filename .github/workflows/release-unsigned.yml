@@ -433,7 +433,7 @@ jobs:
             if ($postRecoveryRepair.ExitCode -ne 0) { throw "Fault lifecycle repair failed: $($fault.Name)" }
             node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
           }
-          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; productionUpdateInterrupted = $updateInterrupted; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
+          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; sourceCommit = '${{ needs.validate.outputs.release_commit }}'; sourceTree = '${{ needs.validate.outputs.release_tree }}'; productionUpdateInterrupted = $updateInterrupted; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
           & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
           if ($LASTEXITCODE -ne 0) { throw 'Successful lifecycle observer compilation failed.' }
@@ -565,6 +565,18 @@ jobs:
           $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
           $uninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -Wait -PassThru
           if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          $cleanupDeadline = (Get-Date).AddSeconds(30)
+          do {
+            $cleanupPending = @(
+              "$env:ProgramFiles\Talking Quill",
+              "$env:ProgramFiles\.Talking Quill.native-staging",
+              "$env:ProgramFiles\.Talking Quill.native-backup",
+              $transaction,
+              $maintenance
+            ) | Where-Object { Test-Path -LiteralPath $_ }
+            if ($cleanupPending.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 100
+          } while ((Get-Date) -lt $cleanupDeadline)
           $machineResidue = @(
             "$env:ProgramFiles\Talking Quill",
             "$env:ProgramFiles\.Talking Quill.native-staging",
@@ -641,6 +653,10 @@ jobs:
             installer=(preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-setup.exe)
             test "${#installer[@]}" -eq 1
             node scripts/windows-installer-ui-evidence.mjs --evidence smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch"
+            node scripts/windows-installer-success-evidence.mjs --evidence fresh-evidence/windows-installer-success-fresh-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch" --operation fresh
+            update=(preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-update.exe)
+            test "${#update[@]}" -eq 1
+            node scripts/windows-installer-success-evidence.mjs --evidence installed-evidence/windows-installer-success-$arch.json --installer "${update[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-update.json --arch "$arch" --operation repair
             cp smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json release-artifacts/
             cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-{setup,update}.exe release-artifacts/
             cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-update.exe.blockmap release-artifacts/
