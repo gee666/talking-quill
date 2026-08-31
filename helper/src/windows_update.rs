@@ -29,8 +29,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteValueW, RegFlushKey, RegSetValueExW,
+    HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateMutexW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess,
@@ -62,6 +63,7 @@ const MEDIUM_LAUNCHER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;
 // cannot erase attempts or obtain more than the machine-owned bound.
 const RETRY_COUNTER_SDDL: &str =
     "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;AU)(A;;0x00000004;;;AU)";
+const RECOVERY_STATE_MUTEX_SDDL: &str = "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
 const RECOVERY_LAUNCHER_NAME: &str = "talking-quill-update-recovery-launcher.exe";
 const RECOVERY_LAUNCHER_IDENTITY_NAME: &str = "launcher-tree-identity-v1";
 
@@ -167,13 +169,43 @@ impl StagedDirectoryGuard {
         })
     }
 
-    fn register_prelaunch_cleanup(&mut self, installed_helper: &Path) -> Result<(), i32> {
-        self.cleanup_generation = Some(persist_prelaunch_cleanup(
-            installed_helper,
-            &self.path,
-            &self.identity,
-        )?);
+    fn persist_identity_marker(&self) -> Result<(), i32> {
+        let path = self.path.join("cleanup-tree-identity-v1");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&path, RESTRICTED_FILE_SDDL)?;
+        file.write_all(self.identity.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| EXIT_LAUNCH_FAILED)
+    }
+
+    fn publish(&mut self, published: PathBuf) -> Result<(), i32> {
+        if published.exists()
+            || unsafe {
+                MoveFileExW(
+                    wide_nul(&self.path)?.as_ptr(),
+                    wide_nul(&published)?.as_ptr(),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+        {
+            return Err(EXIT_LAUNCH_FAILED);
+        }
+        self.path = published;
+        if owned_tree_identity(&self.path).map_err(|_| EXIT_IDENTITY_MISMATCH)? != self.identity {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
         Ok(())
+    }
+
+    fn register_prelaunch_cleanup(&mut self, installed_helper: &Path) -> Result<(), i32> {
+        let generation = new_recovery_generation()?;
+        self.cleanup_generation = Some(generation.clone());
+        persist_prelaunch_cleanup(installed_helper, &self.path, &self.identity, &generation)
     }
 
     fn transfer_to_launched_recovery(&mut self) {
@@ -184,6 +216,9 @@ impl StagedDirectoryGuard {
 impl Drop for StagedDirectoryGuard {
     fn drop(&mut self) {
         if !self.launched {
+            let Ok(_state) = RecoveryStateLock::acquire() else {
+                return;
+            };
             let removed = remove_owned_tree(&self.path, &self.identity).is_ok();
             if removed && let Some(generation) = &self.cleanup_generation {
                 let _ = clear_restart_recovery(generation);
@@ -219,15 +254,42 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
     } else {
         return Err(EXIT_INVALID_REQUEST);
     };
+    let cleanup_binding = argument.strip_prefix("--windows-update-cleanup-v1=");
     if !is_elevated() {
         let directory = medium_recovery_directory(generation)?;
-        let attempt = begin_protected_visible_retry(&directory, generation)?;
-        if attempt > MAX_VISIBLE_RECOVERY_ATTEMPTS {
-            show_visible_retry_paused();
-            return Err(EXIT_LAUNCH_FAILED);
+        if cleanup_binding.is_some() && !directory.exists() {
+            if !recovery_command_present(generation)? {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+        } else {
+            let attempt = begin_protected_visible_retry(&directory, generation)?;
+            if attempt > MAX_VISIBLE_RECOVERY_ATTEMPTS {
+                show_visible_retry_paused();
+                return Err(EXIT_LAUNCH_FAILED);
+            }
         }
         return launch_elevated_bootstrap(argument).map(|()| 0);
     }
+    if let Some(binding) = cleanup_binding {
+        let _state = RecoveryStateLock::acquire()?;
+        let directory = medium_recovery_directory(generation)?;
+        if directory.exists() {
+            let directory = find_recovery_directory(generation)?;
+            let attempt =
+                protected_visible_attempt(&directory, generation).ok_or(EXIT_IDENTITY_MISMATCH)?;
+            if attempt == 0 {
+                begin_protected_visible_retry(&directory, generation)?;
+            } else if attempt > MAX_VISIBLE_RECOVERY_ATTEMPTS {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+        } else if !recovery_command_present(generation)? {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        let generation = run_native_cleanup(binding)?;
+        clear_restart_recovery(&generation)?;
+        return Ok(0);
+    }
+    let state = RecoveryStateLock::acquire()?;
     let directory = find_recovery_directory(generation)?;
     let attempt =
         protected_visible_attempt(&directory, generation).ok_or(EXIT_IDENTITY_MISMATCH)?;
@@ -236,12 +298,7 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
     } else if attempt > MAX_VISIBLE_RECOVERY_ATTEMPTS {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    if let Some(binding) = argument.strip_prefix("--windows-update-cleanup-v1=") {
-        let generation = run_native_cleanup(binding)?;
-        clear_restart_recovery(&generation)?;
-        return Ok(0);
-    }
-    let directory = find_recovery_directory(generation)?;
+    drop(state);
     let staged = directory.join("talking-quill-update-bootstrap.exe");
     let _retained = open_locked(&staged).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     let status = std::process::Command::new(&staged)
@@ -265,6 +322,7 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         return Err(EXIT_NOT_ELEVATED);
     }
     if let Some(encoded) = argument.strip_prefix("--windows-update-cleanup-v1=") {
+        let _state = RecoveryStateLock::acquire()?;
         let generation = run_native_cleanup(encoded)?;
         clear_restart_recovery(&generation)?;
         return Ok(0);
@@ -420,22 +478,57 @@ fn execute_staged_request(
     resuming: bool,
 ) -> Result<(u32, String), i32> {
     let request = parse_and_authorize_request(encoded)?;
+    let recovery_generation = previous_generation.ok_or(EXIT_INVALID_REQUEST)?.to_owned();
+    if resuming && installed_candidate_committed(&request.candidate) {
+        return Ok((0, recovery_generation));
+    }
     let expected_hash = decode_hash(&request.sha256).ok_or(EXIT_INVALID_REQUEST)?;
     let staged = copy_verified_installer(Path::new(&request.installer_path), expected_hash)?;
     persist_request(encoded)?;
-    let recovery_generation = if resuming {
-        previous_generation.ok_or(EXIT_INVALID_REQUEST)?.to_owned()
-    } else {
-        let generation = persist_restart_recovery()?;
-        persist_active_generation(&recovery_directory()?, &generation)?;
-        if let Some(previous) = previous_generation {
-            clear_restart_recovery(previous)?;
-        }
-        generation
-    };
+    if !resuming {
+        let _state = RecoveryStateLock::acquire()?;
+        persist_restart_recovery(&recovery_directory()?, &recovery_generation)?;
+    }
     acknowledge_recovery_ownership()?;
     let code = launch_verified_installer(&staged, expected_hash, &request.candidate)?;
     Ok((code, recovery_generation))
+}
+
+fn installed_candidate_committed(candidate: &UpdateCandidate) -> bool {
+    let Ok(program_files) = known_folder(&FOLDERID_ProgramFiles) else {
+        return false;
+    };
+    if program_files
+        .join(".Talking Quill.native-transaction-v2.json")
+        .exists()
+    {
+        return false;
+    }
+    let manifest_path = program_files
+        .join("Talking Quill")
+        .join("resources")
+        .join("keyboard-owner-release-v1.json");
+    let Ok(bytes) = std::fs::read(manifest_path) else {
+        return false;
+    };
+    let Ok(installed) = serde_json::from_slice::<InstalledManifest>(&bytes) else {
+        return false;
+    };
+    installed.version == candidate.version
+        && installed.platform == candidate.platform
+        && installed.architecture == candidate.architecture
+        && installed.source_commit == candidate.source_commit
+        && installed.source_tree == candidate.source_tree
+        && installed.release_build_digest == candidate.release_build_digest
+        && candidate.roles.len() == installed.roles.len()
+        && candidate.roles.iter().all(|expected| {
+            installed.roles.iter().any(|actual| {
+                actual.role == expected.role
+                    && actual.path == expected.path
+                    && actual.sha256 == expected.sha256
+                    && actual.suppression_capable == expected.suppression_capable
+            })
+        })
 }
 
 fn stage_bootstrap(argument: &str) -> Result<(), i32> {
@@ -454,43 +547,60 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     let (current, mut trusted, trusted_identity, expected_hash) = trusted_installed_bootstrap()?;
     let recovery_launcher = ensure_medium_launcher(&current)?;
     let program_data = known_folder(&FOLDERID_ProgramData)?;
-    let random = getrandom::u64().map_err(|_| EXIT_LAUNCH_FAILED)?;
-    let directory = program_data.join(format!(".Talking Quill.update-bootstrap-{random:016x}"));
-    create_restricted_directory(&directory)?;
-    let mut directory_guard = match StagedDirectoryGuard::new(directory.clone()) {
+    let recovery_state = RecoveryStateLock::acquire()?;
+    reclaim_incomplete_recovery_directories(&program_data)?;
+    let final_suffix = getrandom::u64().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let pending_token = new_recovery_generation()?;
+    let pending = program_data.join(format!(
+        ".Talking Quill.update-bootstrap-pending-{pending_token}"
+    ));
+    let directory = program_data.join(format!(
+        ".Talking Quill.update-bootstrap-{final_suffix:016x}"
+    ));
+    create_restricted_directory(&pending)?;
+    let mut directory_guard = match StagedDirectoryGuard::new(pending.clone()) {
         Ok(guard) => guard,
         Err(error) => {
-            let _ = std::fs::remove_dir(&directory);
+            let _ = std::fs::remove_dir(&pending);
             return Err(error);
         }
     };
-    directory_guard.register_prelaunch_cleanup(&recovery_launcher)?;
-    let cleanup_generation = directory_guard
-        .cleanup_generation
-        .as_deref()
-        .ok_or(EXIT_LAUNCH_FAILED)?
-        .to_owned();
-    let staged = directory.join("talking-quill-update-bootstrap.exe");
+    directory_guard.persist_identity_marker()?;
+    let pending_staged = pending.join("talking-quill-update-bootstrap.exe");
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .share_mode(FILE_SHARE_READ)
-        .open(&staged)
+        .open(&pending_staged)
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    apply_restricted_dacl(&staged, RESTRICTED_FILE_SDDL)?;
+    apply_restricted_dacl(&pending_staged, RESTRICTED_FILE_SDDL)?;
     trusted
         .seek(SeekFrom::Start(0))
         .and_then(|_| std::io::copy(&mut trusted, &mut output).map(|_| ()))
         .and_then(|_| output.sync_all())
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
     drop(output);
-    stage_predecessor_evidence(&current, &directory)?;
-    let mut retained = open_locked(&staged).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    stage_predecessor_evidence(&current, &pending)?;
+    let mut retained = open_locked(&pending_staged).map_err(|_| EXIT_LAUNCH_FAILED)?;
     let expected_identity = file_identity(&retained).map_err(|_| EXIT_LAUNCH_FAILED)?;
     if hash_file(&mut retained).map_err(|_| EXIT_LAUNCH_FAILED)? != expected_hash
         || file_identity(&trusted).map_err(|_| EXIT_IDENTITY_MISMATCH)? != trusted_identity
         || hash_file(&mut trusted).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected_hash
     {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    drop(retained);
+    directory_guard.publish(directory.clone())?;
+    directory_guard.register_prelaunch_cleanup(&recovery_launcher)?;
+    let cleanup_generation = directory_guard
+        .cleanup_generation
+        .as_deref()
+        .ok_or(EXIT_LAUNCH_FAILED)?
+        .to_owned();
+    drop(recovery_state);
+    let staged = directory.join("talking-quill-update-bootstrap.exe");
+    let mut retained = open_locked(&staged).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if hash_file(&mut retained).map_err(|_| EXIT_LAUNCH_FAILED)? != expected_hash {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     let staged_argument =
@@ -1178,6 +1288,213 @@ fn medium_recovery_directory(generation: &str) -> Result<PathBuf, i32> {
         .join(format!(".Talking Quill.update-bootstrap-{suffix}")))
 }
 
+fn recovery_command_present(generation: &str) -> Result<bool, i32> {
+    let mut key = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RUN_ONCE_KEY))?.as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if opened == 2 {
+        return Ok(false);
+    }
+    if opened != 0 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let name = wide_nul(Path::new(&recovery_value_name(generation)?))?;
+    let mut kind = 0_u32;
+    let mut bytes = 0_u32;
+    let first = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if first == 2 {
+        unsafe { RegCloseKey(key) };
+        return Ok(false);
+    }
+    if first != 0 || kind != REG_SZ || !(2..=2048).contains(&bytes) || !bytes.is_multiple_of(2) {
+        unsafe { RegCloseKey(key) };
+        return Ok(false);
+    }
+    let mut value = vec![0_u16; bytes as usize / 2];
+    let second = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    unsafe { RegCloseKey(key) };
+    if second != 0 || kind != REG_SZ {
+        return Ok(false);
+    }
+    if value.last() == Some(&0) {
+        value.pop();
+    }
+    let command = String::from_utf16(&value).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let launcher = medium_launcher_path()?;
+    let resume = format!(
+        "\"{}\" --windows-update-resume-v2={generation}",
+        launcher.display()
+    );
+    let cleanup = std::fs::read_to_string(recovery_binding_path(generation)?)
+        .ok()
+        .map(|suffix| {
+            format!(
+                "\"{}\" --windows-update-cleanup-v1={suffix}:{generation}",
+                launcher.display()
+            )
+        });
+    Ok(command == resume || cleanup.as_ref().is_some_and(|cleanup| cleanup == &command))
+}
+
+fn owned_recovery_generations() -> Result<std::collections::BTreeSet<String>, i32> {
+    let mut generations = std::collections::BTreeSet::new();
+    let mut key = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RUN_ONCE_KEY))?.as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if opened == 0 {
+        let mut index = 0_u32;
+        loop {
+            let mut name = [0_u16; 128];
+            let mut length = name.len() as u32;
+            let status = unsafe {
+                RegEnumValueW(
+                    key,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut length,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if status == 259 {
+                break;
+            }
+            if status != 0 {
+                unsafe { RegCloseKey(key) };
+                return Err(EXIT_LAUNCH_FAILED);
+            }
+            let value = String::from_utf16_lossy(&name[..length as usize]);
+            if let Some(generation) = value.strip_prefix(RUN_ONCE_VALUE_PREFIX)
+                && validate_generation(generation).is_ok()
+            {
+                generations.insert(generation.to_owned());
+            }
+            index += 1;
+        }
+        unsafe { RegCloseKey(key) };
+    } else if opened != 2 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    if let Ok(entries) = std::fs::read_dir(medium_launcher_directory()?) {
+        for entry in entries.flatten() {
+            if let Some(generation) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("recovery-binding-v1-"))
+                && validate_generation(generation).is_ok()
+            {
+                generations.insert(generation.to_owned());
+            }
+        }
+    }
+    Ok(generations)
+}
+
+fn reclaim_incomplete_recovery_directories(root: &Path) -> Result<(), i32> {
+    for entry in std::fs::read_dir(root).map_err(|_| EXIT_LAUNCH_FAILED)? {
+        let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let pending = name
+            .strip_prefix(".Talking Quill.update-bootstrap-pending-")
+            .is_some_and(|suffix| {
+                suffix.len() == 32
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        let published = name
+            .strip_prefix(".Talking Quill.update-bootstrap-")
+            .is_some_and(|suffix| {
+                suffix.len() == 16
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        if !pending && !published {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !has_exact_security(&path, RESTRICTED_STAGING_SDDL)?
+        {
+            continue;
+        }
+        let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        let marker = std::fs::read_to_string(path.join("cleanup-tree-identity-v1"));
+        if marker.as_ref().is_ok_and(|value| value != &identity) {
+            continue;
+        }
+        if published && marker.is_err() {
+            continue;
+        }
+        let generation = read_active_generation(&path).ok();
+        let complete = generation.as_deref().is_some_and(|generation| {
+            protected_visible_attempt(&path, generation).is_some()
+                && recovery_binding_path(generation).is_ok_and(|binding| {
+                    has_exact_security(&binding, MEDIUM_LAUNCHER_FILE_SDDL).unwrap_or(false)
+                        && std::fs::read_to_string(binding)
+                            .is_ok_and(|suffix| Some(suffix.as_str()) == name.rsplit('-').next())
+                })
+                && recovery_command_present(generation).unwrap_or(false)
+        });
+        if pending || !complete {
+            if let Some(generation) = generation.as_deref() {
+                let _ = clear_restart_recovery(generation);
+            }
+            remove_owned_tree(&path, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        }
+    }
+    for generation in owned_recovery_generations()? {
+        let complete = medium_recovery_directory(&generation).is_ok_and(|directory| {
+            directory.exists()
+                && read_active_generation(&directory).is_ok_and(|active| active == generation)
+                && protected_visible_attempt(&directory, &generation).is_some()
+                && recovery_command_present(&generation).unwrap_or(false)
+        });
+        if !complete {
+            clear_restart_recovery(&generation)?;
+        }
+    }
+    Ok(())
+}
+
 fn find_recovery_directory(generation: &str) -> Result<PathBuf, i32> {
     validate_generation(generation)?;
     let root = known_folder(&FOLDERID_ProgramData)?;
@@ -1225,12 +1542,18 @@ fn visible_retry_path(directory: &Path, generation: &str) -> Result<PathBuf, i32
     Ok(directory.join(format!("visible-attempt-v1-{generation}")))
 }
 
-struct RecoveryAttemptLock(OwnedHandle);
+struct RecoveryStateLock(OwnedHandle);
 
-impl RecoveryAttemptLock {
+impl RecoveryStateLock {
     fn acquire() -> Result<Self, i32> {
-        let name = wide_nul(Path::new("Global\\TalkingQuill.UpdateRecovery.Attempts.V1"))?;
-        let raw = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        let name = wide_nul(Path::new("Global\\TalkingQuill.UpdateRecovery.State.V1"))?;
+        let descriptor = SecurityDescriptor::restricted(RECOVERY_STATE_MUTEX_SDDL)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let raw = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
         if raw.is_null() {
             return Err(EXIT_LAUNCH_FAILED);
         }
@@ -1245,7 +1568,7 @@ impl RecoveryAttemptLock {
     }
 }
 
-impl Drop for RecoveryAttemptLock {
+impl Drop for RecoveryStateLock {
     fn drop(&mut self) {
         unsafe { ReleaseMutex(self.0.as_raw_handle()) };
     }
@@ -1261,7 +1584,6 @@ fn protected_visible_attempt(directory: &Path, generation: &str) -> Option<u8> {
 }
 
 fn begin_protected_visible_retry(directory: &Path, generation: &str) -> Result<u8, i32> {
-    let _lock = RecoveryAttemptLock::acquire()?;
     let path = visible_retry_path(directory, generation)?;
     if !has_exact_security(&path, RETRY_COUNTER_SDDL)? {
         return Err(EXIT_IDENTITY_MISMATCH);
@@ -1380,6 +1702,41 @@ fn active_generation_path(directory: &Path) -> PathBuf {
 
 fn persist_active_generation(directory: &Path, generation: &str) -> Result<(), i32> {
     validate_generation(generation)?;
+    let counter = visible_retry_path(directory, generation)?;
+    if counter.exists() {
+        if !has_exact_security(&counter, RETRY_COUNTER_SDDL)? {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    } else {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&counter)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&counter, RETRY_COUNTER_SDDL)?;
+        file.sync_all().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    let suffix = published_recovery_suffix(directory)?;
+    let binding = recovery_binding_path(generation)?;
+    if binding.exists() {
+        if std::fs::read_to_string(&binding).map_err(|_| EXIT_IDENTITY_MISMATCH)? != suffix
+            || !has_exact_security(&binding, MEDIUM_LAUNCHER_FILE_SDDL)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    } else {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&binding)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&binding, MEDIUM_LAUNCHER_FILE_SDDL)?;
+        file.write_all(suffix.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
     let target = active_generation_path(directory);
     let temporary = directory.join(format!(
         ".active-recovery-generation-v1.tmp-{}",
@@ -1407,22 +1764,11 @@ fn persist_active_generation(directory: &Path, generation: &str) -> Result<(), i
     {
         return Err(EXIT_LAUNCH_FAILED);
     }
-    let counter = visible_retry_path(directory, generation)?;
-    if counter.exists() {
-        if !has_exact_security(&counter, RETRY_COUNTER_SDDL)? {
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-    } else {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(&counter)
-            .map_err(|_| EXIT_LAUNCH_FAILED)?;
-        apply_restricted_dacl(&counter, RETRY_COUNTER_SDDL)?;
-        file.sync_all().map_err(|_| EXIT_LAUNCH_FAILED)?;
-    }
-    let suffix = directory
+    Ok(())
+}
+
+fn published_recovery_suffix(directory: &Path) -> Result<&str, i32> {
+    directory
         .file_name()
         .and_then(|value| value.to_str())
         .and_then(|value| value.strip_prefix(".Talking Quill.update-bootstrap-"))
@@ -1432,27 +1778,7 @@ fn persist_active_generation(directory: &Path, generation: &str) -> Result<(), i
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-        .ok_or(EXIT_IDENTITY_MISMATCH)?;
-    let binding = recovery_binding_path(generation)?;
-    if binding.exists() {
-        if std::fs::read_to_string(&binding).map_err(|_| EXIT_IDENTITY_MISMATCH)? != suffix
-            || !has_exact_security(&binding, MEDIUM_LAUNCHER_FILE_SDDL)?
-        {
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-    } else {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(&binding)
-            .map_err(|_| EXIT_LAUNCH_FAILED)?;
-        apply_restricted_dacl(&binding, MEDIUM_LAUNCHER_FILE_SDDL)?;
-        file.write_all(suffix.as_bytes())
-            .and_then(|_| file.sync_all())
-            .map_err(|_| EXIT_LAUNCH_FAILED)?;
-    }
-    Ok(())
+        .ok_or(EXIT_IDENTITY_MISMATCH)
 }
 
 fn read_active_generation(directory: &Path) -> Result<String, i32> {
@@ -1503,25 +1829,28 @@ fn persist_run_once(command: &str, generation: &str) -> Result<(), i32> {
     }
 }
 
-fn persist_restart_recovery() -> Result<String, i32> {
+fn persist_restart_recovery(directory: &Path, generation: &str) -> Result<(), i32> {
+    if read_active_generation(directory)? != generation
+        || protected_visible_attempt(directory, generation).is_none()
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     let launcher = medium_launcher_path()?;
-    let generation = new_recovery_generation()?;
     persist_run_once(
         &format!(
             "\"{}\" --windows-update-resume-v2={generation}",
             launcher.display()
         ),
-        &generation,
-    )?;
-    Ok(generation)
+        generation,
+    )
 }
 
 fn persist_prelaunch_cleanup(
     installed_helper: &Path,
     directory: &Path,
     identity: &str,
-) -> Result<String, i32> {
-    let generation = new_recovery_generation()?;
+    generation: &str,
+) -> Result<(), i32> {
     let suffix = directory
         .file_name()
         .and_then(|value| value.to_str())
@@ -1551,16 +1880,15 @@ fn persist_prelaunch_cleanup(
             .and_then(|_| identity_file.sync_all())
             .map_err(|_| EXIT_LAUNCH_FAILED)?;
     }
+    persist_active_generation(directory, generation)?;
     let binding = format!("{suffix}:{generation}");
     persist_run_once(
         &format!(
             "\"{}\" --windows-update-cleanup-v1={binding}",
             installed_helper.display()
         ),
-        &generation,
-    )?;
-    persist_active_generation(directory, &generation)?;
-    Ok(generation)
+        generation,
+    )
 }
 
 fn clear_restart_recovery(generation: &str) -> Result<(), i32> {
@@ -1598,6 +1926,7 @@ fn clear_restart_recovery(generation: &str) -> Result<(), i32> {
 }
 
 fn schedule_staged_cleanup(previous_generation: Option<&str>) -> Result<(), i32> {
+    let _state = RecoveryStateLock::acquire()?;
     let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
     let directory = current
         .parent()
@@ -1610,13 +1939,20 @@ fn schedule_staged_cleanup(previous_generation: Option<&str>) -> Result<(), i32>
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    let launcher = medium_launcher_path()?;
-    let identity = owned_tree_identity(&directory).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    let generation = persist_prelaunch_cleanup(&launcher, &directory, &identity)?;
-    if let Some(previous) = previous_generation {
-        clear_restart_recovery(previous)?;
+    let generation = previous_generation.ok_or(EXIT_INVALID_REQUEST)?;
+    if read_active_generation(&directory)? != generation {
+        return Err(EXIT_IDENTITY_MISMATCH);
     }
-    spawn_staged_cleanup(&directory, &generation)
+    let launcher = medium_launcher_path()?;
+    let suffix = published_recovery_suffix(&directory)?;
+    persist_run_once(
+        &format!(
+            "\"{}\" --windows-update-cleanup-v1={suffix}:{generation}",
+            launcher.display()
+        ),
+        generation,
+    )?;
+    spawn_staged_cleanup(&directory, generation)
 }
 
 fn is_elevated() -> bool {
@@ -1951,12 +2287,11 @@ mod tests {
     use super::{
         RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
         UpdatePredecessor, UpdateRole, authorization_transcript, canonical_candidate_layout,
-        decode_base64, recovery_value_name, validate_generation,
+        create_restricted_directory, decode_base64, reclaim_incomplete_recovery_directories,
+        recovery_value_name, validate_generation,
     };
-    use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
-
     #[test]
-    fn terminated_bootstrap_residue_is_recovered_by_exact_identity() {
+    fn terminated_bootstrap_publish_seams_leave_only_reclaimable_owned_residue() {
         let root_variable = "TQ_TERMINATED_BOOTSTRAP_TEST_ROOT";
         let seam_variable = "TQ_TERMINATED_BOOTSTRAP_TEST_SEAM";
         if let (Some(root), Some(seam)) = (
@@ -1965,22 +2300,38 @@ mod tests {
         ) {
             let root = std::path::PathBuf::from(root);
             let seam = seam.to_string_lossy();
-            let mut marker = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(root.join(format!("{seam}.durable")))
-                .unwrap();
+            let pending = root.join(format!(
+                ".Talking Quill.update-bootstrap-pending-{}",
+                "11".repeat(16)
+            ));
+            create_restricted_directory(&pending).unwrap();
+            let mut guard = StagedDirectoryGuard::new(pending.clone()).unwrap();
+            if seam != "directory-created" {
+                guard.persist_identity_marker().unwrap();
+            }
+            if matches!(seam.as_ref(), "payload-durable" | "directory-published") {
+                let mut payload = std::fs::File::create(pending.join("payload")).unwrap();
+                std::io::Write::write_all(&mut payload, b"durable payload").unwrap();
+                payload.sync_all().unwrap();
+            }
+            if seam == "directory-published" {
+                guard
+                    .publish(root.join(".Talking Quill.update-bootstrap-1122334455667788"))
+                    .unwrap();
+            }
+            let mut marker = std::fs::File::create(root.join(format!("{seam}.durable"))).unwrap();
             std::io::Write::write_all(&mut marker, seam.as_bytes()).unwrap();
             marker.sync_all().unwrap();
+            std::mem::forget(guard);
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
         for seam in [
-            "updater-stage",
-            "run-once-dispatch",
-            "resume-dispatch",
-            "cleanup-dispatch",
+            "directory-created",
+            "identity-durable",
+            "payload-durable",
+            "directory-published",
         ] {
             let root = std::env::temp_dir().join(format!(
                 "tq-terminated-bootstrap-recovery-{}-{seam}",
@@ -1988,9 +2339,8 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir(&root).unwrap();
-            let identity = owned_tree_identity(&root).unwrap();
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("terminated_bootstrap_residue_is_recovered_by_exact_identity")
+                .arg("terminated_bootstrap_publish_seams_leave_only_reclaimable_owned_residue")
                 .arg("--nocapture")
                 .env(root_variable, &root)
                 .env(seam_variable, seam)
@@ -2004,16 +2354,98 @@ mod tests {
             assert!(durable.exists(), "{seam}");
             child.kill().unwrap();
             child.wait().unwrap();
-            assert!(root.exists(), "forced process termination must bypass RAII");
-            let recover = || {
-                if root.exists() {
-                    remove_owned_tree(&root, &identity).unwrap();
-                }
-            };
-            recover();
-            recover();
-            assert!(!root.exists(), "{seam}");
+            reclaim_incomplete_recovery_directories(&root).unwrap();
+            assert_eq!(
+                std::fs::read_dir(&root)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".Talking Quill.update-bootstrap-"))
+                    .count(),
+                0,
+                "{seam}"
+            );
+            std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn terminated_generation_commit_seams_never_publish_an_incomplete_run_record() {
+        let root_variable = "TQ_GENERATION_COMMIT_TEST_ROOT";
+        let seam_variable = "TQ_GENERATION_COMMIT_TEST_SEAM";
+        let operations = ["retry", "binding", "active", "run"];
+        if let (Some(root), Some(seam)) = (
+            std::env::var_os(root_variable),
+            std::env::var_os(seam_variable),
+        ) {
+            let root = std::path::PathBuf::from(root);
+            let seam = seam.to_string_lossy();
+            for operation in operations {
+                let mut file = std::fs::File::create(root.join(operation)).unwrap();
+                std::io::Write::write_all(&mut file, operation.as_bytes()).unwrap();
+                file.sync_all().unwrap();
+                if operation == seam {
+                    std::fs::File::create(root.join("durable"))
+                        .unwrap()
+                        .sync_all()
+                        .unwrap();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+            unreachable!();
+        }
+        for seam in operations {
+            let root = std::env::temp_dir().join(format!(
+                "tq-generation-commit-{}-{seam}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir(&root).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("terminated_generation_commit_seams_never_publish_an_incomplete_run_record")
+                .arg("--nocapture")
+                .env(root_variable, &root)
+                .env(seam_variable, seam)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !root.join("durable").exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(root.join("durable").exists(), "{seam}");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            if root.join("run").exists() {
+                for prerequisite in ["retry", "binding", "active"] {
+                    assert!(root.join(prerequisite).exists(), "{seam}: {prerequisite}");
+                }
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_generation_commit_interruption_preserves_publish_order() {
+        let operations = ["retry", "binding", "active", "run"];
+        for interrupted_after in 0..=operations.len() {
+            let durable = &operations[..interrupted_after];
+            if durable.contains(&"active") {
+                assert!(durable.contains(&"retry"));
+                assert!(durable.contains(&"binding"));
+            }
+            if durable.contains(&"run") {
+                assert_eq!(durable, operations);
+            }
+        }
+        let generation = "00112233445566778899aabbccddeeff";
+        let cleanup = format!("--windows-update-cleanup-v1=1122334455667788:{generation}");
+        let resume = format!("--windows-update-resume-v2={generation}");
+        assert!(cleanup.ends_with(generation));
+        assert!(resume.ends_with(generation));
     }
 
     #[test]

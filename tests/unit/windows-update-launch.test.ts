@@ -108,7 +108,7 @@ describe('Windows elevated updater launch', () => {
     expect(bootstrap).toContain('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)');
     expect(bootstrap).toContain('CreateDirectoryW(path.as_ptr(), &attributes)');
     expect(bootstrap).toContain('PROTECTED_DACL_SECURITY_INFORMATION');
-    expect(bootstrap).toContain('apply_restricted_dacl(&staged, RESTRICTED_FILE_SDDL)');
+    expect(bootstrap).toContain('apply_restricted_dacl(&pending_staged, RESTRICTED_FILE_SDDL)');
     expect(bootstrap).toContain('apply_restricted_dacl(&target, RESTRICTED_FILE_SDDL)');
     expect(bootstrap).toContain('.share_mode(FILE_SHARE_READ)');
     expect(bootstrap).toContain('CREATE_SUSPENDED');
@@ -116,7 +116,7 @@ describe('Windows elevated updater launch', () => {
     expect(bootstrap).toContain('GetFileInformationByHandle');
     expect(bootstrap).toContain('QueryFullProcessImageNameW');
     expect(bootstrap.indexOf('trusted_installed_bootstrap()?')).toBeLessThan(
-      bootstrap.indexOf('create_restricted_directory(&directory)?'),
+      bootstrap.indexOf('create_restricted_directory(&pending)?'),
     );
     expect(bootstrap).toContain('file_identity(&trusted)');
     expect(bootstrap).toContain('hash_file(&mut trusted)');

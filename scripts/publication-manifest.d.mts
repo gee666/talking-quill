@@ -50,6 +50,13 @@ export function createPublicationManifest(
   },
 ): Promise<PublicationEnvelope>;
 
+export function verifyPublicationEnvelope(options: {
+  readonly envelope: PublicationEnvelope;
+  readonly repository: string;
+  readonly tag: string;
+  readonly publicKeyPath: string;
+}): Promise<PublicationEnvelope>;
+
 export function verifyPublicationManifest(
   options: PublicationManifestOptions & { readonly path: string },
 ): Promise<PublicationEnvelope>;

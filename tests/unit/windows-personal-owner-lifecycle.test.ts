@@ -127,12 +127,29 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(updater).toContain('MAX_VISIBLE_RECOVERY_ATTEMPTS: u8 = 3');
     expect(updater).toContain('show_visible_retry_paused()');
     expect(updater).toContain('read_active_generation(&directory)? != generation');
-    expect(updater).toContain('let recovery_generation = if resuming');
+    expect(updater).toContain('let recovery_generation = previous_generation');
+    const prepare = updater.slice(
+      updater.indexOf('fn persist_active_generation'),
+      updater.indexOf('fn read_active_generation'),
+    );
+    expect(prepare.indexOf('let counter =')).toBeLessThan(prepare.indexOf('let binding ='));
+    expect(prepare.indexOf('let binding =')).toBeLessThan(
+      prepare.indexOf('let target = active_generation_path'),
+    );
+    expect(updater).toContain('.Talking Quill.update-bootstrap-pending-');
+    expect(updater).toContain('directory_guard.publish(directory.clone())?;');
     expect(updater).toContain(
       'Automatic update prompts are paused and the recovery generation is retained.',
     );
     expect(workflow).toContain('Persistent visible recovery command is missing or mismatched.');
     expect(workflow).toContain('Successful recovery retained its persistent retry command.');
+    expect(workflow).toContain(
+      'Installed maintenance recovery entry did not survive interrupted uninstall.',
+    );
+    expect(workflow).toContain('Interrupted uninstall recovery registration is not exact.');
+    expect(workflow).not.toContain(
+      'if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }',
+    );
   });
 
   it('keeps durable install recovery inside the native worker', async () => {

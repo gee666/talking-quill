@@ -37,6 +37,24 @@ describe('Windows native publication policy', () => {
     expect(promote).toBeGreaterThan(inventoryCheck);
   });
 
+  it('serializes publication and rechecks all signed immutable history before promotion', () => {
+    expect(workflow).toContain('group: publish-windows-owner\n');
+    expect(workflow).not.toContain('group: publish-windows-owner-${{ inputs.tag }}');
+    expect(workflow.match(/gh api --paginate --slurp/gu)).toHaveLength(4);
+    expect(workflow.match(/releases\/\$id\/assets\?per_page=100/gu)).toHaveLength(2);
+    expect(workflow.match(/node scripts\/publication-history\.mjs/gu)).toHaveLength(2);
+    const draft = workflow.indexOf('gh release create');
+    const promote = workflow.indexOf('curl --fail-with-body --silent --show-error --request PATCH');
+    const historyChecks = [...workflow.matchAll(/node scripts\/publication-history\.mjs/gu)].map(
+      ({ index }) => index,
+    );
+    expect(historyChecks[0]).toBeLessThan(draft);
+    expect(historyChecks[1]).toBeGreaterThan(draft);
+    expect(historyChecks[1]).toBeLessThan(promote);
+    expect(workflow).toContain('select(.draft == false and .immutable == true)');
+    expect(workflow).toContain('test "${#manifest_assets[@]}" -eq 1');
+  });
+
   it('makes promotion the final mutation and then verifies immutable publication', () => {
     const promote = workflow.indexOf('curl --fail-with-body --silent --show-error --request PATCH');
     expect(workflow.slice(promote).match(/--request PATCH/gu)).toHaveLength(1);

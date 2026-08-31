@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -805,6 +805,14 @@ impl NativeSystemAdapter for WindowsNativeSystem {
 struct MachineLock(OwnedHandle);
 impl MachineLock {
     fn acquire() -> Result<Self> {
+        Self::acquire_named("Global\\TalkingQuill.NativeSetup.V2", 120_000)
+    }
+
+    fn acquire_update_recovery() -> Result<Self> {
+        Self::acquire_named("Global\\TalkingQuill.UpdateRecovery.State.V1", 30_000)
+    }
+
+    fn acquire_named(name: &str, timeout: u32) -> Result<Self> {
         let sddl = wide(OsStr::new("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)"));
         let mut descriptor: *mut c_void = ptr::null_mut();
         if unsafe {
@@ -826,19 +834,13 @@ impl MachineLock {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let handle = unsafe {
-            CreateMutexW(
-                &attributes,
-                0,
-                wide(OsStr::new("Global\\TalkingQuill.NativeSetup.V2")).as_ptr(),
-            )
-        };
+        let handle = unsafe { CreateMutexW(&attributes, 0, wide(OsStr::new(name)).as_ptr()) };
         unsafe { LocalFree(descriptor) };
         if handle.is_null() {
             return Err(fail(EXIT_FAILURE, "Cannot create the machine setup lock."));
         }
         let lock = Self(unsafe { OwnedHandle::from_raw_handle(handle) });
-        let wait = unsafe { WaitForSingleObject(lock.0.as_raw_handle(), 120_000) };
+        let wait = unsafe { WaitForSingleObject(lock.0.as_raw_handle(), timeout) };
         if wait != 0 && wait != 0x80 {
             return Err(fail(EXIT_FAILURE, "Machine setup lock timed out."));
         }
@@ -2524,7 +2526,6 @@ fn uninstall(
     defer_mapped_controller_cleanup: bool,
 ) -> Result<()> {
     write_transaction(paths, "uninstalling", Action::Uninstall, true)?;
-    system.unregister()?;
     system.retire_legacy(paths)?;
     system.clear_update_recovery(paths)?;
     if defer_mapped_controller_cleanup && path_present(&paths.install)? {
@@ -2540,6 +2541,7 @@ fn uninstall(
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
     remove_transaction(paths)?;
+    system.unregister()?;
     remove_maintenance_uninstaller(paths)?;
     Ok(())
 }
@@ -2701,7 +2703,6 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
             remove_plain_tree(&paths.staging)?;
         }
         RecoveryPlan::FinishUninstall => {
-            system.unregister()?;
             system.retire_legacy(paths)?;
             system.clear_update_recovery(paths)?;
             remove_plain_tree(&paths.install)?;
@@ -2711,6 +2712,7 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
     }
     remove_transaction(paths)?;
     if finishing_uninstall {
+        system.unregister()?;
         remove_maintenance_uninstaller(paths)?;
     }
     Ok(())
@@ -2797,7 +2799,34 @@ fn restore_repair_controller(paths: &Paths) -> Result<()> {
     durable_replace(&temporary, &target)
 }
 
+fn remove_maintenance_temporary_files(paths: &Paths) -> Result<()> {
+    let parent = paths
+        .maintenance_uninstaller
+        .parent()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Maintenance path has no parent."))?;
+    for entry in fs::read_dir(parent).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let owned = name
+            .to_str()
+            .and_then(|value| value.strip_prefix("Talking Quill Maintenance."))
+            .and_then(|value| value.strip_suffix(".tmp"))
+            .is_some_and(|suffix| {
+                suffix.len() == 32
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        if owned {
+            assert_plain_file(&entry.path())?;
+            fs::remove_file(entry.path()).map_err(io_failure)?;
+        }
+    }
+    Ok(())
+}
+
 fn remove_maintenance_uninstaller(paths: &Paths) -> Result<()> {
+    remove_maintenance_temporary_files(paths)?;
     if path_present(&paths.maintenance_uninstaller)? {
         assert_plain_file(&paths.maintenance_uninstaller)?;
         fs::remove_file(&paths.maintenance_uninstaller).map_err(io_failure)?;
@@ -2806,6 +2835,7 @@ fn remove_maintenance_uninstaller(paths: &Paths) -> Result<()> {
 }
 
 fn ensure_maintenance_uninstaller(paths: &Paths) -> Result<()> {
+    remove_maintenance_temporary_files(paths)?;
     let source = paths.install.join("Uninstall Talking Quill.exe");
     assert_plain_file(&source)?;
     let replacing = path_present(&paths.maintenance_uninstaller)?;
@@ -2997,6 +3027,7 @@ fn unregister_app_path() -> Result<()> {
 }
 
 fn clear_update_recovery(paths: &Paths) -> Result<()> {
+    let _recovery_lock = MachineLock::acquire_update_recovery()?;
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const PREFIX: &str = "Talking Quill Update Recovery ";
     let mut key = ptr::null_mut();
@@ -3063,23 +3094,38 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
         let name = entry.file_name();
-        let Some(suffix) = name
-            .to_str()
-            .and_then(|value| value.strip_prefix(".Talking Quill.update-bootstrap-"))
-        else {
-            continue;
-        };
-        if suffix.len() == 16
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        let Some(name) = name.to_str() else { continue };
+        let pending = name
+            .strip_prefix(".Talking Quill.update-bootstrap-pending-")
+            .is_some_and(|suffix| {
+                suffix.len() == 32
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        let published = name
+            .strip_prefix(".Talking Quill.update-bootstrap-")
+            .is_some_and(|suffix| {
+                suffix.len() == 16
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        if pending || published {
             let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+            if !metadata.is_dir()
+                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || !staged_path_is_protected(&path, true)?
+            {
+                continue;
+            }
             let identity = owned_tree_identity(&path)
                 .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
             let recorded = fs::read_to_string(path.join("cleanup-tree-identity-v1"));
-            if staged_path_is_protected(&path, true)?
-                && recorded.is_ok_and(|value| value == identity)
+            if (pending && recorded.as_ref().is_ok_and(|value| value == &identity))
+                || (pending && recorded.is_err())
+                || (published && recorded.is_ok_and(|value| value == identity))
             {
                 remove_owned_tree(&path, &identity)
                     .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;

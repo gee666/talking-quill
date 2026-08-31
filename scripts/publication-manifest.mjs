@@ -185,36 +185,12 @@ export async function createPublicationManifest({
   return envelope;
 }
 
-export async function verifyPublicationManifest({
-  path,
-  directory,
-  repository,
-  tag,
-  sequence,
-  workflowRunId,
-  sourceCommit,
-  sourceTree,
-  publicKeyPath,
-}) {
-  const envelope = JSON.parse(await readFile(path, 'utf8'));
+export async function verifyPublicationEnvelope({ envelope, repository, tag, publicKeyPath }) {
   exactObject(envelope, ['payload', 'signature'], 'publication manifest');
   exactObject(envelope.signature, ['scheme', 'keyId', 'value'], 'publication signature');
   validatePayload(envelope.payload);
-  if (
-    envelope.payload.repository !== repository ||
-    envelope.payload.tag !== tag ||
-    envelope.payload.sequence !== Number(sequence) ||
-    envelope.payload.workflowRunId !== workflowRunId ||
-    envelope.payload.sourceCommit !== sourceCommit ||
-    envelope.payload.sourceTree !== sourceTree
-  )
-    throw new Error('Publication manifest context does not match the protected release request');
-  const actual = await inventory(directory, new Set([basename(path), 'SHA256SUMS.txt']));
-  if (
-    canonicalJson(actual.objects) !== canonicalJson(envelope.payload.objects) ||
-    canonicalJson(actual.assets) !== canonicalJson(envelope.payload.assets)
-  )
-    throw new Error('Publication content-addressed inventory changed');
+  if (envelope.payload.repository !== repository || envelope.payload.tag !== tag)
+    throw new Error('Publication manifest release identity does not match its container');
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
   const keyId = sha256(pinned);
   if (
@@ -240,6 +216,39 @@ export async function verifyPublicationManifest({
     )
   )
     throw new Error('Publication manifest signature is invalid');
+  return envelope;
+}
+
+export async function verifyPublicationManifest({
+  path,
+  directory,
+  repository,
+  tag,
+  sequence,
+  workflowRunId,
+  sourceCommit,
+  sourceTree,
+  publicKeyPath,
+}) {
+  const envelope = await verifyPublicationEnvelope({
+    envelope: JSON.parse(await readFile(path, 'utf8')),
+    repository,
+    tag,
+    publicKeyPath,
+  });
+  if (
+    envelope.payload.sequence !== Number(sequence) ||
+    envelope.payload.workflowRunId !== workflowRunId ||
+    envelope.payload.sourceCommit !== sourceCommit ||
+    envelope.payload.sourceTree !== sourceTree
+  )
+    throw new Error('Publication manifest context does not match the protected release request');
+  const actual = await inventory(directory, new Set([basename(path), 'SHA256SUMS.txt']));
+  if (
+    canonicalJson(actual.objects) !== canonicalJson(envelope.payload.objects) ||
+    canonicalJson(actual.assets) !== canonicalJson(envelope.payload.assets)
+  )
+    throw new Error('Publication content-addressed inventory changed');
   return envelope;
 }
 

@@ -575,15 +575,18 @@ jobs:
           $uninstall.WaitForExit()
           if (-not $uninstallInterrupted) { throw 'Production uninstall mutation was not interrupted.' }
           $maintenance = "$env:ProgramFiles\Talking Quill Maintenance.exe"
-          $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
-          $firstUninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -PassThru
+          $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
+          if (-not (Test-Path -LiteralPath $maintenance) -or -not (Test-Path -LiteralPath $uninstallKey)) { throw 'Installed maintenance recovery entry did not survive interrupted uninstall.' }
+          $registeredRecovery = (Get-ItemProperty -LiteralPath $uninstallKey -Name QuietUninstallString).QuietUninstallString
+          if ($registeredRecovery -cne ('"' + $maintenance + '" /S')) { throw 'Interrupted uninstall recovery registration is not exact.' }
+          $firstUninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -PassThru
           $finishUninstallRecoveryInterrupted = $false
           $finishDeadline = (Get-Date).AddSeconds(30)
           while ((Get-Date) -lt $finishDeadline) {
             if (Test-Path -LiteralPath $transaction) {
               $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
               if ($state.phase -eq 'recovering-finish-uninstall') {
-                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' -or $_.ExecutablePath -ceq $setup[0].FullName } | Sort-Object CreationDate -Descending)
+                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' -or $_.ExecutablePath -ceq $maintenance } | Sort-Object CreationDate -Descending)
                 if ($workers.Count -ge 1) { Stop-Process -Id $workers[0].ProcessId -Force; $finishUninstallRecoveryInterrupted = $true; break }
               }
             }
@@ -591,8 +594,8 @@ jobs:
           }
           $firstUninstallRecovery.WaitForExit()
           if (-not $finishUninstallRecoveryInterrupted) { throw 'recovering-finish-uninstall was not interrupted.' }
-          $recoveryExecutable = if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }
-          $uninstallRecovery = Start-Process -FilePath $recoveryExecutable -ArgumentList '/S' -Wait -PassThru
+          if (-not (Test-Path -LiteralPath $maintenance) -or -not (Test-Path -LiteralPath $uninstallKey)) { throw 'Installed maintenance recovery entry was lost before terminal recovery.' }
+          $uninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -Wait -PassThru
           if ($uninstallRecovery.ExitCode -ne 0) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
           $machineResidue = @(
             "$env:ProgramFiles\Talking Quill",

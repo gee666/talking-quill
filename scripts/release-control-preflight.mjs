@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -71,6 +71,23 @@ export function validateExternalControls(
         throw new Error(`Protected environment variable is missing: ${name}:${variable}`);
     }
   }
+}
+
+export function validateLocalPublicationAuthority(directory = resolve(root, '.github/workflows')) {
+  const writers = readdirSync(directory)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .filter((name) =>
+      /^\s+contents:\s*write\s*$/mu.test(readFileSync(resolve(directory, name), 'utf8')),
+    );
+  if (writers.length !== 1 || writers[0] !== 'publish-local-owner.yml')
+    throw new Error('Release publication authority is not restricted to its reviewed workflow.');
+  const publisher = readFileSync(resolve(directory, writers[0]), 'utf8');
+  if (
+    !publisher.includes('environment: release-publication') ||
+    !publisher.includes('group: publish-windows-owner\n') ||
+    publisher.includes('group: publish-windows-owner-${{ inputs.tag }}')
+  )
+    throw new Error('Release publication authority is not globally serialized and protected.');
 }
 
 function rulesetProtectsRef(ruleset, releaseRef) {
@@ -180,6 +197,7 @@ async function main() {
       (value) => value.name,
     );
   }
+  validateLocalPublicationAuthority();
   validateExternalControls(
     {
       repository: { ...repository, defaultBranchProtected: branch.protected === true },
