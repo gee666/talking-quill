@@ -26,7 +26,8 @@ describe('Windows native publication policy', () => {
     expect(verify).toBeGreaterThan(-1);
     expect(promote).toBeGreaterThan(verify);
     expect(workflow).toContain('-H "If-Match: $etag"');
-    expect(workflow).toContain('"draft":false,"prerelease":false,"make_latest":"true"');
+    expect(workflow).toContain('"draft":false,"prerelease":false,"make_latest":"legacy"');
+    expect(workflow).not.toContain('"make_latest":"true"');
     expect(workflow).not.toContain('gh release edit');
     const freshFetch = workflow.indexOf(
       'https://api.github.com/repos/$REPOSITORY/releases/$RELEASE_ID',

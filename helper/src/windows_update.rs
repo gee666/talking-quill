@@ -1,12 +1,13 @@
 #![cfg(windows)]
 
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
@@ -34,9 +35,9 @@ use windows_sys::Win32::System::Registry::{
     RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateMutexW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess,
-    OpenProcessToken, PROCESS_INFORMATION, QueryFullProcessImageNameW, ReleaseMutex, ResumeThread,
-    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
+    PROCESS_INFORMATION, QueryFullProcessImageNameW, ResumeThread, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_ProgramData, FOLDERID_ProgramFiles, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
@@ -57,15 +58,20 @@ static RELEASE_MANIFEST_KEY_MARKER: &str = concat!(
 const RESTRICTED_STAGING_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const RESTRICTED_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
 const MEDIUM_LAUNCHER_DIRECTORY_SDDL: &str =
-    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;AU)";
-const MEDIUM_LAUNCHER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)";
+    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)";
+const MEDIUM_LAUNCHER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;AU)";
 // Authenticated users may only read and append. They can exhaust retries (safe denial), but
 // cannot erase attempts or obtain more than the machine-owned bound.
 const RETRY_COUNTER_SDDL: &str =
-    "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;AU)(A;;0x00000004;;;AU)";
-const RECOVERY_STATE_MUTEX_SDDL: &str = "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120089;;;AU)(A;;0x00000004;;;AU)";
 const RECOVERY_LAUNCHER_NAME: &str = "talking-quill-update-recovery-launcher.exe";
 const RECOVERY_LAUNCHER_IDENTITY_NAME: &str = "launcher-tree-identity-v1";
+const RECOVERY_LAUNCHER_PENDING_PREFIX: &str = ".Talking Quill.update-launcher-pending-";
+const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLockV1";
+const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
+const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 
 const EXIT_INVALID_REQUEST: i32 = 64;
 const EXIT_NOT_ELEVATED: i32 = 77;
@@ -545,9 +551,9 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     let (current, mut trusted, trusted_identity, expected_hash) = trusted_installed_bootstrap()?;
-    let recovery_launcher = ensure_medium_launcher(&current)?;
     let program_data = known_folder(&FOLDERID_ProgramData)?;
     let recovery_state = RecoveryStateLock::acquire()?;
+    let recovery_launcher = ensure_medium_launcher(&current)?;
     reclaim_incomplete_recovery_directories(&program_data)?;
     let final_suffix = getrandom::u64().map_err(|_| EXIT_LAUNCH_FAILED)?;
     let pending_token = new_recovery_generation()?;
@@ -1158,8 +1164,10 @@ fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
     let mut source_file = open_locked(&source).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     let source_hash = hash_file(&mut source_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     let directory = medium_launcher_directory()?;
+    reclaim_incomplete_launcher_directories(directory.parent().ok_or(EXIT_IDENTITY_MISMATCH)?)?;
     if !directory.exists() {
-        create_directory_with_sddl(&directory, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?;
+        publish_medium_launcher_directory(&directory, &mut source_file, source_hash)?;
+        return Ok(directory.join(RECOVERY_LAUNCHER_NAME));
     }
     let metadata = std::fs::symlink_metadata(&directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if !metadata.is_dir()
@@ -1232,7 +1240,114 @@ fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
     {
         return Err(EXIT_LAUNCH_FAILED);
     }
+    let mut published = open_locked(&target).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if hash_file(&mut published).map_err(|_| EXIT_IDENTITY_MISMATCH)? != source_hash
+        || !has_exact_security(&target, MEDIUM_LAUNCHER_FILE_SDDL)?
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     Ok(target)
+}
+
+fn publish_medium_launcher_directory(
+    directory: &Path,
+    source_file: &mut File,
+    source_hash: [u8; 32],
+) -> Result<(), i32> {
+    let parent = directory.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let token = new_recovery_generation()?;
+    let pending = parent.join(format!("{RECOVERY_LAUNCHER_PENDING_PREFIX}{token}"));
+    create_directory_with_sddl(&pending, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?;
+    apply_restricted_dacl(&pending, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?;
+    let identity = owned_tree_identity(&pending).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let result = (|| {
+        let marker = pending.join(RECOVERY_LAUNCHER_IDENTITY_NAME);
+        let mut marker_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&marker)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&marker, MEDIUM_LAUNCHER_FILE_SDDL)?;
+        marker_file
+            .write_all(identity.as_bytes())
+            .and_then(|_| marker_file.sync_all())
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let launcher = pending.join(RECOVERY_LAUNCHER_NAME);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&launcher)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&launcher, MEDIUM_LAUNCHER_FILE_SDDL)?;
+        source_file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| std::io::copy(source_file, &mut output).map(|_| ()))
+            .and_then(|_| output.sync_all())
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        drop(output);
+        let mut copied = open_locked(&launcher).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut copied).map_err(|_| EXIT_IDENTITY_MISMATCH)? != source_hash {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        drop(copied);
+        if unsafe {
+            MoveFileExW(
+                wide_nul(&pending)?.as_ptr(),
+                wide_nul(directory)?.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(EXIT_LAUNCH_FAILED);
+        }
+        if owned_tree_identity(directory).map_err(|_| EXIT_IDENTITY_MISMATCH)? != identity {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        Ok(())
+    })();
+    if result.is_err() && pending.exists() {
+        let _ = remove_owned_tree(&pending, &identity);
+    }
+    result
+}
+
+fn reclaim_incomplete_launcher_directories(root: &Path) -> Result<(), i32> {
+    for entry in std::fs::read_dir(root).map_err(|_| EXIT_LAUNCH_FAILED)? {
+        let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let name = entry.file_name();
+        let pending = name
+            .to_str()
+            .and_then(|value| value.strip_prefix(RECOVERY_LAUNCHER_PENDING_PREFIX))
+            .is_some_and(|suffix| {
+                suffix.len() == 32
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        if !pending {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !has_exact_security(&path, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?
+        {
+            continue;
+        }
+        let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        let marker = path.join(RECOVERY_LAUNCHER_IDENTITY_NAME);
+        if marker.exists()
+            && (std::fs::read_to_string(&marker).map_err(|_| EXIT_IDENTITY_MISMATCH)? != identity
+                || !has_exact_security(&marker, MEDIUM_LAUNCHER_FILE_SDDL)?)
+        {
+            continue;
+        }
+        remove_owned_tree(&path, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    Ok(())
 }
 
 // A normal Run value is the durable retry record. Windows must not consume recovery ownership
@@ -1542,36 +1657,224 @@ fn visible_retry_path(directory: &Path, generation: &str) -> Result<PathBuf, i32
     Ok(directory.join(format!("visible-attempt-v1-{generation}")))
 }
 
-struct RecoveryStateLock(OwnedHandle);
+struct RecoveryStateLock(File);
 
 impl RecoveryStateLock {
     fn acquire() -> Result<Self, i32> {
-        let name = wide_nul(Path::new("Global\\TalkingQuill.UpdateRecovery.State.V1"))?;
-        let descriptor = SecurityDescriptor::restricted(RECOVERY_STATE_MUTEX_SDDL)?;
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: 0,
-        };
-        let raw = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
-        if raw.is_null() {
-            return Err(EXIT_LAUNCH_FAILED);
+        let path = machine_lock_file()?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(&path)
+            {
+                Ok(file) => {
+                    if !has_exact_security(&path, MACHINE_LOCK_FILE_SDDL)?
+                        || file_identity_text(&file)?
+                            != std::fs::read_to_string(path.with_extension("identity-v1"))
+                                .map_err(|_| EXIT_IDENTITY_MISMATCH)?
+                    {
+                        return Err(EXIT_IDENTITY_MISMATCH);
+                    }
+                    return Ok(Self(file));
+                }
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => return Err(EXIT_LAUNCH_FAILED),
+            }
         }
-        let lock = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
-        if !matches!(
-            unsafe { WaitForSingleObject(lock.0.as_raw_handle(), 30_000) },
-            0 | 0x80
-        ) {
-            return Err(EXIT_LAUNCH_FAILED);
-        }
-        Ok(lock)
     }
 }
 
 impl Drop for RecoveryStateLock {
     fn drop(&mut self) {
-        unsafe { ReleaseMutex(self.0.as_raw_handle()) };
+        let _ = self.0.sync_all();
     }
+}
+
+fn machine_lock_file() -> Result<PathBuf, i32> {
+    let mut key = std::ptr::null_mut();
+    let mut disposition = 0_u32;
+    if unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            &mut disposition,
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let mut publisher = disposition == 1;
+    let suffix = if publisher {
+        new_recovery_generation()?
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(value) = read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)? {
+                break value;
+            }
+            if Instant::now() >= deadline {
+                publisher = true;
+                break new_recovery_generation()?;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    validate_generation(&suffix)?;
+    let directory = known_folder(&FOLDERID_ProgramData)?
+        .join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+    if !directory.exists() {
+        create_directory_with_sddl(&directory, MACHINE_LOCK_DIRECTORY_SDDL)?;
+        apply_restricted_dacl(&directory, MACHINE_LOCK_DIRECTORY_SDDL)?;
+    }
+    if !has_exact_security(&directory, MACHINE_LOCK_DIRECTORY_SDDL)? {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    if publisher {
+        if read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)?.is_some() {
+            unsafe { RegCloseKey(key) };
+            return machine_lock_file();
+        }
+        let value = wide_nul(Path::new(&suffix))?;
+        let status = unsafe {
+            RegSetValueExW(
+                key,
+                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_VALUE))?.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                (value.len() * 2) as u32,
+            )
+        };
+        if status != 0 || unsafe { RegFlushKey(key) } != 0 {
+            unsafe { RegCloseKey(key) };
+            return Err(EXIT_LAUNCH_FAILED);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)?.as_deref()
+            != Some(suffix.as_str())
+        {
+            unsafe { RegCloseKey(key) };
+            return machine_lock_file();
+        }
+    }
+    let directory_identity = owned_tree_identity(&directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    create_or_verify_marker(
+        &directory.join("lock-tree-identity-v1"),
+        &directory_identity,
+        MACHINE_LOCK_FILE_SDDL,
+    )?;
+    let lock = directory.join("recovery-state-v1.lock");
+    if !lock.exists() {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE)
+            .open(&lock)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?;
+        apply_restricted_dacl(&lock, MACHINE_LOCK_FILE_SDDL)?;
+        file.sync_all().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    if !has_exact_security(&lock, MACHINE_LOCK_FILE_SDDL)? {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE)
+        .open(&lock)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let identity = file_identity_text(&file)?;
+    drop(file);
+    create_or_verify_marker(
+        &lock.with_extension("identity-v1"),
+        &identity,
+        MACHINE_LOCK_FILE_SDDL,
+    )?;
+    unsafe { RegCloseKey(key) };
+    Ok(lock)
+}
+
+fn create_or_verify_marker(path: &Path, value: &str, sddl: &str) -> Result<(), i32> {
+    if path.exists() {
+        if !has_exact_security(path, sddl)?
+            || std::fs::read_to_string(path).map_err(|_| EXIT_IDENTITY_MISMATCH)? != value
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_restricted_dacl(path, sddl)?;
+    file.write_all(value.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
+fn file_identity_text(file: &File) -> Result<String, i32> {
+    let identity = file_identity(file).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    Ok(format!(
+        "{}:{}",
+        identity.volume,
+        (u64::from(identity.index_high) << 32) | u64::from(identity.index_low)
+    ))
+}
+
+fn read_registry_string(key: *mut c_void, name: &str) -> Result<Option<String>, i32> {
+    let name = wide_nul(Path::new(name))?;
+    let mut kind = 0_u32;
+    let mut bytes = 0_u32;
+    let first = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if first == 2 {
+        return Ok(None);
+    }
+    if first != 0 || kind != REG_SZ || !(2..=256).contains(&bytes) || !bytes.is_multiple_of(2) {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let mut value = vec![0_u16; bytes as usize / 2];
+    if unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    if value.last() == Some(&0) {
+        value.pop();
+    }
+    String::from_utf16(&value)
+        .map(Some)
+        .map_err(|_| EXIT_IDENTITY_MISMATCH)
 }
 
 fn protected_visible_attempt(directory: &Path, generation: &str) -> Option<u8> {
@@ -2285,10 +2588,11 @@ fn base64_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
-        UpdatePredecessor, UpdateRole, authorization_transcript, canonical_candidate_layout,
-        create_restricted_directory, decode_base64, reclaim_incomplete_recovery_directories,
-        recovery_value_name, validate_generation,
+        MEDIUM_LAUNCHER_DIRECTORY_SDDL, RECOVERY_LAUNCHER_PENDING_PREFIX, RUN_ONCE_VALUE_PREFIX,
+        StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate, UpdatePredecessor, UpdateRole,
+        authorization_transcript, canonical_candidate_layout, create_directory_with_sddl,
+        create_restricted_directory, decode_base64, reclaim_incomplete_launcher_directories,
+        reclaim_incomplete_recovery_directories, recovery_value_name, validate_generation,
     };
     #[test]
     fn terminated_bootstrap_publish_seams_leave_only_reclaimable_owned_residue() {
@@ -2369,6 +2673,25 @@ mod tests {
             );
             std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn launcher_pending_directories_are_reclaimed_before_the_identity_marker() {
+        let root = std::env::temp_dir().join(format!(
+            "tq-launcher-pending-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        for token in ["11".repeat(16), "22".repeat(16)] {
+            let pending = root.join(format!("{RECOVERY_LAUNCHER_PENDING_PREFIX}{token}"));
+            create_directory_with_sddl(&pending, MEDIUM_LAUNCHER_DIRECTORY_SDDL).unwrap();
+            super::apply_restricted_dacl(&pending, MEDIUM_LAUNCHER_DIRECTORY_SDDL).unwrap();
+            assert!(super::has_exact_security(&pending, MEDIUM_LAUNCHER_DIRECTORY_SDDL).unwrap());
+        }
+        reclaim_incomplete_launcher_directories(&root).unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

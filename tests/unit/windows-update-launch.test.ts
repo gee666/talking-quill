@@ -49,6 +49,21 @@ const candidate = {
 };
 
 describe('Windows elevated updater launch', () => {
+  it('uses a protected identity-bound ProgramData file lock instead of squattable global names', async () => {
+    const [helper, setup] = await Promise.all([
+      readFile('helper/src/windows_update.rs', 'utf8'),
+      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
+    ]);
+    for (const source of [helper, setup]) {
+      expect(source).toContain('RecoveryStateLockV1');
+      expect(source).toContain('DirectorySuffix');
+      expect(source).toContain('recovery-state-v1.lock');
+      expect(source).toContain('file_identity_text');
+      expect(source).toContain('.share_mode(0)');
+      expect(source).not.toContain('Global\\TalkingQuill.UpdateRecovery.State.V1');
+    }
+  });
+
   it('elevates the installed bootstrap with an opaque exact package request', () => {
     const hash = 'ab'.repeat(32);
     const launch = buildWindowsElevationLaunch(
@@ -105,6 +120,10 @@ describe('Windows elevated updater launch', () => {
     expect(resumeStaged).toBeGreaterThan(hashInstaller);
     expect(bootstrap).toContain('candidate.predecessor.gateway_sha256');
     expect(bootstrap).toContain('RESTRICTED_STAGING_SDDL');
+    expect(bootstrap).toContain('RECOVERY_LAUNCHER_PENDING_PREFIX');
+    expect(bootstrap).toContain('publish_medium_launcher_directory');
+    expect(bootstrap).toContain('reclaim_incomplete_launcher_directories');
+    expect(bootstrap).toContain('RECOVERY_LAUNCHER_IDENTITY_NAME');
     expect(bootstrap).toContain('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)');
     expect(bootstrap).toContain('CreateDirectoryW(path.as_ptr(), &attributes)');
     expect(bootstrap).toContain('PROTECTED_DACL_SECURITY_INFORMATION');

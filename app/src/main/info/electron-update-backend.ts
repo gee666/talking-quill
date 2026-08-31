@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
+import { basename } from 'node:path';
 import { app } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { ApplicationUpdateBackend } from './application-update-controller';
 import { resolveHelperExecutable } from '../helper/helper-path';
 import { parseUnsignedUpdateIdentity } from './unsigned-update-identity';
+import { PublicationCatalog } from './publication-catalog';
+import type { SelectedPublication } from './publication-selection';
 import { buildWindowsElevationLaunch, settleWindowsElevation } from './windows-update-launch';
 
 export function createElectronUpdateBackend(
@@ -24,6 +27,8 @@ export function createElectronUpdateBackend(
   // Setting a custom channel enables downgrades in electron-updater; stable releases never do that.
   autoUpdater.allowDowngrade = false;
 
+  const publicationCatalog = new PublicationCatalog();
+  let selectedPublication: SelectedPublication | null = null;
   let downloadedWindowsInstaller: {
     readonly path: string;
     readonly sha256: string;
@@ -43,26 +48,51 @@ export function createElectronUpdateBackend(
 
   return {
     async checkForUpdates() {
+      checkedIdentity = null;
+      selectedPublication = null;
+      const selected =
+        process.platform === 'win32' ? await publicationCatalog.select(architecture) : null;
+      if (selected !== null) {
+        autoUpdater.setFeedURL({
+          provider: 'generic',
+          url: `https://github.com/${selected.payload.repository}/releases/download/${selected.release.tag_name}`,
+        });
+      }
       const result = await autoUpdater.checkForUpdates();
       if (result === null) return null;
-      checkedIdentity = parseUnsignedUpdateIdentity(
+      if (selected !== null && result.updateInfo.version !== selected.version) {
+        throw new Error('Updater metadata does not match the selected signed publication');
+      }
+      const identity = parseUnsignedUpdateIdentity(
         (result.updateInfo as unknown as { talkingQuillRelease?: unknown }).talkingQuillRelease,
         process.platform,
         architecture,
         result.updateInfo.version,
       );
+      if (selected !== null && identity.packageSha256 !== selected.packageSha256) {
+        throw new Error('Updater identity does not match the selected signed publication object');
+      }
+      checkedIdentity = identity;
+      selectedPublication = selected;
       return { version: result.updateInfo.version };
     },
     async downloadUpdate() {
       const identity = checkedIdentity;
-      if (identity === null) throw new Error('Unsigned updater release identity is unavailable');
+      const publication = selectedPublication;
+      if (identity === null || (process.platform === 'win32' && publication === null))
+        throw new Error('Signed updater release identity is unavailable');
       const files = await autoUpdater.downloadUpdate();
-      const payload = files.find((file) =>
-        file.toLowerCase().endsWith(process.platform === 'win32' ? '.exe' : '.zip'),
-      );
+      const expectedName =
+        process.platform === 'win32'
+          ? (publication?.packageAsset.name ?? '')
+          : basename(files.find((file) => file.toLowerCase().endsWith('.zip')) ?? '');
+      const payload = files.find((file) => basename(file) === expectedName);
       if (payload === undefined) throw new Error('Downloaded update payload is missing');
       const payloadSha256 = await sha256File(payload);
-      if (payloadSha256 !== identity.packageSha256) {
+      if (
+        payloadSha256 !== identity.packageSha256 ||
+        (process.platform === 'win32' && payloadSha256 !== publication?.packageSha256)
+      ) {
         throw new Error('Downloaded update payload does not match its SHA-256 identity');
       }
       if (process.platform === 'win32') {
@@ -126,6 +156,9 @@ export function createElectronUpdateBackend(
       return () => errorListeners.delete(listener);
     },
     dispose() {
+      checkedIdentity = null;
+      selectedPublication = null;
+      downloadedWindowsInstaller = null;
       autoUpdater.removeListener('download-progress', handleProgress);
       autoUpdater.removeListener('error', handleError);
       progressListeners.clear();

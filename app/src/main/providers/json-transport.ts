@@ -63,6 +63,8 @@ export interface JsonTransportRequest {
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;
   readonly errorResponsePolicy?: 'gemini-api-key';
+  /** Accept an octet-stream body only for a bounded public fixed-cloud JSON artifact. */
+  readonly allowOctetStreamJson?: boolean;
   /** Primarily useful to tighten an operation budget in deterministic tests. */
   readonly maxOperationResponseBytes?: number;
 }
@@ -94,6 +96,7 @@ interface PreparedRequest {
   readonly signal: AbortSignal;
   readonly maxResponseBytes: number;
   readonly errorResponsePolicy?: 'gemini-api-key';
+  readonly allowOctetStreamJson?: boolean;
 }
 
 interface OperationEndpoint {
@@ -149,6 +152,11 @@ export class PinnedJsonTransport implements JsonTransport {
     const credentialed = options.credentialed || hasCredentialHeader(headers);
     const body = serializeBody(options.body);
     if (options.method === 'GET' && body !== null) throw new ProviderError('INVALID_CONFIG');
+    if (
+      options.allowOctetStreamJson === true &&
+      (options.method !== 'GET' || options.credentialed || options.fixedCloud !== true)
+    )
+      throw new ProviderError('INVALID_CONFIG');
 
     const timeoutController = new AbortController();
     const remaining = state.deadline - Date.now();
@@ -170,6 +178,9 @@ export class PinnedJsonTransport implements JsonTransport {
       ...(options.errorResponsePolicy === undefined
         ? {}
         : { errorResponsePolicy: options.errorResponsePolicy }),
+      ...(options.allowOctetStreamJson === undefined
+        ? {}
+        : { allowOctetStreamJson: options.allowOctetStreamJson }),
     };
     try {
       return await this.#requestFollowingRedirects(options.url, prepared, state, null, 0);
@@ -433,7 +444,11 @@ function performRequest(
       const contentType = response.headers['content-type'];
       if (
         typeof contentType !== 'string' ||
-        !/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(contentType)
+        (!/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(contentType) &&
+          !(
+            options.allowOctetStreamJson === true &&
+            /^application\/octet-stream\b/iu.test(contentType)
+          ))
       ) {
         response.destroy();
         reject(new ProviderError('INVALID_RESPONSE'));
