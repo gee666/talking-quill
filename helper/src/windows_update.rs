@@ -299,6 +299,7 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
         .and_then(|_| output.sync_all())
         .map_err(|_| EXIT_LAUNCH_FAILED)?;
     drop(output);
+    stage_predecessor_evidence(&current, &directory)?;
     let mut retained = open_locked(&staged).map_err(|_| EXIT_LAUNCH_FAILED)?;
     let expected_identity = file_identity(&retained).map_err(|_| EXIT_LAUNCH_FAILED)?;
     if hash_file(&mut retained).map_err(|_| EXIT_LAUNCH_FAILED)? != expected_hash
@@ -393,6 +394,33 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     Ok(())
 }
 
+fn copy_restricted_snapshot(source: &Path, target: &Path) -> Result<(), i32> {
+    let mut input = open_locked(source).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(target)
+        .map_err(|_| EXIT_LAUNCH_FAILED)?;
+    apply_restricted_dacl(target, RESTRICTED_FILE_SDDL)?;
+    std::io::copy(&mut input, &mut output)
+        .and_then(|_| output.sync_all())
+        .map_err(|_| EXIT_LAUNCH_FAILED)
+}
+
+fn stage_predecessor_evidence(installed_gateway: &Path, directory: &Path) -> Result<(), i32> {
+    let helper_directory = installed_gateway.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let resources = helper_directory.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
+    copy_restricted_snapshot(
+        &resources.join("keyboard-owner-release-v1.json"),
+        &directory.join("predecessor-release.json"),
+    )?;
+    copy_restricted_snapshot(
+        &helper_directory.join("talking-quill-keyboard-owner.exe"),
+        &directory.join("predecessor-owner.exe"),
+    )
+}
+
 fn parse_and_authorize_request(encoded: &str) -> Result<UpdateRequest, i32> {
     let request: UpdateRequest =
         serde_json::from_slice(&decode_base64(encoded)?).map_err(|_| EXIT_INVALID_REQUEST)?;
@@ -450,12 +478,25 @@ fn trusted_installed_bootstrap() -> Result<(PathBuf, File, FileIdentity, [u8; 32
 
 fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> Result<(), i32> {
     let current = std::env::current_exe().map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let staged = current
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("talking-quill-update-bootstrap.exe"));
     let resources = current
         .parent()
-        .and_then(Path::parent)
+        .and_then(|parent| {
+            if staged {
+                Some(parent.to_owned())
+            } else {
+                parent.parent().map(Path::to_owned)
+            }
+        })
         .ok_or(EXIT_IDENTITY_MISMATCH)?;
-    let bytes = std::fs::read(resources.join("keyboard-owner-release-v1.json"))
-        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let manifest_name = if staged {
+        "predecessor-release.json"
+    } else {
+        "keyboard-owner-release-v1.json"
+    };
+    let bytes = std::fs::read(resources.join(manifest_name)).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
@@ -518,11 +559,16 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     let mut gateway_file = open_locked(&current).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let owner_name = if staged {
+        "predecessor-owner.exe"
+    } else {
+        "talking-quill-keyboard-owner.exe"
+    };
     let mut owner_file = open_locked(
         &current
             .parent()
             .ok_or(EXIT_IDENTITY_MISMATCH)?
-            .join("talking-quill-keyboard-owner.exe"),
+            .join(owner_name),
     )
     .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if hash_file(&mut gateway_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?

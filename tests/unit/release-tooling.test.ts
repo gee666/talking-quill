@@ -29,7 +29,7 @@ describe('active release tooling', () => {
     const artifact = 'Talking-Quill-1.0.0-win-x64.exe';
     writeFileSync(resolve(fixture, artifact), 'installer bytes');
     const manifest = sealReleaseManifest({
-      schemaVersion: 1,
+      schemaVersion: 2,
       repository: 'gee666/talking-quill',
       tag: 'v1.0.0',
       version: '1.0.0',
@@ -42,9 +42,18 @@ describe('active release tooling', () => {
       generatedAt: null,
       provenance: [
         {
-          name: 'provenance-win-x64.json',
+          name: 'provenance-win-x64-setup.json',
           platform: 'win',
           arch: 'x64',
+          mode: 'setup',
+          sourceTree,
+          sourceTreeSha256: 'a'.repeat(64),
+        },
+        {
+          name: 'provenance-win-x64-update.json',
+          platform: 'win',
+          arch: 'x64',
+          mode: 'update',
           sourceTree,
           sourceTreeSha256: 'a'.repeat(64),
         },
@@ -97,13 +106,13 @@ describe('active release tooling', () => {
     ) as {
       assets: { name: string }[];
       promotable: boolean;
-      provenance: { platform: string; arch: string }[];
+      provenance: { platform: string; arch: string; mode: string }[];
     };
     expect(manifest.promotable).toBe(true);
     expect(manifest.assets).toHaveLength(8);
-    expect(manifest.provenance.map(({ platform, arch }) => `${platform}-${arch}`)).toEqual([
-      'win-x64',
-    ]);
+    expect(
+      manifest.provenance.map(({ platform, arch, mode }) => `${platform}-${arch}-${mode}`),
+    ).toEqual(['win-x64-setup', 'win-x64-update']);
     expect(manifest.assets.map(({ name }) => name)).not.toContain('smoke-evidence-win-x64.json');
   });
 

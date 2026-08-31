@@ -6,7 +6,7 @@ import {
 } from '../../scripts/release-manifest.mjs';
 
 const body = () => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   repository: 'gee666/talking-quill',
   tag: 'v0.0.69',
   version: '0.0.69',
@@ -19,9 +19,18 @@ const body = () => ({
   generatedAt: null,
   provenance: [
     {
-      name: 'provenance-win-x64.json',
+      name: 'provenance-win-x64-setup.json',
       platform: 'win',
       arch: 'x64',
+      mode: 'setup',
+      sourceTree: 'd'.repeat(40),
+      sourceTreeSha256: 'b'.repeat(64),
+    },
+    {
+      name: 'provenance-win-x64-update.json',
+      platform: 'win',
+      arch: 'x64',
+      mode: 'update',
       sourceTree: 'd'.repeat(40),
       sourceTreeSha256: 'b'.repeat(64),
     },
@@ -51,7 +60,7 @@ describe('sealed release manifest', () => {
       }),
     ).toThrow('sorted and unique');
     expect(() => sealReleaseManifest({ ...body(), architecture: 'x64+arm64' })).toThrow(
-      'architectures are incomplete',
+      'architecture provenance is incomplete',
     );
   });
 });

@@ -261,7 +261,8 @@ fn validate_manifest(
         || !hex_digest(&manifest.target.release_build_digest)
         || !hex_digest(&manifest.target.gateway_sha256)
         || !hex_digest(&manifest.target.owner_sha256)
-        || (manifest.fault_phase.is_some() && manifest.package_mode != "repair")
+        || (manifest.fault_phase.is_some()
+            && (!cfg!(feature = "acceptance-faults") || manifest.package_mode != "repair"))
         || manifest.fault_phase.as_deref().is_some_and(|phase| {
             !matches!(
                 phase,
@@ -638,7 +639,11 @@ mod tests {
             parsed.manifest.fault_phase = Some(phase.into());
             assert_eq!(
                 validate_manifest(&parsed.manifest, package_size, manifest_size),
-                Ok(()),
+                if cfg!(feature = "acceptance-faults") {
+                    Ok(())
+                } else {
+                    Err(PackageError::Identity)
+                },
                 "{phase}"
             );
         }

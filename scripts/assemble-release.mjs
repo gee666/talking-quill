@@ -70,6 +70,7 @@ if (
   provenance.sourceTree !== sourceTree ||
   freshProvenance.sourceCommit !== commit ||
   freshProvenance.sourceTree !== sourceTree ||
+  freshProvenance.sourceTreeSha256 !== sourceTreeSha256 ||
   freshProvenance.package.version !== version ||
   freshProvenance.package.platform !== 'win' ||
   freshProvenance.package.arch !== architecture ||
@@ -116,7 +117,7 @@ const assets = expectedInputs.map((name) => {
   return { name, bytes: lstatSync(path).size, sha256: sha256(path) };
 });
 const manifest = sealReleaseManifest({
-  schemaVersion: 1,
+  schemaVersion: 2,
   repository: releaseConfig.repository,
   tag,
   version,
@@ -133,9 +134,18 @@ const manifest = sealReleaseManifest({
       : new Date().toISOString(),
   provenance: [
     {
+      name: freshProvenanceName,
+      platform: 'win',
+      arch: architecture,
+      mode: 'setup',
+      sourceTree,
+      sourceTreeSha256,
+    },
+    {
       name: provenanceName,
       platform: 'win',
       arch: architecture,
+      mode: 'update',
       sourceTree,
       sourceTreeSha256,
     },

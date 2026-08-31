@@ -78,7 +78,7 @@ function validateReleaseManifestBody(value) {
     'release manifest body',
   );
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     typeof value.repository !== 'string' ||
     !/^v\d+\.\d+\.\d+$/u.test(value.tag ?? '') ||
     !/^\d+\.\d+\.\d+$/u.test(value.version ?? '') ||
@@ -104,10 +104,11 @@ function validateReleaseManifestBody(value) {
   );
   validateEntries(
     value.provenance,
-    ['name', 'platform', 'arch', 'sourceTree', 'sourceTreeSha256'],
+    ['name', 'platform', 'arch', 'mode', 'sourceTree', 'sourceTreeSha256'],
     (entry) =>
       entry.platform === 'win' &&
       ['x64', 'arm64'].includes(entry.arch) &&
+      ['setup', 'update'].includes(entry.mode) &&
       entry.sourceTree === value.sourceTree &&
       /^[0-9a-f]{40}$/u.test(entry.sourceTree ?? '') &&
       HEX.test(entry.sourceTreeSha256 ?? ''),
@@ -115,11 +116,12 @@ function validateReleaseManifestBody(value) {
   );
   const expectedArchitectures =
     value.architecture === 'x64+arm64' ? ['arm64', 'x64'] : [value.architecture];
-  if (
-    JSON.stringify(value.provenance.map(({ arch }) => arch).sort()) !==
-    JSON.stringify(expectedArchitectures)
-  ) {
-    throw new Error('Release manifest provenance architectures are incomplete');
+  const expectedPairs = expectedArchitectures.flatMap((arch) =>
+    ['setup', 'update'].map((mode) => `${arch}:${mode}`),
+  );
+  const actualPairs = value.provenance.map(({ arch, mode }) => `${arch}:${mode}`).sort();
+  if (JSON.stringify(actualPairs) !== JSON.stringify(expectedPairs.sort())) {
+    throw new Error('Release manifest setup/update architecture provenance is incomplete');
   }
 }
 

@@ -39,11 +39,12 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, FileDispositionInfo, GetFileInformationByHandleEx,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WriteFile,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
+    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle,
+    WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -177,14 +178,17 @@ fn run_inner() -> Result<i32> {
         let current =
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
         let controller_paths = paths()?;
-        let stable_uninstaller =
-            canonical(&current).ok() == canonical(&controller_paths.maintenance_uninstaller).ok();
         let retained = retain_controller_image(&current, relocated)?;
         let mut lifecycle_parent = 0;
         let action = if relocated {
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
+            let expected = if path_present(&installed)? {
+                &installed
+            } else {
+                &controller_paths.maintenance_uninstaller
+            };
             let (action, parent, requested_silent, _) =
-                WorkerChannel::connect_and_authenticate(&current, Some(&installed))?;
+                WorkerChannel::connect_and_authenticate(&current, Some(expected))?;
             silent = requested_silent;
             lifecycle_parent = parent;
             if action != Action::Uninstall {
@@ -197,22 +201,26 @@ fn run_inner() -> Result<i32> {
         } else {
             derive_action(&current, &controller_paths)?
         };
-        if action == Action::Uninstall && !relocated && !stable_uninstaller {
+        if action == Action::Uninstall && !relocated {
             let (path, lock) = create_relocated_image(&current)?;
             let channel = ControllerChannel::create(Action::Uninstall, silent, 0)?;
-            launch_relocated(&path, &channel)?;
-            drop(lock);
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while Instant::now() < deadline && !path_present(&controller_paths.transaction)? {
-                std::thread::sleep(Duration::from_millis(25));
+            let process = launch_relocated(&path, &channel)?;
+            let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 700_000) };
+            if wait != WAIT_OBJECT_0 {
+                unsafe { TerminateProcess(process.as_raw_handle(), EXIT_FAILURE as u32) };
+                unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) };
+                drop(lock);
+                return Err(fail(EXIT_FAILURE, "Relocated uninstall did not complete."));
             }
-            if !path_present(&controller_paths.transaction)? {
+            let mut code = EXIT_FAILURE as u32;
+            if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
                 return Err(fail(
                     EXIT_FAILURE,
-                    "Relocated uninstall did not publish durable status.",
+                    "Cannot read relocated uninstall status.",
                 ));
             }
-            return Ok(if silent { ERROR_IO_PENDING as i32 } else { 0 });
+            drop(lock);
+            return Ok(code as i32);
         }
         if !silent && !confirm_controller(action)? {
             return Ok(ERROR_CANCELLED as i32);
@@ -226,7 +234,7 @@ fn run_inner() -> Result<i32> {
         if action != Action::Install {
             request_runtime_exit(&controller_paths)?;
         }
-        let retained = if stable_uninstaller {
+        let retained = if relocated {
             drop(retained);
             retain_controller_image(&current, true)?
         } else {
@@ -344,12 +352,7 @@ fn retain_controller_image(path: &Path, delete_on_close: bool) -> Result<OwnedHa
         } else {
             0
         };
-    let sharing = FILE_SHARE_READ
-        | if delete_on_close {
-            FILE_SHARE_DELETE
-        } else {
-            0
-        };
+    let sharing = FILE_SHARE_READ | FILE_SHARE_DELETE;
     let raw = unsafe {
         CreateFileW(
             wide(path.as_os_str()).as_ptr(),
@@ -386,7 +389,7 @@ fn create_relocated_image(source: &Path) -> Result<(PathBuf, File)> {
     Ok((path, target))
 }
 
-fn launch_relocated(executable: &Path, channel: &ControllerChannel) -> Result<()> {
+fn launch_relocated(executable: &Path, channel: &ControllerChannel) -> Result<OwnedHandle> {
     let file = wide(executable.as_os_str());
     let parameters = wide(OsStr::new(if channel.silent {
         "/TQ-RELOCATED /S"
@@ -406,8 +409,7 @@ fn launch_relocated(executable: &Path, channel: &ControllerChannel) -> Result<()
         ));
     }
     let shell_process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    let _delegated = channel.authenticate(&shell_process, executable)?;
-    Ok(())
+    channel.authenticate(&shell_process, executable)
 }
 
 fn wait_for_process_exit(pid: u32) -> Result<()> {
@@ -518,9 +520,8 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         .ok_or_else(|| fail(EXIT_FAILURE, "Installer state root is invalid."))?;
     assert_plain_directory(state_root)?;
     cleanup_transaction_residue(state_root)?;
-    // Recovery authority comes from the protected journal and retained tree identities.
-    // Restore an interrupted predecessor before authorizing a new update request.
-    recover(&paths)?;
+    // The protected staged predecessor authenticates the persisted signed snapshot and exact
+    // setup package before native journal recovery touches a moved tree.
     let predecessor_authorized = if legacy_predecessor {
         authenticate_predecessor_helper(&package, &paths)?;
         validate_predecessor_arguments(&package, &current)?;
@@ -528,6 +529,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     } else {
         false
     };
+    recover(&paths)?;
     let mut action = if requested_action == Some(Action::Uninstall) {
         authorize_uninstall_controller(&paths)?;
         Action::Uninstall
@@ -669,7 +671,7 @@ impl ControllerChannel {
         let handle = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 256,
@@ -801,8 +803,80 @@ impl ControllerChannel {
             &request,
         );
         pipe_write(self.handle.as_raw_handle(), &proof, monitor, deadline)?;
+        let mut transcript = Sha256::new();
+        transcript.update(b"TalkingQuill/setup-authenticated-transcript/v1");
+        transcript.update(nonce);
+        transcript.update(&public);
+        transcript.update(worker_public_bytes);
+        transcript.update(image_hash);
+        transcript.update(&request);
+        transcript.update(proof);
+        let transcript_hash: [u8; 32] = transcript.finalize().into();
+        let mut evidence_key_hash = Sha256::new();
+        evidence_key_hash.update(b"TalkingQuill/setup-evidence-verifier/v1");
+        evidence_key_hash.update(shared.raw_secret_bytes());
+        evidence_key_hash.update(nonce);
+        let evidence_key: [u8; 32] = evidence_key_hash.finalize().into();
+        let mut receipt_mac = Hmac::<Sha256V10>::new_from_slice(&evidence_key)
+            .map_err(|_| fail(EXIT_FAILURE, "Cannot create setup evidence proof."))?;
+        receipt_mac.update(&transcript_hash);
+        let receipt_hmac: [u8; 32] = receipt_mac.finalize().into_bytes().into();
+        let _ = publish_authentication_receipt(
+            std::process::id(),
+            worker,
+            &file_hash(image)?,
+            &transcript_hash,
+            &evidence_key,
+            &receipt_hmac,
+            worker_process.as_raw_handle(),
+        );
         Ok(worker_process)
     }
+}
+
+fn publish_authentication_receipt(
+    controller: u32,
+    worker: u32,
+    package_sha256: &[u8; 32],
+    transcript_sha256: &[u8; 32],
+    evidence_key: &[u8; 32],
+    receipt_hmac: &[u8; 32],
+    worker_process: std::os::windows::io::RawHandle,
+) -> Result<()> {
+    let name = wide(OsStr::new(&format!(
+        r"\\.\pipe\TalkingQuill.Setup.Receipt.{controller}"
+    )));
+    let raw = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            2048,
+            2048,
+            1_000,
+            ptr::null(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(fail(EXIT_FAILURE, "Cannot create setup evidence pipe."));
+    }
+    let pipe = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    pipe_connect(pipe.as_raw_handle(), worker_process, deadline)?;
+    let receipt = format!(
+        "{{\"schemaVersion\":1,\"protocol\":\"P-256-ECDH/HMAC-SHA256-v1\",\"controllerPid\":{controller},\"workerPid\":{worker},\"packageSha256\":\"{}\",\"transcriptSha256\":\"{}\",\"evidenceVerifierKey\":\"{}\",\"receiptHmac\":\"{}\",\"workerProofVerified\":true,\"controllerProofSent\":true}}",
+        hex_hash(package_sha256),
+        hex_hash(transcript_sha256),
+        hex_hash(evidence_key),
+        hex_hash(receipt_hmac),
+    );
+    pipe_write(
+        pipe.as_raw_handle(),
+        receipt.as_bytes(),
+        Some(worker_process),
+        deadline,
+    )
 }
 
 struct WorkerChannel;
@@ -1313,8 +1387,13 @@ fn retained_file_hash(path: &Path) -> Result<(File, [u8; 32])> {
 fn authorize_uninstall_controller(paths: &Paths) -> Result<()> {
     let controller = process_image(parent_process_id()?)?;
     let installed = paths.install.join("Uninstall Talking Quill.exe");
-    assert_plain_file(&installed)?;
-    if file_hash(&controller)? != file_hash(&installed)? {
+    let expected = if path_present(&installed)? {
+        installed
+    } else {
+        paths.maintenance_uninstaller.clone()
+    };
+    assert_plain_file(&expected)?;
+    if file_hash(&controller)? != file_hash(&expected)? {
         return Err(fail(
             EXIT_REJECTED,
             "Uninstall requires an authenticated exact copy of the installed controller image.",
@@ -1429,8 +1508,8 @@ fn authenticate_predecessor_helper(package: &ParsedPackage, paths: &Paths) -> Re
     let installed_gateway = paths
         .install
         .join("resources/helper/talking-quill-helper.exe");
-    assert_plain_file(&installed_gateway)?;
-    let parent_is_installed = canonical(&parent_image)? == canonical(&installed_gateway)?;
+    let parent_is_installed = path_present(&installed_gateway)?
+        && canonical(&parent_image)? == canonical(&installed_gateway)?;
     let parent_is_staged = parent_image
         .file_name()
         .is_some_and(|name| name.eq_ignore_ascii_case("talking-quill-update-bootstrap.exe"))
@@ -1454,8 +1533,13 @@ fn authenticate_predecessor_helper(package: &ParsedPackage, paths: &Paths) -> Re
             staged_path_is_protected(parent, true).unwrap_or(false)
                 && staged_path_is_protected(&parent_image, false).unwrap_or(false)
         });
+    let installed_hash_matches = if parent_is_installed {
+        parent_hash == file_hash(&installed_gateway)?
+    } else {
+        true
+    };
     if (!parent_is_installed && !parent_is_staged)
-        || parent_hash != file_hash(&installed_gateway)?
+        || !installed_hash_matches
         || hex_hash(&parent_hash) != previous.gateway_sha256
     {
         return Err(fail(
@@ -1528,8 +1612,9 @@ fn installed_matches_target(
     // Fault-bearing packages are non-promotable process-test artifacts. Their crash
     // seam is package-bound (never command-line authority) and can only target the
     // exact installed release identity.
-    let acceptance_fault =
-        package.manifest.fault_phase.is_some() && package.manifest.package_mode == "repair";
+    let acceptance_fault = cfg!(feature = "acceptance-faults")
+        && package.manifest.fault_phase.is_some()
+        && package.manifest.package_mode == "repair";
     Ok((exact_setup || acceptance_fault)
         && installed.get("version").and_then(|value| value.as_str())
             == Some(package.manifest.version.as_str())
@@ -1757,8 +1842,9 @@ fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> 
         }
         _ => false,
     };
-    let acceptance_repair =
-        package.manifest.fault_phase.is_some() && package.manifest.package_mode == "repair";
+    let acceptance_repair = cfg!(feature = "acceptance-faults")
+        && package.manifest.fault_phase.is_some()
+        && package.manifest.package_mode == "repair";
     if value.get("version").and_then(|item| item.as_str())
         != Some(package.manifest.version.as_str())
         || value.get("architecture").and_then(|item| item.as_str())
@@ -1999,10 +2085,16 @@ unsafe fn wide_ptr_string(pointer: *const u16) -> String {
     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, length) })
 }
 
+#[cfg(feature = "acceptance-faults")]
 fn crash_at(package: &ParsedPackage, phase: &str) {
     if package.manifest.fault_phase.as_deref() == Some(phase) {
         std::process::exit(197);
     }
+}
+
+#[cfg(not(feature = "acceptance-faults"))]
+fn crash_at(package: &ParsedPackage, _phase: &str) {
+    debug_assert!(package.manifest.fault_phase.is_none());
 }
 
 fn uninstall(paths: &Paths) -> Result<()> {
@@ -2013,9 +2105,10 @@ fn uninstall(paths: &Paths) -> Result<()> {
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
-    // The synchronous maintenance controller owns a delete-on-close handle. The worker
-    // must not fail final commit by trying to unlink its executing controller image.
+    // Commit the durable uninstall before the relocated worker marks the protected original
+    // for deletion. Until this point the original remains a callable recovery entry point.
     remove_transaction(paths)?;
+    remove_maintenance_uninstaller(paths)?;
     Ok(())
 }
 
@@ -2121,6 +2214,7 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
         path_present(&paths.backup)?,
         path_present(&paths.install)?,
     )?;
+    let finishing_uninstall = plan == RecoveryPlan::FinishUninstall;
     let progress_phase = match plan {
         RecoveryPlan::RestorePredecessor => "recovering-restore-predecessor",
         RecoveryPlan::DiscardStaging => "recovering-discard-staging",
@@ -2181,10 +2275,13 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.backup)?;
             remove_plain_tree(&paths.staging)?;
-            remove_maintenance_uninstaller(paths)?;
         }
     }
-    remove_transaction(paths)
+    remove_transaction(paths)?;
+    if finishing_uninstall {
+        remove_maintenance_uninstaller(paths)?;
+    }
+    Ok(())
 }
 
 fn paths() -> Result<Paths> {

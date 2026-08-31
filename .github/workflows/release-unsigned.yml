@@ -224,6 +224,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-setup.mjs ${{ matrix.arch }}
           mkdir -p tmp/windows-fault-artifacts/${{ matrix.arch }}
           for phase in staged prepared predecessorMoved publishing publishedBeforePersist published registered committed legacyRetiring legacyRetired; do
             TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE="$phase" node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
@@ -302,7 +303,7 @@ jobs:
     name: Verify preserved Windows ${{ matrix.arch }} lifecycle
     needs: [validate, package, smoke]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -359,8 +360,26 @@ jobs:
           $request = @{ version = 2; installerPath = $installers[0].FullName; sha256 = $candidateHash; candidate = $identity } | ConvertTo-Json -Depth 20 -Compress
           $bootstrap = '--windows-update-bootstrap-v2=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
           $helper = "$env:ProgramFiles\Talking Quill\resources\helper\talking-quill-helper.exe"
-          $candidate = Start-Process -FilePath $helper -ArgumentList $bootstrap -Wait -PassThru
-          if ($candidate.ExitCode -ne 0) { throw "Authenticated predecessor update bootstrap failed: $($candidate.ExitCode)" }
+          $candidate = Start-Process -FilePath $helper -ArgumentList $bootstrap -PassThru
+          $updateInterrupted = $false
+          $killDeadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $killDeadline) {
+            $transactionPath = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
+            if (Test-Path -LiteralPath $transactionPath) {
+              $state = Get-Content -LiteralPath $transactionPath -Raw | ConvertFrom-Json
+              if ($state.phase -eq 'staging') {
+                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.Talking Quill.update-bootstrap-*\verified-update-installer.exe' } | Sort-Object CreationDate -Descending | Select-Object -First 1)
+                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $updateInterrupted = $true; break }
+              }
+            }
+            Start-Sleep -Milliseconds 2
+          }
+          $candidate.WaitForExit()
+          if (-not $updateInterrupted) { throw 'Production update mutation was not interrupted.' }
+          $resume = @(Get-ChildItem "$env:ProgramData\.Talking Quill.update-bootstrap-*\talking-quill-update-bootstrap.exe")
+          if ($resume.Count -ne 1) { throw 'Protected staged predecessor recovery owner is not exact.' }
+          $resumed = Start-Process -FilePath $resume[0].FullName -ArgumentList '--windows-update-resume-v2' -Wait -PassThru
+          if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
           $expectedDigest = $identity.releaseBuildDigest
           $deadline = (Get-Date).AddMinutes(3)
           do {
@@ -380,8 +399,23 @@ jobs:
           foreach ($fault in @(Get-ChildItem $faultRoot/Talking-Quill-*-repair-*.exe | Sort-Object Name)) {
             $crash = Start-Process -FilePath $fault.FullName -ArgumentList '/S' -Wait -PassThru
             if ($crash.ExitCode -ne 197) { throw "Fault lifecycle did not terminate at its authenticated seam: $($fault.Name)" }
-            # The production candidate runs protected journal recovery, then truthfully rejects
-            # update mode against the already-installed target before any new mutation.
+            # Kill the real production recovery worker after its durable recovery intent appears,
+            # then rerun the same production package to prove restart idempotence.
+            $firstRecovery = Start-Process -FilePath $setupProbe[0].FullName -ArgumentList '/S' -PassThru
+            $recoveryInterrupted = $false
+            $recoveryDeadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $recoveryDeadline) {
+              if (Test-Path -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") {
+                $recoveryState = Get-Content -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json" -Raw | ConvertFrom-Json
+                if ($recoveryState.phase -like 'recovering-*') {
+                  $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $firstRecovery.Id -and $_.ExecutablePath -ceq $setupProbe[0].FullName } | Sort-Object CreationDate -Descending | Select-Object -First 1)
+                  if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $recoveryInterrupted = $true; break }
+                }
+              }
+              Start-Sleep -Milliseconds 2
+            }
+            $firstRecovery.WaitForExit()
+            if (-not $recoveryInterrupted) { throw "Production recovery mutation was not interrupted: $($fault.Name)" }
             $recovery = Start-Process -FilePath $setupProbe[0].FullName -ArgumentList '/S' -Wait -PassThru
             if ($recovery.ExitCode -ne 78) { throw "Production recovery probe did not reject after recovery: $($fault.Name) / $($recovery.ExitCode)" }
             $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
@@ -394,12 +428,12 @@ jobs:
             & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
             $legacyTaskAbsent = $LASTEXITCODE -ne 0
             if ($appPath -cne "$env:ProgramFiles\Talking Quill\Talking Quill.exe" -or $quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S') -or -not $legacyServiceAbsent -or -not $legacyTaskAbsent) { throw "Recovered registrations or legacy authority are invalid: $($fault.Name)" }
-            $faultEvidence += @{ fault = $fault.Name; crashExitCode = 197; recoveryExitCode = 78; recoveredReleaseBuildDigest = $recoveredIdentity.releaseBuildDigest; inspectedBeforeRepair = $true; appPathExact = $true; quietUninstallExact = $true; legacyServiceAbsent = $true; legacyTaskAbsent = $true }
+            $faultEvidence += @{ fault = $fault.Name; crashExitCode = 197; recoveryExitCode = 78; recoveredReleaseBuildDigest = $recoveredIdentity.releaseBuildDigest; inspectedBeforeRepair = $true; productionRecoveryInterrupted = $recoveryInterrupted; appPathExact = $true; quietUninstallExact = $true; legacyServiceAbsent = $true; legacyTaskAbsent = $true }
             $postRecoveryRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
             if ($postRecoveryRepair.ExitCode -ne 0) { throw "Fault lifecycle repair failed: $($fault.Name)" }
             node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
           }
-          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
+          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; productionUpdateInterrupted = $updateInterrupted; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
           & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
           if ($LASTEXITCODE -ne 0) { throw 'Successful lifecycle observer compilation failed.' }
@@ -451,6 +485,26 @@ jobs:
         run: |
           $setup = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
           if ($setup.Count -ne 1) { throw 'Expected one public fresh setup.' }
+          $freshAttempt = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -PassThru
+          $freshInterrupted = $false
+          $freshDeadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $freshDeadline) {
+            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
+            if (Test-Path -LiteralPath $transaction) {
+              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
+              if ($state.phase -eq 'staging') {
+                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $freshAttempt.Id -and $_.ExecutablePath -ceq $setup[0].FullName } | Select-Object -First 1)
+                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $freshInterrupted = $true; break }
+              }
+            }
+            Start-Sleep -Milliseconds 2
+          }
+          $freshAttempt.WaitForExit()
+          if (-not $freshInterrupted) { throw 'Production fresh publication was not interrupted.' }
+          $freshRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($freshRecovery.ExitCode -ne 0) { throw "Production fresh recovery failed: $($freshRecovery.ExitCode)" }
+          $cleanup = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($cleanup.ExitCode -ne 0) { throw "Fresh recovery cleanup failed: $($cleanup.ExitCode)" }
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
           & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
           if ($LASTEXITCODE -ne 0) { throw 'Fresh lifecycle observer compilation failed.' }
@@ -458,9 +512,34 @@ jobs:
           & tmp/windows-installer-success-observer.exe $setup[0].FullName tmp/windows-installer-success-fresh-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' fresh $hash
           if ($LASTEXITCODE -ne 0) { throw 'Authenticated fresh setup observation failed.' }
           node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "Fresh synchronous lifecycle uninstall failed: $($uninstall.ExitCode)" }
-          if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") { throw 'Fresh synchronous uninstall returned before cleanup.' }
+          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -PassThru
+          $uninstallInterrupted = $false
+          $uninstallDeadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $uninstallDeadline) {
+            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
+            if (Test-Path -LiteralPath $transaction) {
+              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
+              if ($state.phase -eq 'uninstalling') {
+                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' } | Sort-Object CreationDate -Descending)
+                if ($workers.Count -ge 1) { Stop-Process -Id $workers[0].ProcessId -Force; $uninstallInterrupted = $true; break }
+              }
+            }
+            Start-Sleep -Milliseconds 2
+          }
+          $uninstall.WaitForExit()
+          if (-not $uninstallInterrupted) { throw 'Production uninstall mutation was not interrupted.' }
+          $maintenance = "$env:ProgramFiles\Talking Quill Maintenance.exe"
+          if (Test-Path -LiteralPath $maintenance) {
+            $uninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -Wait -PassThru
+            if ($uninstallRecovery.ExitCode -notin @(0,78)) { throw "Uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          } else {
+            $uninstallRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
+            if ($uninstallRecovery.ExitCode -ne 78) { throw "Setup-driven uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
+          }
+          if ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") -or (Test-Path -LiteralPath $transaction)) { throw 'Recovered uninstall retained machine state.' }
+          $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
+          $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; uninstall = $uninstallInterrupted }
+          $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}-fresh-installed-evidence
