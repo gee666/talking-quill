@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { bindVerifiedChannel } from '../../app/src/main/info/publication-catalog';
 import {
   selectHighestPublication,
   type ImmutablePublicationRelease,
@@ -111,6 +113,30 @@ describe('runtime immutable publication selection', () => {
     expect(selected.packageSha256).toBe(
       high.envelope.payload.assets.find(({ name }) => name.includes('win-x64-update.exe'))
         ?.objectSha256,
+    );
+  });
+
+  it('denies channel metadata size and digest tampering before updater parsing', async () => {
+    const value = publication(41, '0.0.69', '1');
+    const selected = await selectHighestPublication(
+      [value.release],
+      'gee666/talking-quill',
+      'x64',
+      () => Promise.resolve(value.envelope),
+      verifier,
+    );
+    const bytes = Buffer.from('version: 0.0.69\n');
+    const bound = {
+      ...selected,
+      channelAsset: { ...selected.channelAsset, size: bytes.length },
+      channelSha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+    expect(bindVerifiedChannel(bound, bytes).channelBytes).toEqual(bytes);
+    expect(() => bindVerifiedChannel(bound, Buffer.from(bytes).fill(0, 0, 1))).toThrow(
+      'does not match',
+    );
+    expect(() => bindVerifiedChannel(bound, Buffer.concat([bytes, Buffer.from('x')]))).toThrow(
+      'does not match',
     );
   });
 

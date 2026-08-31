@@ -49,7 +49,7 @@ const candidate = {
 };
 
 describe('Windows elevated updater launch', () => {
-  it('uses a protected identity-bound ProgramData file lock instead of squattable global names', async () => {
+  it('takes verified legacy migration locks in fixed order before the protected file lock', async () => {
     const [helper, setup] = await Promise.all([
       readFile('helper/src/windows_update.rs', 'utf8'),
       readFile('installer/windows-setup/src/windows.rs', 'utf8'),
@@ -60,7 +60,12 @@ describe('Windows elevated updater launch', () => {
       expect(source).toContain('recovery-state-v1.lock');
       expect(source).toContain('file_identity_text');
       expect(source).toContain('.share_mode(0)');
-      expect(source).not.toContain('Global\\TalkingQuill.UpdateRecovery.State.V1');
+      expect(source).toContain('MACHINE_LOCK_PENDING_PREFIX');
+      expect(source).toContain('publication-pending-v1');
+      expect(source).toContain('LEGACY_LOCK_RETIREMENT_EPOCH');
+      expect(source.indexOf(String.raw`Global\\TalkingQuill.NativeSetup.V2`)).toBeLessThan(
+        source.indexOf(String.raw`Global\\TalkingQuill.UpdateRecovery.State.V1`),
+      );
     }
   });
 

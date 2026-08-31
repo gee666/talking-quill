@@ -49,6 +49,7 @@ export interface SelectedPublication {
   readonly payload: PublicationPayload;
   readonly version: string;
   readonly channelAsset: PublicationAsset;
+  readonly channelSha256: string;
   readonly packageAsset: PublicationAsset;
   readonly packageSha256: string;
 }
@@ -57,7 +58,7 @@ export async function selectHighestPublication(
   releases: readonly ImmutablePublicationRelease[],
   repository: string,
   architecture: 'x64' | 'arm64',
-  loadManifest: (asset: PublicationAsset) => Promise<unknown>,
+  loadManifest: (asset: PublicationAsset, tag: string) => Promise<unknown>,
   verifyEnvelope: (
     value: unknown,
     repository: string,
@@ -82,7 +83,11 @@ export async function selectHighestPublication(
     const manifest = manifests.at(0);
     if (manifest === undefined)
       throw new Error('Immutable release manifest is missing or ambiguous');
-    const envelope = verifyEnvelope(await loadManifest(manifest), repository, release.tag_name);
+    const envelope = verifyEnvelope(
+      await loadManifest(manifest, release.tag_name),
+      repository,
+      release.tag_name,
+    );
     verifyReleaseInventory(release, envelope.payload);
     verified.push({ release, payload: envelope.payload, version: release.tag_name.slice(1) });
   }
@@ -111,6 +116,8 @@ export async function selectHighestPublication(
   return {
     ...selected,
     channelAsset,
+    channelSha256:
+      selected.payload.assets.find(({ name }) => name === channelName)?.objectSha256 ?? '',
     packageAsset,
     packageSha256: logicalPackage[0]?.objectSha256 ?? '',
   };

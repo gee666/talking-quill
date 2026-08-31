@@ -28,8 +28,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
-    SE_FILE_OBJECT,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
@@ -46,10 +46,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
-    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle,
-    WriteFile,
+    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FlushFileBuffers,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_DELAY_UNTIL_REBOOT,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -72,9 +72,10 @@ use windows_sys::Win32::System::Services::{
     SERVICE_STOPPED,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, GetExitCodeProcess, GetProcessId, OpenProcess,
+    CreateEventW, CreateMutexW, GetCurrentProcess, GetExitCodeProcess, GetProcessId, OpenProcess,
     OpenProcessToken, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW, TerminateProcess, WaitForMultipleObjects, WaitForSingleObject,
+    QueryFullProcessImageNameW, ReleaseMutex, TerminateProcess, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_RoamingAppData, FOLDERID_System,
@@ -89,9 +90,18 @@ use crate::package::{self, ParsedPackage};
 
 const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+const MACHINE_LOCK_RETIRED_PREFIX: &str = "retired:";
 const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLockV1";
 const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
 const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
+const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
+const UNINSTALL_FINALIZER_PENDING_PREFIX: &str = ".Talking Quill.uninstall-finalizer-pending-";
+const UNINSTALL_FINALIZER_PREFIX: &str = ".Talking Quill.uninstall-finalizer-";
+const UNINSTALL_FINALIZER_NAME: &str = "Talking Quill Uninstall Finalizer.exe";
+const MEDIUM_FINALIZER_DIRECTORY_SDDL: &str =
+    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)";
+const MEDIUM_FINALIZER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;AU)";
+const LEGACY_LOCK_RETIREMENT_EPOCH: u8 = 3;
 
 const EXIT_USAGE: i32 = 64;
 const EXIT_FAILURE: i32 = 70;
@@ -198,13 +208,15 @@ fn run_inner() -> Result<i32> {
             let expected = if canonical(&original).ok()
                 == canonical(&controller_paths.maintenance_uninstaller).ok()
             {
-                &controller_paths.maintenance_uninstaller
+                controller_paths.maintenance_uninstaller.clone()
+            } else if is_uninstall_finalizer(&original)? {
+                original.clone()
             } else {
-                &installed
+                installed
             };
-            assert_plain_file(expected)?;
+            assert_plain_file(&expected)?;
             let (action, server, requested_silent, requested_lifecycle_parent) =
-                WorkerChannel::connect_and_authenticate(&current, Some(expected))?;
+                WorkerChannel::connect_and_authenticate(&current, Some(&expected))?;
             silent = requested_silent;
             lifecycle_parent = requested_lifecycle_parent;
             relocation_server = Some(server);
@@ -688,7 +700,12 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         ));
     }
     let paths = paths()?;
-    let mut machine_lock = Some(MachineLock::acquire(&paths.program_data, 120_000)?);
+    let predecessor_policy_epoch = installed_recovery_policy_epoch(&paths)?;
+    let mut machine_lock = Some(MachineLock::acquire(
+        &paths.program_data,
+        120_000,
+        predecessor_policy_epoch,
+    )?);
     let state_root = paths
         .transaction
         .parent()
@@ -723,6 +740,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     }
     // Authentication and package validation happen before recovery. Once the machine lock is held,
     // every installed entry point must finish durable recovery before arming or deriving a new action.
+    if finishing_existing_uninstall {
+        ensure_uninstall_finalizer_registered(&current, &paths)?;
+    }
     recover_with_adapter(&paths, &system)?;
     if finishing_existing_uninstall {
         if authenticated_controller
@@ -730,6 +750,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             .is_some_and(|(_, _, _, lifecycle_parent)| *lifecycle_parent != 0)
         {
             finalize_uninstall(&paths, &system)?;
+            retire_machine_lock_publication(&paths)?;
+            drop(machine_lock.take());
+            remove_machine_lock_residue(&paths)?;
         }
         return Ok(0);
     }
@@ -739,6 +762,10 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         // maintenance entry is authenticated residue authority and may finish only terminal cleanup.
         system.unregister()?;
         remove_maintenance_uninstaller(&paths)?;
+        remove_uninstall_finalizer_residue(&paths)?;
+        retire_machine_lock_publication(&paths)?;
+        drop(machine_lock.take());
+        remove_machine_lock_residue(&paths)?;
         return Ok(0);
     }
     if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
@@ -790,6 +817,11 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             uninstall(&paths, &system, original_controller != 0, &mut machine_lock)
         }
     }?;
+    if action == Action::Uninstall {
+        retire_machine_lock_publication(&paths)?;
+        drop(machine_lock.take());
+        remove_machine_lock_residue(&paths)?;
+    }
     Ok(0)
 }
 
@@ -823,10 +855,49 @@ impl NativeSystemAdapter for WindowsNativeSystem {
     }
 }
 
-struct MachineLock(File);
+fn installed_recovery_policy_epoch(paths: &Paths) -> Result<u8> {
+    let helper = paths
+        .install
+        .join("resources/helper/talking-quill-helper.exe");
+    if !path_present(&helper)? {
+        return Ok(1);
+    }
+    assert_plain_file(&helper)?;
+    let bytes = fs::read(helper).map_err(io_failure)?;
+    const PREFIX: &[u8] = b"TALKING_QUILL_WINDOWS_RECOVERY_POLICY_EPOCH=";
+    let matches = bytes
+        .windows(PREFIX.len() + 1)
+        .filter_map(|window| {
+            window
+                .strip_prefix(PREFIX)
+                .map(|value| value[0])
+                .filter(u8::is_ascii_digit)
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Ok(1);
+    }
+    if matches.iter().any(|value| *value != matches[0]) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Installed recovery policy epoch is invalid.",
+        ));
+    }
+    Ok(matches[0] - b'0')
+}
+
+struct MachineLock {
+    _legacy: Option<LegacyMutexPair>,
+    file: File,
+}
 impl MachineLock {
-    fn acquire(program_data: &Path, timeout: u32) -> Result<Self> {
-        let path = machine_lock_file(program_data)?;
+    fn acquire(program_data: &Path, timeout: u32, predecessor_policy_epoch: u8) -> Result<Self> {
+        let legacy = if predecessor_policy_epoch < LEGACY_LOCK_RETIREMENT_EPOCH {
+            Some(LegacyMutexPair::acquire()?)
+        } else {
+            None
+        };
+        let path = machine_lock_file(program_data, predecessor_policy_epoch)?;
         let deadline = Instant::now() + Duration::from_millis(timeout.into());
         loop {
             match OpenOptions::new()
@@ -843,7 +914,10 @@ impl MachineLock {
                     {
                         return Err(fail(EXIT_REJECTED, "Machine lock identity is invalid."));
                     }
-                    return Ok(Self(file));
+                    return Ok(Self {
+                        _legacy: legacy,
+                        file,
+                    });
                 }
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(100));
@@ -855,13 +929,123 @@ impl MachineLock {
 }
 impl Drop for MachineLock {
     fn drop(&mut self) {
-        let _ = self.0.sync_all();
+        let _ = self.file.sync_all();
     }
 }
 
-fn machine_lock_file(program_data: &Path) -> Result<PathBuf> {
+struct LegacyMutexPair([OwnedHandle; 2]);
+impl LegacyMutexPair {
+    fn acquire() -> Result<Self> {
+        Ok(Self([
+            acquire_verified_legacy_mutex("Global\\TalkingQuill.NativeSetup.V2")?,
+            acquire_verified_legacy_mutex("Global\\TalkingQuill.UpdateRecovery.State.V1")?,
+        ]))
+    }
+}
+impl Drop for LegacyMutexPair {
+    fn drop(&mut self) {
+        for handle in self.0.iter().rev() {
+            unsafe { ReleaseMutex(handle.as_raw_handle()) };
+        }
+    }
+}
+
+fn acquire_verified_legacy_mutex(name: &str) -> Result<OwnedHandle> {
+    let sddl = wide(OsStr::new("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)"));
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot create the legacy lock ACL."));
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let raw = unsafe { CreateMutexW(&attributes, 0, wide(OsStr::new(name)).as_ptr()) };
+    unsafe { LocalFree(descriptor) };
+    if raw.is_null() {
+        return Err(fail(EXIT_FAILURE, "Cannot open the legacy machine lock."));
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if !matches!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle(), 30_000) },
+        0 | 0x80
+    ) || !legacy_mutex_security_is_exact(handle.as_raw_handle())?
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy machine lock identity is invalid.",
+        ));
+    }
+    Ok(handle)
+}
+
+fn legacy_mutex_security_is_exact(handle: *mut c_void) -> Result<bool> {
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+        || descriptor.is_null()
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot inspect the legacy machine lock.",
+        ));
+    }
+    let mut text = ptr::null_mut();
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut text,
+            ptr::null_mut(),
+        )
+    } == 0
+        || text.is_null()
+    {
+        unsafe { LocalFree(descriptor.cast()) };
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot encode the legacy machine lock ACL.",
+        ));
+    }
+    let mut length = 0;
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) })
+        .to_ascii_uppercase();
+    unsafe {
+        LocalFree(text.cast());
+        LocalFree(descriptor.cast());
+    }
+    Ok(value.starts_with("O:BA")
+        && (value.contains("(A;;GA;;;SY)") || value.contains("(A;;0X1F0001;;;SY)"))
+        && (value.contains("(A;;GA;;;BA)") || value.contains("(A;;0X1F0001;;;BA)"))
+        && value.matches("(A;;").count() == 2
+        && !value.contains(";;;AU)"))
+}
+
+fn machine_lock_file(program_data: &Path, predecessor_policy_epoch: u8) -> Result<PathBuf> {
     let mut key = ptr::null_mut();
-    let mut disposition = 0_u32;
     if unsafe {
         RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -872,7 +1056,7 @@ fn machine_lock_file(program_data: &Path) -> Result<PathBuf> {
             KEY_READ | KEY_WRITE,
             ptr::null(),
             &mut key,
-            &mut disposition,
+            ptr::null_mut(),
         )
     } != 0
     {
@@ -881,50 +1065,64 @@ fn machine_lock_file(program_data: &Path) -> Result<PathBuf> {
             "Cannot open the machine lock registry key.",
         ));
     }
-    let mut publisher = disposition == 1;
-    let suffix = if publisher {
-        new_machine_lock_suffix()?
-    } else {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(value) = read_machine_lock_registry_string(key)? {
-                break value;
-            }
-            if Instant::now() >= deadline {
-                publisher = true;
-                break new_machine_lock_suffix()?;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    };
-    if suffix.len() != 32
-        || !suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    reclaim_machine_lock_pending(program_data)?;
+    let publication = read_machine_lock_registry_string(key)?;
+    let publication = if let Some(retired) = publication
+        .as_deref()
+        .and_then(|value| value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX))
     {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Machine lock registry identity is invalid.",
-        ));
-    }
-    let directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-    if !path_present(&directory)? {
-        create_restricted_lock_directory(&directory)?;
-        apply_lock_dacl(&directory, MACHINE_LOCK_DIRECTORY_SDDL)?;
-    }
-    if !staged_path_is_protected(&directory, true)? {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Machine lock directory is not protected.",
-        ));
-    }
-    if publisher {
-        if read_machine_lock_registry_string(key)?.is_some() {
+        validate_machine_lock_suffix(retired)?;
+        reclaim_retired_machine_lock_directory(program_data, retired)?;
+        None
+    } else {
+        publication
+    };
+    let directory = if let Some(suffix) = publication {
+        validate_machine_lock_suffix(&suffix)?;
+        program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"))
+    } else {
+        if predecessor_policy_epoch >= LEGACY_LOCK_RETIREMENT_EPOCH {
             unsafe { RegCloseKey(key) };
-            return machine_lock_file(program_data);
+            return Err(fail(
+                EXIT_REJECTED,
+                "A retired recovery policy cannot republish the machine lock.",
+            ));
         }
+        reclaim_unpublished_machine_lock_directories(program_data)?;
+        let suffix = new_machine_lock_suffix()?;
+        let token = new_machine_lock_suffix()?;
+        let pending = program_data.join(format!("{MACHINE_LOCK_PENDING_PREFIX}{token}"));
+        let published = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+        create_restricted_lock_directory(&pending)?;
+        apply_lock_dacl(&pending, MACHINE_LOCK_DIRECTORY_SDDL)?;
+        let identity = owned_tree_identity(&pending).map_err(|_| {
+            fail(
+                EXIT_REJECTED,
+                "Machine lock directory identity is unavailable.",
+            )
+        })?;
+        create_or_verify_lock_marker(
+            &pending.join("publication-pending-v1"),
+            &format!("{suffix}:{identity}"),
+        )?;
+        initialize_machine_lock_tree(&pending, &identity)?;
+        flush_setup_directory(&pending)?;
+        if unsafe {
+            MoveFileExW(
+                wide(pending.as_os_str()).as_ptr(),
+                wide(published.as_os_str()).as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Cannot publish the machine lock directory.",
+            ));
+        }
+        flush_setup_directory(program_data)?;
         let value = wide(OsStr::new(&suffix));
-        let status = unsafe {
+        if unsafe {
             RegSetValueExW(
                 key,
                 wide(OsStr::new(MACHINE_LOCK_REGISTRY_VALUE)).as_ptr(),
@@ -933,52 +1131,230 @@ fn machine_lock_file(program_data: &Path) -> Result<PathBuf> {
                 value.as_ptr().cast(),
                 (value.len() * 2) as u32,
             )
-        };
-        if status != 0 || unsafe { RegFlushKey(key) } != 0 {
-            unsafe { RegCloseKey(key) };
+        } != 0
+            || unsafe { RegFlushKey(key) } != 0
+        {
             return Err(fail(
                 EXIT_FAILURE,
                 "Cannot persist the machine lock identity.",
             ));
         }
-        std::thread::sleep(Duration::from_millis(200));
-        if read_machine_lock_registry_string(key)?.as_deref() != Some(suffix.as_str()) {
-            unsafe { RegCloseKey(key) };
-            return machine_lock_file(program_data);
-        }
+        published
+    };
+    unsafe { RegCloseKey(key) };
+    verify_machine_lock_tree(&directory)
+}
+
+fn validate_machine_lock_suffix(suffix: &str) -> Result<()> {
+    if suffix.len() == 32
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(fail(
+            EXIT_REJECTED,
+            "Machine lock registry identity is invalid.",
+        ))
     }
-    let tree_identity = owned_tree_identity(&directory).map_err(|_| {
+}
+
+fn initialize_machine_lock_tree(directory: &Path, directory_identity: &str) -> Result<()> {
+    let lock = directory.join("recovery-state-v1.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&lock)
+        .map_err(io_failure)?;
+    apply_lock_dacl(&lock, MACHINE_LOCK_FILE_SDDL)?;
+    file.sync_all().map_err(io_failure)?;
+    let identity = file_identity_text(&file)?;
+    drop(file);
+    create_or_verify_lock_marker(&lock.with_extension("identity-v1"), &identity)?;
+    create_or_verify_lock_marker(&directory.join("lock-tree-identity-v1"), directory_identity)
+}
+
+fn verify_machine_lock_tree(directory: &Path) -> Result<PathBuf> {
+    if !staged_path_is_protected(directory, true)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine lock directory is not protected.",
+        ));
+    }
+    let identity = owned_tree_identity(directory).map_err(|_| {
         fail(
             EXIT_REJECTED,
             "Machine lock directory identity is unavailable.",
         )
     })?;
-    create_or_verify_lock_marker(&directory.join("lock-tree-identity-v1"), &tree_identity)?;
-    let lock = directory.join("recovery-state-v1.lock");
-    if !path_present(&lock)? {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(&lock)
-            .map_err(io_failure)?;
-        apply_lock_dacl(&lock, MACHINE_LOCK_FILE_SDDL)?;
-        file.sync_all().map_err(io_failure)?;
+    if fs::read_to_string(directory.join("lock-tree-identity-v1")).map_err(io_failure)? != identity
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine lock directory identity changed.",
+        ));
     }
+    let lock = directory.join("recovery-state-v1.lock");
     if !staged_path_is_protected(&lock, false)? {
         return Err(fail(EXIT_REJECTED, "Machine lock file is not protected."));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .open(&lock)
-        .map_err(io_failure)?;
-    let identity = file_identity_text(&file)?;
-    drop(file);
-    create_or_verify_lock_marker(&lock.with_extension("identity-v1"), &identity)?;
-    unsafe { RegCloseKey(key) };
     Ok(lock)
+}
+
+fn reclaim_retired_machine_lock_directory(program_data: &Path, suffix: &str) -> Result<()> {
+    let path = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+    if !path_present(&path)? {
+        return Ok(());
+    }
+    verify_machine_lock_tree(&path)?;
+    let identity =
+        owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match remove_owned_tree(&path, &identity) {
+            Ok(()) => return Ok(()),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(fail(EXIT_FAILURE, error.to_string())),
+        }
+    }
+}
+
+fn retire_machine_lock_publication(paths: &Paths) -> Result<()> {
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot retire the machine lock publication.",
+        ));
+    }
+    let suffix = read_machine_lock_registry_string(key)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Machine lock publication is missing."))?;
+    validate_machine_lock_suffix(&suffix)?;
+    let value = wide(OsStr::new(&format!(
+        "{MACHINE_LOCK_RETIRED_PREFIX}{suffix}"
+    )));
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide(OsStr::new(MACHINE_LOCK_REGISTRY_VALUE)).as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if !flushed {
+        return Err(fail(EXIT_FAILURE, "Cannot flush machine lock retirement."));
+    }
+    flush_setup_directory(&paths.program_data)
+}
+
+fn reclaim_unpublished_machine_lock_directories(program_data: &Path) -> Result<()> {
+    for entry in fs::read_dir(program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
+        else {
+            continue;
+        };
+        if validate_machine_lock_suffix(suffix).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        if !staged_path_is_protected(&path, true)? {
+            continue;
+        }
+        let identity =
+            owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        let marker = path.join("publication-pending-v1");
+        let expected = format!("{suffix}:{identity}");
+        if fs::read_to_string(marker).is_ok_and(|value| value == expected) {
+            remove_owned_tree(&path, &identity)
+                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn reclaim_machine_lock_pending(program_data: &Path) -> Result<()> {
+    for entry in fs::read_dir(program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .and_then(|value| value.strip_prefix(MACHINE_LOCK_PENDING_PREFIX))
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !staged_path_is_protected(&path, true)?
+        {
+            continue;
+        }
+        let identity = owned_tree_identity(&path).map_err(|_| {
+            fail(
+                EXIT_REJECTED,
+                "Pending machine lock identity is unavailable.",
+            )
+        })?;
+        let marker = path.join("publication-pending-v1");
+        if path_present(&marker)?
+            && (!staged_path_is_protected(&marker, false)?
+                || !fs::read_to_string(&marker)
+                    .map_err(io_failure)?
+                    .ends_with(&format!(":{identity}")))
+        {
+            continue;
+        }
+        remove_owned_tree(&path, &identity)
+            .map_err(|_| fail(EXIT_FAILURE, "Cannot reclaim pending machine lock state."))?;
+    }
+    Ok(())
+}
+
+fn flush_setup_directory(path: &Path) -> Result<()> {
+    let handle = unsafe {
+        CreateFileW(
+            wide(path.as_os_str()).as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot open a durable machine lock directory.",
+        ));
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    if unsafe { FlushFileBuffers(handle.as_raw_handle()) } == 0 {
+        return Err(fail(EXIT_FAILURE, "Cannot flush a machine lock directory."));
+    }
+    Ok(())
 }
 
 fn new_machine_lock_suffix() -> Result<String> {
@@ -1037,7 +1413,11 @@ fn read_machine_lock_registry_string(key: *mut c_void) -> Result<Option<String>>
 }
 
 fn create_restricted_lock_directory(path: &Path) -> Result<()> {
-    let sddl = wide(OsStr::new(MACHINE_LOCK_DIRECTORY_SDDL));
+    create_directory_with_security(path, MACHINE_LOCK_DIRECTORY_SDDL)
+}
+
+fn create_directory_with_security(path: &Path, descriptor_sddl: &str) -> Result<()> {
+    let sddl = wide(OsStr::new(descriptor_sddl));
     let mut descriptor = ptr::null_mut();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -2042,6 +2422,7 @@ fn pending_uninstall_transaction(paths: &Paths) -> Result<bool> {
                 | "uninstall-quarantined"
                 | "recovering-finish-uninstall"
                 | "uninstall-cleanup-complete"
+                | "uninstall-finalizer-published"
         ))
 }
 
@@ -2069,7 +2450,9 @@ fn arm_relocated_uninstall_controller(server: &OwnedHandle) -> Result<()> {
 fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
     let controller = process_image(parent_process_id()?)?;
     let installed = paths.install.join("Uninstall Talking Quill.exe");
-    let expected = if path_present(&installed)? {
+    let expected = if is_uninstall_finalizer(&controller)? {
+        controller.clone()
+    } else if path_present(&installed)? {
         installed
     } else if path_present(&paths.maintenance_uninstaller)? {
         paths.maintenance_uninstaller.clone()
@@ -2086,6 +2469,7 @@ fn authorize_uninstall_controller(paths: &Paths, current: &Path) -> Result<()> {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-published"
             )
         {
             return Err(fail(
@@ -2191,6 +2575,57 @@ fn staged_path_is_protected(path: &Path, directory: bool) -> Result<bool> {
     Ok(expected
         .iter()
         .any(|value| sddl.eq_ignore_ascii_case(value)))
+}
+
+fn medium_launcher_directory_is_protected(path: &Path) -> Result<bool> {
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        GetNamedSecurityInfoW(
+            wide(path.as_os_str()).as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+        || descriptor.is_null()
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot inspect launcher staging protection.",
+        ));
+    }
+    let mut text = ptr::null_mut();
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut text,
+            ptr::null_mut(),
+        )
+    } == 0
+        || text.is_null()
+    {
+        unsafe { LocalFree(descriptor.cast()) };
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot encode launcher staging protection.",
+        ));
+    }
+    let mut length = 0;
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
+    unsafe {
+        LocalFree(text.cast());
+        LocalFree(descriptor.cast());
+    }
+    Ok(value.eq_ignore_ascii_case("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)"))
 }
 
 fn authenticate_predecessor_helper(package: &ParsedPackage, paths: &Paths) -> Result<()> {
@@ -2415,12 +2850,43 @@ fn authorize_package_mode(
     }
 }
 
+fn is_uninstall_finalizer(path: &Path) -> Result<bool> {
+    if !path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(UNINSTALL_FINALIZER_NAME))
+    {
+        return Ok(false);
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(false);
+    };
+    if !parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix(UNINSTALL_FINALIZER_PREFIX)
+                .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok())
+        })
+        || !medium_launcher_directory_is_protected(parent)?
+    {
+        return Ok(false);
+    }
+    let identity =
+        owned_tree_identity(parent).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    Ok(
+        fs::read_to_string(parent.join("finalizer-tree-identity-v1"))
+            .is_ok_and(|value| value == identity),
+    )
+}
+
 fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
     let maintenance = canonical(current)
         .ok()
         .zip(canonical(&paths.maintenance_uninstaller).ok())
         .is_some_and(|(current, maintenance)| current == maintenance);
+    let finalizer = is_uninstall_finalizer(current)?;
     if maintenance
+        || finalizer
         || current
             .file_name()
             .is_some_and(|name| name.eq_ignore_ascii_case("Uninstall Talking Quill.exe"))
@@ -2428,7 +2894,7 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         let parent = current
             .parent()
             .ok_or_else(|| fail(EXIT_REJECTED, "Invalid installed setup path."))?;
-        if !maintenance && canonical(parent)? != canonical(&paths.install)? {
+        if !maintenance && !finalizer && canonical(parent)? != canonical(&paths.install)? {
             return Err(fail(
                 EXIT_REJECTED,
                 "Uninstall image is outside the installed tree.",
@@ -2819,6 +3285,7 @@ fn uninstall(
     // has committed all machine cleanup and reported success to its supervising worker.
     system.register_installed(paths)?;
     write_transaction(paths, "uninstall-cleanup-owned", Action::Uninstall, true)?;
+    ensure_uninstall_finalizer_registered(&std::env::current_exe().map_err(io_failure)?, paths)?;
     system.retire_legacy(paths)?;
     system.clear_update_recovery(paths)?;
     if defer_mapped_controller_cleanup && path_present(&paths.install)? {
@@ -2830,7 +3297,11 @@ fn uninstall(
         // completion report. Reacquire before clearing terminal recovery records.
         drop(machine_lock.take());
         launch_same_token_uninstall_cleanup(&std::env::current_exe().map_err(io_failure)?)?;
-        *machine_lock = Some(MachineLock::acquire(&paths.program_data, 120_000)?);
+        *machine_lock = Some(MachineLock::acquire(
+            &paths.program_data,
+            120_000,
+            installed_recovery_policy_epoch(paths)?,
+        )?);
         if !path_present(&paths.transaction)? && !path_present(&paths.install)? {
             return Ok(());
         }
@@ -2875,10 +3346,12 @@ fn require_uninstall_cleanup_complete(paths: &Paths) -> Result<()> {
 
 fn finalize_uninstall(paths: &Paths, system: &dyn NativeSystemAdapter) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
+    schedule_terminal_uninstall_cleanup(paths)?;
     // Completion is already durable. Clear the journal first so a crash can leave only a harmless
     // registered cleanup entry, never an authoritative journal with no executable recovery path.
     remove_transaction(paths)?;
     remove_maintenance_uninstaller(paths)?;
+    remove_uninstall_finalizer_residue(paths)?;
     system.unregister()
 }
 
@@ -2910,6 +3383,7 @@ fn recovery_plan(
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-published"
             ))
     {
         return Err(fail(
@@ -2967,7 +3441,8 @@ fn recovery_plan(
         | "uninstall-cleanup-owned"
         | "uninstall-quarantined"
         | "recovering-finish-uninstall"
-        | "uninstall-cleanup-complete" => Ok(RecoveryPlan::FinishUninstall),
+        | "uninstall-cleanup-complete"
+        | "uninstall-finalizer-published" => Ok(RecoveryPlan::FinishUninstall),
         _ => Err(fail(
             EXIT_REJECTED,
             "Installer transaction topology is invalid.",
@@ -3210,6 +3685,202 @@ fn ensure_maintenance_uninstaller(paths: &Paths) -> Result<()> {
     }
 }
 
+fn ensure_uninstall_finalizer_registered(current: &Path, paths: &Paths) -> Result<PathBuf> {
+    if let Some(existing) = registered_uninstall_executable()?
+        && existing
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(UNINSTALL_FINALIZER_NAME))
+        && path_present(&existing)?
+    {
+        return Ok(existing);
+    }
+    let token = new_machine_lock_suffix()?;
+    let suffix = new_machine_lock_suffix()?;
+    let pending = paths
+        .program_data
+        .join(format!("{UNINSTALL_FINALIZER_PENDING_PREFIX}{token}"));
+    let published = paths
+        .program_data
+        .join(format!("{UNINSTALL_FINALIZER_PREFIX}{suffix}"));
+    create_directory_with_security(&pending, MEDIUM_FINALIZER_DIRECTORY_SDDL)?;
+    apply_lock_dacl(&pending, MEDIUM_FINALIZER_DIRECTORY_SDDL)?;
+    let identity =
+        owned_tree_identity(&pending).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    create_or_verify_finalizer_marker(&pending.join("finalizer-tree-identity-v1"), &identity)?;
+    let executable = pending.join(UNINSTALL_FINALIZER_NAME);
+    let mut source = File::open(current).map_err(io_failure)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&executable)
+        .map_err(io_failure)?;
+    apply_lock_dacl(&executable, MEDIUM_FINALIZER_FILE_SDDL)?;
+    std::io::copy(&mut source, &mut output).map_err(io_failure)?;
+    output.sync_all().map_err(io_failure)?;
+    if file_hash(current)? != file_hash(&executable)? {
+        return Err(fail(EXIT_REJECTED, "Uninstall finalizer copy changed."));
+    }
+    flush_setup_directory(&pending)?;
+    if unsafe {
+        MoveFileExW(
+            wide(pending.as_os_str()).as_ptr(),
+            wide(published.as_os_str()).as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot publish the uninstall finalizer.",
+        ));
+    }
+    flush_setup_directory(&paths.program_data)?;
+    let executable = published.join(UNINSTALL_FINALIZER_NAME);
+    register_uninstall_executable(&executable)?;
+    write_transaction(
+        paths,
+        "uninstall-finalizer-published",
+        Action::Uninstall,
+        true,
+    )?;
+    Ok(executable)
+}
+
+fn create_or_verify_finalizer_marker(path: &Path, identity: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(io_failure)?;
+    apply_lock_dacl(path, MEDIUM_FINALIZER_FILE_SDDL)?;
+    file.write_all(identity.as_bytes()).map_err(io_failure)?;
+    file.sync_all().map_err(io_failure)
+}
+
+fn register_uninstall_executable(executable: &Path) -> Result<()> {
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(UNINSTALL_KEY)).as_ptr(),
+            0,
+            KEY_WRITE,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot open uninstall recovery registration.",
+        ));
+    }
+    let values = [
+        ("UninstallString", format!("\"{}\"", executable.display())),
+        (
+            "QuietUninstallString",
+            format!("\"{}\" /S", executable.display()),
+        ),
+    ];
+    for (name, value) in values {
+        let bytes = wide(OsStr::new(&value));
+        if unsafe {
+            RegSetValueExW(
+                key,
+                wide(OsStr::new(name)).as_ptr(),
+                0,
+                REG_SZ,
+                bytes.as_ptr().cast(),
+                (bytes.len() * 2) as u32,
+            )
+        } != 0
+        {
+            unsafe { RegCloseKey(key) };
+            return Err(fail(EXIT_FAILURE, "Cannot register uninstall recovery."));
+        }
+    }
+    let flushed = unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(EXIT_FAILURE, "Cannot flush uninstall recovery."))
+    }
+}
+
+fn registered_uninstall_executable() -> Result<Option<PathBuf>> {
+    let mut key = ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(UNINSTALL_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if status == 2 {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot read uninstall recovery registration.",
+        ));
+    }
+    let value = read_registry_value(key, "UninstallString", 4096)?;
+    unsafe { RegCloseKey(key) };
+    let Some(value) = value else { return Ok(None) };
+    let value = value.trim();
+    let path = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'));
+    Ok(path.map(PathBuf::from))
+}
+
+fn read_registry_value(key: *mut c_void, name: &str, maximum: u32) -> Result<Option<String>> {
+    let name = wide(OsStr::new(name));
+    let mut kind = 0_u32;
+    let mut bytes = 0_u32;
+    let first = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if first == 2 {
+        return Ok(None);
+    }
+    if first != 0 || kind != REG_SZ || bytes < 2 || bytes > maximum || !bytes.is_multiple_of(2) {
+        return Err(fail(EXIT_REJECTED, "Registry string is invalid."));
+    }
+    let mut value = vec![0_u16; bytes as usize / 2];
+    if unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot read registry string."));
+    }
+    if value.last() == Some(&0) {
+        value.pop();
+    }
+    String::from_utf16(&value)
+        .map(Some)
+        .map_err(|_| fail(EXIT_REJECTED, "Registry string is invalid."))
+}
+
 fn register_installed_uninstall(paths: &Paths) -> Result<()> {
     ensure_maintenance_uninstaller(paths)?;
     let manifest = paths
@@ -3446,20 +4117,32 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             });
-        if pending || published {
+        let launcher_pending = name
+            .strip_prefix(".Talking Quill.update-launcher-pending-")
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if pending || published || launcher_pending {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
             if !metadata.is_dir()
                 || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || !staged_path_is_protected(&path, true)?
+                || !(if launcher_pending {
+                    medium_launcher_directory_is_protected(&path)?
+                } else {
+                    staged_path_is_protected(&path, true)?
+                })
             {
                 continue;
             }
             let identity = owned_tree_identity(&path)
                 .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-            let recorded = fs::read_to_string(path.join("cleanup-tree-identity-v1"));
-            if (pending && recorded.as_ref().is_ok_and(|value| value == &identity))
-                || (pending && recorded.is_err())
+            let recorded = if launcher_pending {
+                fs::read_to_string(path.join("launcher-tree-identity-v1"))
+            } else {
+                fs::read_to_string(path.join("cleanup-tree-identity-v1"))
+            };
+            if ((pending || launcher_pending)
+                && recorded.as_ref().is_ok_and(|value| value == &identity))
+                || ((pending || launcher_pending) && recorded.is_err())
                 || (published && recorded.is_ok_and(|value| value == identity))
             {
                 remove_owned_tree(&path, &identity)
@@ -3475,6 +4158,121 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
             .is_ok_and(|value| value == identity)
         {
             remove_owned_tree(&launcher, &identity)
+                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn schedule_terminal_uninstall_cleanup(paths: &Paths) -> Result<()> {
+    let mut paths_to_delete = vec![paths.maintenance_uninstaller.clone()];
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(UNINSTALL_FINALIZER_PREFIX))
+            && medium_launcher_directory_is_protected(&entry.path())?
+        {
+            paths_to_delete.push(entry.path().join(UNINSTALL_FINALIZER_NAME));
+            paths_to_delete.push(entry.path().join("finalizer-tree-identity-v1"));
+            paths_to_delete.push(entry.path());
+        }
+    }
+    for path in paths_to_delete {
+        if path_present(&path)?
+            && unsafe {
+                MoveFileExW(
+                    wide(path.as_os_str()).as_ptr(),
+                    ptr::null(),
+                    MOVEFILE_DELAY_UNTIL_REBOOT,
+                )
+            } == 0
+        {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Cannot durably schedule terminal uninstall cleanup.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let owned = name
+            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
+            .or_else(|| name.strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX))
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !owned {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !medium_launcher_directory_is_protected(&path)?
+        {
+            continue;
+        }
+        let identity =
+            owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        let marker = path.join("finalizer-tree-identity-v1");
+        if !path_present(&marker)?
+            || fs::read_to_string(marker).is_ok_and(|value| value == identity)
+        {
+            remove_owned_tree(&path, &identity)
+                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_machine_lock_residue(paths: &Paths) -> Result<()> {
+    let status = unsafe {
+        RegDeleteTreeW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+        )
+    };
+    if status != 0 && status != 2 {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot remove the machine lock registry key.",
+        ));
+    }
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let owned = name
+            .strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX)
+            .or_else(|| name.strip_prefix(MACHINE_LOCK_PENDING_PREFIX))
+            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !owned {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !staged_path_is_protected(&path, true)?
+        {
+            continue;
+        }
+        let identity =
+            owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        let tree_marker = path.join("lock-tree-identity-v1");
+        let pending_marker = path.join("publication-pending-v1");
+        let marker_matches = fs::read_to_string(&tree_marker).is_ok_and(|value| value == identity)
+            || fs::read_to_string(&pending_marker)
+                .is_ok_and(|value| value.ends_with(&format!(":{identity}")))
+            || (!path_present(&tree_marker)? && !path_present(&pending_marker)?);
+        if marker_matches {
+            remove_owned_tree(&path, &identity)
                 .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
         }
     }
@@ -3958,6 +4756,7 @@ mod tests {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-published"
                     | "uninstall-cleanup-elevation"
             );
             let had_predecessor = !uninstalling;
@@ -4000,7 +4799,7 @@ mod tests {
                     fs::create_dir(&paths.backup).unwrap();
                     fs::write(paths.backup.join("identity"), b"candidate").unwrap();
                 }
-                "uninstall-cleanup-complete" => {}
+                "uninstall-cleanup-complete" | "uninstall-finalizer-published" => {}
                 _ => unreachable!(),
             }
             write_transaction(
@@ -4076,6 +4875,7 @@ mod tests {
             "uninstall-quarantined",
             "recovering-finish-uninstall",
             "uninstall-cleanup-complete",
+            "uninstall-finalizer-published",
             "uninstall-cleanup-elevation",
         ] {
             let root =
@@ -4090,6 +4890,7 @@ mod tests {
                     | "uninstall-quarantined"
                     | "recovering-finish-uninstall"
                     | "uninstall-cleanup-complete"
+                    | "uninstall-finalizer-published"
                     | "uninstall-cleanup-elevation"
             );
             let channel = ControllerChannel::create(

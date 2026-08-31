@@ -63,8 +63,8 @@ export interface JsonTransportRequest {
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;
   readonly errorResponsePolicy?: 'gemini-api-key';
-  /** Accept an octet-stream body only for a bounded public fixed-cloud JSON artifact. */
-  readonly allowOctetStreamJson?: boolean;
+  /** Return exact response bytes for a bounded public fixed-cloud GET. */
+  readonly responseType?: 'json' | 'bytes';
   /** Primarily useful to tighten an operation budget in deterministic tests. */
   readonly maxOperationResponseBytes?: number;
 }
@@ -96,7 +96,7 @@ interface PreparedRequest {
   readonly signal: AbortSignal;
   readonly maxResponseBytes: number;
   readonly errorResponsePolicy?: 'gemini-api-key';
-  readonly allowOctetStreamJson?: boolean;
+  readonly responseType: 'json' | 'bytes';
 }
 
 interface OperationEndpoint {
@@ -152,8 +152,9 @@ export class PinnedJsonTransport implements JsonTransport {
     const credentialed = options.credentialed || hasCredentialHeader(headers);
     const body = serializeBody(options.body);
     if (options.method === 'GET' && body !== null) throw new ProviderError('INVALID_CONFIG');
+    const responseType = options.responseType ?? 'json';
     if (
-      options.allowOctetStreamJson === true &&
+      responseType === 'bytes' &&
       (options.method !== 'GET' || options.credentialed || options.fixedCloud !== true)
     )
       throw new ProviderError('INVALID_CONFIG');
@@ -178,9 +179,7 @@ export class PinnedJsonTransport implements JsonTransport {
       ...(options.errorResponsePolicy === undefined
         ? {}
         : { errorResponsePolicy: options.errorResponsePolicy }),
-      ...(options.allowOctetStreamJson === undefined
-        ? {}
-        : { allowOctetStreamJson: options.allowOctetStreamJson }),
+      responseType,
     };
     try {
       return await this.#requestFollowingRedirects(options.url, prepared, state, null, 0);
@@ -443,12 +442,9 @@ function performRequest(
       }
       const contentType = response.headers['content-type'];
       if (
-        typeof contentType !== 'string' ||
-        (!/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(contentType) &&
-          !(
-            options.allowOctetStreamJson === true &&
-            /^application\/octet-stream\b/iu.test(contentType)
-          ))
+        options.responseType === 'json' &&
+        (typeof contentType !== 'string' ||
+          !/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(contentType))
       ) {
         response.destroy();
         reject(new ProviderError('INVALID_RESPONSE'));
@@ -469,8 +465,11 @@ function performRequest(
       response.on('error', reject);
       response.on('end', () => {
         try {
-          const source = Buffer.concat(chunks, size).toString('utf8');
-          const body = JSON.parse(source) as unknown;
+          const bytes = Buffer.concat(chunks, size);
+          const body: unknown =
+            options.responseType === 'bytes'
+              ? bytes
+              : (JSON.parse(bytes.toString('utf8')) as unknown);
           resolve({ body, destination: endpoint.destination, status, location: null });
         } catch {
           reject(new ProviderError('INVALID_RESPONSE'));

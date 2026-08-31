@@ -474,7 +474,13 @@ jobs:
           if ($quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S')) { throw 'QuietUninstallString is not exact.' }
           $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill Maintenance.exe" -ArgumentList '/S' -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
-          if ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill") -or (Test-Path -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json")) { throw 'Synchronous uninstall returned before final removal.' }
+          $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' } | ForEach-Object FullName)
+          $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
+          $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
+          if ($terminalResidue.Count -ne 0 -or $terminalKeys.Count -ne 0) { throw 'Synchronous uninstall retained protected recovery residue.' }
+          $faultDocument = Get-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
+          $faultDocument | Add-Member -NotePropertyName terminalCleanup -NotePropertyValue @{ inspected = $true; residue = @(); registry = @() }
+          $faultDocument | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
 
       - name: Upload successful authenticated lifecycle evidence
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -607,14 +613,15 @@ jobs:
             "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine",
             "$env:ProgramData\Talking Quill Update Recovery"
           ) | Where-Object { Test-Path -LiteralPath $_ }
-          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -ErrorAction SilentlyContinue | Where-Object Name -like '.Talking Quill.update-bootstrap-*' | ForEach-Object FullName)
+          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' } | ForEach-Object FullName)
           $recoveryValues = @((Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object Name -like 'Talking Quill Update Recovery *')
           $uninstallRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
           $appPathRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe'
+          $machineLockRegistration = Test-Path -LiteralPath 'HKLM:\Software\Talking Quill\RecoveryStateLockV1'
           $legacyService = $null -ne (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
           & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
           $legacyTask = $LASTEXITCODE -eq 0
-          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, machine, registration, service, or task state.' }
+          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $machineLockRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, machine lock, finalizer, registration, service, or task state.' }
           $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
           $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; removeFreshRecovery = $removeFreshRecoveryInterrupted; uninstall = $uninstallInterrupted; finishUninstallRecovery = $finishUninstallRecoveryInterrupted }
           $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8

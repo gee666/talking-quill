@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { PinnedJsonTransport, type JsonTransport } from '../providers/json-transport';
 import { RELEASE_REPOSITORY } from './release-url-policy';
@@ -26,6 +27,10 @@ const ReleaseSchema = z.looseObject({
   assets: z.array(AssetSchema).max(128),
 });
 
+export interface VerifiedPublication extends SelectedPublication {
+  readonly channelBytes: Buffer;
+}
+
 export class PublicationCatalog {
   readonly #transport: JsonTransport;
 
@@ -35,7 +40,7 @@ export class PublicationCatalog {
     this.#transport = transport;
   }
 
-  async select(architecture: 'x64' | 'arm64'): Promise<SelectedPublication> {
+  async select(architecture: 'x64' | 'arm64'): Promise<VerifiedPublication> {
     const controller = new AbortController();
     const releases: ImmutablePublicationRelease[] = [];
     for (let page = 1; page <= 10; page += 1) {
@@ -56,19 +61,39 @@ export class PublicationCatalog {
       if (values.length < 100) break;
       if (page === 10) throw new Error('Immutable publication history exceeds its bound');
     }
-    return await selectHighestPublication(
+    const selected = await selectHighestPublication(
       releases,
       RELEASE_REPOSITORY,
       architecture,
-      async (asset) => await this.#loadManifest(asset),
+      async (asset, tag) => await this.#loadManifest(asset, tag),
     );
+    const channelBytes = await this.#loadBytes(
+      selected.channelAsset,
+      selected.release.tag_name,
+      4 * 1024 * 1024,
+    );
+    return bindVerifiedChannel(selected, channelBytes);
   }
 
-  async #loadManifest(asset: PublicationAsset): Promise<unknown> {
-    const signal = new AbortController().signal;
-    validateAssetUrl(asset.browser_download_url, asset.name);
+  async #loadManifest(asset: PublicationAsset, tag: string): Promise<unknown> {
     if (asset.size <= 0 || asset.size > 1024 * 1024)
       throw new Error('Publication manifest size is invalid');
+    const bytes = await this.#loadBytes(asset, tag, 1024 * 1024);
+    if (bytes.length !== asset.size) throw new Error('Publication manifest size changed');
+    try {
+      return JSON.parse(bytes.toString('utf8')) as unknown;
+    } catch {
+      throw new Error('Publication manifest JSON is invalid');
+    }
+  }
+
+  async #loadBytes(
+    asset: PublicationAsset,
+    expectedTag: string | undefined,
+    maxResponseBytes: number,
+  ): Promise<Buffer> {
+    const signal = new AbortController().signal;
+    validateAssetUrl(asset.browser_download_url, asset.name, expectedTag);
     const response = await this.#transport.request({
       url: asset.browser_download_url,
       method: 'GET',
@@ -82,15 +107,28 @@ export class PublicationCatalog {
       ],
       signal,
       timeoutMs: 30_000,
-      maxResponseBytes: 1024 * 1024,
-      allowOctetStreamJson: true,
+      maxResponseBytes,
+      responseType: 'bytes',
       maxOperationResponseBytes: 16 * 1024 * 1024,
     });
+    if (!Buffer.isBuffer(response.body)) throw new Error('Publication asset bytes are unavailable');
     return response.body;
   }
 }
 
-function validateAssetUrl(value: string, name: string): void {
+export function bindVerifiedChannel(
+  selected: SelectedPublication,
+  channelBytes: Buffer,
+): VerifiedPublication {
+  if (
+    channelBytes.length !== selected.channelAsset.size ||
+    createHash('sha256').update(channelBytes).digest('hex') !== selected.channelSha256
+  )
+    throw new Error('Channel metadata does not match its signed publication object');
+  return { ...selected, channelBytes: Buffer.from(channelBytes) };
+}
+
+function validateAssetUrl(value: string, name: string, expectedTag?: string): void {
   const url = new URL(value);
   const expectedPrefix = `/${RELEASE_REPOSITORY}/releases/download/`;
   if (
@@ -103,6 +141,7 @@ function validateAssetUrl(value: string, name: string): void {
     url.search !== '' ||
     url.hash !== '' ||
     !url.pathname.startsWith(expectedPrefix) ||
+    (expectedTag !== undefined && !url.pathname.startsWith(`${expectedPrefix}${expectedTag}/`)) ||
     decodeURIComponent(url.pathname.split('/').at(-1) ?? '') !== name
   )
     throw new Error('Publication asset URL is invalid');

@@ -8,7 +8,8 @@ import type { ApplicationUpdateBackend } from './application-update-controller';
 import { resolveHelperExecutable } from '../helper/helper-path';
 import { parseUnsignedUpdateIdentity } from './unsigned-update-identity';
 import { PublicationCatalog } from './publication-catalog';
-import type { SelectedPublication } from './publication-selection';
+import type { VerifiedPublication } from './publication-catalog';
+import { signedPublicationProviderOptions } from './signed-publication-provider';
 import { buildWindowsElevationLaunch, settleWindowsElevation } from './windows-update-launch';
 
 export function createElectronUpdateBackend(
@@ -23,12 +24,13 @@ export function createElectronUpdateBackend(
   autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.allowPrerelease = false;
   autoUpdater.disableWebInstaller = true;
+  autoUpdater.disableDifferentialDownload = true;
   autoUpdater.channel = `latest-${architecture}`;
   // Setting a custom channel enables downgrades in electron-updater; stable releases never do that.
   autoUpdater.allowDowngrade = false;
 
   const publicationCatalog = new PublicationCatalog();
-  let selectedPublication: SelectedPublication | null = null;
+  let selectedPublication: VerifiedPublication | null = null;
   let downloadedWindowsInstaller: {
     readonly path: string;
     readonly sha256: string;
@@ -53,10 +55,7 @@ export function createElectronUpdateBackend(
       const selected =
         process.platform === 'win32' ? await publicationCatalog.select(architecture) : null;
       if (selected !== null) {
-        autoUpdater.setFeedURL({
-          provider: 'generic',
-          url: `https://github.com/${selected.payload.repository}/releases/download/${selected.release.tag_name}`,
-        });
+        autoUpdater.setFeedURL(signedPublicationProviderOptions(selected));
       }
       const result = await autoUpdater.checkForUpdates();
       if (result === null) return null;
