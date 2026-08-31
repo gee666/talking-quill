@@ -676,7 +676,7 @@ export function validateExpectedFinalArtifacts(artifactNames, mode, expectedArti
   };
   const expected = {
     none: { exe: 0, dmg: 0, zip: 0 },
-    nsis: { exe: 1, dmg: 0, zip: 0 },
+    'native-setup': { exe: 1, dmg: 0, zip: 0 },
     'dmg-zip': { exe: 0, dmg: 1, zip: 1 },
   }[mode];
   if (expected === undefined) {

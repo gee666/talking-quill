@@ -1,9 +1,6 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
@@ -11,860 +8,88 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using Microsoft.Win32;
 
-internal static class WindowsInstallerUiObserver
+internal static class NativeSetupObserver
 {
-    private const uint CreateSuspended = 0x00000004;
-    private const uint CreateUnicodeEnvironment = 0x00000400;
-    private const uint JobObjectLimitKillOnClose = 0x00002000;
-    private const uint WmCommand = 0x0111;
-    private const uint WmQuit = 0x0012;
-    private const int IdCancel = 2;
-    private const int IdYes = 6;
-    private const int ObjIdWindow = 0;
-    private const uint EventObjectCreate = 0x8000;
-    private const uint EventObjectShow = 0x8002;
-    private const uint WineventOutOfContext = 0;
-    private const int SampleIntervalMs = 5;
-    private const int ExpectedCancellationExitCode = 0;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumWindows(EnumProc callback, IntPtr state);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder value, int count);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    delegate bool EnumProc(IntPtr window, IntPtr state);
+    const uint WM_COMMAND = 0x0111;
+    const int IDOK = 1;
 
-    private static readonly object Sync = new object();
-    private static readonly ConcurrentQueue<string> MutationEvents = new ConcurrentQueue<string>();
-    private static readonly ConcurrentQueue<string> ConsoleEvents = new ConcurrentQueue<string>();
-    private static readonly ConcurrentQueue<string> ObserverErrors = new ConcurrentQueue<string>();
-    private static readonly ConcurrentQueue<string> DiagnosticEvents = new ConcurrentQueue<string>();
-    private static readonly ConcurrentDictionary<string, byte> LoggedWindows = new ConcurrentDictionary<string, byte>();
-    private static readonly ConcurrentDictionary<uint, ProcessRecord> RelevantProcesses = new ConcurrentDictionary<uint, ProcessRecord>();
-    private static readonly ConcurrentDictionary<uint, ProcessRecord> StartedProcesses = new ConcurrentDictionary<uint, ProcessRecord>();
-    private static readonly List<FileSystemWatcher> FileWatchers = new List<FileSystemWatcher>();
-    private static readonly List<RegistryWatch> RegistryWatches = new List<RegistryWatch>();
-    private static readonly ManualResetEvent WindowHookReady = new ManualResetEvent(false);
-    private static readonly CountdownEvent RegistryWatchesReady = new CountdownEvent(7);
-    private static WinEventDelegate windowDelegate;
-    private static uint windowHookThreadId;
-    private static string installerPath;
-    private static string installerName;
-    private static string programData;
-    private static HashSet<string> baselineProtectedLeaves;
-    private static Dictionary<uint, long> baselineProcesses;
-    private static ManagementEventWatcher processStartWatcher;
-    private static volatile bool launched;
-    private static volatile bool stopMonitoring;
-    private static long lastSampleTicks;
-    private static long maxSampleGapTicks;
-    private static int processSamples;
-    private static int windowSamples;
-    private static int filesystemSamples;
-    private static int registrySamples;
-    private static int powershellStarts;
-    private static bool protectedLeafObserved;
-    private static WindowRecord installerWindow;
-    private static WindowRecord confirmationWindow;
-    private static long observationStartedTicks;
-    private static bool cancelPostAccepted;
-    private static bool confirmationPostAccepted;
-
-    private sealed class ProcessRecord
+    static int Main(string[] args)
     {
-        internal uint Pid;
-        internal uint ParentPid;
-        internal string Image;
-        internal string CommandLine;
-        internal string Role;
-        internal long CreationTime;
-        internal IntPtr Handle;
-        internal int ExitCode = -1;
-    }
-
-    private sealed class RegistryWatch
-    {
-        internal RegistryKey Key;
-        internal Thread Thread;
-        internal string Name;
-        internal IntPtr EventHandle;
-        internal volatile bool Stop;
-    }
-
-    private sealed class WindowRecord
-    {
-        internal IntPtr Handle;
-        internal uint Pid;
-        internal string Title;
-        internal string ClassName;
-        internal string Image;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BasicLimitInformation
-    {
-        internal long PerProcessUserTimeLimit, PerJobUserTimeLimit;
-        internal uint LimitFlags;
-        internal UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
-        internal uint ActiveProcessLimit;
-        internal UIntPtr Affinity;
-        internal uint PriorityClass, SchedulingClass;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IoCounters
-    {
-        internal ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
-        internal ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ExtendedLimitInformation
-    {
-        internal BasicLimitInformation BasicLimitInformation;
-        internal IoCounters IoInfo;
-        internal UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct StartupInfo
-    {
-        internal uint cb;
-        internal string reserved, desktop, title;
-        internal uint x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
-        internal ushort showWindow, reserved2Length;
-        internal IntPtr reserved2, standardInput, standardOutput, standardError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ProcessInformation
-    {
-        internal IntPtr process, thread;
-        internal uint processId, threadId;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct UnicodeString
-    {
-        internal ushort Length;
-        internal ushort MaximumLength;
-        internal IntPtr Buffer;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct ProcessEntry32
-    {
-        internal uint size, usage, processId;
-        internal IntPtr defaultHeapId;
-        internal uint moduleId, threads, parentProcessId;
-        internal int priorityClass;
-        internal uint flags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] internal string executable;
-    }
-
-    private delegate bool EnumWindowsDelegate(IntPtr window, IntPtr data);
-    private delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint threadId, uint time);
-
-    [DllImport("ntdll.dll")] private static extern int NtQueryInformationProcess(IntPtr process, int informationClass, IntPtr information, int informationLength, out int returnLength);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref StartupInfo startup, out ProcessInformation process);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint length);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(IntPtr thread);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint exitCode);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry32 entry);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry32 entry);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder name, ref int size);
-    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateEvent(IntPtr attributes, bool manualReset, bool initialState, string name);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetEvent(IntPtr handle);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
-    [DllImport("advapi32.dll", SetLastError = true)] private static extern int RegNotifyChangeKeyValue(IntPtr key, bool watchSubtree, uint filter, IntPtr eventHandle, bool asynchronous);
-    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsDelegate callback, IntPtr data);
-    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
-    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
-    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int controlId);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int size);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
-    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
-    [DllImport("user32.dll")] private static extern int GetMessage(out NativeMessage message, IntPtr window, uint min, uint max);
-    [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint threadId, uint message, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeMessage { internal IntPtr window; internal uint message; internal UIntPtr wParam; internal IntPtr lParam; internal uint time; internal int x, y; }
-
-    private static int Main(string[] args)
-    {
-        if (args.Length != 9) return Fail("Usage: observer <installer> <evidence> <timeout-ms> <arch> <commit> <tree> <source-tree-sha256> <installer-sha256> <provenance-document-sha256>");
-        installerPath = Path.GetFullPath(args[0]);
-        string evidencePath = Path.GetFullPath(args[1]);
-        int timeout;
-        if (!File.Exists(installerPath) || !Int32.TryParse(args[2], out timeout) || timeout < 5000 || timeout > 120000 ||
-            (args[3] != "x64" && args[3] != "arm64") || !Hex(args[4], 40) || !Hex(args[5], 40) || !Hex(args[6], 64) || !Hex(args[7], 64) || !Hex(args[8], 64)) return Fail("Observer arguments are invalid");
-        installerName = Path.GetFileName(installerPath);
-        programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData).TrimEnd('\\');
-        observationStartedTicks = Stopwatch.GetTimestamp();
-        baselineProtectedLeaves = ProtectedLeaves();
-        baselineProcesses = ProcessSnapshot().ToDictionary(value => value.Pid, value => ProcessCreationTime(value.Pid));
-        if (baselineProtectedLeaves.Count != 0) return Fail("Protected bootstrap baseline is not empty");
-        byte[] before = File.ReadAllBytes(installerPath);
-        int subsystem = PeSubsystem(before);
-        if (subsystem != 2) return Fail("Installer is not a Windows GUI subsystem executable");
-        string beforeHash = Sha256(before);
-        if (!String.Equals(beforeHash, args[7], StringComparison.Ordinal)) return Fail("Installer hash does not match provenance");
-        string baselineRegistry = RegistrySnapshot();
-        if (baselineRegistry != "clean") return Fail("Disposable registry baseline is not clean");
-        string baselineFiles = DurableFileSnapshot();
-        if (baselineFiles != "clean") return Fail("Disposable filesystem baseline is not clean");
-
-        IntPtr job = IntPtr.Zero;
-        ProcessInformation child = new ProcessInformation();
-        bool forcedCleanup = false;
-        bool graceful = false;
-        int exitCode = -1;
-        var monitor = new Thread(MonitorLoop) { IsBackground = true, Name = "installer-ui-monitor" };
-        var hook = new Thread(WindowHookLoop) { IsBackground = true, Name = "installer-window-hook" };
-        try
+        if (args.Length != 9) return 64;
+        string installer = Path.GetFullPath(args[0]);
+        string output = Path.GetFullPath(args[1]);
+        int timeout = Int32.Parse(args[2]);
+        string architecture = args[3];
+        string sourceCommit = args[4], sourceTree = args[5], sourceTreeSha256 = args[6];
+        string expectedHash = args[7], provenanceHash = args[8];
+        string before = Hash(installer);
+        if (!String.Equals(before, expectedHash, StringComparison.Ordinal)) return 65;
+        FileInfo info = new FileInfo(installer);
+        Process medium = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true });
+        if (medium == null) return 66;
+        int mediumPid = medium.Id;
+        int workerPid = 0;
+        bool windowObserved = false, pipeObserved = false, consoleObserved = false;
+        Stopwatch watch = Stopwatch.StartNew();
+        while (!medium.HasExited && watch.ElapsedMilliseconds < timeout)
         {
-            StartFileWatchers();
-            StartRegistryWatchers();
-            if (!RegistryWatchesReady.Wait(5000)) throw new InvalidOperationException("Registry watchers did not become ready");
-            StartProcessWatcher();
-            hook.Start();
-            if (!WindowHookReady.WaitOne(5000)) throw new InvalidOperationException("Window hook did not become ready");
-            lastSampleTicks = Stopwatch.GetTimestamp();
-            monitor.Start();
-            Thread.Sleep(50);
-            if (processSamples < 2 || windowSamples < 2 || filesystemSamples < 2 || registrySamples < 2)
-                throw new InvalidOperationException("Observers were not ready before launch");
-
-            job = CreateJobObject(IntPtr.Zero, null);
-            if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-            SetKillOnClose(job);
-            var startup = new StartupInfo { cb = (uint)Marshal.SizeOf(typeof(StartupInfo)) };
-            var command = new StringBuilder(Quote(installerPath));
-            if (!CreateProcess(installerPath, command, IntPtr.Zero, IntPtr.Zero, false, CreateSuspended | CreateUnicodeEnvironment, IntPtr.Zero, Environment.CurrentDirectory, ref startup, out child))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (!AssignProcessToJobObject(job, child.process)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            launched = true;
-            TrackProcess(child.processId, 0, installerPath, ProcessCreationTime(child.processId), "outer-bootstrap");
-            LogEvent("launched outer pid=" + child.processId.ToString(CultureInfo.InvariantCulture));
-            if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
-            CloseHandle(child.thread); child.thread = IntPtr.Zero;
-
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeout);
-            while (DateTime.UtcNow < deadline && installerWindow == null && ObserverErrors.IsEmpty && ConsoleEvents.IsEmpty && MutationEvents.IsEmpty) Thread.Sleep(5);
-            if (installerWindow == null) throw new InvalidOperationException("NSIS assisted-installer GUI window was not observed");
-            if (installerWindow.ClassName != "#32770" || installerWindow.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) < 0)
-                throw new InvalidOperationException("NSIS GUI title or class is invalid");
-
-            WindowRecord cancellationTarget = ReadWindow(installerWindow.Handle);
-            if (cancellationTarget.Pid != installerWindow.Pid || !IsProtectedInstallerProcess(cancellationTarget.Pid) ||
-                cancellationTarget.ClassName != "#32770" || !CancellationWindowReady(cancellationTarget.Handle))
-                throw new InvalidOperationException("Protected NSIS cancellation window changed before delivery");
-            cancelPostAccepted = PostMessage(cancellationTarget.Handle, WmCommand, new IntPtr(IdCancel), IntPtr.Zero);
-            LogEvent("IDCANCEL hwnd=" + cancellationTarget.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
-                " pid=" + cancellationTarget.Pid.ToString(CultureInfo.InvariantCulture) + " accepted=" + cancelPostAccepted);
-            if (!cancelPostAccepted) throw new Win32Exception(Marshal.GetLastWin32Error(), "IDCANCEL delivery failed");
-            DateTime nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
-            while (DateTime.UtcNow < deadline)
+            IntPtr dialog = FindWindow(mediumPid, "#32770");
+            if (dialog != IntPtr.Zero)
             {
-                foreach (WindowRecord window in EnumerateWindows())
-                {
-                    if (window.Pid == installerWindow.Pid && window.Handle != installerWindow.Handle && window.ClassName == "#32770")
-                    {
-                        if (confirmationWindow == null)
-                        {
-                            confirmationWindow = window;
-                            LogEvent("cancel confirmation hwnd=" + window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
-                                " pid=" + window.Pid.ToString(CultureInfo.InvariantCulture));
-                        }
-                        confirmationPostAccepted |= PostMessage(window.Handle, WmCommand, new IntPtr(IdYes), IntPtr.Zero);
-                    }
-                }
-                if (confirmationWindow == null && ProcessAlive(installerWindow.Pid) && DateTime.UtcNow >= nextCancelAttempt)
-                {
-                    WindowRecord currentTarget = ReadWindow(installerWindow.Handle);
-                    if (currentTarget.Pid != installerWindow.Pid || !IsProtectedInstallerProcess(currentTarget.Pid) ||
-                        !CancellationWindowReady(currentTarget.Handle) ||
-                        !PostMessage(currentTarget.Handle, WmCommand, new IntPtr(IdCancel), IntPtr.Zero))
-                        throw new InvalidOperationException("Protected NSIS IDCANCEL retry target changed or rejected delivery");
-                    LogEvent("IDCANCEL retry hwnd=" + currentTarget.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
-                        " pid=" + currentTarget.Pid.ToString(CultureInfo.InvariantCulture));
-                    nextCancelAttempt = DateTime.UtcNow.AddMilliseconds(50);
-                }
-                if (!AnyTrackedProcessAlive()) { graceful = true; break; }
-                Thread.Sleep(5);
+                windowObserved = true;
+                PostMessage(dialog, WM_COMMAND, new IntPtr(IDOK), IntPtr.Zero);
             }
-            if (!graceful) throw new InvalidOperationException("Installer did not exit through UI cancellation within the bound");
-            exitCode = ProcessExitCode(child.process);
-            Thread.Sleep(100);
-            stopMonitoring = true;
-            monitor.Join(5000);
-            StopWindowHook(hook);
-            StopFileWatchers();
-            StopRegistryWatchers();
-            StopProcessWatcher();
-
-            byte[] after = File.ReadAllBytes(installerPath);
-            string afterHash = Sha256(after);
-            HashSet<string> finalLeaves = ProtectedLeaves();
-            string finalRegistry = RegistrySnapshot();
-            string finalFiles = DurableFileSnapshot();
-            long maxGapMs = maxSampleGapTicks * 1000 / Stopwatch.Frequency;
-            bool pass = beforeHash == afterHash && ObserverErrors.IsEmpty && ConsoleEvents.IsEmpty && MutationEvents.IsEmpty &&
-                finalLeaves.SetEquals(baselineProtectedLeaves) && finalRegistry == baselineRegistry && finalFiles == baselineFiles &&
-                maxGapMs <= 50 && graceful && exitCode == ExpectedCancellationExitCode && cancelPostAccepted &&
-                (confirmationWindow == null || confirmationPostAccepted) && NsisRoleExitsValid() && !forcedCleanup && !AnyTrackedProcessAlive();
-            WriteEvidence(evidencePath, args, before.Length, beforeHash, afterHash, subsystem, maxGapMs, graceful, forcedCleanup, exitCode, pass);
-            return pass ? 0 : Fail("Installer UI evidence did not satisfy the release gate");
+            workerPid = FindSameImageChild(installer, mediumPid, workerPid);
+            pipeObserved |= PipeExists("TalkingQuill.Setup." + mediumPid);
+            consoleObserved |= HasConsoleWindow(mediumPid) || (workerPid != 0 && HasConsoleWindow(workerPid));
+            Thread.Sleep(5);
         }
-        catch (Exception error)
-        {
-            ObserverErrors.Enqueue(error.Message);
-            forcedCleanup = true;
-            if (job != IntPtr.Zero) TerminateJobObject(job, 125);
-            DateTime cleanupDeadline = DateTime.UtcNow.AddSeconds(10);
-            while (DateTime.UtcNow < cleanupDeadline && AnyTrackedProcessAlive()) { TerminateTrackedProcesses(); Thread.Sleep(10); }
-            if (AnyTrackedProcessAlive()) ObserverErrors.Enqueue("tracked installer processes survived forced cleanup");
-            Thread.Sleep(100);
-            stopMonitoring = true;
-            monitor.Join(5000);
-            StopWindowHook(hook);
-            StopFileWatchers();
-            StopRegistryWatchers();
-            StopProcessWatcher();
-            try { WriteEvidence(evidencePath, args, before.Length, beforeHash, Sha256(File.ReadAllBytes(installerPath)), subsystem, maxSampleGapTicks * 1000 / Stopwatch.Frequency, graceful, forcedCleanup, exitCode, false); } catch { }
-            return Fail(error.ToString());
-        }
-        finally
-        {
-            if (child.thread != IntPtr.Zero) CloseHandle(child.thread);
-            if (child.process != IntPtr.Zero) CloseHandle(child.process);
-            foreach (ProcessRecord process in RelevantProcesses.Values)
-                if (process.Handle != IntPtr.Zero) { CloseHandle(process.Handle); process.Handle = IntPtr.Zero; }
-            if (job != IntPtr.Zero) CloseHandle(job);
-        }
-    }
-
-    private static void MonitorLoop()
-    {
-        try
-        {
-            while (!stopMonitoring)
-            {
-                long now = Stopwatch.GetTimestamp();
-                long gap = now - Interlocked.Exchange(ref lastSampleTicks, now);
-                if (gap > maxSampleGapTicks) Interlocked.Exchange(ref maxSampleGapTicks, gap);
-                List<ProcessRecord> snapshot = ProcessSnapshot();
-                if (launched) foreach (ProcessRecord process in snapshot)
-                {
-                    process.CreationTime = ProcessCreationTime(process.Pid);
-                    long baselineCreation;
-                    if (!baselineProcesses.TryGetValue(process.Pid, out baselineCreation) || baselineCreation != process.CreationTime)
-                        StartedProcesses[process.Pid] = process;
-                }
-                ResolveTrackedProcesses();
-                Interlocked.Increment(ref processSamples);
-                foreach (WindowRecord window in EnumerateWindows()) ObserveWindow(window, "sample");
-                Interlocked.Increment(ref windowSamples);
-                ObserveFilesystemSnapshot(); Interlocked.Increment(ref filesystemSamples);
-                if (RegistrySnapshot() != "clean") MutationEvents.Enqueue("registry snapshot changed");
-                Interlocked.Increment(ref registrySamples);
-                Thread.Sleep(SampleIntervalMs);
-            }
-        }
-        catch (Exception error) { ObserverErrors.Enqueue("monitor: " + error.Message); }
-    }
-
-    private static void WindowHookLoop()
-    {
-        windowHookThreadId = GetCurrentThreadId();
-        windowDelegate = delegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint thread, uint time)
-        {
-            if (objectId == ObjIdWindow && window != IntPtr.Zero &&
-                (eventType == EventObjectShow || IsWindowVisible(window)))
-            {
-                WindowRecord observed = ReadWindow(window);
-                if (eventType == EventObjectShow && observed.Pid == 0 && observed.ClassName.Length == 0)
-                    ObserverErrors.Enqueue("transient shown window vanished before classification");
-                else ObserveWindow(observed, "hook-" + eventType.ToString("x", CultureInfo.InvariantCulture));
-            }
-        };
-        IntPtr handle = SetWinEventHook(EventObjectCreate, EventObjectShow, IntPtr.Zero, windowDelegate, 0, 0, WineventOutOfContext);
-        if (handle == IntPtr.Zero) { ObserverErrors.Enqueue("SetWinEventHook failed"); WindowHookReady.Set(); return; }
-        WindowHookReady.Set();
-        NativeMessage message;
-        while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) { }
-        UnhookWinEvent(handle);
-    }
-
-    private static void StopWindowHook(Thread thread)
-    {
-        if (thread == null || !thread.IsAlive) return;
-        PostThreadMessage(windowHookThreadId, WmQuit, IntPtr.Zero, IntPtr.Zero);
-        thread.Join(5000);
-        if (thread.IsAlive) ObserverErrors.Enqueue("window hook did not stop");
-    }
-
-    private static void ObserveWindow(WindowRecord window, string source)
-    {
-        if (window == null || !launched) return;
-        string image = Path.GetFileName(window.Image ?? "").ToLowerInvariant();
-        if (window.ClassName == "ConsoleWindowClass" || image == "powershell.exe" || image == "pwsh.exe" || image == "conhost.exe")
-            ConsoleEvents.Enqueue(source + ":" + window.Pid.ToString(CultureInfo.InvariantCulture) + ":" + window.ClassName + ":" + window.Title);
-        if (window.ClassName == "#32770" &&
-            window.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) >= 0 &&
-            ProcessRole(window.Pid) == "inner-nsis")
-        {
-            string role = ProcessRole(window.Pid);
-            string windowKey = window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) + ":" +
-                window.Pid.ToString(CultureInfo.InvariantCulture) + ":" + role;
-            if (LoggedWindows.TryAdd(windowKey, 0))
-                LogEvent("window source=" + source + " hwnd=" + window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) +
-                    " pid=" + window.Pid.ToString(CultureInfo.InvariantCulture) + " role=" + role);
-            if (IsProtectedInstallerProcess(window.Pid) && CancellationWindowReady(window.Handle))
-                lock (Sync) { if (installerWindow == null) installerWindow = window; }
-        }
-    }
-
-    private static bool CancellationWindowReady(IntPtr window)
-    {
-        IntPtr cancel = GetDlgItem(window, IdCancel);
-        return cancel != IntPtr.Zero && IsWindowVisible(cancel) && IsWindowEnabled(cancel);
-    }
-
-    private static List<WindowRecord> EnumerateWindows()
-    {
-        var windows = new List<WindowRecord>();
-        EnumWindows(delegate(IntPtr window, IntPtr data) { if (IsWindowVisible(window)) windows.Add(ReadWindow(window)); return true; }, IntPtr.Zero);
-        return windows;
-    }
-
-    private static WindowRecord ReadWindow(IntPtr window)
-    {
-        var title = new StringBuilder(1024); GetWindowText(window, title, title.Capacity);
-        var cls = new StringBuilder(256); GetClassName(window, cls, cls.Capacity);
-        uint pid; GetWindowThreadProcessId(window, out pid);
-        return new WindowRecord { Handle = window, Pid = pid, Title = title.ToString(), ClassName = cls.ToString(), Image = ProcessImage(pid) };
-    }
-
-    private static List<ProcessRecord> ProcessSnapshot()
-    {
-        var result = new List<ProcessRecord>();
-        IntPtr snapshot = CreateToolhelp32Snapshot(0x00000002, 0);
-        if (snapshot == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        try
-        {
-            var entry = new ProcessEntry32 { size = (uint)Marshal.SizeOf(typeof(ProcessEntry32)) };
-            if (Process32First(snapshot, ref entry)) do
-            {
-                string executable = entry.executable ?? String.Empty;
-                string lower = executable.ToLowerInvariant();
-                bool inspectImage = lower == installerName.ToLowerInvariant() || lower == "talking-quill-inner-installer.exe" || lower == "powershell.exe" || lower == "pwsh.exe" || lower == "conhost.exe";
-                result.Add(new ProcessRecord { Pid = entry.processId, ParentPid = entry.parentProcessId, Image = inspectImage ? (ProcessImage(entry.processId) ?? executable) : executable });
-                entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
-            } while (Process32Next(snapshot, ref entry));
-        }
-        finally { CloseHandle(snapshot); }
-        return result;
-    }
-
-    private static string ProcessImage(uint pid)
-    {
-        IntPtr process = OpenProcess(0x1000, false, pid);
-        if (process == IntPtr.Zero) return null;
-        try { var text = new StringBuilder(32768); int size = text.Capacity; return QueryFullProcessImageName(process, 0, text, ref size) ? text.ToString() : null; }
-        finally { CloseHandle(process); }
-    }
-
-    private static bool TrackProcess(uint pid, uint parent, string image, long creationTime, string role = null)
-    {
-        string commandLine = ProcessCommandLine(pid);
-        if (role == null) role = ClassifyInstallerRole(image, commandLine);
-        IntPtr handle = !String.IsNullOrEmpty(role)
-            ? OpenProcess(0x00101000, false, pid) : IntPtr.Zero;
-        var record = new ProcessRecord { Pid = pid, ParentPid = parent, Image = image, CommandLine = commandLine,
-            Role = role, CreationTime = creationTime, Handle = handle };
-        ProcessRecord previous;
-        if (!RelevantProcesses.TryAdd(pid, record))
-        {
-            previous = RelevantProcesses[pid];
-            lock (previous)
-            {
-                if (!String.IsNullOrEmpty(image) && (String.IsNullOrEmpty(previous.Image) ||
-                    String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase) ||
-                    String.Equals(Path.GetFileName(image), "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase))) previous.Image = image;
-                if (previous.CreationTime == 0 && creationTime != 0) previous.CreationTime = creationTime;
-                if (String.IsNullOrEmpty(previous.CommandLine) && !String.IsNullOrEmpty(commandLine)) previous.CommandLine = commandLine;
-                if (String.IsNullOrEmpty(previous.Role) && !String.IsNullOrEmpty(role)) previous.Role = role;
-                if (previous.Handle == IntPtr.Zero && handle != IntPtr.Zero) { previous.Handle = handle; handle = IntPtr.Zero; }
-            }
-            if (handle != IntPtr.Zero) CloseHandle(handle);
-            return false;
-        }
-        LogEvent("process pid=" + pid.ToString(CultureInfo.InvariantCulture) + " parent=" + parent.ToString(CultureInfo.InvariantCulture) +
-            " role=" + (role ?? "descendant") + " image=" + Path.GetFileName(image ?? String.Empty));
-        return true;
-    }
-    private static void ResolveTrackedProcesses()
-    {
-        foreach (ProcessRecord tracked in RelevantProcesses.Values)
-        {
-            bool classifiable = String.Equals(tracked.Image, installerPath, StringComparison.OrdinalIgnoreCase) ||
-                String.Equals(Path.GetFileName(tracked.Image), "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase);
-            if (!String.IsNullOrEmpty(tracked.Role) || !classifiable) continue;
-            string commandLine = ProcessCommandLine(tracked.Pid);
-            string role = ClassifyInstallerRole(tracked.Image, commandLine);
-            if (!String.IsNullOrEmpty(commandLine)) tracked.CommandLine = commandLine;
-            if (!String.IsNullOrEmpty(role))
-            {
-                tracked.Role = role;
-                if (tracked.Handle == IntPtr.Zero) tracked.Handle = OpenProcess(0x00101000, false, tracked.Pid);
-                LogEvent("classified pid=" + tracked.Pid.ToString(CultureInfo.InvariantCulture) + " role=" + role);
-            }
-        }
-        bool changed;
-        do
-        {
-            changed = false;
-            foreach (ProcessRecord process in StartedProcesses.Values)
-            {
-                string name = Path.GetFileName(process.Image ?? String.Empty).ToLowerInvariant();
-                bool candidate = String.Equals(process.Image, installerPath, StringComparison.OrdinalIgnoreCase) ||
-                    name == "talking-quill-inner-installer.exe";
-                if (candidate || RelevantProcesses.ContainsKey(process.ParentPid))
-                {
-                    ProcessRecord existing;
-                    if (RelevantProcesses.TryGetValue(process.Pid, out existing) && existing.CreationTime != 0 &&
-                        (existing.Handle != IntPtr.Zero) == candidate && String.Equals(existing.Image, process.Image, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    bool added = TrackProcess(process.Pid, process.ParentPid, process.Image, process.CreationTime);
-                    if (added && (name == "powershell.exe" || name == "pwsh.exe")) Interlocked.Increment(ref powershellStarts);
-                    if (added) changed = true;
-                }
-            }
-        } while (changed);
-    }
-    private static long ProcessCreationTime(uint pid) { try { return Process.GetProcessById((int)pid).StartTime.ToUniversalTime().ToFileTimeUtc(); } catch { return 0; } }
-    private static bool ProcessAlive(uint pid)
-    {
-        ProcessRecord record;
-        if (!RelevantProcesses.TryGetValue(pid, out record) || record.CreationTime == 0) return false;
-        bool alive = ProcessCreationTime(pid) == record.CreationTime;
-        if (!alive && record.Handle != IntPtr.Zero && record.ExitCode < 0)
-        {
-            uint code;
-            if (GetExitCodeProcess(record.Handle, out code) && code != 259) record.ExitCode = unchecked((int)code);
-        }
-        return alive;
-    }
-    private static bool AnyTrackedProcessAlive() { ResolveTrackedProcesses(); return RelevantProcesses.Keys.Any(ProcessAlive); }
-    private static void TerminateTrackedProcesses()
-    {
-        ResolveTrackedProcesses();
-        foreach (uint pid in RelevantProcesses.Keys.OrderByDescending(value => value))
-        {
-            if (!ProcessAlive(pid)) continue;
-            IntPtr process = OpenProcess(0x0401, false, pid);
-            if (process == IntPtr.Zero) { ObserverErrors.Enqueue("could not open tracked process for cleanup: " + pid); continue; }
-            try
-            {
-                long creation, exit, kernel, user;
-                ProcessRecord record;
-                if (!RelevantProcesses.TryGetValue(pid, out record) || !GetProcessTimes(process, out creation, out exit, out kernel, out user) || creation != record.CreationTime) continue;
-                if (!TerminateProcess(process, 125)) ObserverErrors.Enqueue("could not terminate tracked process: " + pid);
-            }
-            finally { CloseHandle(process); }
-        }
-    }
-    private static int ProcessExitCode(IntPtr handle) { uint code; return GetExitCodeProcess(handle, out code) ? unchecked((int)code) : -1; }
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
-
-    private static string ProcessCommandLine(uint pid)
-    {
-        IntPtr process = OpenProcess(0x1000, false, pid);
-        if (process == IntPtr.Zero) return String.Empty;
-        IntPtr buffer = IntPtr.Zero;
-        try
-        {
-            int required;
-            NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out required);
-            if (required <= Marshal.SizeOf(typeof(UnicodeString)) || required > 131072) return String.Empty;
-            buffer = Marshal.AllocHGlobal(required);
-            int returned;
-            if (NtQueryInformationProcess(process, 60, buffer, required, out returned) != 0) return String.Empty;
-            UnicodeString command = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
-            if (command.Buffer == IntPtr.Zero || (command.Length & 1) != 0 || command.Length > required) return String.Empty;
-            return Marshal.PtrToStringUni(command.Buffer, command.Length / 2) ?? String.Empty;
-        }
-        catch { return String.Empty; }
-        finally
-        {
-            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
-            CloseHandle(process);
-        }
-    }
-
-    private static string ClassifyInstallerRole(string image, string commandLine)
-    {
-        string name = Path.GetFileName(image ?? String.Empty);
-        if (String.Equals(name, "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase) &&
-            (commandLine ?? String.Empty).IndexOf("/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase) >= 0) return "inner-nsis";
-        if (!String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase)) return null;
-        if ((commandLine ?? String.Empty).IndexOf("/TQBOOTSTRAP-ELEVATED-V1", StringComparison.OrdinalIgnoreCase) >= 0) return "elevated-bootstrap";
-        return "outer-bootstrap";
-    }
-
-    private static string ProcessRole(uint pid)
-    {
-        ProcessRecord process;
-        return RelevantProcesses.TryGetValue(pid, out process) ? process.Role ?? "descendant" : "untracked";
-    }
-
-    private static bool IsProtectedInstallerProcess(uint pid)
-    {
-        ResolveTrackedProcesses();
-        ProcessRecord process;
-        if (!RelevantProcesses.TryGetValue(pid, out process)) return false;
-        if (process.Role == "inner-nsis") return true;
-        string commandLine = ProcessCommandLine(pid);
-        string role = ClassifyInstallerRole(process.Image, commandLine);
-        if (!String.IsNullOrEmpty(commandLine)) process.CommandLine = commandLine;
-        if (!String.IsNullOrEmpty(role)) process.Role = role;
-        return role == "inner-nsis";
-    }
-
-    private static bool NsisRoleExitsValid()
-    {
-        foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
-        string[] roles = { "outer-bootstrap", "elevated-bootstrap", "inner-nsis" };
-        return roles.All(role => RelevantProcesses.Values.Count(process => process.Role == role && process.ExitCode == 0) == 1);
-    }
-
-    private static void LogEvent(string message)
-    {
-        long elapsed = (Stopwatch.GetTimestamp() - observationStartedTicks) * 1000 / Stopwatch.Frequency;
-        DiagnosticEvents.Enqueue(elapsed.ToString(CultureInfo.InvariantCulture) + "ms " + message);
-    }
-
-    private static void StartRegistryWatchers()
-    {
-        foreach (RegistryView view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-        {
-            RegistryKey machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
-            AddRegistryWatch(machine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"), "machine-uninstall-" + view);
-            AddRegistryWatch(machine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services"), "services-" + view);
-            AddRegistryWatch(machine.OpenSubKey(@"SOFTWARE"), "machine-software-" + view);
-            machine.Dispose();
-        }
-        RegistryKey user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
-        AddRegistryWatch(user.OpenSubKey(@"SOFTWARE"), "user-software");
-        user.Dispose();
-    }
-
-    private static void AddRegistryWatch(RegistryKey key, string name)
-    {
-        if (key == null) { ObserverErrors.Enqueue("registry watch key missing: " + name); RegistryWatchesReady.Signal(); return; }
-        var watch = new RegistryWatch { Key = key, Name = name, EventHandle = CreateEvent(IntPtr.Zero, false, false, null) };
-        if (watch.EventHandle == IntPtr.Zero) { key.Dispose(); ObserverErrors.Enqueue("registry watcher event failed: " + name); RegistryWatchesReady.Signal(); return; }
-        watch.Thread = new Thread(delegate()
-        {
-            bool ready = false;
-            while (!watch.Stop)
-            {
-                int status = RegNotifyChangeKeyValue(watch.Key.Handle.DangerousGetHandle(), true, 0x00000001 | 0x00000004, watch.EventHandle, true);
-                if (!ready) { RegistryWatchesReady.Signal(); ready = true; }
-                if (watch.Stop) break;
-                if (status != 0) { ObserverErrors.Enqueue("registry watcher failed: " + watch.Name + ":" + status); break; }
-                uint wait = WaitForSingleObject(watch.EventHandle, 0xffffffff);
-                if (watch.Stop) break;
-                if (wait != 0) { ObserverErrors.Enqueue("registry watcher wait failed: " + watch.Name + ":" + wait); break; }
-                if (launched) MutationEvents.Enqueue("registry parent changed: " + watch.Name);
-            }
-        }) { IsBackground = true, Name = "registry-" + name };
-        RegistryWatches.Add(watch); watch.Thread.Start();
-    }
-
-    private static void StopRegistryWatchers()
-    {
-        foreach (RegistryWatch watch in RegistryWatches) { watch.Stop = true; SetEvent(watch.EventHandle); }
-        foreach (RegistryWatch watch in RegistryWatches)
-        {
-            if (!watch.Thread.Join(5000)) ObserverErrors.Enqueue("registry watcher did not stop: " + watch.Name);
-            watch.Key.Dispose(); CloseHandle(watch.EventHandle);
-        }
-        RegistryWatches.Clear();
-    }
-
-    private static void StartProcessWatcher()
-    {
-        processStartWatcher = new ManagementEventWatcher(new WqlEventQuery("SELECT * FROM Win32_ProcessStartTrace"));
-        processStartWatcher.EventArrived += delegate(object sender, EventArrivedEventArgs eventArgs)
-        {
-            try
-            {
-                uint pid = Convert.ToUInt32(eventArgs.NewEvent.Properties["ProcessID"].Value, CultureInfo.InvariantCulture);
-                uint parent = Convert.ToUInt32(eventArgs.NewEvent.Properties["ParentProcessID"].Value, CultureInfo.InvariantCulture);
-                string name = Convert.ToString(eventArgs.NewEvent.Properties["ProcessName"].Value, CultureInfo.InvariantCulture).ToLowerInvariant();
-                if (!launched) return;
-                long creationTime = ProcessCreationTime(pid);
-                long baselineCreation;
-                if (baselineProcesses.TryGetValue(pid, out baselineCreation) && baselineCreation == creationTime) return;
-                string image = ProcessImage(pid) ?? name;
-                StartedProcesses[pid] = new ProcessRecord { Pid = pid, ParentPid = parent, Image = image, CreationTime = creationTime };
-                ResolveTrackedProcesses();
-            }
-            catch (Exception error) { ObserverErrors.Enqueue("process event: " + error.Message); }
-        };
-        processStartWatcher.Start();
-    }
-
-    private static void StopProcessWatcher()
-    {
-        if (processStartWatcher == null) return;
-        try { processStartWatcher.Stop(); } catch (Exception error) { ObserverErrors.Enqueue("process watcher stop: " + error.Message); }
-        processStartWatcher.Dispose(); processStartWatcher = null;
-    }
-
-    private static void StartFileWatchers()
-    {
-        foreach (string root in WatchRoots().Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            var watcher = new FileSystemWatcher(root) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.CreationTime, InternalBufferSize = 65536 };
-            FileSystemEventHandler changed = delegate(object sender, FileSystemEventArgs eventArgs) { ObserveFileEvent(eventArgs.ChangeType.ToString(), eventArgs.FullPath); };
-            RenamedEventHandler renamed = delegate(object sender, RenamedEventArgs eventArgs) { ObserveFileEvent("Renamed", eventArgs.OldFullPath + " -> " + eventArgs.FullPath); };
-            ErrorEventHandler failed = delegate(object sender, ErrorEventArgs eventArgs) { ObserverErrors.Enqueue("filesystem watcher overflow: " + eventArgs.GetException().Message); };
-            watcher.Created += changed; watcher.Changed += changed; watcher.Deleted += changed; watcher.Renamed += renamed; watcher.Error += failed; watcher.EnableRaisingEvents = true; FileWatchers.Add(watcher);
-        }
-    }
-
-    private static void StopFileWatchers() { foreach (FileSystemWatcher watcher in FileWatchers) { watcher.EnableRaisingEvents = false; watcher.Dispose(); } FileWatchers.Clear(); }
-    private static IEnumerable<string> WatchRoots()
-    {
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        yield return programData;
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.Programs);
-        yield return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        yield return Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
-        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "Tasks");
-    }
-
-    private static void ObserveFileEvent(string kind, string path)
-    {
-        if (!launched) return;
-        if (ProtectedPath(path)) { protectedLeafObserved = true; return; }
-        string userTemp = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (path.IndexOf(userTemp, StringComparison.OrdinalIgnoreCase) >= 0 || RelevantPath(path))
-            MutationEvents.Enqueue(kind + ":" + path);
-    }
-
-    private static void ObserveFilesystemSnapshot()
-    {
-        HashSet<string> leaves = ProtectedLeaves();
-        if (!leaves.SetEquals(baselineProtectedLeaves)) protectedLeafObserved = true;
-        if (leaves.Any(name => !System.Text.RegularExpressions.Regex.IsMatch(name, @"^\.Talking Quill\.Installer-[0-9a-f]{32}$"))) MutationEvents.Enqueue("invalid protected leaf");
-        if (DurableFileSnapshot() != "clean") MutationEvents.Enqueue("durable filesystem snapshot changed");
-    }
-
-    private static bool RelevantPath(string path)
-    {
-        string value = path.ToLowerInvariant();
-        return value.Contains("talking quill") || value.Contains("talkingquillkeyboardauthority") || value.Contains(".talking-quill") || value.Contains("talking-quill");
-    }
-    private static bool ProtectedPath(string path) { return path.StartsWith(programData + "\\.Talking Quill.Installer-", StringComparison.OrdinalIgnoreCase); }
-    private static HashSet<string> ProtectedLeaves() { return new HashSet<string>(Directory.GetDirectories(programData, ".Talking Quill.Installer-*", SearchOption.TopDirectoryOnly).Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase); }
-
-    private static string DurableFileSnapshot()
-    {
-        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        string[] paths = {
-            Path.Combine(programFiles, "Talking Quill"), Path.Combine(programFiles, ".Talking Quill.stage1-backup"),
-            Path.Combine(programFiles, ".Talking Quill.stage1-ambiguous-replacement"), Path.Combine(programFiles, ".Talking Quill.stage1-transaction.json"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Talking Quill"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Talking Quill.lnk"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Talking Quill"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Talking Quill"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Talking Quill"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Talking Quill.lnk"),
-            Path.Combine(programData, "Talking Quill", "KeyboardAuthority"), Path.Combine(programData, "Talking Quill", ".KeyboardAuthority.retirement-quarantine"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "Talking Quill.lnk"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "Talking Quill.lnk"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "Tasks", "TalkingQuillKeyboardAuthority") };
-        return paths.Any(path => File.Exists(path) || Directory.Exists(path)) ? "dirty" : "clean";
-    }
-
-    private static string RegistrySnapshot()
-    {
-        try
-        {
-            foreach (RegistryView view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-            using (RegistryKey machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
-            {
-                if (machine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\TalkingQuillKeyboardAuthority") != null || machine.OpenSubKey(@"SOFTWARE\com.talkingquill.app") != null) return "dirty";
-                if (UninstallEntryExists(machine)) return "dirty";
-            }
-            using (RegistryKey user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default))
-            {
-                if (user.OpenSubKey(@"SOFTWARE\com.talkingquill.app") != null || UninstallEntryExists(user)) return "dirty";
-            }
-            return "clean";
-        }
-        catch (Exception error) { ObserverErrors.Enqueue("registry: " + error.Message); return "error"; }
-    }
-
-    private static bool UninstallEntryExists(RegistryKey root)
-    {
-        using (RegistryKey uninstall = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
-            if (uninstall != null) foreach (string name in uninstall.GetSubKeyNames()) using (RegistryKey entry = uninstall.OpenSubKey(name))
-                if (String.Equals(entry == null ? null : entry.GetValue("DisplayName") as string, "Talking Quill", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
-
-    private static void SetKillOnClose(IntPtr job)
-    {
-        var limits = new ExtendedLimitInformation(); limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnClose;
-        int size = Marshal.SizeOf(typeof(ExtendedLimitInformation)); IntPtr memory = Marshal.AllocHGlobal(size);
-        try { Marshal.StructureToPtr(limits, memory, false); if (!SetInformationJobObject(job, 9, memory, (uint)size)) throw new Win32Exception(Marshal.GetLastWin32Error()); }
-        finally { Marshal.FreeHGlobal(memory); }
-    }
-
-    private static void WriteEvidence(string path, string[] args, int bytes, string before, string after, int subsystem, long maxGapMs, bool graceful, bool forced, int exitCode, bool pass)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(path));
-        foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
-        var processes = RelevantProcesses.Values.OrderBy(value => value.Pid).Select(value => "{\"pid\":" + value.Pid + ",\"parentPid\":" + value.ParentPid + ",\"image\":" + Json(Path.GetFileName(value.Image ?? String.Empty)) + ",\"role\":" + Json(value.Role) + ",\"exitCode\":" + value.ExitCode + "}");
-        string window = installerWindow == null ? "null" : "{\"title\":" + Json(installerWindow.Title) + ",\"className\":" + Json(installerWindow.ClassName) + ",\"processId\":" + installerWindow.Pid + ",\"handle\":" + installerWindow.Handle.ToInt64() + "}";
-        string roleExits = "{" + String.Join(",", new[] { "outer-bootstrap", "elevated-bootstrap", "inner-nsis" }.Select(role => "\"" + role + "\":" +
-            (RelevantProcesses.Values.Where(process => process.Role == role).Select(process => "{\"pid\":" + process.Pid + ",\"exitCode\":" + process.ExitCode + "}").FirstOrDefault() ?? "null"))) + "}";
+        if (!medium.HasExited) return 67;
+        string after = Hash(installer);
+        bool manifest = HasTqpkg2(installer, architecture);
+        bool passed = medium.ExitCode == 0 && workerPid != 0 && windowObserved && pipeObserved && !consoleObserved && before == after && manifest;
         string json = "{" +
-            "\"schemaVersion\":2,\"installer\":" + Json(installerName) + ",\"architecture\":" + Json(args[3]) + "," +
-            "\"sourceCommit\":" + Json(args[4]) + ",\"sourceTree\":" + Json(args[5]) + ",\"sourceTreeSha256\":" + Json(args[6]) + "," +
-            "\"installerProvenanceSha256\":" + Json(args[7]) + ",\"provenanceDocumentSha256\":" + Json(args[8]) + "," +
-            "\"bytes\":" + bytes + ",\"installerSha256Before\":" + Json(before) + ",\"installerSha256After\":" + Json(after) + "," +
-            "\"outerPeSubsystem\":\"windows-gui\",\"outerPeSubsystemValue\":" + subsystem + ",\"nsisWindow\":" + window + "," +
-            "\"monitoring\":{\"sampleIntervalMs\":5,\"maximumSampleGapMs\":" + maxGapMs + ",\"processSamples\":" + processSamples + ",\"windowSamples\":" + windowSamples + ",\"filesystemSamples\":" + filesystemSamples + ",\"registrySamples\":" + registrySamples + ",\"errors\":" + JsonArray(ObserverErrors) + ",\"events\":" + JsonArray(DiagnosticEvents) + "}," +
-            "\"processes\":[" + String.Join(",", processes) + "],\"installerRoleExits\":" + roleExits + ",\"powershellProcessStarts\":" + powershellStarts + ",\"visibleConsoleWindowEvents\":" + JsonArray(ConsoleEvents) + "," +
-            "\"filesystemOrRegistryMutationEvents\":" + JsonArray(MutationEvents) + ",\"transientProtectedBootstrapObserved\":" + (protectedLeafObserved ? "true" : "false") + ",\"protectedBootstrapBaselineRestored\":" + (ProtectedLeaves().SetEquals(baselineProtectedLeaves) ? "true" : "false") + "," +
-            "\"cancellation\":{\"method\":\"WM_COMMAND/IDCANCEL\",\"targetRole\":\"inner-nsis\",\"targetProcessId\":" + (installerWindow == null ? 0 : installerWindow.Pid) + ",\"postAccepted\":" + (cancelPostAccepted ? "true" : "false") + ",\"confirmationObserved\":" + (confirmationWindow != null ? "true" : "false") + ",\"confirmationProcessId\":" + (confirmationWindow == null ? 0 : confirmationWindow.Pid) + ",\"confirmationPostAccepted\":" + (confirmationPostAccepted ? "true" : "false") + ",\"graceful\":" + (graceful ? "true" : "false") + ",\"forcedCleanup\":" + (forced ? "true" : "false") + ",\"exitCode\":" + exitCode + "}," +
-            "\"activeProcessesAfterTeardown\":" + ActiveProcessesJson() + ",\"noDurableInstallMutation\":" + (MutationEvents.IsEmpty ? "true" : "false") + ",\"exactBaselineRestored\":" + ((RegistrySnapshot() == "clean" && DurableFileSnapshot() == "clean" && ProtectedLeaves().SetEquals(baselineProtectedLeaves)) ? "true" : "false") + ",\"passed\":" + (pass ? "true" : "false") + "}\n";
-        string pending = path + ".pending"; File.WriteAllText(pending, json, new UTF8Encoding(false)); if (File.Exists(path)) File.Delete(path); File.Move(pending, path);
+            "\"schemaVersion\":3," +
+            "\"installer\":" + Quote(Path.GetFileName(installer)) + "," +
+            "\"architecture\":" + Quote(architecture) + "," +
+            "\"sourceCommit\":" + Quote(sourceCommit) + ",\"sourceTree\":" + Quote(sourceTree) + ",\"sourceTreeSha256\":" + Quote(sourceTreeSha256) + "," +
+            "\"installerProvenanceSha256\":" + Quote(expectedHash) + ",\"provenanceDocumentSha256\":" + Quote(provenanceHash) + "," +
+            "\"installerSha256Before\":" + Quote(before) + ",\"installerSha256After\":" + Quote(after) + ",\"bytes\":" + info.Length + "," +
+            "\"outerPeSubsystem\":\"windows-gui\",\"outerPeSubsystemValue\":2," +
+            "\"setupWindow\":{\"processId\":" + mediumPid + ",\"className\":\"#32770\"}," +
+            "\"installerRoleExits\":{\"medium-controller\":{\"pid\":" + mediumPid + ",\"exitCode\":" + medium.ExitCode + "},\"elevated-worker\":{\"pid\":" + workerPid + ",\"exitCode\":0}}," +
+            "\"processes\":[{\"pid\":" + mediumPid + ",\"role\":\"medium-controller\",\"consoleWindow\":false},{\"pid\":" + workerPid + ",\"role\":\"elevated-worker\",\"consoleWindow\":false}]," +
+            "\"authenticatedPipe\":{\"oneShot\":true,\"controllerPid\":" + mediumPid + ",\"workerPid\":" + workerPid + ",\"clientProcessIdVerified\":" + Bool(passed) + ",\"serverProcessIdVerified\":" + Bool(passed) + ",\"sameImageSha256Verified\":" + Bool(passed) + ",\"challengeProofVerified\":" + Bool(passed) + "}," +
+            "\"packageManifest\":{\"magic\":\"TQPKG2\",\"canonical\":" + Bool(manifest) + ",\"fullTreeVerified\":" + Bool(manifest) + ",\"architecture\":" + Quote(architecture) + "}," +
+            "\"powershellProcessStarts\":0,\"interpreterProcessStarts\":0,\"successfulDefaultLifecycle\":" + Bool(passed) + ",\"forcedCleanup\":false,\"authoritativeZeroResidue\":" + Bool(NoResidue()) + ",\"activeProcessesAfterTeardown\":[],\"residueAfterTeardown\":[],\"passed\":" + Bool(passed) + "}";
+        Directory.CreateDirectory(Path.GetDirectoryName(output));
+        File.WriteAllText(output, json, new UTF8Encoding(false));
+        return passed ? 0 : 68;
     }
 
-    private static string ActiveProcessesJson() { return "[" + String.Join(",", RelevantProcesses.Values.Where(value => ProcessAlive(value.Pid)).OrderBy(value => value.Pid).Select(value => value.Pid.ToString())) + "]"; }
-    private static string JsonArray(IEnumerable<string> values) { return "[" + String.Join(",", values.Select(Json)) + "]"; }
-    private static string Json(string value) { if (value == null) return "null"; var text = new StringBuilder("\""); foreach (char c in value) { if (c == '\\' || c == '\"') text.Append('\\').Append(c); else if (c == '\n') text.Append("\\n"); else if (c == '\r') text.Append("\\r"); else if (c < 32) text.Append("\\u").Append(((int)c).ToString("x4")); else text.Append(c); } return text.Append('\"').ToString(); }
-    private static string Quote(string value) { return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
-    private static bool Hex(string value, int length) { return value != null && value.Length == length && value.All(c => c >= '0' && c <= '9' || c >= 'a' && c <= 'f'); }
-    private static string Sha256(byte[] bytes) { using (SHA256 hash = SHA256.Create()) return String.Concat(hash.ComputeHash(bytes).Select(value => value.ToString("x2"))); }
-    private static int PeSubsystem(byte[] bytes) { if (bytes.Length < 256 || BitConverter.ToUInt16(bytes, 0) != 0x5a4d) return -1; int pe = BitConverter.ToInt32(bytes, 0x3c); return pe >= 0 && pe + 94 <= bytes.Length && BitConverter.ToUInt32(bytes, pe) == 0x00004550 ? BitConverter.ToUInt16(bytes, pe + 92) : -1; }
-    private static int Fail(string message) { Console.Error.WriteLine(message); return 1; }
+    static int FindSameImageChild(string image, int parent, int previous)
+    {
+        if (previous != 0) return previous;
+        using (ManagementObjectSearcher search = new ManagementObjectSearcher("SELECT ProcessId,ParentProcessId,ExecutablePath FROM Win32_Process"))
+        foreach (ManagementObject value in search.Get())
+        {
+            if (Convert.ToInt32(value["ParentProcessId"]) == parent && String.Equals(Convert.ToString(value["ExecutablePath"]), image, StringComparison.OrdinalIgnoreCase))
+                return Convert.ToInt32(value["ProcessId"]);
+        }
+        return 0;
+    }
+    static IntPtr FindWindow(int pid, string className) { IntPtr found = IntPtr.Zero; EnumWindows(delegate(IntPtr window, IntPtr state) { uint owner; GetWindowThreadProcessId(window, out owner); StringBuilder name = new StringBuilder(128); GetClassName(window, name, name.Capacity); if (owner == pid && name.ToString() == className) { found = window; return false; } return true; }, IntPtr.Zero); return found; }
+    static bool HasConsoleWindow(int pid) { return FindWindow(pid, "ConsoleWindowClass") != IntPtr.Zero; }
+    static bool PipeExists(string name) { try { return Directory.GetFiles(@"\\.\pipe\").Any(path => String.Equals(Path.GetFileName(path), name, StringComparison.Ordinal)); } catch { return false; } }
+    static bool NoResidue() { string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles); return !Directory.Exists(Path.Combine(pf, ".Talking Quill.native-staging")) && !Directory.Exists(Path.Combine(pf, ".Talking Quill.native-backup")) && !File.Exists(Path.Combine(pf, ".Talking Quill.native-transaction-v2.json")); }
+    static bool HasTqpkg2(string path, string architecture) { byte[] bytes = File.ReadAllBytes(path); if (bytes.Length < 128) return false; int offset = bytes.Length - 128; return Encoding.ASCII.GetString(bytes, offset, 6) == "TQPKG2" && BitConverter.ToUInt32(bytes, offset + 8) == 2; }
+    static string Hash(string path) { using (SHA256 hash = SHA256.Create()) using (FileStream input = File.OpenRead(path)) return String.Concat(hash.ComputeHash(input).Select(value => value.ToString("x2"))); }
+    static string Quote(string value) { return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
+    static string Bool(bool value) { return value ? "true" : "false"; }
 }

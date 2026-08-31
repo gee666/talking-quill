@@ -66,8 +66,11 @@ export async function runProductionPhase(phase, input, state, os) {
     assertInstalled(predecessor, input.artifacts.predecessor);
     await os.machineQuit();
     await os.pollRuntimeExit(30_000);
-    await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [0]);
-    const candidate = observe('installed-candidate', await installed());
+    await spawnAuthenticatedUpdate(input.artifacts.candidate, os, observations);
+    const candidate = observe(
+      'installed-candidate',
+      await waitForInstalledArtifact(input.artifacts.candidate, installed, os),
+    );
     assertInstalled(candidate, input.artifacts.candidate);
     return pass(observations, { predecessorAuthenticated: true, candidateInstalled: true });
   }
@@ -229,7 +232,7 @@ export async function runProductionPhase(phase, input, state, os) {
     await os.ensureApplicationRunning();
     const before = observe('repair-before', await installed());
     const beforeSentinel = observe('repair-sentinel-before', await sentinel());
-    await spawnFrozen(input.artifacts.candidate, ['/S', '/TQMODE=repair'], os, observations, [0]);
+    await spawnFrozen(input.artifacts.candidate, ['/S'], os, observations, [78]);
     const after = observe('repair-after', await installed());
     const afterSentinel = observe('repair-sentinel-after', await sentinel());
     assertInstalled(before, input.artifacts.candidate);
@@ -239,7 +242,7 @@ export async function runProductionPhase(phase, input, state, os) {
       'Repair changed profile sentinel',
     );
     return pass(observations, {
-      authenticatedRepair: true,
+      unauthorizedDirectRepairRejected: true,
       sameCandidate: true,
       sentinelPreserved: true,
     });
@@ -249,16 +252,16 @@ export async function runProductionPhase(phase, input, state, os) {
     const machineBefore = observe('fault-machine-before', await os.observeMachineResidue());
     await spawnFrozen(
       input.artifacts.fault,
-      ['/S', '/TALKINGQUILLTESTCOMMITFAIL=before-program-files-replace'],
+      ['/TALKINGQUILLTESTCOMMITFAIL=before-program-files-replace'],
       os,
       observations,
-      [70],
+      [64],
     );
     const after = observe('fault-after', await installed());
     const machineAfter = observe('fault-machine-after', await os.observeMachineResidue());
     requireValue(
       input.artifacts.fault.isolatedValidation === true,
-      'Fault artifact is not an authenticated isolated-validation build',
+      'Rejected legacy fault artifact is not an isolated-validation build',
     );
     requireValue(
       before.releaseBuildDigest === after.releaseBuildDigest &&
@@ -273,8 +276,8 @@ export async function runProductionPhase(phase, input, state, os) {
       'Rollback machine state is invalid',
     );
     return pass(observations, {
-      failureInjected: true,
-      predecessorRestored: true,
+      unsupportedFaultAuthorityRejected: true,
+      predecessorPreserved: true,
       mixedAuthorityAbsent: true,
     });
   }
@@ -412,6 +415,31 @@ export async function runProductionPhase(phase, input, state, os) {
     });
   }
   throw new Error(`Unknown installed acceptance phase: ${phase}`);
+}
+
+async function waitForInstalledArtifact(artifact, observeInstalled, os) {
+  const deadline = Date.now() + 180_000;
+  while (true) {
+    const identity = await observeInstalled();
+    if (identity.releaseBuildDigest === artifact.metadata.releaseBuildDigest) return identity;
+    requireValue(Date.now() < deadline, 'Authenticated update did not commit before timeout');
+    await (os.sleep?.(250) ?? new Promise((resolvePromise) => setTimeout(resolvePromise, 250)));
+  }
+}
+
+async function spawnAuthenticatedUpdate(artifact, os, observations) {
+  const observed = await os.hashFile(artifact.installer.path);
+  observations.push({
+    kind: 'pre-spawn-artifact-hash',
+    observedAt: os.utcNow(),
+    value: { bytes: observed.bytes, sha256: observed.sha256 },
+  });
+  requireValue(
+    observed.sha256 === artifact.installer.sha256 && observed.bytes === artifact.installer.bytes,
+    'Frozen installer was substituted before authenticated update launch',
+  );
+  const launch = await os.spawnAuthenticatedUpdate(artifact);
+  observations.push({ kind: 'authenticated-predecessor-update', observedAt: os.utcNow(), value: launch });
 }
 
 async function spawnFrozen(artifact, arguments_, os, observations, acceptedExitCodes) {
@@ -731,6 +759,23 @@ export function createWindowsOsAdapter(acceptance = {}) {
         'Trusted process guard returned invalid evidence',
       );
       return evidence;
+    },
+    spawnAuthenticatedUpdate: async (artifact) => {
+      const request = Buffer.from(
+        JSON.stringify({
+          version: 2,
+          installerPath: artifact.installer.path,
+          sha256: artifact.installer.sha256,
+          candidate: artifact.metadata,
+        }),
+        'utf8',
+      ).toString('base64');
+      return spawnObserved({
+        executable: resolve(installedRoot, 'resources/helper/talking-quill-helper.exe'),
+        arguments: [`--windows-update-bootstrap-v2=${request}`],
+        timeoutMs: 180_000,
+        acceptedExitCodes: [0],
+      });
     },
     spawnTrustedInstaller: async (request) => {
       requireValue(broker !== undefined, 'Trusted acceptance broker is unavailable');

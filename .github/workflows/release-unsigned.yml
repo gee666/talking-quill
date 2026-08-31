@@ -1,4 +1,4 @@
-name: Build Windows x64 and ARM64 NSIS release candidates
+name: Build Windows x64 and ARM64 native setup release candidates
 
 on:
   workflow_dispatch:
@@ -12,11 +12,11 @@ on:
         required: true
         type: string
       predecessor_x64_installer_url:
-        description: HTTPS URL for the exact published x64 predecessor NSIS installer
+        description: HTTPS URL for the exact published x64 predecessor native setup installer
         required: true
         type: string
       predecessor_x64_installer_sha256:
-        description: Exact published x64 predecessor NSIS SHA-256
+        description: Exact published x64 predecessor native setup SHA-256
         required: true
         type: string
       predecessor_x64_gateway_sha256:
@@ -48,11 +48,11 @@ on:
         required: true
         type: string
       predecessor_arm64_installer_url:
-        description: HTTPS URL for the exact published ARM64 predecessor NSIS installer
+        description: HTTPS URL for the exact published ARM64 predecessor native setup installer
         required: true
         type: string
       predecessor_arm64_installer_sha256:
-        description: Exact published ARM64 predecessor NSIS SHA-256
+        description: Exact published ARM64 predecessor native setup SHA-256
         required: true
         type: string
       predecessor_arm64_gateway_sha256:
@@ -128,7 +128,7 @@ jobs:
       - run: pnpm security:gate
 
   package:
-    name: Package and preserve Windows ${{ matrix.arch }} NSIS
+    name: Package and preserve Windows ${{ matrix.arch }} native setup
     needs: validate
     runs-on: windows-latest
     environment: release-signing
@@ -149,10 +149,10 @@ jobs:
       TALKING_QUILL_RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
       TALKING_QUILL_RELEASE_TREE: ${{ needs.validate.outputs.release_tree }}
       TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'
-      TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: nsis
+      TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: native-setup
       TALKING_QUILL_PACKAGE_TARGET: win
       TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
-      TALKING_QUILL_PACKAGE_MODE: update
+      TALKING_QUILL_PACKAGE_MODE: release
       TALKING_QUILL_PREDECESSOR_VERSION: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_version || inputs.predecessor_arm64_version }}
       TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_release_build || inputs.predecessor_arm64_release_build }}
       TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_gateway_sha256 || inputs.predecessor_arm64_gateway_sha256 }}
@@ -196,7 +196,7 @@ jobs:
           $env:TALKING_QUILL_PREDECESSOR_OWNER_PATH = $owner
           node -e "import('./scripts/release-package-metadata.mjs').then(({readPackagePredecessor})=>{const fs=require('fs');readPackagePredecessor(process.env,'win','${{ matrix.arch }}');fs.appendFileSync(process.env.GITHUB_ENV,'TALKING_QUILL_PREDECESSOR_GATEWAY_PATH='+process.env.TALKING_QUILL_PREDECESSOR_GATEWAY_PATH+'\nTALKING_QUILL_PREDECESSOR_OWNER_PATH='+process.env.TALKING_QUILL_PREDECESSOR_OWNER_PATH+'\n')})"
       - run: node scripts/prepare-seven-zip.mjs x64
-      # Invoke the app package command directly. It builds and inspects the NSIS
+      # Invoke the app package command directly. It builds and inspects the native setup
       # before any source-test ABI restoration or installed lifecycle work.
       - run: pnpm --filter @talking-quill/app ${{ matrix.package_script }}
       # Canonical staging binds the exact installer bytes to the two-role
@@ -215,10 +215,10 @@ jobs:
           node scripts/assemble-release.mjs "$tag" tmp/release-upload
       # Transfer the provenance-bound bytes to the architecture-native smoke
       # runner. No evidence exists until that runner exercises these exact bytes.
-      - name: Upload provenance-bound exact NSIS smoke input
+      - name: Upload provenance-bound exact native setup smoke input
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-exact-nsis-input
+          name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: |
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe.blockmap
@@ -232,7 +232,7 @@ jobs:
           retention-days: 14
 
   smoke:
-    name: Smoke exact Windows ${{ matrix.arch }} NSIS on native hardware
+    name: Smoke exact Windows ${{ matrix.arch }} native setup on native hardware
     needs: [validate, package]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -260,7 +260,7 @@ jobs:
           node-version: 24.15.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-${{ matrix.arch }}-exact-nsis-input
+          name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: preserved
       - name: Run native interactive cancellation smoke on exact transferred bytes
         shell: pwsh
@@ -305,7 +305,7 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-${{ matrix.arch }}-exact-nsis-input
+          name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: preserved
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -330,15 +330,29 @@ jobs:
           $actual = (Get-FileHash -LiteralPath $predecessor -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -cne $env:PREDECESSOR_INSTALLER_SHA256) { throw 'Predecessor installer SHA-256 mismatch.' }
           $previous = Start-Process -FilePath $predecessor -ArgumentList '/S' -Wait -PassThru
-          if ($previous.ExitCode -ne 0) { throw "Predecessor NSIS install failed: $($previous.ExitCode)" }
+          if ($previous.ExitCode -ne 0) { throw "Predecessor native setup install failed: $($previous.ExitCode)" }
           $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}.exe)
           if ($installers.Count -ne 1) { throw "Expected one preserved ${{ matrix.arch }} installer, found $($installers.Count)" }
-          $candidate = Start-Process -FilePath $installers[0].FullName -ArgumentList '/S' -Wait -PassThru
-          if ($candidate.ExitCode -ne 0) { throw "Candidate NSIS update failed: $($candidate.ExitCode)" }
+          $identity = Get-Content -LiteralPath preserved/tmp/release-upload/release-identity-win-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
+          $candidateHash = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $request = @{ version = 2; installerPath = $installers[0].FullName; sha256 = $candidateHash; candidate = $identity } | ConvertTo-Json -Depth 20 -Compress
+          $bootstrap = '--windows-update-bootstrap-v2=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
+          $helper = "$env:ProgramFiles\Talking Quill\resources\helper\talking-quill-helper.exe"
+          $candidate = Start-Process -FilePath $helper -ArgumentList $bootstrap -Wait -PassThru
+          if ($candidate.ExitCode -ne 0) { throw "Authenticated predecessor update bootstrap failed: $($candidate.ExitCode)" }
+          $expectedDigest = $identity.releaseBuildDigest
+          $deadline = (Get-Date).AddMinutes(3)
+          do {
+            $installedIdentityPath = "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json"
+            $installedDigest = if (Test-Path -LiteralPath $installedIdentityPath) { (Get-Content -LiteralPath $installedIdentityPath -Raw | ConvertFrom-Json).releaseBuildDigest } else { $null }
+            if ($installedDigest -ceq $expectedDigest) { break }
+            if ((Get-Date) -ge $deadline) { throw 'Authenticated predecessor update did not commit before timeout.' }
+            Start-Sleep -Milliseconds 250
+          } while ($true)
           node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
           $uninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall failed: $($uninstall.ExitCode)" }
+          if ($uninstall.ExitCode -ne 0) { throw "native setup uninstall failed: $($uninstall.ExitCode)" }
 
   assemble:
     name: Checksum preserved Windows x64 installer
@@ -358,11 +372,11 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-x64-exact-nsis-input
+          name: windows-x64-exact-native-setup-input
           path: preserved/x64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-arm64-exact-nsis-input
+          name: windows-arm64-exact-native-setup-input
           path: preserved/arm64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

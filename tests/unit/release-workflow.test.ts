@@ -32,7 +32,7 @@ describe('Windows native release workflow', () => {
     expect(validate).toContain('cargo-audit@0.22.2');
     expect(validate).toContain('pnpm security:gate');
   });
-  it('builds architecture-specific x64 and ARM64 NSIS candidates', () => {
+  it('builds architecture-specific x64 and ARM64 native setup candidates', () => {
     const packageJob = section('package', 'smoke');
     expect(packageJob).toContain('package_script: package:win');
     expect(packageJob).toContain('package_script: package:win:arm64');
@@ -81,7 +81,7 @@ describe('Windows native release workflow', () => {
     const stageCommand = packageJob.indexOf('stage-unsigned-release.mjs win ${{ matrix.arch }}');
     const assembleCommand = packageJob.indexOf('node scripts/assemble-release.mjs');
     const immediateUpload = packageJob.indexOf(
-      'name: Upload provenance-bound exact NSIS smoke input',
+      'name: Upload provenance-bound exact native setup smoke input',
     );
     expect(packageCommand).toBeGreaterThan(-1);
     expect(packageJob).not.toContain('run-windows-installer-ui-smoke.mjs');
@@ -95,10 +95,10 @@ describe('Windows native release workflow', () => {
     expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
     expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
     expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
-    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
     expect(packageJob).not.toContain('tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json');
     expect(smokeJob).toContain('needs: [validate, package]');
-    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
     expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
     expect(smokeJob).toContain('windows-installer-ui-evidence.mjs');
     expect(smokeJob.indexOf('actions/download-artifact')).toBeLessThan(smokeCommand);
@@ -108,7 +108,7 @@ describe('Windows native release workflow', () => {
       'windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked',
     );
     expect(lifecycle).toContain('needs: [validate, package, smoke]');
-    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-nsis-input');
+    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
     expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
     const evidenceValidation = lifecycle.indexOf('windows-installer-ui-evidence.mjs');
     const predecessorInstall = lifecycle.indexOf('Start-Process -FilePath $predecessor');
@@ -116,13 +116,14 @@ describe('Windows native release workflow', () => {
     expect(predecessorInstall).toBeGreaterThan(evidenceValidation);
     expect(lifecycle).toContain('Start-Process -FilePath $predecessor');
     expect(lifecycle).toContain('PREDECESSOR_INSTALLER_SHA256');
-    expect(lifecycle).toContain('Start-Process -FilePath $installers[0].FullName');
+    expect(lifecycle).toContain('--windows-update-bootstrap-v2=');
+    expect(lifecycle).toContain('Start-Process -FilePath $helper');
     expect(lifecycle).toContain('--mode installed --root');
     expect(lifecycle).toContain('Uninstall Talking Quill.exe');
     const assemble = section('assemble');
     expect(assemble).toContain('needs: [validate, package, smoke, lifecycle]');
-    expect(assemble).toContain('windows-x64-exact-nsis-input');
-    expect(assemble).toContain('windows-arm64-exact-nsis-input');
+    expect(assemble).toContain('windows-x64-exact-native-setup-input');
+    expect(assemble).toContain('windows-arm64-exact-native-setup-input');
     expect(assemble).toContain('windows-x64-native-ui-smoke-evidence');
     expect(assemble).toContain('windows-arm64-native-ui-smoke-evidence');
     expect(assemble.match(/windows-installer-ui-evidence\.mjs/gu)).toHaveLength(1);

@@ -141,7 +141,7 @@ async function check(configuration) {
         ...process.env,
         TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
         TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED:
-          configuration.platform === 'win' ? 'nsis' : 'dmg-zip',
+          configuration.platform === 'win' ? 'native-setup' : 'dmg-zip',
         TALKING_QUILL_PACKAGE_TARGET: configuration.platform,
         TALKING_QUILL_PACKAGE_ARCH: configuration.architecture,
       },

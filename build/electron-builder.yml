@@ -87,22 +87,13 @@ win:
   requestedExecutionLevel: asInvoker
   signExts:
     - .exe
+  # electron-builder only freezes the application directory. The Rust setup
+  # image and deterministic TQPKG2 packer own the Windows artifact.
   target:
-    - target: nsis
+    - target: dir
       arch:
         - x64
         - arm64
-nsis:
-  include: installer.nsh
-  oneClick: false
-  perMachine: true
-  allowToChangeInstallationDirectory: false
-  # The elevated installer owns installation only. The user starts the
-  # medium-integrity application after the installer has fully exited.
-  runAfterFinish: false
-  deleteAppDataOnUninstall: false
-  createDesktopShortcut: true
-  createStartMenuShortcut: true
 mac:
   icon: icon.png
   files:

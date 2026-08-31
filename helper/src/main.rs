@@ -28,16 +28,6 @@ fn main() {
         return;
     }
     #[cfg(windows)]
-    if os_arguments.get(1).is_some_and(|value| {
-        value
-            .to_string_lossy()
-            .starts_with("--windows-installer-lifecycle-v1=")
-    }) {
-        std::process::exit(talking_quill_helper::windows_installer::run(
-            &os_arguments[1..],
-        ));
-    }
-    #[cfg(windows)]
     if os_arguments.len() == 2
         && os_arguments.get(1).is_some_and(|value| {
             value

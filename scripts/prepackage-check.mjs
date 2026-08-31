@@ -33,7 +33,7 @@ cleanPriorProvenance();
 cleanTargetArtifacts();
 run('scripts/generate-notices.mjs', ['--check']);
 run('scripts/model-manifest.mjs', ['--check']);
-run('scripts/nsis-uninstall-policy.mjs', []);
+run('scripts/native-installer-policy.mjs', []);
 
 function cleanPriorProvenance() {
   rmSync(resolve(root, 'artifact-provenance.json'), { force: true });

@@ -8,12 +8,12 @@ import {
 } from '../../scripts/run-package.mjs';
 
 const expectedPlans = {
-  win: ['package:win', 'nsis', 'win', 'x64'],
-  'win-arm64': ['package:win:arm64', 'nsis', 'win', 'arm64'],
+  win: ['package:win', 'native-setup', 'win', 'x64'],
+  'win-arm64': ['package:win:arm64', 'native-setup', 'win', 'arm64'],
   'win-dir': ['package:win:dir', 'none', 'win', 'x64'],
   'win-arm64-dir': ['package:win:arm64:dir', 'none', 'win', 'arm64'],
-  'win-unsigned': ['package:win', 'nsis', 'win', 'x64'],
-  'win-arm64-unsigned': ['package:win:arm64:unsigned', 'nsis', 'win', 'arm64'],
+  'win-unsigned': ['package:win', 'native-setup', 'win', 'x64'],
+  'win-arm64-unsigned': ['package:win:arm64:unsigned', 'native-setup', 'win', 'arm64'],
   'mac-x64': ['package:mac:x64', 'dmg-zip', 'mac', 'x64'],
   'mac-arm64': ['package:mac:arm64', 'dmg-zip', 'mac', 'arm64'],
   'mac-x64-unsigned': ['package:mac:x64', 'dmg-zip', 'mac', 'x64'],

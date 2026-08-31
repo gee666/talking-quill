@@ -13,7 +13,7 @@ describe('Windows native architecture policy', () => {
       scripts: Record<string, string>;
     };
 
-    const windows = builder.slice(builder.indexOf('\nwin:'), builder.indexOf('\nnsis:'));
+    const windows = builder.slice(builder.indexOf('\nwin:'), builder.indexOf('\nmac:'));
     expect(windows).toContain('- x64');
     expect(windows).toContain('- arm64');
     expect(helperBuild).not.toContain('Windows x64 native helpers only');

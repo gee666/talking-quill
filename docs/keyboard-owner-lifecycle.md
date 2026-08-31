@@ -146,7 +146,7 @@ Maintenance rollback is an immutable source-to-target transaction and follows th
 
 ## 11. Windows install, repair, update, and uninstall
 
-The elevated NSIS installer asks the installed Electron process to close, then waits for the gateway and owner to exit. It never terminates an owner whose neutrality is unknown. If the owner does not drain within the bound, replacement stops before moving machine files.
+The elevated native setup installer asks the installed Electron process to close, then waits for the gateway and owner to exit. It never terminates an owner whose neutrality is unknown. If the owner does not drain within the bound, replacement stops before moving machine files.
 
 Install and repair move the fixed Program Files predecessor and obsolete ProgramData state to protected recovery locations. The replacement is copied before commit. Commit removes obsolete service registration and ProgramData state while recovery remains available. Recovery deletion is the final step. Any earlier failure runs rollback and restores the predecessor. Uninstall uses the same bounded runtime wait and preserves `%APPDATA%\\Talking Quill` unless the user selects and confirms personal-data removal.
 

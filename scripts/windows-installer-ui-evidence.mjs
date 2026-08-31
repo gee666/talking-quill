@@ -6,23 +6,15 @@ import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
 
 const HEX_40 = /^[0-9a-f]{40}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
-export const WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE = 0;
 
 export function validateWindowsInstallerUiEvidence(value, expected) {
-  const monitoring = value?.monitoring;
-  const cancellation = value?.cancellation;
-  const window = value?.nsisWindow;
-  const installerRoles = ['outer-bootstrap', 'elevated-bootstrap', 'inner-nsis'];
-  const rolePids = installerRoles.map((role) => value?.installerRoleExits?.[role]?.pid);
-  const roleExitsMatchProcesses = installerRoles.every((role) => {
-    const expectedRole = value?.installerRoleExits?.[role];
-    return value?.processes?.some(
-      (process) =>
-        process?.pid === expectedRole?.pid && process?.role === role && process?.exitCode === 0,
-    );
-  });
+  const roles = ['medium-controller', 'elevated-worker'];
+  const exits = value?.installerRoleExits;
+  const pids = roles.map((role) => exits?.[role]?.pid);
+  const pipe = value?.authenticatedPipe;
+  const manifest = value?.packageManifest;
   if (
-    value?.schemaVersion !== 2 ||
+    value?.schemaVersion !== 3 ||
     value.installer !== expected.installer ||
     value.architecture !== expected.architecture ||
     value.sourceCommit !== expected.sourceCommit ||
@@ -35,59 +27,46 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
     value.bytes !== expected.bytes ||
     value.outerPeSubsystem !== 'windows-gui' ||
     value.outerPeSubsystemValue !== 2 ||
-    window?.className !== '#32770' ||
-    typeof window.title !== 'string' ||
-    !window.title.toLowerCase().includes('talking quill') ||
-    !Number.isSafeInteger(window.processId) ||
-    window.processId < 1 ||
-    monitoring?.sampleIntervalMs !== 5 ||
-    !Number.isSafeInteger(monitoring.maximumSampleGapMs) ||
-    monitoring.maximumSampleGapMs > 50 ||
-    monitoring.maximumSampleGapMs < 0 ||
-    !['processSamples', 'windowSamples', 'filesystemSamples', 'registrySamples'].every(
-      (name) => Number.isSafeInteger(monitoring[name]) && monitoring[name] >= 2,
-    ) ||
-    !Array.isArray(monitoring.errors) ||
-    monitoring.errors.length !== 0 ||
-    !Array.isArray(monitoring.events) ||
-    monitoring.events.length === 0 ||
-    !Array.isArray(value.visibleConsoleWindowEvents) ||
-    value.visibleConsoleWindowEvents.length !== 0 ||
-    !Array.isArray(value.filesystemOrRegistryMutationEvents) ||
-    value.filesystemOrRegistryMutationEvents.length !== 0 ||
-    !Array.isArray(value.processes) ||
-    value.processes.length < 3 ||
-    !installerRoles.every(
+    value.setupWindow?.processId !== exits?.['medium-controller']?.pid ||
+    value.setupWindow?.className !== '#32770' ||
+    !roles.every(
       (role) =>
-        value.installerRoleExits?.[role]?.exitCode === 0 &&
-        Number.isSafeInteger(value.installerRoleExits[role].pid) &&
-        value.installerRoleExits[role].pid > 0,
+        Number.isSafeInteger(exits?.[role]?.pid) &&
+        exits[role].pid > 0 &&
+        exits[role].exitCode === 0,
     ) ||
-    new Set(rolePids).size !== installerRoles.length ||
-    !roleExitsMatchProcesses ||
-    window?.processId !== value.installerRoleExits['inner-nsis'].pid ||
+    new Set(pids).size !== 2 ||
+    !roles.every((role) =>
+      value.processes?.some(
+        (process) =>
+          process.pid === exits[role].pid &&
+          process.role === role &&
+          process.consoleWindow === false,
+      ),
+    ) ||
+    pipe?.oneShot !== true ||
+    pipe?.controllerPid !== exits['medium-controller'].pid ||
+    pipe?.workerPid !== exits['elevated-worker'].pid ||
+    pipe?.clientProcessIdVerified !== true ||
+    pipe?.serverProcessIdVerified !== true ||
+    pipe?.sameImageSha256Verified !== true ||
+    pipe?.challengeProofVerified !== true ||
+    manifest?.magic !== 'TQPKG2' ||
+    manifest?.canonical !== true ||
+    manifest?.fullTreeVerified !== true ||
+    manifest?.architecture !== expected.architecture ||
     value.powershellProcessStarts !== 0 ||
-    value.transientProtectedBootstrapObserved !== true ||
-    value.protectedBootstrapBaselineRestored !== true ||
-    cancellation?.method !== 'WM_COMMAND/IDCANCEL' ||
-    cancellation.targetRole !== 'inner-nsis' ||
-    cancellation.targetProcessId !== window.processId ||
-    cancellation.postAccepted !== true ||
-    typeof cancellation.confirmationObserved !== 'boolean' ||
-    typeof cancellation.confirmationPostAccepted !== 'boolean' ||
-    (cancellation.confirmationObserved &&
-      (cancellation.confirmationProcessId !== window.processId ||
-        cancellation.confirmationPostAccepted !== true)) ||
-    cancellation.graceful !== true ||
-    cancellation.forcedCleanup !== false ||
-    cancellation.exitCode !== WINDOWS_INSTALLER_UI_CANCELLATION_EXIT_CODE ||
+    value.interpreterProcessStarts !== 0 ||
+    value.successfulDefaultLifecycle !== true ||
+    value.forcedCleanup !== false ||
+    value.authoritativeZeroResidue !== true ||
     !Array.isArray(value.activeProcessesAfterTeardown) ||
     value.activeProcessesAfterTeardown.length !== 0 ||
-    value.noDurableInstallMutation !== true ||
-    value.exactBaselineRestored !== true ||
+    !Array.isArray(value.residueAfterTeardown) ||
+    value.residueAfterTeardown.length !== 0 ||
     value.passed !== true
   ) {
-    throw new Error('Windows installer UI smoke evidence is not promotable');
+    throw new Error('Windows native setup UI evidence is not promotable');
   }
   return value;
 }
@@ -117,10 +96,9 @@ export async function verifyWindowsInstallerUiEvidence({
     !HEX_64.test(provenance.sourceTreeSha256) ||
     finalEntries.length !== 1 ||
     basename(finalEntries[0].path) !== basename(installerPath) ||
-    !HEX_64.test(finalEntries[0].sha256) ||
     finalEntries[0].sha256 !== installerSha256
   ) {
-    throw new Error('Windows installer UI smoke does not match exact artifact provenance');
+    throw new Error('Windows native setup UI smoke does not match exact artifact provenance');
   }
   return validateWindowsInstallerUiEvidence(JSON.parse(evidenceSource), {
     installer: basename(installerPath),
@@ -138,22 +116,19 @@ function argument(name) {
   const index = process.argv.indexOf(name);
   return index < 0 ? undefined : process.argv[index + 1];
 }
-
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const evidencePath = argument('--evidence');
   const installerPath = argument('--installer');
   const provenancePath = argument('--provenance');
   const architecture = argument('--arch');
-  if ([evidencePath, installerPath, provenancePath, architecture].some((value) => !value)) {
+  if ([evidencePath, installerPath, provenancePath, architecture].some((value) => !value))
     throw new Error(
       'Usage: windows-installer-ui-evidence --evidence <json> --installer <exe> --provenance <json> --arch <x64|arm64>',
     );
-  }
   await verifyWindowsInstallerUiEvidence({
     evidencePath: resolve(evidencePath),
     installerPath: resolve(installerPath),
     provenancePath: resolve(provenancePath),
     architecture,
   });
-  console.log(`Windows ${architecture} installer UI smoke evidence verified.`);
 }

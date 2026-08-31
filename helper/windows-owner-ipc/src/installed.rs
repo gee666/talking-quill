@@ -179,10 +179,10 @@ impl InstalledRelease {
                 != Some(manifest.source_tree.as_str())
             || manifest.roles.len() != 2
             || manifest.update.channel != format!("latest-{architecture}")
-            || manifest.update.payload != "nsis"
+            || manifest.update.payload != "tqpkg2"
             || manifest.update.companion.is_some()
             || manifest.update.transaction_binding != "source-target-package-sha256-v1"
-            || manifest.update.maintenance_installer != "elevated-nsis"
+            || manifest.update.maintenance_installer != "native-setup"
         {
             return Err(InstalledReleaseError::Manifest);
         }
@@ -587,7 +587,7 @@ mod tests {
             "predecessor": predecessor,
             "releaseBuildDigest": hex(&[0;32]),
             "packageLayoutDigest": hex(&[0;32]),
-            "update": {"channel":format!("latest-{architecture}"),"payload":"nsis","companion":null,"transactionBinding":"source-target-package-sha256-v1","maintenanceInstaller":"elevated-nsis"}
+            "update": {"channel":format!("latest-{architecture}"),"payload":"tqpkg2","companion":null,"transactionBinding":"source-target-package-sha256-v1","maintenanceInstaller":"native-setup"}
         });
         if predecessor.is_null() {
             value["freshInstall"] = true.into();

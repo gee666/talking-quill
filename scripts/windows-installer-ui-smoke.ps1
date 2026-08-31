@@ -8,8 +8,8 @@ param(
 $ErrorActionPreference = [Management.Automation.ActionPreference]::Stop
 if (-not $IsWindows -and $env:OS -ne 'Windows_NT') { throw 'The installer UI smoke gate requires Windows.' }
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'The disposable installer UI smoke gate must run elevated.'
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'The native setup UI smoke must start at medium integrity so it can observe the UAC boundary.'
 }
 $nativeArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $expectedNativeArchitecture = if ($Architecture -ceq 'arm64') { 'Arm64' } else { 'X64' }

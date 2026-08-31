@@ -442,6 +442,10 @@ describe('installed Windows acceptance executor', () => {
         calls.push(`spawn:${request.installer.path}`);
         return Promise.resolve({ exitCode: 0, evidence: { result: 'passed' } });
       }),
+      spawnAuthenticatedUpdate: vi.fn((artifact: { installer: { path: string } }) => {
+        calls.push(`authenticated-update:${artifact.installer.path}`);
+        return Promise.resolve({ result: 'passed' });
+      }),
       machineQuit: vi.fn(() => Promise.resolve()),
       pollRuntimeExit: vi.fn(() => Promise.resolve()),
       observeInstalledIdentity: vi.fn(() =>
@@ -465,7 +469,7 @@ describe('installed Windows acceptance executor', () => {
       'hash:predecessor.exe',
       'spawn:predecessor.exe',
       'hash:candidate.exe',
-      'spawn:candidate.exe',
+      'authenticated-update:candidate.exe',
     ]);
   });
 

@@ -8,13 +8,13 @@ export const CANONICAL_PACKAGE_TARGETS = Object.freeze(['win', 'win-arm64']);
 const PACKAGE_TARGETS = Object.freeze({
   win: Object.freeze({
     command: 'package:win',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'x64',
   }),
   'win-arm64': Object.freeze({
     command: 'package:win:arm64',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'arm64',
   }),
@@ -32,26 +32,26 @@ const PACKAGE_TARGETS = Object.freeze({
   }),
   'win-unsigned': Object.freeze({
     command: 'package:win',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'x64',
   }),
   'win-arm64-unsigned': Object.freeze({
     command: 'package:win:arm64:unsigned',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'arm64',
   }),
   'win-installed-acceptance': Object.freeze({
     command: 'package:win:installed-acceptance',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'x64',
     acceptance: true,
   }),
   'win-arm64-installed-acceptance': Object.freeze({
     command: 'package:win:arm64:installed-acceptance',
-    artifactRequirement: 'nsis',
+    artifactRequirement: 'native-setup',
     platform: 'win',
     architecture: 'arm64',
     acceptance: true,
@@ -118,7 +118,7 @@ function main() {
   let failure = null;
   try {
     runPnpm(pnpmCli, plan.pnpmArguments, environment);
-    if (plan.platform === 'win' && plan.artifactRequirement === 'nsis') {
+    if (plan.platform === 'win' && plan.artifactRequirement === 'native-setup') {
       runNode('scripts/run-windows-installer-ui-smoke.mjs', environment);
     }
   } catch (error) {

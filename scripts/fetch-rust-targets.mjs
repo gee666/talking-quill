@@ -14,7 +14,7 @@ const targets = [
 for (const target of targets) {
   for (const manifest of [
     'helper/Cargo.toml',
-    ...(target.includes('windows') ? ['installer/windows-bootstrap/Cargo.toml'] : []),
+    ...(target.includes('windows') ? ['installer/windows-setup/Cargo.toml'] : []),
   ]) {
     const result = spawnSync(
       cargo,

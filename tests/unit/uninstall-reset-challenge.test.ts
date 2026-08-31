@@ -15,7 +15,7 @@ afterEach(async () => removeTestDirectory(temporary));
 
 describe('uninstall reset accidental-invocation challenge', () => {
   it('consumes a matching one-time file below the OS temporary root', async () => {
-    const plugin = resolve(temporary, 'nsis-random-plugin-dir');
+    const plugin = resolve(temporary, 'native-setup-random-dir');
     const path = resolve(plugin, 'talking-quill-reset.challenge');
     await mkdir(plugin);
     await writeFile(path, plugin);

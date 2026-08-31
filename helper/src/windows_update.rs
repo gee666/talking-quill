@@ -152,7 +152,7 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         .ok_or(EXIT_INVALID_REQUEST)?;
     let result = execute_staged_request(encoded);
     // A timed-out installer still owns the protected staged directory. Keep it
-    // intact for the running NSIS process and a later repair/recovery attempt.
+    // intact for the running native setup process and a later repair/recovery attempt.
     if result != Err(EXIT_INSTALLER_STILL_RUNNING) {
         schedule_staged_cleanup();
     }
@@ -222,7 +222,7 @@ fn execute_staged_request(encoded: &str) -> Result<u32, i32> {
     let request = parse_and_authorize_request(encoded)?;
     let expected_hash = decode_hash(&request.sha256).ok_or(EXIT_INVALID_REQUEST)?;
     let staged = copy_verified_installer(Path::new(&request.installer_path), expected_hash)?;
-    launch_verified_installer(&staged, expected_hash, &request.candidate)
+    launch_verified_installer(&staged, expected_hash)
 }
 
 fn stage_bootstrap(argument: &str) -> Result<(), i32> {
@@ -730,11 +730,7 @@ fn copy_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<PathB
     Ok(target)
 }
 
-fn launch_verified_installer(
-    path: &Path,
-    expected_hash: [u8; 32],
-    candidate: &UpdateCandidate,
-) -> Result<u32, i32> {
+fn launch_verified_installer(path: &Path, expected_hash: [u8; 32]) -> Result<u32, i32> {
     if !path.is_absolute() {
         return Err(EXIT_INVALID_REQUEST);
     }
@@ -745,16 +741,11 @@ fn launch_verified_installer(
         return Err(EXIT_IDENTITY_MISMATCH);
     }
 
-    let gateway = update_role(&candidate.roles, "gateway")?;
-    let owner = update_role(&candidate.roles, "owner")?;
     let mut application = wide_nul(&canonical)?;
-    let mut command = wide_nul(&PathBuf::from(format!(
-        "\"{}\" /S /TQUPDATE=1 /TQGATEWAYHASH={} /TQOWNERHASH={} /TQLAYOUT={}",
-        canonical.display(),
-        gateway.sha256,
-        owner.sha256,
-        candidate.package_layout_digest
-    )))?;
+    // The candidate derives update mode and predecessor identity from its
+    // authenticated TQPKG2 manifest and installed machine state. Arguments
+    // carry no install authority.
+    let mut command = wide_nul(&PathBuf::from(format!("\"{}\" /S", canonical.display())))?;
     let startup = STARTUPINFOW {
         cb: size_of::<STARTUPINFOW>() as u32,
         ..unsafe { std::mem::zeroed() }
@@ -801,7 +792,7 @@ fn launch_verified_installer(
     }
     // The verified copy lives in the elevated bootstrap's protected directory,
     // so same-user code cannot replace it after this point. Release the file
-    // lock because NSIS removes its own executable during normal teardown.
+    // lock because native setup removes its own executable during normal teardown.
     drop(retained);
     let wait = unsafe {
         WaitForSingleObject(

@@ -40,10 +40,10 @@ export interface PackageReleaseMetadata {
   readonly packageLayoutDigest: string;
   readonly update: {
     readonly channel: string;
-    readonly payload: 'nsis' | 'zip';
+    readonly payload: 'tqpkg2' | 'zip';
     readonly companion: 'dmg' | null;
     readonly transactionBinding: 'source-target-package-sha256-v1';
-    readonly maintenanceInstaller: 'elevated-nsis' | 'macos-owner-finalizer';
+    readonly maintenanceInstaller: 'native-setup' | 'macos-owner-finalizer';
   };
 }
 export const RELEASE_PACKAGE_METADATA_NAME: 'keyboard-owner-release-v1.json';

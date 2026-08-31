@@ -90,10 +90,10 @@ export async function createPackageReleaseMetadata({
     packageLayoutDigest: derived,
     update: {
       channel: platform === 'mac' ? `latest-${architecture}-mac` : `latest-${architecture}`,
-      payload: platform === 'win' ? 'nsis' : 'zip',
+      payload: platform === 'win' ? 'tqpkg2' : 'zip',
       companion: platform === 'mac' ? 'dmg' : null,
       transactionBinding: 'source-target-package-sha256-v1',
-      maintenanceInstaller: platform === 'win' ? 'elevated-nsis' : 'macos-owner-finalizer',
+      maintenanceInstaller: platform === 'win' ? 'native-setup' : 'macos-owner-finalizer',
     },
   });
 }
@@ -349,11 +349,11 @@ export function validatePackageReleaseMetadata(value) {
       (value.platform === 'mac'
         ? `latest-${value.architecture}-mac`
         : `latest-${value.architecture}`) ||
-    value.update?.payload !== (value.platform === 'win' ? 'nsis' : 'zip') ||
+    value.update?.payload !== (value.platform === 'win' ? 'tqpkg2' : 'zip') ||
     value.update?.companion !== (value.platform === 'mac' ? 'dmg' : null) ||
     value.update?.transactionBinding !== 'source-target-package-sha256-v1' ||
     value.update?.maintenanceInstaller !==
-      (value.platform === 'win' ? 'elevated-nsis' : 'macos-owner-finalizer')
+      (value.platform === 'win' ? 'native-setup' : 'macos-owner-finalizer')
   ) {
     throw new Error('Package updater identity is invalid');
   }

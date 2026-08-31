@@ -1,13 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   loadMergedElectronBuilderConfig,
   type ElectronBuilderConfig,
 } from '../../scripts/electron-builder-config-policy.mjs';
-import { validateNsisUninstallPolicy } from '../../scripts/nsis-uninstall-policy.mjs';
 import {
   discoverFinalArtifactNames,
   finalArtifactNamesForIdentity,
@@ -791,284 +790,16 @@ describe('packaged runtime allowlist', () => {
     expect(source).not.toContain('rmSync');
   });
 
-  it('keeps uninstall data removal explicit and opt-in', async () => {
-    const [builder, installer] = await Promise.all([
+  it('uses the native TQPKG2 setup policy', async () => {
+    const [builder, setup, packer] = await Promise.all([
       readFile(resolve('build/electron-builder.yml'), 'utf8'),
-      readFile(resolve('build/installer.nsh'), 'utf8'),
+      readFile(resolve('installer/windows-setup/src/windows.rs'), 'utf8'),
+      readFile(resolve('scripts/pack-windows-native.mjs'), 'utf8'),
     ]);
-    expect(builder).toContain('include: installer.nsh');
-    expect(builder).toContain('deleteAppDataOnUninstall: false');
-    expect(installer).toContain('!macro customUnWelcomePage');
-    expect(installer).toContain('UninstPage custom');
-    expect(installer).not.toContain('!macro customUninstallPage');
-    expect(installer).toContain('${NSD_Uncheck} $DeleteTalkingQuillDataCheckbox');
-    expect(installer).toContain('--talking-quill-reset-owned-data-and-exit="$2"');
-    expect(installer).toContain('TALKING_QUILL_UNINSTALL_RESET_CHALLENGE');
-    expect(installer).toContain('IfFileExists "$INSTDIR\\${APP_FILENAME}.exe"');
-    expect(installer).toMatch(/ExecWait[^\n]+\$0/u);
-    expect(installer).toContain('${If} $0 != 0');
-    expect(installer).toContain('Abort');
-    expect(installer).toContain('!insertmacro TalkingQuillRunMachineCleanup uninstall');
-    expect(installer).toContain('RMDir /r "$INSTDIR"');
-    expect(builder).toContain('runAfterFinish: false');
-    expect(installer).not.toContain('!macro customUnInstallSection');
-    expect(installer).not.toContain('RMDir /r "$5\\Talking Quill\\KeyboardAuthority"');
-    expect(installer).not.toContain('RMDir /r "$APPDATA');
-    expect(installer).not.toContain('RMDir /r "$LOCALAPPDATA');
-    expect(installer).not.toMatch(/Ollama/i);
-    expect(await readFile(resolve('scripts/run-package.mjs'), 'utf8')).toContain(
-      "TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1'",
-    );
-  });
-
-  it('proves the extracted pinned NSIS page and reset-helper ordering before packaging', async () => {
-    const require = createRequire(import.meta.url);
-    const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
-    const templateRoot = resolve(
-      dirname(electronBuilderRequire.resolve('app-builder-lib/package.json')),
-      'templates/nsis',
-    );
-    const [
-      custom,
-      assisted,
-      uninstaller,
-      installer,
-      installSection,
-      installUtil,
-      installerInclude,
-      common,
-      extractAppPackage,
-      oneInstance,
-      multiUserUi,
-      installValidation,
-      cleanup,
-      protectedBootstrap,
-    ] = await Promise.all([
-      readFile(resolve('build/installer.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'assistedInstaller.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'uninstaller.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'installer.nsi'), 'utf8'),
-      readFile(resolve(templateRoot, 'installSection.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'include/installUtil.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'include/installer.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'common.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'include/extractAppPackage.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'include/allowOnlyOneInstallerInstance.nsh'), 'utf8'),
-      readFile(resolve(templateRoot, 'multiUserUi.nsh'), 'utf8'),
-      readFile(resolve('build/installer-install-validation.nsh'), 'utf8'),
-      readFile(resolve('build/windows-personal-machine-cleanup.ps1'), 'utf8'),
-      readFile(resolve('installer/windows-bootstrap/src/windows.rs'), 'utf8'),
-    ]);
-    const pinned = {
-      assisted,
-      uninstaller,
-      installer,
-      installSection,
-      installUtil,
-      installerInclude,
-      common,
-      extractAppPackage,
-      oneInstance,
-      multiUserUi,
-      installValidation,
-      cleanup,
-      protectedBootstrap,
-    };
-    expect(custom).not.toContain('/TALKINGQUILLTESTCOMMITFAIL=');
-    expect(installValidation).toContain('/TALKINGQUILLTESTCOMMITFAIL=');
-    expect(() => validateNsisUninstallPolicy({ custom, ...pinned })).not.toThrow();
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        cleanup: cleanup.replace(
-          'Write-InstallTransaction -State committed',
-          '# commit marker removed',
-        ),
-      }),
-    ).toThrow(
-      'machine install recovery must use durable staging/prepared/restoring/committed transactions',
-    );
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        installValidation: installValidation.replace('/TALKINGQUILLTESTCOMMITFAIL=', ''),
-      }),
-    ).toThrow('install failure injection must exist only in the isolated validation include');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace('!macro customUnWelcomePage', '!macro removedUnWelcomePage'),
-        ...pinned,
-      }),
-    ).toThrow('Missing NSIS macro customUnWelcomePage');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        uninstaller: uninstaller.replace(
-          '!insertmacro customUnInstall',
-          '# custom reset hook removed',
-        ),
-      }),
-    ).toThrow('runtime cleanup and checked file removal hooks moved');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace('${NSD_Uncheck} $DeleteTalkingQuillDataCheckbox', ''),
-        ...pinned,
-      }),
-    ).toThrow('preserve personal data unless confirmed');
-    const hookOrderError =
-      'generated running-process and old-uninstaller paths must yield to the custom lifecycle barrier';
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace(
-          '!insertmacro TalkingQuillRunMachineCleanup install personal_cleanup_failed',
-          '# lifecycle barrier removed',
-        ),
-        ...pinned,
-      }),
-    ).toThrow('install cancellation and failure must share guarded armed rollback');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace('Function TalkingQuillOnUserAbort', 'Function removedOnUserAbort'),
-        ...pinned,
-      }),
-    ).toThrow('Missing NSIS function TalkingQuillOnUserAbort');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace(
-          'StrCpy $PersonalInstallTransactionArmed "1"\n  ; Skip the generated',
-          '; transaction arm removed\n  ; Skip the generated',
-        ),
-        ...pinned,
-      }),
-    ).toThrow('install cancellation and failure must share guarded armed rollback');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        installSection: installSection.replace(
-          '!ifmacrondef customUninstallOldVersion',
-          '!ifmacrondef removedCustomUninstallOldVersion',
-        ),
-      }),
-    ).toThrow(hookOrderError);
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace('${If} $TEMP != $R1', '${If} $R0 != $R1'),
-        ...pinned,
-      }),
-    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        protectedBootstrap: protectedBootstrap.replaceAll(
-          'FOLDERID_ProgramData',
-          'FOLDERID_LocalAppData',
-        ),
-      }),
-    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        protectedBootstrap: protectedBootstrap.replace(
-          'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
-          'O:BAG:BAD:(A;;FA;;;WD)',
-        ),
-      }),
-    ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        uninstaller: uninstaller.replace(
-          '!ifmacrondef customUnInstall',
-          '!ifmacrondef removedCustomUnInstall',
-        ),
-      }),
-    ).toThrow('generated process killing must be unreachable');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        extractAppPackage: extractAppPackage.replace(
-          '"$(decompressionFailed)$\\n$R0" /SD IDOK',
-          '"$(decompressionFailed)$\\n$R0"',
-        ),
-      }),
-    ).toThrow('MessageBox without a silent default');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        extractAppPackage: extractAppPackage.replace(
-          'StrCmp $R0 "success" ${ZIP_DECOMPRESSION_SUCCESS_LABEL}',
-          'StrCmp $R0 "success" +3',
-        ),
-      }),
-    ).toThrow('silent-reachable generated failures must default safely and return nonzero');
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        cleanup: cleanup.replace(
-          '$path = Normalize-RuntimeExecutablePath -Path ([string]$_.ExecutablePath)',
-          '$path = [string]$_.ExecutablePath',
-        ),
-      }),
-    ).toThrow('generated process killing must be unreachable');
-    for (const installSectionMutation of [
-      installSection.replace(
-        '!ifmacrodef customUninstallOldVersion',
-        '!ifmacrodef removedCustomUninstallOldVersion',
-      ),
-      installSection.replace(
-        '!insertmacro customUninstallOldVersion',
-        '# lifecycle hook invocation removed',
-      ),
-      installSection.replace(
-        '!insertmacro customUninstallOldVersion\n!else',
-        '!insertmacro customUninstallOldVersion\n# branch boundary removed',
-      ),
-      installSection.replace('SetOutPath $INSTDIR', '# extraction boundary removed'),
-    ]) {
-      expect(() =>
-        validateNsisUninstallPolicy({
-          custom,
-          ...pinned,
-          installSection: installSectionMutation,
-        }),
-      ).toThrow(hookOrderError);
-    }
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        installer: installer.replace('!include "installSection.nsh"', '# section include removed'),
-      }),
-    ).toThrow(hookOrderError);
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom,
-        ...pinned,
-        installUtil: installUtil.replace(
-          '!ifmacrondef customUninstallOldVersion',
-          '# utility guard removed',
-        ),
-      }),
-    ).toThrow(hookOrderError);
-    expect(() =>
-      validateNsisUninstallPolicy({
-        custom: custom.replace(
-          '!macroend\n\n; Patched installSection.nsh',
-          '!macroend\nDeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "UninstallString"\n\n; Patched installSection.nsh',
-        ),
-        ...pinned,
-      }),
-    ).toThrow(hookOrderError);
+    expect(builder).toContain('- target: dir');
+    expect(setup).toContain('GetNamedPipeClientProcessId');
+    expect(setup).toContain('GetNamedPipeServerProcessId');
+    expect(packer).toContain('TQPKG2');
   });
 
   it('requires the physical notices and unpacked native runtime resources', () => {
@@ -1094,7 +825,7 @@ describe('packaged runtime allowlist', () => {
     );
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain(
-      'Strict final-artifact inspection requires --artifacts-required=none|nsis|dmg-zip',
+      'Strict final-artifact inspection requires --artifacts-required=none|native-setup|dmg-zip',
     );
   });
 
@@ -1138,7 +869,7 @@ describe('packaged runtime allowlist', () => {
     const macArm64 = { version: '1.0.0', platform: 'mac', arch: 'arm64' } as const;
     expect(() => validateExpectedFinalArtifacts([], 'none', winX64)).not.toThrow();
     expect(() =>
-      validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-x64.exe'], 'nsis', winX64),
+      validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-x64.exe'], 'native-setup', winX64),
     ).not.toThrow();
     expect(() =>
       validateExpectedFinalArtifacts(
@@ -1147,11 +878,13 @@ describe('packaged runtime allowlist', () => {
         macArm64,
       ),
     ).not.toThrow();
-    expect(() => validateExpectedFinalArtifacts([], 'nsis', winX64)).toThrow('expected exe=1');
+    expect(() => validateExpectedFinalArtifacts([], 'native-setup', winX64)).toThrow(
+      'expected exe=1',
+    );
     expect(() =>
       validateExpectedFinalArtifacts(
         ['Talking-Quill-1.0.0-win-x64.exe', 'Talking-Quill-1.0.0-win-x64.exe'],
-        'nsis',
+        'native-setup',
         winX64,
       ),
     ).toThrow('found exe=2');
@@ -1168,11 +901,11 @@ describe('packaged runtime allowlist', () => {
       );
     }
     expect(() =>
-      validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-arm64.exe'], 'nsis', winX64),
+      validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-arm64.exe'], 'native-setup', winX64),
     ).toThrow('Unexpected final artifact names');
-    expect(() => validateExpectedFinalArtifacts(['unexpected.exe'], 'nsis', winX64)).toThrow(
-      'Unexpected final artifact names: unexpected.exe',
-    );
+    expect(() =>
+      validateExpectedFinalArtifacts(['unexpected.exe'], 'native-setup', winX64),
+    ).toThrow('Unexpected final artifact names: unexpected.exe');
     expect(() => validateExpectedFinalArtifacts([], 'unknown', winX64)).toThrow(
       'Unknown final-artifact requirement mode',
     );

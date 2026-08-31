@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod package;
+
 #[cfg(windows)]
 mod windows;
 

@@ -58,38 +58,14 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(driver).not.toContain('evidence');
   });
 
-  it('relaunches into validated ProgramData before any privileged plugin or cleanup code', async () => {
-    const [installer, bootstrap, patch, lifecycle] = await Promise.all([
-      readFile('build/installer.nsh', 'utf8'),
-      readFile('installer/windows-bootstrap/src/windows.rs', 'utf8'),
-      readFile('patches/app-builder-lib@26.15.3.patch', 'utf8'),
-      readFile('helper/src/windows_installer.rs', 'utf8'),
-    ]);
-    expect(patch).toContain('!insertmacro customEarlyInit');
-    expect(installer).toContain('!macro customEarlyInit');
-    expect(installer).toContain('/TQPROTECTEDTEMP=');
-    const early = installer.slice(
-      installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
-      installer.indexOf(
-        '!macroend',
-        installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
-      ),
-    );
-    expect(early).not.toContain('WindowsPowerShell');
-    expect(bootstrap).toContain('FOLDERID_ProgramData');
-    expect(bootstrap).toContain('ConvertStringSecurityDescriptorToSecurityDescriptorW');
-    expect(bootstrap).toContain('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)');
-    expect(bootstrap).toContain('PROTECTED_MARKER');
-    expect(bootstrap).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
-    expect(bootstrap).toContain('ShellExecuteExW');
-    expect(bootstrap).toContain('create_new(true)');
-    expect(bootstrap).toContain('Sha256::digest');
-    expect(bootstrap).toContain('wait_exit');
-    expect(installer).toContain('talking-quill-installer-lifecycle.exe');
-    expect(installer).not.toContain('File /oname=$PLUGINSDIR\\talking-quill-machine-cleanup.ps1');
-    expect(lifecycle).toContain('FOLDERID_ProgramFiles');
-    expect(lifecycle).toContain('verify_candidate');
-    expect(lifecycle).toContain('fresh-install');
+  it('authenticates the native medium controller and elevated worker', async () => {
+    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    expect(setup).toContain('ShellExecuteExW');
+    expect(setup).toContain('GetNamedPipeClientProcessId');
+    expect(setup).toContain('GetNamedPipeServerProcessId');
+    expect(setup).toContain('same-image worker');
+    expect(setup).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
+    expect(setup).not.toMatch(/powershell|cmd.exe/iu);
   });
 
   it('has no superseded Windows owner transport or lifecycle seams', async () => {
@@ -115,57 +91,12 @@ describe('Windows gateway and owner lifecycle contract', () => {
     );
   });
 
-  it('uses the elevated installer only for rollback-safe files and retired cleanup', async () => {
-    const cleanup = await readFile('build/windows-personal-machine-cleanup.ps1', 'utf8');
-    expect(cleanup).toContain("$serviceName = 'TalkingQuillKeyboardAuthority'");
-    expect(cleanup).toContain("'Talking Quill\\KeyboardAuthority'");
-    expect(cleanup).toContain('[Microsoft.Win32.RegistryView]::Registry64');
-    expect(cleanup).toContain("GetValue('ProgramFilesDir'");
-    expect(cleanup).toContain('$machineRoot = Get-NativeProgramFiles');
-    expect(cleanup).not.toContain(
-      '[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)',
-    );
-    expect(cleanup).toContain('Assert-PlainOwnedTree');
-    expect(cleanup).toContain('function Normalize-RuntimeExecutablePath');
-    expect(cleanup).toContain("$Path.StartsWith('\\\\?\\', [StringComparison]::Ordinal)");
-    expect(cleanup).toContain('return $Path.Substring(4)');
-    expect(cleanup).toContain(
-      '$path = Normalize-RuntimeExecutablePath -Path ([string]$_.ExecutablePath)',
-    );
-    expect(cleanup).toContain('Request-PlannedRuntimeExit');
-    expect(cleanup).toContain('--talking-quill-request-machine-quit');
-    expect(cleanup).toContain('did not confirm neutral planned exit');
-    expect(cleanup).toContain('Write-InstallTransaction -State staging');
-    expect(cleanup).toContain("$transaction.state -eq 'staging'");
-    expect(cleanup).toContain('recovery collision was preserved');
-    expect(cleanup).toContain(
-      'Move-OwnedTreeContents -Source $installRoot -Destination $backupRoot',
-    );
-    const commit = cleanup.slice(
-      cleanup.indexOf("'install-commit' {"),
-      cleanup.indexOf("'install-retire-backup' {"),
-    );
-    expect(commit).not.toContain('Remove-Item -LiteralPath $backupRoot');
-    const retirement = cleanup.slice(
-      cleanup.indexOf("'install-retire-backup' {"),
-      cleanup.indexOf("'uninstall' {"),
-    );
-    expect(retirement).toContain('Remove-LegacyService');
-    expect(retirement).toContain('Resolve-PendingInstallTransaction -CommittedAction recover');
-    expect(cleanup).toMatch(
-      /\$transaction\.state -eq 'committed'[\s\S]*Remove-Item -LiteralPath \$backupRoot/u,
-    );
-    const installPreparation = cleanup.slice(
-      cleanup.indexOf("'install' {"),
-      cleanup.indexOf("'install-rollback' {"),
-    );
-    expect(installPreparation).not.toContain('Remove-LegacyService');
-    const uninstall = cleanup.slice(cleanup.indexOf("'uninstall' {"));
-    expect(uninstall).toContain('Remove-LegacyService');
-    expect(uninstall.indexOf('Test-Path -LiteralPath $backupRoot')).toBeLessThan(
-      uninstall.indexOf('Clear-OwnedTreeContents -Path $installRoot'),
-    );
-    expect(cleanup).not.toContain('--enroll');
-    expect(cleanup).not.toContain('CreateService');
+  it('keeps durable install recovery inside the native worker', async () => {
+    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    for (const phase of ['staging', 'prepared', 'committed', 'uninstalling']) {
+      expect(setup).toContain(`"${phase}"`);
+    }
+    expect(setup).toContain('package::extract_file');
+    expect(setup).toContain('remove_plain_tree');
   });
 });

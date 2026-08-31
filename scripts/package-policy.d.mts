@@ -18,7 +18,7 @@ export function validateAsarEntries(
 ): void;
 export function validateSharedReleaseArtifacts(
   artifactNames: readonly string[],
-  mode: 'none' | 'nsis' | 'dmg-zip' | string,
+  mode: 'none' | 'native-setup' | 'dmg-zip' | string,
   expectedArtifact: {
     readonly version: string;
     readonly platform: 'win' | 'mac' | string;
@@ -35,7 +35,7 @@ export function finalArtifactNamesForIdentity(
 ): string[];
 export function validateExpectedFinalArtifacts(
   artifactNames: readonly string[],
-  mode: 'none' | 'nsis' | 'dmg-zip' | string,
+  mode: 'none' | 'native-setup' | 'dmg-zip' | string,
   expectedArtifact: {
     readonly version: string;
     readonly platform: 'win' | 'mac' | string;

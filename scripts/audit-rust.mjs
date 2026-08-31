@@ -10,7 +10,7 @@ if (version.status !== 0 || !isExpectedCargoAuditVersion(version.stdout)) {
     `RustSec audit requires cargo-audit ${CARGO_AUDIT_VERSION}. Install with: cargo install cargo-audit --version ${CARGO_AUDIT_VERSION} --locked`,
   );
 }
-for (const lockfile of ['helper/Cargo.lock', 'installer/windows-bootstrap/Cargo.lock']) {
+for (const lockfile of ['helper/Cargo.lock', 'installer/windows-setup/Cargo.lock']) {
   auditLockfile(lockfile);
 }
 console.log(

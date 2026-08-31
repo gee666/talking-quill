@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { zstdDecompressSync } from 'node:zlib';
 import { createReadStream, existsSync } from 'node:fs';
 import {
   appendFile,
@@ -79,7 +80,7 @@ const artifactRequirement =
   process.env.TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED;
 if (strictArtifactInspection && artifactRequirement === undefined) {
   throw new Error(
-    'Strict final-artifact inspection requires --artifacts-required=none|nsis|dmg-zip or TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED',
+    'Strict final-artifact inspection requires --artifacts-required=none|native-setup|dmg-zip or TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED',
   );
 }
 const packageRoot = resolve(invocationDirectory, packageArgument ?? 'release/win-unpacked');
@@ -441,13 +442,10 @@ async function inspectFinalArtifacts(
     let extracted = null;
     let extractionArtifact = artifact;
     if (!mac && /\.exe$/iu.test(artifact)) {
-      extractionArtifact = resolve(extractionRoot, 'embedded-inner-nsis.exe');
-      await writeFile(
-        extractionArtifact,
-        await extractNativeBootstrapPayload(artifact, expectedArtifact.arch),
-      );
-    }
-    if (/\.zip$/iu.test(artifact) && ditto !== null) {
+      await extractNativePackage(artifact, extractionRoot, expectedArtifact.arch);
+      extracted = { status: 0 };
+      methods.add('tqpkg2');
+    } else if (/\.zip$/iu.test(artifact) && ditto !== null) {
       extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], { stdio: 'pipe' });
       methods.add('ditto');
     } else if (/\.dmg$/iu.test(artifact) && hdiutil !== null) {
@@ -500,57 +498,101 @@ async function inspectFinalArtifacts(
   return { summary, artifacts };
 }
 
-async function extractNativeBootstrapPayload(artifact, expectedArchitecture) {
+async function extractNativePackage(artifact, output, expectedArchitecture) {
   const bytes = await readFile(artifact);
-  if (bytes.length < 64) {
-    throw new Error('Windows final artifact is missing its native-bootstrap footer');
-  }
-  const pe = bytes.readUInt32LE(0x3c);
-  const optional = pe + 24;
-  const directory = bytes.readUInt16LE(optional) === 0x20b ? optional + 112 : optional + 96;
-  const certificateOffset = bytes.readUInt32LE(directory + 32);
-  const certificateSize = bytes.readUInt32LE(directory + 36);
-  const payloadEnd =
+  const peHeader = bytes.readUInt32LE(0x3c);
+  const optionalHeader = peHeader + 24;
+  const dataDirectory =
+    bytes.readUInt16LE(optionalHeader) === 0x20b ? optionalHeader + 112 : optionalHeader + 96;
+  const certificateOffset = bytes.readUInt32LE(dataDirectory + 32);
+  const certificateSize = bytes.readUInt32LE(dataDirectory + 36);
+  const signedEnd =
     certificateOffset === 0 && certificateSize === 0
       ? bytes.length
       : certificateOffset + certificateSize === bytes.length
         ? certificateOffset
         : -1;
-  const footerOffset = payloadEnd - 64;
+  const footerOffset = signedEnd - 128;
   if (
-    footerOffset < 0 ||
-    bytes.subarray(footerOffset, footerOffset + 8).toString('ascii') !== 'TQNSIS01'
+    footerOffset < 256 ||
+    bytes.subarray(footerOffset, footerOffset + 8).toString('binary') !== 'TQPKG2\0\0'
   ) {
-    throw new Error('Windows final artifact is missing its native-bootstrap footer');
+    throw new Error('Windows final artifact is missing its TQPKG2 footer');
   }
-  const footer = bytes.subarray(footerOffset, footerOffset + 64);
-  if (footer.readUInt32LE(8) !== 1) throw new Error('Windows native-bootstrap schema is invalid');
+  const footer = bytes.subarray(footerOffset);
   const offset = Number(footer.readBigUInt64LE(16));
-  const length = Number(footer.readBigUInt64LE(24));
+  const size = Number(footer.readBigUInt64LE(24));
+  const manifestSize = Number(footer.readBigUInt64LE(32));
   if (
-    !Number.isSafeInteger(offset) ||
-    !Number.isSafeInteger(length) ||
-    offset < 256 ||
-    length < 256 ||
-    offset + length !== footerOffset
+    footer.readUInt32LE(8) !== 2 ||
+    offset + size !== footerOffset ||
+    manifestSize <= 0 ||
+    manifestSize > size
   ) {
-    throw new Error('Windows native-bootstrap payload range is invalid');
+    throw new Error('Windows TQPKG2 footer range is invalid');
   }
-  const outerPe = bytes.readUInt32LE(0x3c);
-  const expectedMachine = expectedArchitecture === 'x64' ? 0x8664 : 0xaa64;
+  const pe = bytes.readUInt32LE(0x3c);
+  const machine = expectedArchitecture === 'x64' ? 0x8664 : 0xaa64;
   if (
-    bytes.readUInt32LE(outerPe) !== 0x0000_4550 ||
-    bytes.readUInt16LE(outerPe + 4) !== expectedMachine ||
-    bytes.readUInt16LE(outerPe + 24 + 68) !== 2
+    bytes.readUInt32LE(pe) !== 0x0000_4550 ||
+    bytes.readUInt16LE(pe + 4) !== machine ||
+    bytes.readUInt16LE(pe + 24 + 68) !== 2
   ) {
-    throw new Error('Windows native bootstrap architecture or subsystem is invalid');
+    throw new Error('Windows native setup architecture or subsystem is invalid');
   }
-  const payload = bytes.subarray(offset, offset + length);
-  const actual = createHash('sha256').update(payload).digest();
-  if (!actual.equals(footer.subarray(32, 64))) {
-    throw new Error('Windows native-bootstrap embedded NSIS digest is invalid');
+  const packageBytes = bytes.subarray(offset, footerOffset);
+  if (!createHash('sha256').update(packageBytes).digest().equals(footer.subarray(40, 72))) {
+    throw new Error('Windows TQPKG2 package digest is invalid');
   }
-  return payload;
+  const manifestBytes = packageBytes.subarray(0, manifestSize);
+  if (!createHash('sha256').update(manifestBytes).digest().equals(footer.subarray(72, 104))) {
+    throw new Error('Windows TQPKG2 manifest digest is invalid');
+  }
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  if (
+    Buffer.from(canonicalJsonForInspection(manifest)).compare(manifestBytes) !== 0 ||
+    manifest.schemaVersion !== 2 ||
+    manifest.architecture !== expectedArchitecture
+  ) {
+    throw new Error('Windows TQPKG2 manifest is not canonical');
+  }
+  const folded = new Set();
+  for (const file of manifest.files ?? []) {
+    const path = String(file.path ?? '');
+    if (
+      !path ||
+      path.includes('\\') ||
+      path.includes(':') ||
+      path.split('/').some((part) => !part || part === '.' || part === '..')
+    )
+      throw new Error('Windows TQPKG2 path is invalid');
+    const key = path.toLowerCase();
+    if (folded.has(key)) throw new Error('Windows TQPKG2 has a case collision');
+    folded.add(key);
+    const compressed = packageBytes.subarray(file.blockOffset, file.blockOffset + file.blockSize);
+    const content = zstdDecompressSync(compressed, { maxOutputLength: file.size });
+    if (
+      content.length !== file.size ||
+      createHash('sha256').update(content).digest('hex') !== file.sha256
+    )
+      throw new Error('Windows TQPKG2 file digest is invalid');
+    const destination = resolve(output, ...path.split('/'));
+    if (!destination.startsWith(`${resolve(output)}${sep}`))
+      throw new Error('Windows TQPKG2 path escaped extraction');
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, content, { flag: 'wx' });
+  }
+}
+
+function canonicalJsonForInspection(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return JSON.stringify(value);
+  if (typeof value === 'number') return String(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonForInspection).join(',')}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJsonForInspection(value[key])}`)
+    .join(',')}}`;
 }
 
 async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseMetadata) {
