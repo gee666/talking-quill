@@ -207,9 +207,7 @@ export function validateNsisUninstallPolicy({
     );
   }
   const protectedBootstrapMacro = macroBody(custom, 'TalkingQuillProtectedEarlyBootstrap');
-  const protectedPathValidation = protectedBootstrap.indexOf(
-    '[Environment+SpecialFolder]::CommonApplicationData).TrimEnd',
-  );
+  const protectedPathValidation = protectedBootstrap.indexOf('FOLDERID_ProgramData');
   const immutableTempCheck = protectedBootstrapMacro.indexOf('${If} $TEMP != $R1');
   const secureTempAssignment = protectedBootstrapMacro.indexOf(
     'StrCpy $TalkingQuillSecureTemp $R1',
@@ -221,26 +219,18 @@ export function validateNsisUninstallPolicy({
     generatedUnOnInit < 0 ||
     unEarlyBootstrap <= generatedUnOnInit ||
     firstUnOnInitWork <= unEarlyBootstrap ||
-    !custom.includes('ExecShellWait "runas" "$EXEPATH"') ||
     !custom.includes('TALKING_QUILL_PERSONAL_INSTALLER') ||
-    custom.indexOf('ExecShellWait "runas" "$EXEPATH"') > custom.indexOf('ExecWait') ||
+    /ExecShellWait|PowerShell/iu.test(protectedBootstrapMacro) ||
     protectedBootstrapMacro.includes('StrCpy $TEMP') ||
     protectedPathValidation < 0 ||
-    !protectedBootstrap.includes('NtQueryInformationProcess') ||
-    !protectedBootstrap.includes('CommandLineToArgvW') ||
-    !protectedBootstrap.includes('QueryFullProcessImageName') ||
-    !protectedBootstrap.includes("StartsWith('/TQPROTECTEDTEMP='") ||
-    !protectedBootstrap.includes('JoinArguments($childArguments)') ||
-    !protectedBootstrap.includes('LastIndexOf(" _?=", StringComparison.Ordinal)') ||
-    !protectedBootstrap.includes('[Microsoft.Win32.RegistryView]::Registry64') ||
-    !protectedBootstrap.includes("Join-Path $nativeProgramFiles 'Talking Quill'") ||
-    !protectedBootstrap.includes("$start.Arguments += ' ' + $nsisTail") ||
-    !protectedBootstrap.includes('FileAttributes]::ReparsePoint') ||
-    !protectedBootstrap.includes('SetAccessRuleProtection($true, $false)') ||
-    !protectedBootstrap.includes("SetEnvironmentVariable('TEMP', $leaf, 'Process')") ||
-    protectedBootstrap.indexOf("SetEnvironmentVariable('TEMP', $leaf, 'Process')") >
-      protectedBootstrap.indexOf('Add-Type -TypeDefinition') ||
-    /-Command[^\r\n]*\s"\$[R0-9]/u.test(protectedBootstrapMacro) ||
+    !protectedBootstrap.includes('ShellExecuteExW') ||
+    !protectedBootstrap.includes('SEE_MASK_NOCLOSEPROCESS') ||
+    !protectedBootstrap.includes('ConvertStringSecurityDescriptorToSecurityDescriptorW') ||
+    !protectedBootstrap.includes('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)') ||
+    !protectedBootstrap.includes('FILE_ATTRIBUTE_REPARSE_POINT') ||
+    !protectedBootstrap.includes('create_new(true)') ||
+    !protectedBootstrap.includes('Sha256::digest') ||
+    !protectedBootstrap.includes('SetEnvironmentVariableW') ||
     immutableTempCheck < 0 ||
     secureTempAssignment <= immutableTempCheck
   ) {
@@ -432,7 +422,7 @@ export async function loadNsisPolicyInputs() {
     ),
     cleanup: await read(resolve(repositoryRoot, 'build', 'windows-personal-machine-cleanup.ps1')),
     protectedBootstrap: await read(
-      resolve(repositoryRoot, 'build', 'windows-protected-bootstrap.ps1'),
+      resolve(repositoryRoot, 'installer', 'windows-bootstrap', 'src', 'windows.rs'),
     ),
   };
 }

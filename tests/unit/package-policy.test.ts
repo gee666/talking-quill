@@ -857,7 +857,7 @@ describe('packaged runtime allowlist', () => {
       readFile(resolve(templateRoot, 'multiUserUi.nsh'), 'utf8'),
       readFile(resolve('build/installer-install-validation.nsh'), 'utf8'),
       readFile(resolve('build/windows-personal-machine-cleanup.ps1'), 'utf8'),
-      readFile(resolve('build/windows-protected-bootstrap.ps1'), 'utf8'),
+      readFile(resolve('installer/windows-bootstrap/src/windows.rs'), 'utf8'),
     ]);
     const pinned = {
       assisted,
@@ -964,9 +964,9 @@ describe('packaged runtime allowlist', () => {
       validateNsisUninstallPolicy({
         custom,
         ...pinned,
-        protectedBootstrap: protectedBootstrap.replace(
-          '[Environment+SpecialFolder]::CommonApplicationData).TrimEnd',
-          '[Environment+SpecialFolder]::CommonApplicationData)',
+        protectedBootstrap: protectedBootstrap.replaceAll(
+          'FOLDERID_ProgramData',
+          'FOLDERID_LocalAppData',
         ),
       }),
     ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');
@@ -975,8 +975,8 @@ describe('packaged runtime allowlist', () => {
         custom,
         ...pinned,
         protectedBootstrap: protectedBootstrap.replace(
-          '[Microsoft.Win32.RegistryView]::Registry64',
-          '[Microsoft.Win32.RegistryView]::Default',
+          'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
+          'O:BAG:BAD:(A;;FA;;;WD)',
         ),
       }),
     ).toThrow('installer and uninstaller must elevate before protected plugin bootstrap');

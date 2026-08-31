@@ -42,31 +42,41 @@ function evidence() {
       errors: [],
       events: [
         '1ms launched outer pid=40',
-        '20ms classified pid=41 role=elevated',
-        '40ms classified pid=42 role=protected',
+        '20ms classified pid=41 role=elevated-bootstrap',
+        '40ms classified pid=42 role=inner-nsis',
         '45ms IDCANCEL hwnd=100 pid=42 accepted=True',
       ],
     },
     processes: [
-      { pid: 40, parentPid: 1, image: expected.installer, role: 'outer', exitCode: 0 },
-      { pid: 41, parentPid: 40, image: expected.installer, role: 'elevated', exitCode: 0 },
-      { pid: 43, parentPid: 41, image: 'powershell.exe', role: null, exitCode: 0 },
-      { pid: 42, parentPid: 43, image: expected.installer, role: 'protected', exitCode: 0 },
-      { pid: 44, parentPid: 42, image: 'powershell.exe', role: null, exitCode: 0 },
+      { pid: 40, parentPid: 1, image: expected.installer, role: 'outer-bootstrap', exitCode: 0 },
+      {
+        pid: 41,
+        parentPid: 40,
+        image: expected.installer,
+        role: 'elevated-bootstrap',
+        exitCode: 0,
+      },
+      {
+        pid: 42,
+        parentPid: 41,
+        image: 'Talking-Quill-inner-installer.exe',
+        role: 'inner-nsis',
+        exitCode: 0,
+      },
     ],
-    nsisRoleExits: {
-      outer: { pid: 40, exitCode: 0 },
-      elevated: { pid: 41, exitCode: 0 },
-      protected: { pid: 42, exitCode: 0 },
+    installerRoleExits: {
+      'outer-bootstrap': { pid: 40, exitCode: 0 },
+      'elevated-bootstrap': { pid: 41, exitCode: 0 },
+      'inner-nsis': { pid: 42, exitCode: 0 },
     },
-    powershellProcessStarts: 2,
+    powershellProcessStarts: 0,
     visibleConsoleWindowEvents: [],
     filesystemOrRegistryMutationEvents: [],
     transientProtectedBootstrapObserved: true,
     protectedBootstrapBaselineRestored: true,
     cancellation: {
       method: 'WM_COMMAND/IDCANCEL',
-      targetRole: 'protected',
+      targetRole: 'inner-nsis',
       targetProcessId: 42,
       postAccepted: true,
       confirmationObserved: true,
@@ -122,11 +132,21 @@ describe('mandatory Windows installer UI smoke evidence', () => {
     ],
     [
       'wrong protected role binding',
-      { nsisRoleExits: { ...evidence().nsisRoleExits, protected: { pid: 43, exitCode: 0 } } },
+      {
+        installerRoleExits: {
+          ...evidence().installerRoleExits,
+          'inner-nsis': { pid: 43, exitCode: 0 },
+        },
+      },
     ],
     [
       'elevated wrapper nonzero exit',
-      { nsisRoleExits: { ...evidence().nsisRoleExits, elevated: { pid: 41, exitCode: 124 } } },
+      {
+        installerRoleExits: {
+          ...evidence().installerRoleExits,
+          'elevated-bootstrap': { pid: 41, exitCode: 124 },
+        },
+      },
     ],
     [
       'elevated role not bound to process record',
@@ -138,7 +158,12 @@ describe('mandatory Windows installer UI smoke evidence', () => {
     ],
     [
       'duplicate NSIS role PID',
-      { nsisRoleExits: { ...evidence().nsisRoleExits, elevated: { pid: 40, exitCode: 0 } } },
+      {
+        installerRoleExits: {
+          ...evidence().installerRoleExits,
+          'elevated-bootstrap': { pid: 40, exitCode: 0 },
+        },
+      },
     ],
     [
       'cancel delivery not accepted',

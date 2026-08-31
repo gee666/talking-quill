@@ -12,10 +12,10 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
   const monitoring = value?.monitoring;
   const cancellation = value?.cancellation;
   const window = value?.nsisWindow;
-  const nsisRoles = ['outer', 'elevated', 'protected'];
-  const rolePids = nsisRoles.map((role) => value?.nsisRoleExits?.[role]?.pid);
-  const roleExitsMatchProcesses = nsisRoles.every((role) => {
-    const expectedRole = value?.nsisRoleExits?.[role];
+  const installerRoles = ['outer-bootstrap', 'elevated-bootstrap', 'inner-nsis'];
+  const rolePids = installerRoles.map((role) => value?.installerRoleExits?.[role]?.pid);
+  const roleExitsMatchProcesses = installerRoles.every((role) => {
+    const expectedRole = value?.installerRoleExits?.[role];
     return value?.processes?.some(
       (process) =>
         process?.pid === expectedRole?.pid && process?.role === role && process?.exitCode === 0,
@@ -57,21 +57,20 @@ export function validateWindowsInstallerUiEvidence(value, expected) {
     value.filesystemOrRegistryMutationEvents.length !== 0 ||
     !Array.isArray(value.processes) ||
     value.processes.length < 3 ||
-    !nsisRoles.every(
+    !installerRoles.every(
       (role) =>
-        value.nsisRoleExits?.[role]?.exitCode === 0 &&
-        Number.isSafeInteger(value.nsisRoleExits[role].pid) &&
-        value.nsisRoleExits[role].pid > 0,
+        value.installerRoleExits?.[role]?.exitCode === 0 &&
+        Number.isSafeInteger(value.installerRoleExits[role].pid) &&
+        value.installerRoleExits[role].pid > 0,
     ) ||
-    new Set(rolePids).size !== nsisRoles.length ||
+    new Set(rolePids).size !== installerRoles.length ||
     !roleExitsMatchProcesses ||
-    window?.processId !== value.nsisRoleExits.protected.pid ||
-    !Number.isSafeInteger(value.powershellProcessStarts) ||
-    value.powershellProcessStarts < 2 ||
+    window?.processId !== value.installerRoleExits['inner-nsis'].pid ||
+    value.powershellProcessStarts !== 0 ||
     value.transientProtectedBootstrapObserved !== true ||
     value.protectedBootstrapBaselineRestored !== true ||
     cancellation?.method !== 'WM_COMMAND/IDCANCEL' ||
-    cancellation.targetRole !== 'protected' ||
+    cancellation.targetRole !== 'inner-nsis' ||
     cancellation.targetProcessId !== window.processId ||
     cancellation.postAccepted !== true ||
     typeof cancellation.confirmationObserved !== 'boolean' ||

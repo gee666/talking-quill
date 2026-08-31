@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import {
   appendFile,
@@ -9,6 +10,7 @@ import {
   realpath,
   rm,
   mkdir,
+  writeFile,
 } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
@@ -437,6 +439,14 @@ async function inspectFinalArtifacts(
     let inspectionRoot = extractionRoot;
     let detach = null;
     let extracted = null;
+    let extractionArtifact = artifact;
+    if (!mac && /\.exe$/iu.test(artifact)) {
+      extractionArtifact = resolve(extractionRoot, 'embedded-inner-nsis.exe');
+      await writeFile(
+        extractionArtifact,
+        await extractNativeBootstrapPayload(artifact, expectedArtifact.arch),
+      );
+    }
     if (/\.zip$/iu.test(artifact) && ditto !== null) {
       extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], { stdio: 'pipe' });
       methods.add('ditto');
@@ -453,7 +463,7 @@ async function inspectFinalArtifacts(
     } else if (sevenZip !== null) {
       extracted = await extractArchiveWithRetry(
         sevenZip,
-        ['x', '-y', `-o${extractionRoot}`, artifact],
+        ['x', '-y', `-o${extractionRoot}`, extractionArtifact],
         extractionRoot,
       );
       methods.add(sevenZip);
@@ -466,6 +476,7 @@ async function inspectFinalArtifacts(
         console.warn(`Final-artifact extraction failed: ${detail}`);
         continue;
       }
+      if (extractionArtifact !== artifact) await rm(extractionArtifact, { force: true });
       const entries = await inspectPhysicalTree(inspectionRoot, mac);
       validatePhysicalPackageEntries(entries, mac ? 'mac' : 'win', {
         macosOwner: macosOwnerPackage,
@@ -487,6 +498,59 @@ async function inspectFinalArtifacts(
   const summary = `${String(inspected)}/${String(artifacts.length)} recursively extracted with ${methodSummary}; ${String(skipped)} not claimed as extracted`;
   validateFinalArtifactInspection(artifacts.length, inspected, strict);
   return { summary, artifacts };
+}
+
+async function extractNativeBootstrapPayload(artifact, expectedArchitecture) {
+  const bytes = await readFile(artifact);
+  if (bytes.length < 64) {
+    throw new Error('Windows final artifact is missing its native-bootstrap footer');
+  }
+  const pe = bytes.readUInt32LE(0x3c);
+  const optional = pe + 24;
+  const directory = bytes.readUInt16LE(optional) === 0x20b ? optional + 112 : optional + 96;
+  const certificateOffset = bytes.readUInt32LE(directory + 32);
+  const certificateSize = bytes.readUInt32LE(directory + 36);
+  const payloadEnd =
+    certificateOffset === 0 && certificateSize === 0
+      ? bytes.length
+      : certificateOffset + certificateSize === bytes.length
+        ? certificateOffset
+        : -1;
+  const footerOffset = payloadEnd - 64;
+  if (
+    footerOffset < 0 ||
+    bytes.subarray(footerOffset, footerOffset + 8).toString('ascii') !== 'TQNSIS01'
+  ) {
+    throw new Error('Windows final artifact is missing its native-bootstrap footer');
+  }
+  const footer = bytes.subarray(footerOffset, footerOffset + 64);
+  if (footer.readUInt32LE(8) !== 1) throw new Error('Windows native-bootstrap schema is invalid');
+  const offset = Number(footer.readBigUInt64LE(16));
+  const length = Number(footer.readBigUInt64LE(24));
+  if (
+    !Number.isSafeInteger(offset) ||
+    !Number.isSafeInteger(length) ||
+    offset < 256 ||
+    length < 256 ||
+    offset + length !== footerOffset
+  ) {
+    throw new Error('Windows native-bootstrap payload range is invalid');
+  }
+  const outerPe = bytes.readUInt32LE(0x3c);
+  const expectedMachine = expectedArchitecture === 'x64' ? 0x8664 : 0xaa64;
+  if (
+    bytes.readUInt32LE(outerPe) !== 0x0000_4550 ||
+    bytes.readUInt16LE(outerPe + 4) !== expectedMachine ||
+    bytes.readUInt16LE(outerPe + 24 + 68) !== 2
+  ) {
+    throw new Error('Windows native bootstrap architecture or subsystem is invalid');
+  }
+  const payload = bytes.subarray(offset, offset + length);
+  const actual = createHash('sha256').update(payload).digest();
+  if (!actual.equals(footer.subarray(32, 64))) {
+    throw new Error('Windows native-bootstrap embedded NSIS digest is invalid');
+  }
+  return payload;
 }
 
 async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseMetadata) {

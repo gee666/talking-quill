@@ -250,7 +250,7 @@ internal static class WindowsInstallerUiObserver
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             if (!AssignProcessToJobObject(job, child.process)) throw new Win32Exception(Marshal.GetLastWin32Error());
             launched = true;
-            TrackProcess(child.processId, 0, installerPath, ProcessCreationTime(child.processId), "outer");
+            TrackProcess(child.processId, 0, installerPath, ProcessCreationTime(child.processId), "outer-bootstrap");
             LogEvent("launched outer pid=" + child.processId.ToString(CultureInfo.InvariantCulture));
             if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
             CloseHandle(child.thread); child.thread = IntPtr.Zero;
@@ -416,8 +416,9 @@ internal static class WindowsInstallerUiObserver
         string image = Path.GetFileName(window.Image ?? "").ToLowerInvariant();
         if (window.ClassName == "ConsoleWindowClass" || image == "powershell.exe" || image == "pwsh.exe" || image == "conhost.exe")
             ConsoleEvents.Enqueue(source + ":" + window.Pid.ToString(CultureInfo.InvariantCulture) + ":" + window.ClassName + ":" + window.Title);
-        if (String.Equals(window.Image, installerPath, StringComparison.OrdinalIgnoreCase) && window.ClassName == "#32770" &&
-            window.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (window.ClassName == "#32770" &&
+            window.Title.IndexOf("Talking Quill", StringComparison.OrdinalIgnoreCase) >= 0 &&
+            ProcessRole(window.Pid) == "inner-nsis")
         {
             string role = ProcessRole(window.Pid);
             string windowKey = window.Handle.ToInt64().ToString(CultureInfo.InvariantCulture) + ":" +
@@ -463,7 +464,7 @@ internal static class WindowsInstallerUiObserver
             {
                 string executable = entry.executable ?? String.Empty;
                 string lower = executable.ToLowerInvariant();
-                bool inspectImage = lower == installerName.ToLowerInvariant() || lower == "powershell.exe" || lower == "pwsh.exe" || lower == "conhost.exe";
+                bool inspectImage = lower == installerName.ToLowerInvariant() || lower == "talking-quill-inner-installer.exe" || lower == "powershell.exe" || lower == "pwsh.exe" || lower == "conhost.exe";
                 result.Add(new ProcessRecord { Pid = entry.processId, ParentPid = entry.parentProcessId, Image = inspectImage ? (ProcessImage(entry.processId) ?? executable) : executable });
                 entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
             } while (Process32Next(snapshot, ref entry));
@@ -484,7 +485,7 @@ internal static class WindowsInstallerUiObserver
     {
         string commandLine = ProcessCommandLine(pid);
         if (role == null) role = ClassifyInstallerRole(image, commandLine);
-        IntPtr handle = String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase)
+        IntPtr handle = !String.IsNullOrEmpty(role)
             ? OpenProcess(0x00101000, false, pid) : IntPtr.Zero;
         var record = new ProcessRecord { Pid = pid, ParentPid = parent, Image = image, CommandLine = commandLine,
             Role = role, CreationTime = creationTime, Handle = handle };
@@ -495,7 +496,8 @@ internal static class WindowsInstallerUiObserver
             lock (previous)
             {
                 if (!String.IsNullOrEmpty(image) && (String.IsNullOrEmpty(previous.Image) ||
-                    String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase))) previous.Image = image;
+                    String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(Path.GetFileName(image), "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase))) previous.Image = image;
                 if (previous.CreationTime == 0 && creationTime != 0) previous.CreationTime = creationTime;
                 if (String.IsNullOrEmpty(previous.CommandLine) && !String.IsNullOrEmpty(commandLine)) previous.CommandLine = commandLine;
                 if (String.IsNullOrEmpty(previous.Role) && !String.IsNullOrEmpty(role)) previous.Role = role;
@@ -512,13 +514,16 @@ internal static class WindowsInstallerUiObserver
     {
         foreach (ProcessRecord tracked in RelevantProcesses.Values)
         {
-            if (!String.IsNullOrEmpty(tracked.Role) || !String.Equals(tracked.Image, installerPath, StringComparison.OrdinalIgnoreCase)) continue;
+            bool classifiable = String.Equals(tracked.Image, installerPath, StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(Path.GetFileName(tracked.Image), "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase);
+            if (!String.IsNullOrEmpty(tracked.Role) || !classifiable) continue;
             string commandLine = ProcessCommandLine(tracked.Pid);
             string role = ClassifyInstallerRole(tracked.Image, commandLine);
             if (!String.IsNullOrEmpty(commandLine)) tracked.CommandLine = commandLine;
             if (!String.IsNullOrEmpty(role))
             {
                 tracked.Role = role;
+                if (tracked.Handle == IntPtr.Zero) tracked.Handle = OpenProcess(0x00101000, false, tracked.Pid);
                 LogEvent("classified pid=" + tracked.Pid.ToString(CultureInfo.InvariantCulture) + " role=" + role);
             }
         }
@@ -529,7 +534,8 @@ internal static class WindowsInstallerUiObserver
             foreach (ProcessRecord process in StartedProcesses.Values)
             {
                 string name = Path.GetFileName(process.Image ?? String.Empty).ToLowerInvariant();
-                bool candidate = String.Equals(process.Image, installerPath, StringComparison.OrdinalIgnoreCase);
+                bool candidate = String.Equals(process.Image, installerPath, StringComparison.OrdinalIgnoreCase) ||
+                    name == "talking-quill-inner-installer.exe";
                 if (candidate || RelevantProcesses.ContainsKey(process.ParentPid))
                 {
                     ProcessRecord existing;
@@ -605,11 +611,12 @@ internal static class WindowsInstallerUiObserver
 
     private static string ClassifyInstallerRole(string image, string commandLine)
     {
+        string name = Path.GetFileName(image ?? String.Empty);
+        if (String.Equals(name, "Talking-Quill-inner-installer.exe", StringComparison.OrdinalIgnoreCase) &&
+            (commandLine ?? String.Empty).IndexOf("/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase) >= 0) return "inner-nsis";
         if (!String.Equals(image, installerPath, StringComparison.OrdinalIgnoreCase)) return null;
-        if ((commandLine ?? String.Empty).IndexOf("/TQPROTECTEDTEMP=", StringComparison.OrdinalIgnoreCase) >= 0) return "protected";
-        if ((commandLine ?? String.Empty).IndexOf("/TQELEVATEDBOOTSTRAP=1", StringComparison.OrdinalIgnoreCase) >= 0 &&
-            (commandLine ?? String.Empty).IndexOf("/TQOUTERWINDOW=", StringComparison.OrdinalIgnoreCase) >= 0) return "elevated";
-        return null;
+        if ((commandLine ?? String.Empty).IndexOf("/TQBOOTSTRAP-ELEVATED-V1", StringComparison.OrdinalIgnoreCase) >= 0) return "elevated-bootstrap";
+        return "outer-bootstrap";
     }
 
     private static string ProcessRole(uint pid)
@@ -623,18 +630,18 @@ internal static class WindowsInstallerUiObserver
         ResolveTrackedProcesses();
         ProcessRecord process;
         if (!RelevantProcesses.TryGetValue(pid, out process)) return false;
-        if (process.Role == "protected") return true;
+        if (process.Role == "inner-nsis") return true;
         string commandLine = ProcessCommandLine(pid);
         string role = ClassifyInstallerRole(process.Image, commandLine);
         if (!String.IsNullOrEmpty(commandLine)) process.CommandLine = commandLine;
         if (!String.IsNullOrEmpty(role)) process.Role = role;
-        return role == "protected";
+        return role == "inner-nsis";
     }
 
     private static bool NsisRoleExitsValid()
     {
         foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
-        string[] roles = { "outer", "elevated", "protected" };
+        string[] roles = { "outer-bootstrap", "elevated-bootstrap", "inner-nsis" };
         return roles.All(role => RelevantProcesses.Values.Count(process => process.Role == role && process.ExitCode == 0) == 1);
     }
 
@@ -836,7 +843,7 @@ internal static class WindowsInstallerUiObserver
         foreach (ProcessRecord process in RelevantProcesses.Values) ProcessAlive(process.Pid);
         var processes = RelevantProcesses.Values.OrderBy(value => value.Pid).Select(value => "{\"pid\":" + value.Pid + ",\"parentPid\":" + value.ParentPid + ",\"image\":" + Json(Path.GetFileName(value.Image ?? String.Empty)) + ",\"role\":" + Json(value.Role) + ",\"exitCode\":" + value.ExitCode + "}");
         string window = installerWindow == null ? "null" : "{\"title\":" + Json(installerWindow.Title) + ",\"className\":" + Json(installerWindow.ClassName) + ",\"processId\":" + installerWindow.Pid + ",\"handle\":" + installerWindow.Handle.ToInt64() + "}";
-        string roleExits = "{" + String.Join(",", new[] { "outer", "elevated", "protected" }.Select(role => "\"" + role + "\":" +
+        string roleExits = "{" + String.Join(",", new[] { "outer-bootstrap", "elevated-bootstrap", "inner-nsis" }.Select(role => "\"" + role + "\":" +
             (RelevantProcesses.Values.Where(process => process.Role == role).Select(process => "{\"pid\":" + process.Pid + ",\"exitCode\":" + process.ExitCode + "}").FirstOrDefault() ?? "null"))) + "}";
         string json = "{" +
             "\"schemaVersion\":2,\"installer\":" + Json(installerName) + ",\"architecture\":" + Json(args[3]) + "," +
@@ -845,9 +852,9 @@ internal static class WindowsInstallerUiObserver
             "\"bytes\":" + bytes + ",\"installerSha256Before\":" + Json(before) + ",\"installerSha256After\":" + Json(after) + "," +
             "\"outerPeSubsystem\":\"windows-gui\",\"outerPeSubsystemValue\":" + subsystem + ",\"nsisWindow\":" + window + "," +
             "\"monitoring\":{\"sampleIntervalMs\":5,\"maximumSampleGapMs\":" + maxGapMs + ",\"processSamples\":" + processSamples + ",\"windowSamples\":" + windowSamples + ",\"filesystemSamples\":" + filesystemSamples + ",\"registrySamples\":" + registrySamples + ",\"errors\":" + JsonArray(ObserverErrors) + ",\"events\":" + JsonArray(DiagnosticEvents) + "}," +
-            "\"processes\":[" + String.Join(",", processes) + "],\"nsisRoleExits\":" + roleExits + ",\"powershellProcessStarts\":" + powershellStarts + ",\"visibleConsoleWindowEvents\":" + JsonArray(ConsoleEvents) + "," +
+            "\"processes\":[" + String.Join(",", processes) + "],\"installerRoleExits\":" + roleExits + ",\"powershellProcessStarts\":" + powershellStarts + ",\"visibleConsoleWindowEvents\":" + JsonArray(ConsoleEvents) + "," +
             "\"filesystemOrRegistryMutationEvents\":" + JsonArray(MutationEvents) + ",\"transientProtectedBootstrapObserved\":" + (protectedLeafObserved ? "true" : "false") + ",\"protectedBootstrapBaselineRestored\":" + (ProtectedLeaves().SetEquals(baselineProtectedLeaves) ? "true" : "false") + "," +
-            "\"cancellation\":{\"method\":\"WM_COMMAND/IDCANCEL\",\"targetRole\":\"protected\",\"targetProcessId\":" + (installerWindow == null ? 0 : installerWindow.Pid) + ",\"postAccepted\":" + (cancelPostAccepted ? "true" : "false") + ",\"confirmationObserved\":" + (confirmationWindow != null ? "true" : "false") + ",\"confirmationProcessId\":" + (confirmationWindow == null ? 0 : confirmationWindow.Pid) + ",\"confirmationPostAccepted\":" + (confirmationPostAccepted ? "true" : "false") + ",\"graceful\":" + (graceful ? "true" : "false") + ",\"forcedCleanup\":" + (forced ? "true" : "false") + ",\"exitCode\":" + exitCode + "}," +
+            "\"cancellation\":{\"method\":\"WM_COMMAND/IDCANCEL\",\"targetRole\":\"inner-nsis\",\"targetProcessId\":" + (installerWindow == null ? 0 : installerWindow.Pid) + ",\"postAccepted\":" + (cancelPostAccepted ? "true" : "false") + ",\"confirmationObserved\":" + (confirmationWindow != null ? "true" : "false") + ",\"confirmationProcessId\":" + (confirmationWindow == null ? 0 : confirmationWindow.Pid) + ",\"confirmationPostAccepted\":" + (confirmationPostAccepted ? "true" : "false") + ",\"graceful\":" + (graceful ? "true" : "false") + ",\"forcedCleanup\":" + (forced ? "true" : "false") + ",\"exitCode\":" + exitCode + "}," +
             "\"activeProcessesAfterTeardown\":" + ActiveProcessesJson() + ",\"noDurableInstallMutation\":" + (MutationEvents.IsEmpty ? "true" : "false") + ",\"exactBaselineRestored\":" + ((RegistrySnapshot() == "clean" && DurableFileSnapshot() == "clean" && ProtectedLeaves().SetEquals(baselineProtectedLeaves)) ? "true" : "false") + ",\"passed\":" + (pass ? "true" : "false") + "}\n";
         string pending = path + ".pending"; File.WriteAllText(pending, json, new UTF8Encoding(false)); if (File.Exists(path)) File.Delete(path); File.Move(pending, path);
     }

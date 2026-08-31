@@ -345,3 +345,63 @@ index c3f4f11..61e2682 100644
        Quit
 
        # one-click installer executes uninstall section in the silent mode, but we must show message dialog if silent mode was not explicitly set by user (using /S flag)
+diff --git a/out/targets/nsis/NsisTarget.js b/out/targets/nsis/NsisTarget.js
+index 92cac56..163f502 100644
+--- a/out/targets/nsis/NsisTarget.js
++++ b/out/targets/nsis/NsisTarget.js
+@@ -4,6 +4,7 @@ exports.NsisTarget = void 0;
+ const builder_util_1 = require("builder-util");
+ const builder_util_runtime_1 = require("builder-util-runtime");
+ const debug_1 = require("debug");
++const crypto = require("crypto");
+ const fs = require("fs");
+ const fs_extra_1 = require("fs-extra");
+ const path = require("path");
+@@ -374,6 +375,8 @@ class NsisTarget extends core_1.Target {
+             await wineVm.exec(installerPath, [], { env: { __COMPAT_LAYER: "RunAsInvoker" } });
+         }
+         await packager.signIf(uninstallerPath);
++        await wrapTalkingQuillUninstaller(uninstallerPath, packager, archs);
++        await packager.signIf(uninstallerPath);
+         delete defines.BUILD_UNINSTALLER;
+         // platform-specific path, not wine
+         defines.UNINSTALLER_OUT_FILE = uninstallerPath;
+@@ -663,6 +666,38 @@ class NsisTarget extends core_1.Target {
+     }
+ }
+ exports.NsisTarget = NsisTarget;
++async function wrapTalkingQuillUninstaller(uninstallerPath, packager, archs) {
++    if (!["com.talkingquill.app", "com.talkingquill.installed-acceptance"].includes(packager.appInfo.id) || archs.size !== 1) {
++        return;
++    }
++    const arch = builder_util_1.Arch[archs.keys().next().value];
++    if (arch !== "x64" && arch !== "arm64") {
++        throw new Error(`Talking Quill native uninstaller bootstrap does not support ${arch}`);
++    }
++    const stubPath = path.join(packager.projectDir, "..", "tmp", "windows-bootstrap", arch, "talking-quill-windows-bootstrap.exe");
++    const [stub, inner] = await Promise.all([fs.promises.readFile(stubPath), fs.promises.readFile(uninstallerPath)]);
++    const footer = Buffer.alloc(64);
++    footer.write("TQNSIS01", 0, "ascii");
++    footer.writeUInt32LE(1, 8);
++    footer.writeBigUInt64LE(BigInt(stub.length), 16);
++    footer.writeBigUInt64LE(BigInt(inner.length), 24);
++    crypto.createHash("sha256").update(inner).digest().copy(footer, 32);
++    const pending = `${uninstallerPath}.native-bootstrap-pending`;
++    const predecessor = `${uninstallerPath}.native-bootstrap-inner`;
++    await fs.promises.rm(pending, { force: true });
++    await fs.promises.rm(predecessor, { force: true });
++    await fs.promises.writeFile(pending, Buffer.concat([stub, inner, footer]), { flag: "wx" });
++    await fs.promises.rename(uninstallerPath, predecessor);
++    try {
++        await fs.promises.rename(pending, uninstallerPath);
++        await fs.promises.rm(predecessor, { force: true });
++    }
++    catch (error) {
++        await fs.promises.rm(pending, { force: true });
++        await fs.promises.rename(predecessor, uninstallerPath);
++        throw error;
++    }
++}
+ async function generateForPreCompressed(preCompressedFileExtensions, dir, arch, scriptGenerator) {
+     const resourcesDir = path.join(dir, "resources");
+     const dirInfo = await (0, builder_util_1.statOrNull)(resourcesDir);

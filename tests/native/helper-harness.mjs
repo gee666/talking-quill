@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access } from 'node:fs/promises';
+import { access, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
@@ -13,6 +13,7 @@ import {
 const arguments_ = process.argv.slice(2);
 const interactive = arguments_.includes('--interactive');
 const helperArgument = valueAfter('--helper');
+const evidenceArgument = valueAfter('--evidence');
 const repositoryRoot = resolve(import.meta.dirname, '..', '..');
 const sourceHelper = resolve(
   helperArgument ??
@@ -25,16 +26,32 @@ const preparedHelper = await prepareHelperHarnessExecutable({
   repositoryRoot,
 });
 
+const lifecycleAudit = {
+  harnessPid: process.pid,
+  sourceImage: sourceHelper,
+  stagedGatewayImage: preparedHelper.executable,
+  stagedOwnerImage: preparedHelper.ownerExecutable ?? null,
+  stagingRoot: preparedHelper.packageRoot ?? null,
+  primaryGatewayPid: null,
+  cleanupGatewayPid: null,
+};
 const child = spawn(
   preparedHelper.executable,
   preparedHelper.staged ? ['--windows-helper-harness-v1'] : [],
   {
-    stdio: ['pipe', 'pipe', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
     windowsHide: false,
     env: { ...process.env, NO_COLOR: '1' },
   },
 );
+lifecycleAudit.primaryGatewayPid = child.pid ?? null;
+let protocolDiagnostics = '';
+child.stderr.on('data', (chunk) => {
+  const text = chunk.toString('utf8');
+  protocolDiagnostics += text;
+  process.stderr.write(text);
+});
 const childExit = new Promise((resolveExit, reject) => {
   child.once('error', reject);
   child.once('exit', (code) => {
@@ -149,8 +166,8 @@ try {
     await runInteractive();
   }
   const shutdown = await requestDisabledNeutralShutdown();
-  if (!['neutral', 'draining'].includes(shutdown.ownerDisposition)) {
-    throw new Error(`Malformed owner shutdown disposition: ${JSON.stringify(shutdown)}`);
+  if (shutdown.ownerDisposition !== 'neutral') {
+    throw new Error(`Owner did not reach neutral shutdown: ${JSON.stringify(shutdown)}`);
   }
   plannedShutdown = true;
   if (!(await waitForChildExit(3_000))) {
@@ -184,7 +201,21 @@ try {
     }
   }
 }
-if (runError !== undefined) throw runError;
+console.log(`lifecycle-audit ${JSON.stringify(lifecycleAudit)}`);
+const evidencePath = evidenceArgument ?? process.env.TALKING_QUILL_HARNESS_EVIDENCE;
+if (evidencePath) {
+  await writeFile(
+    evidencePath,
+    `${JSON.stringify({ lifecycleAudit, error: runError?.message ?? null, protocolDiagnostics })}\n`,
+    'utf8',
+  );
+}
+if (runError !== undefined) {
+  if (protocolDiagnostics.trim() !== '') {
+    runError.message += `\nowner protocol diagnostics:\n${protocolDiagnostics.trim()}`;
+  }
+  throw runError;
+}
 
 async function waitForChildExit(milliseconds) {
   if (child.exitCode !== null) return true;
@@ -233,10 +264,12 @@ async function cleanupWithFreshGateway(executable, expectedOwnerInstance) {
     windowsHide: false,
     env: { ...process.env, NO_COLOR: '1' },
   });
+  lifecycleAudit.cleanupGatewayPid = cleanup.pid ?? null;
   cleanup.stdin.on('error', () => undefined);
   let bytes = Buffer.alloc(0);
   let id = 1;
   const requests = new Map();
+  const expiredRequests = new Set();
   const exit = new Promise((resolveExit, rejectExit) => {
     cleanup.once('error', rejectExit);
     cleanup.once('exit', (code) => {
@@ -260,7 +293,10 @@ async function cleanupWithFreshGateway(executable, expectedOwnerInstance) {
       bytes = bytes.subarray(length + 4);
       if (!('id' in message)) continue;
       const pendingRequest = requests.get(message.id);
-      if (pendingRequest === undefined) throw new Error('Unknown cleanup gateway response');
+      if (pendingRequest === undefined) {
+        if (expiredRequests.delete(message.id)) continue;
+        throw new Error('Unknown cleanup gateway response');
+      }
       requests.delete(message.id);
       if ('error' in message) pendingRequest.reject(new Error(message.error.message));
       else pendingRequest.resolve(message.result);
@@ -275,6 +311,7 @@ async function cleanupWithFreshGateway(executable, expectedOwnerInstance) {
     return new Promise((resolveRequest, rejectRequest) => {
       const timeout = setTimeout(() => {
         requests.delete(requestId);
+        expiredRequests.add(requestId);
         rejectRequest(new Error(`fresh cleanup ${method} timed out`));
       }, 3_000);
       requests.set(requestId, {
@@ -302,8 +339,15 @@ async function cleanupWithFreshGateway(executable, expectedOwnerInstance) {
     ) {
       throw new Error('Fresh cleanup gateway authenticated a different owner instance');
     }
+    let shutdown;
     for (const [method, params] of FAILURE_CLEANUP_REQUESTS) {
-      await requestCleanup(method, params);
+      const result = await requestCleanup(method, params);
+      if (method === 'shutdown') shutdown = result;
+    }
+    if (shutdown?.ownerDisposition !== 'neutral') {
+      throw new Error(
+        `Fresh cleanup owner did not reach neutral shutdown: ${JSON.stringify(shutdown)}`,
+      );
     }
     if (!(await Promise.race([exit.then(() => true), delay(3_000).then(() => false)]))) {
       throw new Error('Fresh cleanup gateway did not exit after planned neutral shutdown');

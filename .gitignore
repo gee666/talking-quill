@@ -15,6 +15,7 @@ coverage/
 # Native build output
 helper/target/
 helper/**/target/
+installer/**/target/
 app/native/
 
 # Local agent plans, configuration, and secrets

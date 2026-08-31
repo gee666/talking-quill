@@ -1,7 +1,6 @@
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 !include "FileFunc.nsh"
-!include "${PROJECT_DIR}\..\build\windows-protected-bootstrap-encoded.nsh"
 !ifdef BUILD_UNINSTALLER
 !include "StrFunc.nsh"
 ${UnStrStr}
@@ -30,62 +29,20 @@ ${UnStrStr}
 Var TalkingQuillNativeProgramData
 Var TalkingQuillSecureTemp
 
-; Both generated entrypoints invoke this body before SetOutPath, logging,
-; InitPluginsDir, or any plugin-backed macro. The first process uses the NSIS
-; built-in ExecShellWait runas path. Only that elevated child may ask system
-; PowerShell to create the protected ProgramData leaf. The final child validates
-; the leaf before assigning TEMP, so privileged plugins never use user TEMP.
+; The published executable is the reviewed native bootstrap. It elevates before
+; extracting this inner NSIS image into an Administrators/SYSTEM-only ProgramData
+; leaf, sets TEMP and TMP, and waits for exact exit propagation. No plugin may
+; initialize before this marker and inherited TEMP check completes.
 !macro TalkingQuillProtectedEarlyBootstrap
   ${GetParameters} $R0
-  ${GetOptions} $R0 "/TQELEVATEDBOOTSTRAP=" $R1
-  ${If} $R1 != "1"
-    ClearErrors
-    StrCpy $R2 79
-    ; This NSIS build's ExecShellWait does not expose the ShellExecute process
-    ; exit code. The protected bootstrap authenticates both waiting installer
-    ; images and terminates them with the final child's exact exit code.
-    ExecShellWait "runas" "$EXEPATH" '$R0 /TQELEVATEDBOOTSTRAP=1 /TQOUTERWINDOW=$HWNDPARENT' SW_SHOWNORMAL $R2
-    IfErrors 0 +3
-      SetErrorLevel 79
-      Quit
-    SetErrorLevel $R2
-    Quit
-  ${EndIf}
-
   ${GetOptions} $R0 "/TQPROTECTEDTEMP=" $R1
   ${If} $R1 == ""
-    ClearErrors
-    StrCpy $R2 79
-    ; The static bootstrap reads this waiting NSIS parent through native process
-    ; APIs. No caller-controlled value is interpolated into PowerShell source.
-    ExecShellWait "open" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' SW_HIDE $R2
-    IfErrors 0 +3
-      SetErrorLevel 79
-      Quit
-    SetErrorLevel $R2
-    Quit
-  ${EndIf}
-
-  ClearErrors
-  StrCpy $R2 78
-  ; ShellExecute likewise does not expose PowerShell's exit code. Success is
-  ; an authenticated marker inside the already validated protected leaf;
-  ; launch failure or any script failure leaves the marker absent.
-  StrCpy $R3 "$R1\.talking-quill-bootstrap-validated"
-  ExecShellWait "open" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command "$$b=$\'${TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD}$\';$$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String($$b));$$z=New-Object IO.Compression.GZipStream($$m,[IO.Compression.CompressionMode]::Decompress);$$r=New-Object IO.StreamReader($$z,[Text.Encoding]::UTF8);&([ScriptBlock]::Create($$r.ReadToEnd()))"' SW_HIDE $R2
-  IfErrors protected_bootstrap_validation_failed
-  IfFileExists "$R3" 0 protected_bootstrap_validation_failed
-  Delete "$R3"
-  Goto protected_bootstrap_validation_done
-  protected_bootstrap_validation_failed:
     SetErrorLevel 78
     Abort
-  protected_bootstrap_validation_done:
-  ; $TEMP is an NSIS shell variable and cannot be a StrCpy destination. The
-  ; protected child inherits TEMP/TMP before NSIS initializes $TEMP, so require
-  ; that immutable value to match the validated command-line path. Otherwise
-  ; InitPluginsDir could still use an unprotected directory.
+  ${EndIf}
+  ReadEnvStr $R2 "TMP"
   ${If} $TEMP != $R1
+  ${OrIf} $R2 != $R1
     SetErrorLevel 78
     Abort
   ${EndIf}

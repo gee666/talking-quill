@@ -12,18 +12,22 @@ const targets = [
   'aarch64-apple-darwin',
 ];
 for (const target of targets) {
-  const manifest = 'helper/Cargo.toml';
-  const result = spawnSync(
-    cargo,
-    ['fetch', '--manifest-path', manifest, '--locked', '--target', target],
-    {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: 'inherit',
-    },
-  );
-  if (result.status !== 0)
-    throw new Error(`Cargo dependency fetch failed for ${manifest} on ${target}.`);
+  for (const manifest of [
+    'helper/Cargo.toml',
+    ...(target.includes('windows') ? ['installer/windows-bootstrap/Cargo.toml'] : []),
+  ]) {
+    const result = spawnSync(
+      cargo,
+      ['fetch', '--manifest-path', manifest, '--locked', '--target', target],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        stdio: 'inherit',
+      },
+    );
+    if (result.status !== 0)
+      throw new Error(`Cargo dependency fetch failed for ${manifest} on ${target}.`);
+  }
 }
 console.log(`Fetched locked Rust dependency graphs for ${targets.join(', ')}.`);
 

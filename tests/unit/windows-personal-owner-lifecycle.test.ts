@@ -61,26 +61,30 @@ describe('Windows gateway and owner lifecycle contract', () => {
   it('relaunches into validated ProgramData before any privileged plugin or cleanup code', async () => {
     const [installer, bootstrap, patch, lifecycle] = await Promise.all([
       readFile('build/installer.nsh', 'utf8'),
-      readFile('build/windows-protected-bootstrap.ps1', 'utf8'),
+      readFile('installer/windows-bootstrap/src/windows.rs', 'utf8'),
       readFile('patches/app-builder-lib@26.15.3.patch', 'utf8'),
       readFile('helper/src/windows_installer.rs', 'utf8'),
     ]);
     expect(patch).toContain('!insertmacro customEarlyInit');
     expect(installer).toContain('!macro customEarlyInit');
-    expect(installer).toContain('TALKING_QUILL_PROTECTED_BOOTSTRAP_PAYLOAD');
-    expect(installer).not.toMatch(/-Command[^\r\n]*"\s+"\$[R0-9]/u);
-    expect(bootstrap).toContain('[Environment+SpecialFolder]::CommonApplicationData');
-    expect(bootstrap).toContain('SetAccessRuleProtection($true, $false)');
-    expect(bootstrap).toContain('/TQPROTECTEDTEMP=');
-    expect(bootstrap).toContain('AreAccessRulesProtected');
-    expect(bootstrap).toContain('ReparsePoint');
-    expect(bootstrap).toContain('NtQueryInformationProcess');
-    expect(bootstrap).toContain('CommandLineToArgvW');
-    expect(bootstrap).toContain('QueryFullProcessImageName');
-    expect(bootstrap).toContain('LastIndexOf(" _?=", StringComparison.Ordinal)');
-    expect(bootstrap).toContain('[Microsoft.Win32.RegistryView]::Registry64');
-    expect(bootstrap).toContain("Join-Path $nativeProgramFiles 'Talking Quill'");
-    expect(bootstrap).toContain("$start.Arguments += ' ' + $nsisTail");
+    expect(installer).toContain('/TQPROTECTEDTEMP=');
+    const early = installer.slice(
+      installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
+      installer.indexOf(
+        '!macroend',
+        installer.indexOf('!macro TalkingQuillProtectedEarlyBootstrap'),
+      ),
+    );
+    expect(early).not.toContain('WindowsPowerShell');
+    expect(bootstrap).toContain('FOLDERID_ProgramData');
+    expect(bootstrap).toContain('ConvertStringSecurityDescriptorToSecurityDescriptorW');
+    expect(bootstrap).toContain('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)');
+    expect(bootstrap).toContain('PROTECTED_MARKER');
+    expect(bootstrap).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
+    expect(bootstrap).toContain('ShellExecuteExW');
+    expect(bootstrap).toContain('create_new(true)');
+    expect(bootstrap).toContain('Sha256::digest');
+    expect(bootstrap).toContain('wait_exit');
     expect(installer).toContain('talking-quill-installer-lifecycle.exe');
     expect(installer).not.toContain('File /oname=$PLUGINSDIR\\talking-quill-machine-cleanup.ps1');
     expect(lifecycle).toContain('FOLDERID_ProgramFiles');

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import {
@@ -109,11 +109,21 @@ export async function prepareHelperHarnessExecutable({
       }
     }
     await rename(pendingRoot, packageRoot);
+    const executable = join(packageRoot, 'resources', 'helper', 'talking-quill-helper.exe');
     return {
-      executable: join(packageRoot, 'resources', 'helper', 'talking-quill-helper.exe'),
+      executable,
+      ownerExecutable: join(packageRoot, 'resources', 'helper', 'talking-quill-keyboard-owner.exe'),
+      packageRoot,
       staged: true,
-      cleanup: () =>
-        rm(packageRoot, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 }),
+      cleanup: async () => {
+        await rm(packageRoot, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
+        try {
+          await lstat(packageRoot);
+          throw new Error(`Native harness staging root remains after cleanup: ${packageRoot}`);
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+      },
     };
   } catch (error) {
     await Promise.all([
