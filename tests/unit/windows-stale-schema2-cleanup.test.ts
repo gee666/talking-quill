@@ -109,12 +109,20 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     ]) {
       expect(source).toContain(check);
     }
-    expect(index('let legacy = LegacyMutexPair::acquire()?;')).toBeLessThan(
-      index('RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?'),
+    const cleanup = source.slice(
+      index('fn reclaim_exact_schema2_orphan_v2('),
+      index('fn reclaim_exact_schema2_orphan_with_audit('),
+    );
+    expect(cleanup.indexOf('let legacy = LegacyMutexPair::acquire()?;')).toBeLessThan(
+      cleanup.indexOf(
+        'RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?',
+      ),
     );
     expect(
-      index('RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?'),
-    ).toBeLessThan(index('let admission = active_state_proof('));
+      cleanup.indexOf(
+        'RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?',
+      ),
+    ).toBeLessThan(cleanup.indexOf('let admission = active_state_proof('));
     expect(source).toContain('share_mode(0)');
     expect(source).toContain('Duration::from_millis(750)');
   });
@@ -134,7 +142,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       'let zero = active_state_proof(\n        program_files,\n        program_data,\n        system,\n        false,\n        authenticated_parent,\n    )?;',
     );
     expect(source).toContain('audit.record("completed", binding, &zero)');
-    expect(source).toContain('reclaim_exact_schema2_orphan(true, false)?;');
+    expect(source).toContain('reclaim_exact_schema2_orphan_with_audit(true, false, &mut audit)?;');
     expect(source).toContain('reclaim_exact_schema2_orphan(true, true)?;');
     expect(source).toContain(
       'no_talking_quill_process_except_authenticated_pair(authenticated_parent)?;',
@@ -151,12 +159,26 @@ describe('Windows schema-2 stale coordination cleanup', () => {
   });
 
   it('requires a protected completion audit and full zero proof on every successful branch', () => {
+    const reclaimStart = index('fn reclaim_exact_schema2_orphan_v2(');
     const reclaim = source.slice(
-      index('fn reclaim_exact_schema2_orphan_v2('),
-      index('fn reclaim_exact_schema2_orphan(developer_command: bool, authenticated_parent: bool)'),
+      reclaimStart,
+      source.indexOf('\nfn reclaim_exact_schema2_orphan_with_audit(', reclaimStart),
     );
-    expect(reclaim.indexOf('let mut audit = StaleCleanupAudit::open()?;')).toBeLessThan(
-      reclaim.indexOf('let Some(suffix) = exact_machine_lock_publication()? else'),
+    expect(reclaim).not.toContain('StaleCleanupAudit::open()');
+    expect(reclaim).toContain('audit: &mut StaleCleanupAudit');
+    expect(source.match(/let mut audit = StaleCleanupAudit::open\(\)\?;/g)).toHaveLength(1);
+    expect(source).toContain('audit.record("inspected", &binding, &admission)?;');
+    expect(source).toContain('audit.record("commit-intent", &binding, &second)?;');
+    expect(source).toContain('audit.record(stage, &empty, &empty)');
+    const auditImplementation = source.slice(
+      index('impl StaleCleanupAudit {'),
+      index('fn retained_binding('),
+    );
+    expect(auditImplementation).not.toContain('FILE_SHARE_WRITE');
+    expect(source).toContain('force_stale_cleanup_rejection("post-inspected")?;');
+    expect(source).toContain('force_stale_cleanup_rejection("post-commit-intent")?;');
+    expect(source).toContain(
+      'forced_post_inspected_and_post_commit_rejections_keep_one_audit_chain',
     );
     expect(reclaim).toContain('retained_binding(&[], "no-machine-lock-publication")');
     expect(reclaim.match(/complete_stale_cleanup_zero_state\(/g)).toHaveLength(2);

@@ -7982,6 +7982,7 @@ const STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES: &[&str] = &[
     "request.exact-argv",
     "token.identity",
     "self.path",
+    "self.open",
     "self.acl",
     "self.identity",
     "self.sha256",
@@ -7991,14 +7992,17 @@ const STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES: &[&str] = &[
     "audit.path",
     "audit.acl",
     "audit.open",
+    "audit.initialize",
+    "audit.event",
     "mutex.availability",
+    "paths.known-folders",
     "lifecycle-lock.availability",
     "registry.inventory",
     "active-state.inventory",
     "fixture.identity",
     "fixture.sha256",
+    "image.stability",
     "diagnostic.complete",
-    "diagnostic.rejected",
     "cleanup.rejected.before-audit",
     "cleanup.rejected.after-audit",
 ];
@@ -8131,19 +8135,22 @@ impl StaleSchema2Diagnostic {
 }
 
 #[cfg(feature = "stale-schema2-cleanup")]
-fn diagnostic_stage<T>(
+fn diagnostic_stage<T, F>(
     diagnostic: &mut StaleSchema2Diagnostic,
     stage_code: &str,
-    result: Result<(T, serde_json::Value)>,
-) -> Result<T> {
-    match result {
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<(T, serde_json::Value)>,
+{
+    match operation() {
         Ok((value, evidence)) => {
             diagnostic.record(stage_code, "passed", evidence)?;
             Ok(value)
         }
         Err(error) => {
             let evidence = serde_json::json!({ "error": error.message });
-            let _ = diagnostic.record(stage_code, "rejected", evidence);
+            diagnostic.record(stage_code, "rejected", evidence)?;
             Err(fail(EXIT_REJECTED, error.message))
         }
     }
@@ -8173,10 +8180,10 @@ impl StaleCleanupAudit {
             .ok_or_else(|| fail(EXIT_REJECTED, "Audit path has no parent."))?
             .to_owned();
         assert_plain_directory(&parent)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .append(true)
             .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
             .open(&path)
             .map_err(|_| {
@@ -8191,6 +8198,10 @@ impl StaleCleanupAudit {
                 "Cleanup audit is not administrator protected.",
             ));
         }
+        Self::from_retained(file, parent)
+    }
+
+    fn from_retained(mut file: File, parent: PathBuf) -> Result<Self> {
         let identity = file_identity_text(&file)?;
         file.seek(SeekFrom::Start(0)).map_err(io_failure)?;
         let mut prior = Vec::new();
@@ -8513,285 +8524,362 @@ fn open_authenticated_direct_cleanup_image() -> Result<(File, [u8; 32])> {
 #[cfg(feature = "stale-schema2-cleanup")]
 fn run_direct_stale_schema2_diagnostic(arguments: &[OsString]) -> Result<i32> {
     let mut diagnostic = StaleSchema2Diagnostic::open()?;
-    match run_direct_stale_schema2_diagnostic_inner(&mut diagnostic, arguments) {
-        Ok(code) => Ok(code),
-        Err(error) => {
-            diagnostic.record(
-                "diagnostic.rejected",
-                "rejected",
-                serde_json::json!({ "error": error.message, "exitCode": EXIT_REJECTED }),
-            )?;
-            Err(fail(EXIT_REJECTED, error.message))
-        }
-    }
+    run_direct_stale_schema2_diagnostic_inner(&mut diagnostic, arguments)
 }
 
 #[cfg(feature = "stale-schema2-cleanup")]
-#[allow(clippy::needless_borrow)]
 fn run_direct_stale_schema2_diagnostic_inner(
-    mut diagnostic: &mut StaleSchema2Diagnostic,
+    diagnostic: &mut StaleSchema2Diagnostic,
     arguments: &[OsString],
 ) -> Result<i32> {
-    let argv_utf16 = arguments
-        .iter()
-        .map(|argument| argument.encode_wide().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    diagnostic_stage(
-        &mut diagnostic,
-        "request.exact-argv",
-        Ok(((), serde_json::json!({ "argvUtf16": argv_utf16 }))),
-    )?;
-
-    let elevated = token_is_elevated()?;
-    let claims = peer_claims(std::process::id())?;
-    diagnostic_stage(
-        &mut diagnostic,
-        "token.identity",
-        if direct_cleanup_token_is_authorized(elevated, claims.integrity_rid) {
-            Ok((
-                (),
-                serde_json::json!({
-                    "elevated": elevated,
-                    "integrityRid": claims.integrity_rid,
-                    "processId": std::process::id(),
-                }),
-            ))
-        } else {
-            Err(fail(
+    diagnostic_stage(diagnostic, "request.exact-argv", || {
+        let argv_utf16 = arguments
+            .iter()
+            .map(|argument| argument.encode_wide().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok(((), serde_json::json!({ "argvUtf16": argv_utf16 })))
+    })?;
+    diagnostic_stage(diagnostic, "token.identity", || {
+        let elevated = token_is_elevated()?;
+        let claims = peer_claims(std::process::id())?;
+        if !direct_cleanup_token_is_authorized(elevated, claims.integrity_rid) {
+            return Err(fail(
                 EXIT_REJECTED,
                 "Stale schema-2 diagnosis requires a high elevated token.",
-            ))
-        },
-    )?;
-
-    let current = std::env::current_exe().map_err(io_failure)?;
-    let kernel_image = process_image(std::process::id())?;
-    diagnostic_stage(
-        &mut diagnostic,
-        "self.path",
-        if canonical(&current)? == canonical(&kernel_image)? {
-            Ok((
-                (),
-                serde_json::json!({
-                    "current": current.to_string_lossy(),
-                    "kernel": kernel_image.to_string_lossy(),
-                }),
-            ))
-        } else {
-            Err(fail(
+            ));
+        }
+        Ok((
+            (),
+            serde_json::json!({
+                "elevated": elevated,
+                "integrityRid": claims.integrity_rid,
+                "processId": std::process::id(),
+            }),
+        ))
+    })?;
+    let (current, kernel_image) = diagnostic_stage(diagnostic, "self.path", || {
+        let current = std::env::current_exe().map_err(io_failure)?;
+        let kernel_image = process_image(std::process::id())?;
+        if canonical(&current)? != canonical(&kernel_image)? {
+            return Err(fail(
                 EXIT_REJECTED,
                 "Diagnostic process image does not match its self path.",
-            ))
-        },
-    )?;
-    let (mut retained_image, expected_hash) = diagnostic_stage(
-        &mut diagnostic,
-        "package.tqpkg2",
-        open_authenticated_direct_cleanup_image().map(|value| {
-            (
-                value,
-                serde_json::json!({ "parser": "rust", "format": "TQPKG2", "schemaVersion": 2 }),
-            )
-        }),
-    )?;
-    let identity = file_identity_text(&retained_image)?;
-    diagnostic.record(
-        "self.acl",
-        "passed",
-        serde_json::json!({ "protected": true }),
-    )?;
-    diagnostic.record(
-        "self.identity",
-        "passed",
-        serde_json::json!({ "fileIdentity": identity }),
-    )?;
-    diagnostic.record(
-        "self.sha256",
-        "passed",
-        serde_json::json!({ "sha256": hex_hash(&expected_hash) }),
-    )?;
-    let length = retained_image.metadata().map_err(io_failure)?.len();
-    retained_image
-        .seek(SeekFrom::Start(0))
-        .map_err(io_failure)?;
-    let package = package::parse(&mut retained_image, length).map_err(|error| {
-        fail(
-            EXIT_REJECTED,
-            format!("Diagnostic TQPKG2 validation failed: {error:?}"),
-        )
+            ));
+        }
+        let evidence = serde_json::json!({
+            "current": current.to_string_lossy(),
+            "kernel": kernel_image.to_string_lossy(),
+        });
+        Ok(((current, kernel_image), evidence))
     })?;
-    diagnostic.record(
-        "package.source-binding",
-        "passed",
-        serde_json::json!({
-            "architecture": package.manifest.architecture,
-            "packageMode": package.manifest.package_mode,
-            "sourceCommit": package.manifest.source_commit,
-            "sourceTree": package.manifest.source_tree,
-        }),
-    )?;
-
-    let audit_path = diagnostic_stage(
-        &mut diagnostic,
-        "audit.environment",
-        std::env::var_os("TQ_STALE_SCHEMA2_AUDIT_PATH")
-            .map(PathBuf::from)
-            .ok_or_else(|| fail(EXIT_REJECTED, "TQ_STALE_SCHEMA2_AUDIT_PATH is required."))
-            .map(|path| {
-                let evidence = serde_json::json!({ "path": path.to_string_lossy() });
-                (path, evidence)
-            }),
-    )?;
-    diagnostic_stage(
-        &mut diagnostic,
-        "audit.path",
-        if audit_path.is_absolute() {
-            Ok(((), serde_json::json!({ "absolute": true })))
+    let mut retained_image = diagnostic_stage(diagnostic, "self.open", || {
+        let image = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&current)
+            .map_err(|_| fail(EXIT_REJECTED, "Diagnostic image cannot be retained."))?;
+        Ok((image, serde_json::json!({ "retained": true })))
+    })?;
+    diagnostic_stage(diagnostic, "self.acl", || {
+        let parent = current
+            .parent()
+            .ok_or_else(|| fail(EXIT_REJECTED, "Diagnostic image has no parent."))?;
+        if !staged_path_is_protected(parent, true)?
+            || !protected_file_handle_acl_is_exact(&retained_image)?
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Diagnostic image is not administrator protected.",
+            ));
+        }
+        Ok(((), serde_json::json!({ "protected": true })))
+    })?;
+    let identity = diagnostic_stage(diagnostic, "self.identity", || {
+        let identity = file_identity_text(&retained_image)?;
+        let path_image = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&kernel_image)
+            .map_err(|_| fail(EXIT_REJECTED, "Diagnostic process image changed."))?;
+        if file_identity_text(&path_image)? != identity {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Diagnostic process image identity changed.",
+            ));
+        }
+        Ok((
+            identity.clone(),
+            serde_json::json!({ "fileIdentity": identity }),
+        ))
+    })?;
+    let expected_hash = diagnostic_stage(diagnostic, "self.sha256", || {
+        let digest = hash_reader(&mut retained_image)?;
+        retained_image
+            .seek(SeekFrom::Start(0))
+            .map_err(io_failure)?;
+        Ok((digest, serde_json::json!({ "sha256": hex_hash(&digest) })))
+    })?;
+    let package = diagnostic_stage(diagnostic, "package.tqpkg2", || {
+        let length = retained_image.metadata().map_err(io_failure)?.len();
+        retained_image
+            .seek(SeekFrom::Start(0))
+            .map_err(io_failure)?;
+        let package = package::parse(&mut retained_image, length).map_err(|error| {
+            fail(
+                EXIT_REJECTED,
+                format!("Diagnostic TQPKG2 validation failed: {error:?}"),
+            )
+        })?;
+        Ok((
+            package,
+            serde_json::json!({ "parser": "rust", "format": "TQPKG2", "schemaVersion": 2 }),
+        ))
+    })?;
+    diagnostic_stage(diagnostic, "package.source-binding", || {
+        let (source_commit, source_tree) = direct_cleanup_source_identity()?;
+        let expected_architecture = if cfg!(target_arch = "x86_64") {
+            "x64"
+        } else if cfg!(target_arch = "aarch64") {
+            "arm64"
         } else {
-            Err(fail(
+            "unsupported"
+        };
+        if package.manifest.source_commit != source_commit
+            || package.manifest.source_tree != source_tree
+            || package.manifest.architecture != expected_architecture
+            || package.manifest.package_mode != "stale-schema2-cleanup"
+            || package.manifest.predecessor.is_some()
+            || package.manifest.fault_phase.is_some()
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Diagnostic image does not match its compiled source identity.",
+            ));
+        }
+        Ok((
+            (),
+            serde_json::json!({
+                "architecture": package.manifest.architecture,
+                "packageMode": package.manifest.package_mode,
+                "sourceCommit": package.manifest.source_commit,
+                "sourceTree": package.manifest.source_tree,
+            }),
+        ))
+    })?;
+    let audit_path = diagnostic_stage(diagnostic, "audit.environment", || {
+        let path = std::env::var_os("TQ_STALE_SCHEMA2_AUDIT_PATH")
+            .map(PathBuf::from)
+            .ok_or_else(|| fail(EXIT_REJECTED, "TQ_STALE_SCHEMA2_AUDIT_PATH is required."))?;
+        Ok((
+            path.clone(),
+            serde_json::json!({ "path": path.to_string_lossy() }),
+        ))
+    })?;
+    let audit_parent = diagnostic_stage(diagnostic, "audit.path", || {
+        if !audit_path.is_absolute() {
+            return Err(fail(
                 EXIT_REJECTED,
                 "Stale cleanup audit path must be absolute.",
+            ));
+        }
+        let parent = audit_path
+            .parent()
+            .ok_or_else(|| fail(EXIT_REJECTED, "Audit path has no parent."))?
+            .to_owned();
+        assert_plain_directory(&parent)?;
+        Ok((parent, serde_json::json!({ "absolute": true })))
+    })?;
+    let audit_file = diagnostic_stage(diagnostic, "audit.open", || {
+        let file = OpenOptions::new()
+            .append(true)
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(&audit_path)
+            .map_err(|_| {
+                fail(
+                    EXIT_REJECTED,
+                    "Administrator must pre-create the protected cleanup audit file.",
+                )
+            })?;
+        Ok((file, serde_json::json!({ "opened": true })))
+    })?;
+    let audit_file = diagnostic_stage(diagnostic, "audit.acl", || {
+        if !protected_file_handle_acl_is_exact(&audit_file)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Cleanup audit is not administrator protected.",
+            ));
+        }
+        Ok((audit_file, serde_json::json!({ "protected": true })))
+    })?;
+    let mut audit = diagnostic_stage(diagnostic, "audit.initialize", || {
+        let audit = StaleCleanupAudit::from_retained(audit_file, audit_parent)?;
+        let evidence = serde_json::json!({ "auditIdentity": audit.identity });
+        Ok((audit, evidence))
+    })?;
+    diagnostic_stage(diagnostic, "audit.event", || {
+        let empty = retained_binding(&[], "diagnostic-start");
+        audit.record("diagnostic-start", &empty, &empty)?;
+        Ok(((), serde_json::json!({ "stage": "diagnostic-start" })))
+    })?;
+    let legacy = diagnostic_stage(diagnostic, "mutex.availability", || {
+        let mutex = LegacyMutexPair::acquire()?;
+        Ok((mutex, serde_json::json!({ "available": true })))
+    })?;
+    let (program_files, program_data, system) =
+        diagnostic_stage(diagnostic, "paths.known-folders", || {
+            let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+            let program_data = known_folder(&FOLDERID_ProgramData)?;
+            let system = known_folder(&FOLDERID_System)?;
+            Ok((
+                (program_files, program_data, system),
+                serde_json::json!({ "resolved": true }),
             ))
-        },
-    )?;
-    let mut audit = diagnostic_stage(
-        &mut diagnostic,
-        "audit.open",
-        StaleCleanupAudit::open().map(|audit| {
-            let evidence = serde_json::json!({ "auditIdentity": audit.identity });
-            (audit, evidence)
-        }),
-    )?;
-    diagnostic.record(
-        "audit.acl",
-        "passed",
-        serde_json::json!({ "protected": true }),
-    )?;
-
-    let legacy = diagnostic_stage(
-        &mut diagnostic,
-        "mutex.availability",
-        LegacyMutexPair::acquire().map(|mutex| (mutex, serde_json::json!({ "available": true }))),
-    )?;
-    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
-    let system = known_folder(&FOLDERID_System)?;
-    let suffix = exact_machine_lock_publication()?;
-    let registry_subkeys = registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
-    let registry_values = registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
-    diagnostic.record(
-        "registry.inventory",
-        "passed",
-        serde_json::json!({
+        })?;
+    let suffix = diagnostic_stage(diagnostic, "registry.inventory", || {
+        let suffix = exact_machine_lock_publication()?;
+        let subkeys = registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
+        let values = registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
+        if let Some(suffix) = suffix.as_deref() {
+            validate_machine_lock_suffix(suffix)?;
+            exact_cleanup_registry(suffix)?;
+        }
+        let evidence = serde_json::json!({
             "machineLockSuffix": suffix,
-            "subkeys": registry_subkeys,
-            "values": registry_values,
-        }),
-    )?;
-    let active = diagnostic_stage(
-        &mut diagnostic,
-        "active-state.inventory",
-        active_state_proof(&program_files, &program_data, &system, true, false)
-            .map(|proof| (proof.clone(), serde_json::json!({ "proofSha256": proof }))),
-    )?;
-
+            "subkeys": subkeys,
+            "values": values,
+        });
+        Ok((suffix, evidence))
+    })?;
+    let active = diagnostic_stage(diagnostic, "active-state.inventory", || {
+        let proof = active_state_proof(&program_files, &program_data, &system, true, false)?;
+        Ok((proof.clone(), serde_json::json!({ "proofSha256": proof })))
+    })?;
     let Some(suffix) = suffix else {
         let binding = retained_binding(&[], "no-machine-lock-publication");
-        audit.record("diagnostic-complete", &binding, &active)?;
-        diagnostic.record(
-            "diagnostic.complete",
-            "passed",
-            serde_json::json!({ "bindingSha256": binding, "state": "absent" }),
-        )?;
+        diagnostic_stage(diagnostic, "audit.event", || {
+            audit.record("diagnostic-complete", &binding, &active)?;
+            Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
+        })?;
+        diagnostic_stage(diagnostic, "image.stability", || {
+            retained_image
+                .seek(SeekFrom::Start(0))
+                .map_err(io_failure)?;
+            if hash_reader(&mut retained_image)? != expected_hash {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Diagnostic image changed during inspection.",
+                ));
+            }
+            Ok(((), serde_json::json!({ "fileIdentity": identity })))
+        })?;
+        diagnostic_stage(diagnostic, "diagnostic.complete", || {
+            Ok((
+                (),
+                serde_json::json!({ "bindingSha256": binding, "state": "absent" }),
+            ))
+        })?;
         drop(legacy);
         return Ok(0);
     };
-    validate_machine_lock_suffix(&suffix)?;
-    exact_cleanup_registry(&suffix)?;
     let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-    let lifecycle = diagnostic_stage(
-        &mut diagnostic,
-        "lifecycle-lock.availability",
-        RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock")).map(
-            |object| {
-                let evidence = serde_json::json!({ "fileIdentity": object.identity });
-                (object, evidence)
-            },
-        ),
-    )?;
-    let lock_root = RetainedStaleObject::open(&lock_directory, true)?;
-    let mut lock_tree_identity =
-        RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
-    let mut lock_file_identity =
-        RetainedStaleObject::open(&lock_directory.join("recovery-state-v1.identity-v1"), false)?;
-    let recovery = program_data.join("Talking Quill Update Recovery");
-    let relaunch = recovery.join("Relaunch Records");
-    let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
-    let mut pending =
-        RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
-    let generation_guard = RetainedStaleObject::open(&generation, true)?;
-    let relaunch_guard = RetainedStaleObject::open(&relaunch, true)?;
-    let recovery_guard = RetainedStaleObject::open(&recovery, true)?;
-    let bytes = pending.read_all()?;
-    let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    for object in [
-        &lifecycle,
-        &lock_root,
-        &lock_tree_identity,
-        &lock_file_identity,
-        &pending,
-        &generation_guard,
-        &relaunch_guard,
-        &recovery_guard,
-    ] {
-        object.verify()?;
-    }
-    diagnostic_stage(
-        &mut diagnostic,
-        "fixture.identity",
-        if lock_tree_identity.read_all()? == lock_root.identity.as_bytes()
-            && lock_file_identity.read_all()? == lifecycle.identity.as_bytes()
-            && generation_guard.names()? == [SYNTHETIC_SCHEMA2_PENDING]
-            && relaunch_guard.names()?
-                == [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
-            && recovery_guard.names()? == ["Relaunch Records"]
-            && lock_root.names()?
-                == [
+    let lifecycle = diagnostic_stage(diagnostic, "lifecycle-lock.availability", || {
+        let object =
+            RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
+        let evidence = serde_json::json!({ "fileIdentity": object.identity });
+        Ok((object, evidence))
+    })?;
+    let (
+        lock_root,
+        lock_tree_identity,
+        lock_file_identity,
+        pending,
+        generation_guard,
+        relaunch_guard,
+        recovery_guard,
+        bytes,
+    ) = diagnostic_stage(diagnostic, "fixture.identity", || {
+        let lock_root = RetainedStaleObject::open(&lock_directory, true)?;
+        let mut lock_tree_identity =
+            RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
+        let mut lock_file_identity = RetainedStaleObject::open(
+            &lock_directory.join("recovery-state-v1.identity-v1"),
+            false,
+        )?;
+        let recovery = program_data.join("Talking Quill Update Recovery");
+        let relaunch = recovery.join("Relaunch Records");
+        let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
+        let mut pending =
+            RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
+        let generation_guard = RetainedStaleObject::open(&generation, true)?;
+        let relaunch_guard = RetainedStaleObject::open(&relaunch, true)?;
+        let recovery_guard = RetainedStaleObject::open(&recovery, true)?;
+        for object in [
+            &lifecycle,
+            &lock_root,
+            &lock_tree_identity,
+            &lock_file_identity,
+            &pending,
+            &generation_guard,
+            &relaunch_guard,
+            &recovery_guard,
+        ] {
+            object.verify()?;
+        }
+        let bytes = pending.read_all()?;
+        if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+            || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+            || generation_guard.names()? != [SYNTHETIC_SCHEMA2_PENDING]
+            || relaunch_guard.names()?
+                != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
+            || recovery_guard.names()? != ["Relaunch Records"]
+            || lock_root.names()?
+                != [
                     "lock-tree-identity-v1",
                     "recovery-state-v1.identity-v1",
                     "recovery-state-v1.lock",
                 ]
         {
-            Ok((
-                (),
-                serde_json::json!({
-                    "lifecycle": lifecycle.identity,
-                    "lockRoot": lock_root.identity,
-                    "pending": pending.identity,
-                }),
-            ))
-        } else {
-            Err(fail(
+            return Err(fail(
                 EXIT_REJECTED,
                 "Retained stale fixture identity is not exact.",
-            ))
-        },
-    )?;
-    diagnostic_stage(
-        &mut diagnostic,
-        "fixture.sha256",
-        if bytes == SYNTHETIC_SCHEMA2_BYTES && hex_hash(&digest) == SYNTHETIC_SCHEMA2_SHA256 {
-            Ok((
-                (),
-                serde_json::json!({ "sha256": hex_hash(&digest), "size": bytes.len() }),
-            ))
-        } else {
-            Err(fail(
+            ));
+        }
+        let evidence = serde_json::json!({
+            "lifecycle": lifecycle.identity,
+            "lockRoot": lock_root.identity,
+            "pending": pending.identity,
+        });
+        Ok((
+            (
+                lock_root,
+                lock_tree_identity,
+                lock_file_identity,
+                pending,
+                generation_guard,
+                relaunch_guard,
+                recovery_guard,
+                bytes,
+            ),
+            evidence,
+        ))
+    })?;
+    diagnostic_stage(diagnostic, "fixture.sha256", || {
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if bytes != SYNTHETIC_SCHEMA2_BYTES || hex_hash(&digest) != SYNTHETIC_SCHEMA2_SHA256 {
+            return Err(fail(
                 EXIT_REJECTED,
                 "Retained stale fixture hash is not exact.",
-            ))
-        },
-    )?;
+            ));
+        }
+        Ok((
+            (),
+            serde_json::json!({ "sha256": hex_hash(&digest), "size": bytes.len() }),
+        ))
+    })?;
     let objects = [
         &lifecycle,
         &lock_root,
@@ -8803,23 +8891,74 @@ fn run_direct_stale_schema2_diagnostic_inner(
         &recovery_guard,
     ];
     let binding = retained_binding(&objects, &suffix);
-    audit.record("diagnostic-complete", &binding, &active)?;
-    diagnostic.record(
-        "diagnostic.complete",
-        "passed",
-        serde_json::json!({ "bindingSha256": binding, "state": "exact-schema2-fixture" }),
-    )?;
-    retained_image
-        .seek(SeekFrom::Start(0))
-        .map_err(io_failure)?;
-    if hash_reader(&mut retained_image)? != expected_hash {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Diagnostic image changed during inspection.",
-        ));
-    }
+    diagnostic_stage(diagnostic, "audit.event", || {
+        audit.record("diagnostic-complete", &binding, &active)?;
+        Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
+    })?;
+    diagnostic_stage(diagnostic, "image.stability", || {
+        retained_image
+            .seek(SeekFrom::Start(0))
+            .map_err(io_failure)?;
+        if hash_reader(&mut retained_image)? != expected_hash {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Diagnostic image changed during inspection.",
+            ));
+        }
+        Ok(((), serde_json::json!({ "fileIdentity": identity })))
+    })?;
+    diagnostic_stage(diagnostic, "diagnostic.complete", || {
+        Ok((
+            (),
+            serde_json::json!({ "bindingSha256": binding, "state": "exact-schema2-fixture" }),
+        ))
+    })?;
     drop(legacy);
     Ok(0)
+}
+
+#[cfg(feature = "stale-schema2-cleanup")]
+fn force_stale_cleanup_rejection(stage: &str) -> Result<()> {
+    if std::env::var("TQ_STALE_SCHEMA2_FORCE_REJECTION_STAGE").as_deref() == Ok(stage) {
+        Err(fail(
+            EXIT_REJECTED,
+            format!("Forced stale schema-2 cleanup rejection at {stage}."),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "stale-schema2-cleanup")]
+fn record_post_audit_cleanup_rejection(
+    diagnostic: &mut StaleSchema2Diagnostic,
+    audit: &mut StaleCleanupAudit,
+    error: SetupError,
+) -> Result<()> {
+    let stage = "cleanup.rejected.after-audit";
+    let evidence = serde_json::json!({ "error": error.message, "exitCode": EXIT_REJECTED });
+    let diagnostic_result = diagnostic.record(stage, "rejected", evidence);
+    let empty = retained_binding(&[], stage);
+    let audit_result = audit.record(stage, &empty, &empty);
+    if let Err(audit_error) = audit_result {
+        return Err(fail(
+            EXIT_REJECTED,
+            format!(
+                "{} Cleanup rejection audit failed: {}",
+                error.message, audit_error.message
+            ),
+        ));
+    }
+    if let Err(diagnostic_error) = diagnostic_result {
+        return Err(fail(
+            EXIT_REJECTED,
+            format!(
+                "{} Cleanup rejection diagnostic failed: {}",
+                error.message, diagnostic_error.message
+            ),
+        ));
+    }
+    Err(fail(EXIT_REJECTED, error.message))
 }
 
 #[cfg(feature = "stale-schema2-cleanup")]
@@ -8874,8 +9013,8 @@ fn run_direct_elevated_stale_schema2_cleanup() -> Result<()> {
         }
     };
     // Retain a protected append handle so a later cleanup failure can be recorded durably.
-    let audit_probe = StaleCleanupAudit::open();
-    let mut rejection_audit = match audit_probe {
+    let audit = StaleCleanupAudit::open();
+    let mut audit = match audit {
         Ok(audit) => audit,
         Err(error) => {
             diagnostic.record(
@@ -8887,7 +9026,7 @@ fn run_direct_elevated_stale_schema2_cleanup() -> Result<()> {
         }
     };
     let operation = (|| -> Result<()> {
-        reclaim_exact_schema2_orphan(true, false)?;
+        reclaim_exact_schema2_orphan_with_audit(true, false, &mut audit)?;
         retained_image
             .seek(SeekFrom::Start(0))
             .map_err(io_failure)?;
@@ -8900,22 +9039,7 @@ fn run_direct_elevated_stale_schema2_cleanup() -> Result<()> {
         Ok(())
     })();
     if let Err(error) = operation {
-        let stage = "cleanup.rejected.after-audit";
-        let evidence = serde_json::json!({ "error": error.message, "exitCode": EXIT_REJECTED });
-        diagnostic.record(stage, "rejected", evidence)?;
-        let empty = retained_binding(&[], stage);
-        rejection_audit
-            .record(stage, &empty, &empty)
-            .map_err(|audit_error| {
-                fail(
-                    EXIT_REJECTED,
-                    format!(
-                        "{} Cleanup rejection audit failed: {}",
-                        error.message, audit_error.message
-                    ),
-                )
-            })?;
-        return Err(fail(EXIT_REJECTED, error.message));
+        return record_post_audit_cleanup_rejection(&mut diagnostic, &mut audit, error);
     }
     Ok(())
 }
@@ -8923,6 +9047,7 @@ fn run_direct_elevated_stale_schema2_cleanup() -> Result<()> {
 fn reclaim_exact_schema2_orphan_v2(
     developer_command: bool,
     authenticated_parent: bool,
+    audit: &mut StaleCleanupAudit,
 ) -> Result<()> {
     if !token_is_elevated()? {
         return Err(fail(EXIT_REJECTED, "Stale cleanup requires elevation."));
@@ -8937,11 +9062,10 @@ fn reclaim_exact_schema2_orphan_v2(
             "Production orphan reclaim requires an administrator audit path.",
         ));
     }
-    let mut audit = StaleCleanupAudit::open()?;
     let Some(suffix) = exact_machine_lock_publication()? else {
         let binding = retained_binding(&[], "no-machine-lock-publication");
         complete_stale_cleanup_zero_state(
-            &mut audit,
+            audit,
             &binding,
             &program_files,
             &program_data,
@@ -9044,6 +9168,8 @@ fn reclaim_exact_schema2_orphan_v2(
     ];
     let binding = retained_binding(&objects, &suffix);
     audit.record("inspected", &binding, &admission)?;
+    #[cfg(feature = "stale-schema2-cleanup")]
+    force_stale_cleanup_rejection("post-inspected")?;
     std::thread::sleep(Duration::from_millis(750));
     for object in objects {
         object.verify()?;
@@ -9075,6 +9201,8 @@ fn reclaim_exact_schema2_orphan_v2(
     )?;
     exact_cleanup_registry(&suffix)?;
     audit.record("commit-intent", &binding, &second)?;
+    #[cfg(feature = "stale-schema2-cleanup")]
+    force_stale_cleanup_rejection("post-commit-intent")?;
 
     // Repeat registry identity after the second active proof and before the first mutation.
     if exact_machine_lock_publication()?.as_deref() != Some(&suffix) {
@@ -9151,7 +9279,7 @@ fn reclaim_exact_schema2_orphan_v2(
     lifecycle.finish_deleted()?;
     flush_setup_directory(&program_data)?;
     complete_stale_cleanup_zero_state(
-        &mut audit,
+        audit,
         &binding,
         &program_files,
         &program_data,
@@ -9162,8 +9290,17 @@ fn reclaim_exact_schema2_orphan_v2(
     Ok(())
 }
 
+fn reclaim_exact_schema2_orphan_with_audit(
+    developer_command: bool,
+    authenticated_parent: bool,
+    audit: &mut StaleCleanupAudit,
+) -> Result<()> {
+    reclaim_exact_schema2_orphan_v2(developer_command, authenticated_parent, audit)
+}
+
 fn reclaim_exact_schema2_orphan(developer_command: bool, authenticated_parent: bool) -> Result<()> {
-    reclaim_exact_schema2_orphan_v2(developer_command, authenticated_parent)
+    let mut audit = StaleCleanupAudit::open()?;
+    reclaim_exact_schema2_orphan_with_audit(developer_command, authenticated_parent, &mut audit)
 }
 
 fn remove_machine_lock_residue(paths: &Paths, suffix: &str) -> Result<()> {
@@ -10403,7 +10540,7 @@ mod tests {
             diagnostic,
             OsString::from("/S")
         ]));
-        assert_eq!(STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES.len(), 22);
+        assert_eq!(STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES.len(), 26);
         let unique = STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES
             .iter()
             .copied()
@@ -10578,6 +10715,73 @@ mod tests {
         let worker = channel.authenticate(&shell, &image, None).unwrap();
         assert_eq!(unsafe { GetProcessId(worker.as_raw_handle()) }, child.id());
         assert!(child.wait().unwrap().success());
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn forced_post_inspected_and_post_commit_rejections_keep_one_audit_chain() {
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        for forced_stage in ["post-inspected", "post-commit-intent"] {
+            let root = std::env::temp_dir().join(format!(
+                "tq-stale-forced-rejection-{}-{forced_stage}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let path = root.join("audit.jsonl");
+            let diagnostic_path = root.join("diagnostic.jsonl");
+            fs::write(&path, b"").unwrap();
+            fs::write(&diagnostic_path, b"").unwrap();
+            apply_lock_dacl(&path, MACHINE_LOCK_FILE_SDDL).unwrap();
+            apply_lock_dacl(&diagnostic_path, MACHINE_LOCK_FILE_SDDL).unwrap();
+            unsafe {
+                std::env::set_var("TQ_STALE_SCHEMA2_AUDIT_PATH", &path);
+                std::env::set_var("TQ_STALE_SCHEMA2_DIAGNOSTIC_PATH", &diagnostic_path);
+                std::env::set_var("TQ_STALE_SCHEMA2_FORCE_REJECTION_STAGE", forced_stage);
+            }
+            let mut audit = StaleCleanupAudit::open().unwrap();
+            let mut diagnostic = StaleSchema2Diagnostic::open().unwrap();
+            let binding = "ab".repeat(32);
+            let proof = "cd".repeat(32);
+            audit.record("inspected", &binding, &proof).unwrap();
+            if forced_stage == "post-commit-intent" {
+                audit.record("commit-intent", &binding, &proof).unwrap();
+            }
+            let forced = force_stale_cleanup_rejection(forced_stage).unwrap_err();
+            assert!(
+                record_post_audit_cleanup_rejection(&mut diagnostic, &mut audit, forced,).is_err()
+            );
+            unsafe {
+                std::env::remove_var("TQ_STALE_SCHEMA2_AUDIT_PATH");
+                std::env::remove_var("TQ_STALE_SCHEMA2_DIAGNOSTIC_PATH");
+                std::env::remove_var("TQ_STALE_SCHEMA2_FORCE_REJECTION_STAGE");
+            }
+            drop(diagnostic);
+            drop(audit);
+            let events = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(events.first().unwrap()["stage"], "inspected");
+            assert_eq!(
+                events.last().unwrap()["stage"],
+                "cleanup.rejected.after-audit"
+            );
+            let operation = events.first().unwrap()["operationId"].as_str().unwrap();
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event["operationId"].as_str() == Some(operation))
+            );
+            for pair in events.windows(2) {
+                assert_eq!(pair[1]["previousSha256"], pair[0]["eventSha256"]);
+            }
+            let diagnostic_events = fs::read_to_string(&diagnostic_path).unwrap();
+            assert!(diagnostic_events.contains("cleanup.rejected.after-audit"));
+            assert!(diagnostic_events.contains("\"outcome\":\"rejected\""));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[cfg(feature = "stale-schema2-cleanup")]
