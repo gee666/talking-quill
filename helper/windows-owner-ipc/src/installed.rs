@@ -210,7 +210,7 @@ impl InstalledRelease {
             "resources/helper/talking-quill-update-recovery-launcher.exe";
         if pe_architecture(recovery_launcher) != Some(architecture)
             || !has_source_identity(
-                &recovery_launcher,
+                recovery_launcher,
                 &manifest.source_commit,
                 &manifest.source_tree,
             )
@@ -426,23 +426,30 @@ fn pe_architecture(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn source_marker_prefix(kind: &[u8]) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(21 + kind.len());
+    prefix.extend_from_slice(b"TALKING_QUILL_");
+    prefix.extend_from_slice(b"SOURCE_");
+    prefix.extend_from_slice(kind);
+    prefix.push(b'=');
+    prefix
+}
+
 fn has_source_identity(bytes: &[u8], commit: &str, tree: &str) -> bool {
-    [
-        ("TALKING_QUILL_SOURCE_COMMIT=", commit),
-        ("TALKING_QUILL_SOURCE_TREE=", tree),
-    ]
-    .iter()
-    .all(|(prefix, expected)| {
-        let offsets: Vec<usize> = bytes
-            .windows(prefix.len())
-            .enumerate()
-            .filter(|(_, window)| *window == prefix.as_bytes())
-            .map(|(offset, _)| offset)
-            .collect();
-        offsets.len() == 1
-            && bytes.get(offsets[0] + prefix.len()..offsets[0] + prefix.len() + 40)
-                == Some(expected.as_bytes())
-    })
+    [(b"COMMIT".as_slice(), commit), (b"TREE".as_slice(), tree)]
+        .iter()
+        .all(|(kind, expected)| {
+            let prefix = source_marker_prefix(kind);
+            let offsets: Vec<usize> = bytes
+                .windows(prefix.len())
+                .enumerate()
+                .filter(|(_, window)| *window == prefix)
+                .map(|(offset, _)| offset)
+                .collect();
+            offsets.len() == 1
+                && bytes.get(offsets[0] + prefix.len()..offsets[0] + prefix.len() + 40)
+                    == Some(expected.as_bytes())
+        })
 }
 
 pub fn protected_policy_proof(binding: &StablePipeBinding) -> Vec<u8> {
@@ -647,11 +654,10 @@ mod tests {
             0x8664_u16
         };
         bytes[132..134].copy_from_slice(&machine.to_le_bytes());
-        bytes.extend_from_slice(
-            format!("TALKING_QUILL_SOURCE_COMMIT={}", "11".repeat(20)).as_bytes(),
-        );
-        bytes
-            .extend_from_slice(format!("TALKING_QUILL_SOURCE_TREE={}", "22".repeat(20)).as_bytes());
+        bytes.extend_from_slice(&source_marker_prefix(b"COMMIT"));
+        bytes.extend_from_slice("11".repeat(20).as_bytes());
+        bytes.extend_from_slice(&source_marker_prefix(b"TREE"));
+        bytes.extend_from_slice("22".repeat(20).as_bytes());
         bytes
     }
 
