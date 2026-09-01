@@ -10,6 +10,7 @@ license = "MIT"
 
 [features]
 acceptance-faults = []
+stale-schema2-cleanup = []
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
