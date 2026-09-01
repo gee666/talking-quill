@@ -259,8 +259,10 @@ fn connect_named_pipe(
         return Err(WindowsEndpointError::Io(std::io::Error::last_os_error()));
     }
     let event = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event) };
-    let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
-    overlapped.hEvent = event.as_raw_handle();
+    let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED {
+        hEvent: event.as_raw_handle(),
+        ..Default::default()
+    };
     let connected = unsafe {
         windows_sys::Win32::System::Pipes::ConnectNamedPipe(
             listener.as_raw_handle(),
@@ -337,8 +339,10 @@ impl WindowsOverlappedPipeStream {
             return Err(std::io::Error::last_os_error());
         }
         let event = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event) };
-        let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
-        overlapped.hEvent = event.as_raw_handle();
+        let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED {
+            hEvent: event.as_raw_handle(),
+            ..Default::default()
+        };
         let handle = self.handle.as_raw_handle();
         let started = if write {
             unsafe {
