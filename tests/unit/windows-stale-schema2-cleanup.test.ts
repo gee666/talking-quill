@@ -76,8 +76,10 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(index('lifecycle.finish_deleted()?')).toBeGreaterThan(
       index('stale machine lifecycle publication'),
     );
-    expect(source).toContain('active_state_proof(&program_files, &program_data, &system, false)?');
-    expect(source).toContain('audit.record("completed", &binding, &zero)?');
+    expect(source).toContain(
+      'let zero = active_state_proof(program_files, program_data, system, false)?;',
+    );
+    expect(source).toContain('audit.record("completed", binding, &zero)');
   });
 
   it('limits production reclaim to authenticated fresh installs before paths create state', () => {
@@ -86,7 +88,20 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     );
     expect(production).toBeGreaterThan(index('TQPKG2 architecture does not match'));
     expect(production).toBeLessThan(index('let mut paths = paths()?;'));
-    expect(source).toContain('Unknown coordination state has no lifecycle lock.');
     expect(source).toContain('TQ_STALE_SCHEMA2_AUDIT_PATH is required.');
+  });
+
+  it('requires a protected completion audit and full zero proof on every successful branch', () => {
+    const reclaim = source.slice(
+      index('fn reclaim_exact_schema2_orphan_v2('),
+      index('fn reclaim_exact_schema2_orphan(developer_command:'),
+    );
+    expect(reclaim.indexOf('let mut audit = StaleCleanupAudit::open()?;')).toBeLessThan(
+      reclaim.indexOf('let Some(suffix) = exact_machine_lock_publication()? else'),
+    );
+    expect(reclaim).toContain('retained_binding(&[], "no-machine-lock-publication")');
+    expect(reclaim.match(/complete_stale_cleanup_zero_state\(/g)).toHaveLength(2);
+    expect(reclaim.match(/return Ok\(\(\)\);/g)).toHaveLength(1);
+    expect(reclaim.trimEnd().endsWith('Ok(())\n}')).toBe(true);
   });
 });

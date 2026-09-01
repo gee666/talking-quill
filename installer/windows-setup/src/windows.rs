@@ -8035,6 +8035,17 @@ fn exact_cleanup_registry(suffix: &str) -> Result<()> {
     Ok(())
 }
 
+fn complete_stale_cleanup_zero_state(
+    audit: &mut StaleCleanupAudit,
+    binding: &str,
+    program_files: &Path,
+    program_data: &Path,
+    system: &Path,
+) -> Result<()> {
+    let zero = active_state_proof(program_files, program_data, system, false)?;
+    audit.record("completed", binding, &zero)
+}
+
 fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
     if !token_is_elevated()? {
         return Err(fail(EXIT_REJECTED, "Stale cleanup requires elevation."));
@@ -8043,36 +8054,6 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
     let program_data = known_folder(&FOLDERID_ProgramData)?;
     let system = known_folder(&FOLDERID_System)?;
     let legacy = LegacyMutexPair::acquire()?;
-    let Some(suffix) = exact_machine_lock_publication()? else {
-        let recovery = program_data.join("Talking Quill Update Recovery");
-        let lock_residue = fs::read_dir(&program_data)
-            .map_err(io_failure)?
-            .map(|entry| entry.map_err(io_failure))
-            .collect::<Result<Vec<_>>>()?
-            .iter()
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-                    .starts_with(&MACHINE_LOCK_DIRECTORY_PREFIX.to_ascii_lowercase())
-            });
-        if path_present(&recovery)?
-            || lock_residue
-            || registry_key_present(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Unknown coordination state has no lifecycle lock.",
-            ));
-        }
-        return Ok(());
-    };
-    validate_machine_lock_suffix(&suffix)?;
-    let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-    let lifecycle =
-        RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
-    exact_cleanup_registry(&suffix)?;
     if !developer_command && std::env::var_os("TQ_STALE_SCHEMA2_AUDIT_PATH").is_none() {
         return Err(fail(
             EXIT_REJECTED,
@@ -8080,6 +8061,23 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
         ));
     }
     let mut audit = StaleCleanupAudit::open()?;
+    let Some(suffix) = exact_machine_lock_publication()? else {
+        let binding = retained_binding(&[], "no-machine-lock-publication");
+        complete_stale_cleanup_zero_state(
+            &mut audit,
+            &binding,
+            &program_files,
+            &program_data,
+            &system,
+        )?;
+        drop(legacy);
+        return Ok(());
+    };
+    validate_machine_lock_suffix(&suffix)?;
+    let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+    let lifecycle =
+        RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
+    exact_cleanup_registry(&suffix)?;
 
     // The lifecycle file is retained before any process, role, service, task, Run, registration,
     // journal, terminal, Program Files, or ProgramData activity inspection.
@@ -8262,8 +8260,13 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
     }
     lifecycle.finish_deleted()?;
     flush_setup_directory(&program_data)?;
-    let zero = active_state_proof(&program_files, &program_data, &system, false)?;
-    audit.record("completed", &binding, &zero)?;
+    complete_stale_cleanup_zero_state(
+        &mut audit,
+        &binding,
+        &program_files,
+        &program_data,
+        &system,
+    )?;
     drop(legacy);
     Ok(())
 }
@@ -9629,6 +9632,7 @@ mod tests {
     #[cfg(feature = "stale-schema2-cleanup")]
     #[test]
     fn stale_audit_is_flushed_and_identity_bound() {
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("tq-stale-audit-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir(&root).unwrap();
@@ -9649,6 +9653,41 @@ mod tests {
         assert!(content.contains("commit-intent") && content.contains("completed"));
         assert!(content.contains(&"ab".repeat(32)) && content.contains(&"ef".repeat(32)));
         drop(audit);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_no_publication_active_residue_cannot_complete_audit() {
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("tq-stale-no-publication-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let program_files = root.join("Program Files");
+        let program_data = root.join("ProgramData");
+        let system = root.join("System32");
+        fs::create_dir_all(program_files.join("Talking Quill")).unwrap();
+        fs::create_dir(&program_data).unwrap();
+        fs::create_dir_all(system.join("Tasks")).unwrap();
+        let audit_path = root.join("audit.jsonl");
+        fs::write(&audit_path, b"").unwrap();
+        apply_lock_dacl(&audit_path, MACHINE_LOCK_FILE_SDDL).unwrap();
+        unsafe { std::env::set_var("TQ_STALE_SCHEMA2_AUDIT_PATH", &audit_path) };
+        let mut audit = StaleCleanupAudit::open().unwrap();
+        unsafe { std::env::remove_var("TQ_STALE_SCHEMA2_AUDIT_PATH") };
+        let binding = retained_binding(&[], "no-machine-lock-publication");
+        assert!(
+            complete_stale_cleanup_zero_state(
+                &mut audit,
+                &binding,
+                &program_files,
+                &program_data,
+                &system,
+            )
+            .is_err()
+        );
+        drop(audit);
+        assert!(fs::read(&audit_path).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
