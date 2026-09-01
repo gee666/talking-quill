@@ -151,14 +151,30 @@ function fault(architecture: string) {
     productionUpdateInterrupted: true,
     candidateSha256: sha('a'),
     releaseBuildDigest: sha('d'),
-    faults: Array.from({ length: 10 }, (_, index) => ({
-      fault: `phase-${String(index)}`,
+    faults: [
+      'committed',
+      'legacyRetired',
+      'legacyRetiring',
+      'predecessorMoved',
+      'prepared',
+      'published',
+      'publishedBeforePersist',
+      'publishing',
+      'registered',
+      'staged',
+    ].map((phase) => ({
+      fault: `Talking-Quill-test-repair-${phase}.exe`,
       crashExitCode: 197,
       recoveryExitCode: 78,
       inspectedBeforeRepair: true,
       productionRecoveryInterrupted: true,
       recoveredReleaseBuildDigest: sha('d'),
+      appPathExact: true,
+      quietUninstallExact: true,
+      legacyServiceAbsent: true,
+      legacyTaskAbsent: true,
     })),
+    terminalCleanup: { inspected: true, residue: [] as string[], registry: [] as string[] },
     passed: true,
   };
 }
@@ -225,13 +241,22 @@ describe('Windows promotion lifecycle evidence', () => {
       privateKeyPkcs8Base64: value.privateKey,
     });
     const records = created.payload.records as {
-      claims: { kind: string; action: string };
+      claims: {
+        kind: string;
+        action: string;
+        terminalCleanup?: { inspected: boolean; residue: unknown[]; registry: unknown[] };
+      };
     }[];
     expect(
       records
         .filter(({ claims }) => claims.kind === 'fault')
         .every(({ claims }) => claims.action === 'fault'),
     ).toBe(true);
+    expect(records.find(({ claims }) => claims.kind === 'fault')?.claims.terminalCleanup).toEqual({
+      inspected: true,
+      residue: [],
+      registry: [],
+    });
     await expect(
       verifyWindowsPromotionEvidence({
         path: value.output,
@@ -253,6 +278,63 @@ describe('Windows promotion lifecycle evidence', () => {
         publicKeyPath: value.publicKeyPath,
       }),
     ).rejects.toThrow(/did not pass exact lifecycle policy/u);
+  });
+
+  it('rejects malformed terminal cleanup and fault topology before signing', async () => {
+    const value = await fixture();
+    const path = join(value.directory, 'windows-installer-fault-recovery-x64.json');
+    const invalidCleanup = fault('x64');
+    invalidCleanup.terminalCleanup.residue.push('leftover.exe');
+    await writeFile(path, JSON.stringify(invalidCleanup));
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.privateKey,
+      }),
+    ).rejects.toThrow(/terminal cleanup evidence is invalid/u);
+
+    const invalidFault = fault('x64');
+    delete (invalidFault.faults[0] as Partial<(typeof invalidFault.faults)[number]>).appPathExact;
+    await writeFile(path, JSON.stringify(invalidFault));
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.privateKey,
+      }),
+    ).rejects.toThrow(/unexpected schema/u);
+
+    const duplicateFault = fault('x64');
+    const [firstFault, secondFault] = duplicateFault.faults;
+    if (firstFault === undefined || secondFault === undefined)
+      throw new Error('Missing fault fixture');
+    firstFault.fault = secondFault.fault;
+    await writeFile(path, JSON.stringify(duplicateFault));
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.privateKey,
+      }),
+    ).rejects.toThrow(/fault phase inventory is invalid/u);
+  });
+
+  it('binds terminal cleanup and package identity into the signed architecture generation', async () => {
+    const value = await fixture();
+    const path = join(value.directory, 'windows-installer-fault-recovery-x64.json');
+    await writeFile(path, JSON.stringify({ ...fault('x64'), candidateSha256: sha('9') }));
+    await expect(
+      createWindowsPromotionEvidence({
+        ...value,
+        repository: 'owner/repository',
+        workflowRunId: '123',
+        privateKeyPkcs8Base64: value.privateKey,
+      }),
+    ).rejects.toThrow(/generation binding is invalid/u);
   });
 
   it('rejects a signed receipt whose authenticated action differs from its lifecycle claim', async () => {

@@ -62,9 +62,10 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW,
-    RegEnumValueW, RegFlushKey, RegLoadAppKeyW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_MULTI_SZ,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
+    RegEnumKeyExW, RegEnumValueW, RegFlushKey, RegLoadAppKeyW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW,
@@ -98,6 +99,8 @@ const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
 const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
+const TERMINAL_RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+const TERMINAL_RUN_ONCE_PREFIX: &str = "!Talking Quill Terminal Cleanup ";
 const UNINSTALL_FINALIZER_PENDING_PREFIX: &str = ".Talking Quill.uninstall-finalizer-pending-";
 const UNINSTALL_FINALIZER_PREFIX: &str = ".Talking Quill.uninstall-finalizer-";
 const UNINSTALL_FINALIZER_NAME: &str = "Talking Quill Uninstall Finalizer.exe";
@@ -4738,6 +4741,177 @@ fn require_machine_relaunch_owner(paths: &Paths) -> Result<()> {
     }
 }
 
+fn terminal_run_once_name(generation: &str) -> Result<String> {
+    validate_machine_lock_suffix(generation)?;
+    Ok(format!("{TERMINAL_RUN_ONCE_PREFIX}{generation}"))
+}
+
+fn terminal_run_once_command(paths: &Paths, generation: &str) -> Result<String> {
+    validate_machine_lock_suffix(generation)?;
+    let launcher =
+        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    Ok(format!(
+        "\"{}\" --windows-terminal-uninstall-v1={generation}",
+        launcher.display()
+    ))
+}
+
+fn require_single_terminal_run_once_generation(key: HKEY, generation: &str) -> Result<()> {
+    let expected = terminal_run_once_name(generation)?;
+    let mut index = 0_u32;
+    loop {
+        let mut name = [0_u16; 512];
+        let mut length = name.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut length,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if status == 259 {
+            return Ok(());
+        }
+        if status != 0 {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Cannot enumerate terminal RunOnce owners.",
+            ));
+        }
+        let name = String::from_utf16(&name[..length as usize])
+            .map_err(|_| fail(EXIT_REJECTED, "Terminal RunOnce name is invalid."))?;
+        if name.starts_with(TERMINAL_RUN_ONCE_PREFIX) && name != expected {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Another terminal RunOnce owner exists.",
+            ));
+        }
+        index += 1;
+    }
+}
+
+fn install_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
+    let name = terminal_run_once_name(generation)?;
+    let command = terminal_run_once_command(paths, generation)?;
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
+            0,
+            ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WRITE,
+            ptr::null(),
+            &mut key,
+            ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot create terminal RunOnce owner."));
+    }
+    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
+        unsafe { RegCloseKey(key) };
+        return Err(error);
+    }
+    let value = wide(OsStr::new(&command));
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide(OsStr::new(&name)).as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(EXIT_FAILURE, "Cannot flush terminal RunOnce owner."))
+    }
+}
+
+fn require_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
+    let name = terminal_run_once_name(generation)?;
+    let expected = terminal_run_once_command(paths, generation)?;
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal RunOnce owner is missing."));
+    }
+    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
+        unsafe { RegCloseKey(key) };
+        return Err(error);
+    }
+    let actual = read_registry_value(key, &name, 1024)?;
+    unsafe { RegCloseKey(key) };
+    if actual.as_deref() == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err(fail(EXIT_REJECTED, "Terminal RunOnce owner is invalid."))
+    }
+}
+
+fn clear_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
+    let name = terminal_run_once_name(generation)?;
+    let expected = terminal_run_once_command(paths, generation)?;
+    let mut key = ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    };
+    if opened == 2 {
+        return Ok(());
+    }
+    if opened != 0 {
+        return Err(fail(EXIT_FAILURE, "Cannot open terminal RunOnce owner."));
+    }
+    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
+        unsafe { RegCloseKey(key) };
+        return Err(error);
+    }
+    let actual = read_registry_value(key, &name, 1024)?;
+    if actual.as_deref().is_some_and(|value| value != expected) {
+        unsafe { RegCloseKey(key) };
+        return Err(fail(EXIT_REJECTED, "Terminal RunOnce owner was replaced."));
+    }
+    if actual.is_some() && unsafe { RegDeleteValueW(key, wide(OsStr::new(&name)).as_ptr()) } != 0 {
+        unsafe { RegCloseKey(key) };
+        return Err(fail(EXIT_FAILURE, "Cannot retire terminal RunOnce owner."));
+    }
+    let flushed = unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Cannot flush terminal RunOnce retirement.",
+        ))
+    }
+}
+
 fn terminal_uninstall_commands(paths: &Paths) -> (String, String) {
     let executable = format!("\"{}\"", paths.maintenance_uninstaller.display());
     (executable.clone(), format!("{executable} /S"))
@@ -4756,6 +4930,7 @@ fn publish_terminal_uninstall_record(paths: &Paths) -> Result<String> {
         quiet_uninstall_command,
     };
     write_terminal_uninstall_record(paths, &record)?;
+    install_terminal_run_once_owner(paths, &generation)?;
     Ok(generation)
 }
 
@@ -4821,6 +4996,7 @@ fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
     {
         return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
     }
+    install_terminal_run_once_owner(&paths, generation)?;
     if terminal_uninstall_recovery_step(&record.phase, path_present(&paths.transaction)?)?
         == TerminalUninstallRecoveryStep::RetireMachine
     {
@@ -5166,6 +5342,7 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
             "Terminal uninstall machine state is not retired.",
         ));
     }
+    require_terminal_run_once_owner(paths, &record.generation)?;
     clear_update_recovery(paths)?;
     clear_legacy_profile_relaunch_owners(paths)?;
     let root = terminal_uninstall_root(paths);
@@ -5174,55 +5351,43 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
 
-    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
-    let current = std::env::current_exe().map_err(io_failure)?;
-    // The original worker and every finalizer were already scheduled before machine retirement.
-    // Repeating that verified operation here adds the maintenance image used by recovery.
-    establish_finalizer_deletion_ownership(paths, &current)?;
-    let mut scheduled = Vec::new();
-    for path in [&launcher, &paths.maintenance_uninstaller] {
-        if !path_present(path)? {
-            continue;
-        }
-        assert_plain_file(path)?;
-        if unsafe {
-            MoveFileExW(
-                wide(path.as_os_str()).as_ptr(),
-                ptr::null(),
-                MOVEFILE_DELAY_UNTIL_REBOOT,
-            )
-        } == 0
-        {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Windows could not take terminal recovery deletion ownership.",
-            ));
-        }
-        scheduled.push(path.to_path_buf());
-    }
-    verify_pending_finalizer_deletions(&scheduled)?;
-    for name in [
-        TERMINAL_UNINSTALL_MARKER_NAME,
-        TERMINAL_UNINSTALL_RECORD_NAME,
-    ] {
-        let path = root.join(name);
-        if path_present(&path)? {
-            fs::remove_file(path).map_err(io_failure)?;
-        }
-    }
-    flush_setup_directory(&root)?;
-    // The Run deletion and registry flush are the final authority mutation. MoveFileEx already
-    // owns every image deletion, so immediate POSIX unlink below is only an optimization.
+    // RunOnce is now the terminal callable owner. Retire ordinary Run before any object is
+    // scheduled, so a reboot can never retain a persistent value whose launcher was deleted.
     clear_machine_relaunch_owner(paths)?;
+    let current = std::env::current_exe().map_err(io_failure)?;
+    let deletion_plan = collect_terminal_deletion_plan(paths, &current)?;
+    schedule_delayed_deletion_plan(&deletion_plan)?;
 
-    let _ = arm_mapped_image_deletion(&launcher);
-    let _ = remove_uninstall_finalizer_residue(paths);
-    if current != launcher {
-        let _ = arm_mapped_image_deletion(&current);
+    // Normal completion does not depend on reboot. POSIX disposition removes mapped images,
+    // then identity-bound tree removal clears every remaining protected object.
+    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    if path_present(&launcher)? {
+        arm_mapped_image_deletion(&launcher)?;
     }
-    let _ = fs::remove_file(root.join("launcher-tree-identity-v1"));
-    let _ = fs::remove_dir(&root);
-    Ok(())
+    if path_present(&paths.maintenance_uninstaller)? {
+        arm_mapped_image_deletion(&paths.maintenance_uninstaller)?;
+    }
+    if current != launcher && current != paths.maintenance_uninstaller && path_present(&current)? {
+        arm_mapped_image_deletion(&current)?;
+    }
+    remove_uninstall_finalizer_residue(paths)?;
+    let identity =
+        owned_tree_identity(&root).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    if !medium_launcher_directory_is_protected(&root)?
+        || fs::read_to_string(root.join("launcher-tree-identity-v1")).map_err(io_failure)?
+            != identity
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery root identity is invalid.",
+        ));
+    }
+    remove_owned_tree(&root, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    flush_setup_directory(&paths.program_data)?;
+
+    // This deletion and flush are the last fallible mutation. If the process crashed earlier,
+    // Windows owns the complete postorder filesystem deletion and !RunOnce removes itself.
+    clear_terminal_run_once_owner(paths, &record.generation)
 }
 
 fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
@@ -5330,20 +5495,22 @@ fn relocated_uninstall_matches_maintenance(target: &Path, paths: &Paths) -> Resu
         && file_hash(target)? == file_hash(&paths.maintenance_uninstaller)?)
 }
 
-fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Result<()> {
-    let mut scheduled = Vec::new();
+fn collect_owned_finalizer_deletion_paths(paths: &Paths, output: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let pending = name
-            .strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX)
-            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        let published = name
-            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
-            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        if !pending && !published {
+        let name = name.to_string_lossy();
+        let pending_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX);
+        let published_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PREFIX);
+        if pending_suffix.is_none() && published_suffix.is_none() {
             continue;
+        }
+        let pending =
+            pending_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        let published =
+            published_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !pending && !published {
+            return Err(fail(EXIT_REJECTED, "Finalizer namespace entry is invalid."));
         }
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
@@ -5351,7 +5518,7 @@ fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Resu
             || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || !medium_launcher_directory_is_protected(&path)?
         {
-            continue;
+            return Err(fail(EXIT_REJECTED, "Finalizer directory is invalid."));
         }
         let identity =
             owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
@@ -5359,67 +5526,80 @@ fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Resu
             && !fs::read_to_string(path.join("finalizer-tree-identity-v1"))
                 .is_ok_and(|value| value == identity)
         {
-            continue;
+            return Err(fail(EXIT_REJECTED, "Finalizer identity is invalid."));
         }
-        let mut tree = Vec::new();
-        collect_finalizer_deletion_paths(&path, &mut tree)?;
-        for target in tree {
-            if unsafe {
-                MoveFileExW(
-                    wide(target.as_os_str()).as_ptr(),
-                    ptr::null(),
-                    MOVEFILE_DELAY_UNTIL_REBOOT,
-                )
-            } == 0
-            {
-                return Err(fail(
-                    EXIT_FAILURE,
-                    "Windows could not take ownership of finalizer deletion.",
-                ));
-            }
-            scheduled.push(target);
-        }
+        collect_finalizer_deletion_paths(&path, output)?;
     }
-    // The stable ProgramData launcher is deliberately not scheduled here. Its HKLM Run
-    // value remains callable through the terminal commit and it is retired last afterward.
-    for target in [current] {
-        if !path_present(target)? {
-            continue;
-        }
-        assert_plain_file(target)?;
-        let canonical_target = canonical(target)?;
+    Ok(())
+}
+
+fn append_unique_deletion_path(output: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
+    let canonical_path = canonical(path)?;
+    if !output
+        .iter()
+        .filter_map(|existing| canonical(existing).ok())
+        .any(|existing| existing == canonical_path)
+    {
+        output.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Result<()> {
+    let mut scheduled = Vec::new();
+    collect_owned_finalizer_deletion_paths(paths, &mut scheduled)?;
+    if path_present(current)? {
+        assert_plain_file(current)?;
+        let canonical_target = canonical(current)?;
         let authorized = canonical_target == canonical(&paths.maintenance_uninstaller)?
-            || is_uninstall_finalizer(target)?
-            || relocated_uninstall_matches_maintenance(target, paths)?;
+            || is_uninstall_finalizer(current)?
+            || relocated_uninstall_matches_maintenance(current, paths)?;
         if !authorized {
             return Err(fail(
                 EXIT_REJECTED,
                 "Terminal uninstall executable identity is invalid.",
             ));
         }
-        let already_scheduled = scheduled
-            .iter()
-            .filter_map(|path| canonical(path).ok())
-            .any(|path| path == canonical_target);
-        if already_scheduled {
-            continue;
-        }
-        if unsafe {
-            MoveFileExW(
-                wide(target.as_os_str()).as_ptr(),
-                ptr::null(),
-                MOVEFILE_DELAY_UNTIL_REBOOT,
-            )
-        } == 0
-        {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Windows could not take ownership of terminal executable deletion.",
-            ));
-        }
-        scheduled.push(target.to_path_buf());
+        append_unique_deletion_path(&mut scheduled, current)?;
     }
-    verify_pending_finalizer_deletions(&scheduled)
+    schedule_delayed_deletion_plan(&scheduled)
+}
+
+fn collect_terminal_deletion_plan(paths: &Paths, current: &Path) -> Result<Vec<PathBuf>> {
+    let root = terminal_uninstall_root(paths);
+    if !medium_launcher_directory_is_protected(&root)? {
+        return Err(fail(EXIT_REJECTED, "Terminal recovery root is invalid."));
+    }
+    let identity =
+        owned_tree_identity(&root).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    if fs::read_to_string(root.join("launcher-tree-identity-v1")).map_err(io_failure)? != identity {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery root identity is invalid.",
+        ));
+    }
+    let mut plan = Vec::new();
+    collect_owned_finalizer_deletion_paths(paths, &mut plan)?;
+    if path_present(&paths.maintenance_uninstaller)? {
+        assert_plain_file(&paths.maintenance_uninstaller)?;
+        append_unique_deletion_path(&mut plan, &paths.maintenance_uninstaller)?;
+    }
+    if path_present(current)? {
+        assert_plain_file(current)?;
+        append_unique_deletion_path(&mut plan, current)?;
+    }
+    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    let mut root_plan = Vec::new();
+    collect_finalizer_deletion_paths(&root, &mut root_plan)?;
+    for path in root_plan
+        .iter()
+        .filter(|path| path.as_path() != launcher && path.as_path() != root)
+    {
+        append_unique_deletion_path(&mut plan, path)?;
+    }
+    append_unique_deletion_path(&mut plan, &launcher)?;
+    append_unique_deletion_path(&mut plan, &root)?;
+    Ok(plan)
 }
 
 fn collect_finalizer_deletion_paths(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -5445,52 +5625,72 @@ fn collect_finalizer_deletion_paths(path: &Path, output: &mut Vec<PathBuf>) -> R
     Ok(())
 }
 
-fn verify_pending_finalizer_deletions(expected: &[PathBuf]) -> Result<()> {
-    if expected.is_empty() {
-        return Err(fail(
-            EXIT_REJECTED,
-            "No protected finalizer tree was available.",
-        ));
+fn decode_pending_rename_pairs(data: &[u16]) -> Result<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    let mut cursor = 0;
+    while cursor < data.len() {
+        let source_start = cursor;
+        while cursor < data.len() && data[cursor] != 0 {
+            cursor += 1;
+        }
+        if cursor == data.len() {
+            return Err(fail(EXIT_REJECTED, "Pending deletion data is truncated."));
+        }
+        if cursor == source_start {
+            if data[cursor..].iter().any(|value| *value != 0) {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Pending deletion terminator is invalid.",
+                ));
+            }
+            break;
+        }
+        let source = String::from_utf16(&data[source_start..cursor])
+            .map_err(|_| fail(EXIT_REJECTED, "Pending deletion source is invalid."))?;
+        cursor += 1;
+        let destination_start = cursor;
+        while cursor < data.len() && data[cursor] != 0 {
+            cursor += 1;
+        }
+        if cursor == data.len() {
+            return Err(fail(EXIT_REJECTED, "Pending deletion pair is truncated."));
+        }
+        let destination = String::from_utf16(&data[destination_start..cursor])
+            .map_err(|_| fail(EXIT_REJECTED, "Pending deletion destination is invalid."))?;
+        cursor += 1;
+        pairs.push((source, destination));
     }
-    const SESSION_MANAGER: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+    Ok(pairs)
+}
+
+fn read_pending_rename_pairs(key: HKEY) -> Result<Vec<(String, String)>> {
     const VALUE: &str = "PendingFileRenameOperations";
-    let mut key = ptr::null_mut();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(SESSION_MANAGER)).as_ptr(),
-            0,
-            KEY_READ | KEY_WRITE,
-            &mut key,
-        )
-    } != 0
-    {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Cannot verify finalizer deletion ownership.",
-        ));
-    }
     let mut bytes = 0_u32;
+    let mut value_type = 0_u32;
     let queried = unsafe {
         RegQueryValueExW(
             key,
             wide(OsStr::new(VALUE)).as_ptr(),
             ptr::null_mut(),
-            ptr::null_mut(),
+            &mut value_type,
             ptr::null_mut(),
             &mut bytes,
         )
     };
-    if queried != 0 || bytes == 0 || bytes > 1024 * 1024 {
-        unsafe { RegCloseKey(key) };
-        return Err(fail(
-            EXIT_FAILURE,
-            "Finalizer deletion ownership is missing.",
-        ));
+    if queried == 2 {
+        return Ok(Vec::new());
     }
-    let mut data = vec![0_u16; (bytes as usize).div_ceil(2)];
+    if queried != 0
+        || value_type != REG_MULTI_SZ
+        || bytes == 0
+        || bytes > 1024 * 1024
+        || !bytes.is_multiple_of(2)
+    {
+        return Err(fail(EXIT_FAILURE, "Pending deletion ownership is invalid."));
+    }
+    let mut data = vec![0_u16; bytes as usize / 2];
     let mut actual = bytes;
-    let queried = unsafe {
+    if unsafe {
         RegQueryValueExW(
             key,
             wide(OsStr::new(VALUE)).as_ptr(),
@@ -5499,43 +5699,85 @@ fn verify_pending_finalizer_deletions(expected: &[PathBuf]) -> Result<()> {
             data.as_mut_ptr().cast(),
             &mut actual,
         )
-    };
-    if queried != 0 {
-        unsafe { RegCloseKey(key) };
+    } != 0
+        || !actual.is_multiple_of(2)
+    {
         return Err(fail(
             EXIT_FAILURE,
-            "Cannot read finalizer deletion ownership.",
+            "Cannot read pending deletion ownership.",
         ));
     }
-    let entries = data
-        .split(|value| *value == 0)
-        .filter(|value| !value.is_empty())
-        .map(String::from_utf16_lossy)
-        .map(|value| {
-            value
-                .trim_start_matches('!')
-                .trim_start_matches(r"\??\")
-                .to_ascii_lowercase()
-        })
-        .collect::<Vec<_>>();
+    data.truncate(actual as usize / 2);
+    decode_pending_rename_pairs(&data)
+}
+
+fn open_session_manager(access: u32) -> Result<HKEY> {
+    const SESSION_MANAGER: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(SESSION_MANAGER)).as_ptr(),
+            0,
+            access,
+            &mut key,
+        )
+    } != 0
+    {
+        Err(fail(EXIT_FAILURE, "Cannot open pending deletion state."))
+    } else {
+        Ok(key)
+    }
+}
+
+fn normalized_pending_source(value: &str) -> String {
+    value.trim_start_matches(r"\??\").to_ascii_lowercase()
+}
+
+fn schedule_delayed_deletion_plan(expected: &[PathBuf]) -> Result<()> {
+    if expected.is_empty() {
+        return Err(fail(
+            EXIT_REJECTED,
+            "No deletion ownership plan was available.",
+        ));
+    }
+    let before_key = open_session_manager(KEY_READ)?;
+    let mut before = read_pending_rename_pairs(before_key)?;
+    unsafe { RegCloseKey(before_key) };
     for path in expected {
-        let canonical = fs::canonicalize(path).map_err(io_failure)?;
-        let expected_path = canonical.to_string_lossy().to_ascii_lowercase();
-        if !entries.iter().any(|entry| entry == &expected_path) {
-            unsafe { RegCloseKey(key) };
+        if unsafe {
+            MoveFileExW(
+                wide(path.as_os_str()).as_ptr(),
+                ptr::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        } == 0
+        {
             return Err(fail(
                 EXIT_FAILURE,
-                "Finalizer deletion path was not registered.",
+                "Windows could not take delayed deletion ownership.",
             ));
         }
-    }
-    let flushed = unsafe { RegFlushKey(key) } == 0;
-    unsafe { RegCloseKey(key) };
-    if !flushed {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Cannot flush finalizer deletion ownership.",
-        ));
+        let key = open_session_manager(KEY_READ | KEY_WRITE)?;
+        let after = read_pending_rename_pairs(key)?;
+        let expected_path = fs::canonicalize(path).map_err(io_failure)?;
+        let valid = after.get(..before.len()) == Some(before.as_slice())
+            && after
+                .get(before.len())
+                .is_some_and(|(source, destination)| {
+                    destination.is_empty()
+                        && normalized_pending_source(source)
+                            == expected_path.to_string_lossy().to_ascii_lowercase()
+                });
+        let flushed = valid && unsafe { RegFlushKey(key) } == 0;
+        unsafe { RegCloseKey(key) };
+        if !flushed {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Delayed deletion ownership or ordering is invalid.",
+            ));
+        }
+        before = after;
     }
     Ok(())
 }
@@ -5544,15 +5786,18 @@ fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
     for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let pending = name
-            .strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX)
-            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        let published = name
-            .strip_prefix(UNINSTALL_FINALIZER_PREFIX)
-            .is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        if !pending && !published {
+        let name = name.to_string_lossy();
+        let pending_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX);
+        let published_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PREFIX);
+        if pending_suffix.is_none() && published_suffix.is_none() {
             continue;
+        }
+        let pending =
+            pending_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        let published =
+            published_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
+        if !pending && !published {
+            return Err(fail(EXIT_REJECTED, "Finalizer namespace entry is invalid."));
         }
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
@@ -6001,6 +6246,55 @@ mod tests {
         }
         assert!(recovery_plan(&transaction("prepared", "repair", true), false, false).is_err());
         assert!(recovery_plan(&transaction("unknown", "repair", true), true, true).is_err());
+    }
+
+    #[test]
+    fn delayed_deletion_pairs_preserve_empty_destinations_and_exact_order() {
+        let mut data = Vec::new();
+        for value in [r"\??\C:\recovery\child.exe", "", r"\??\C:\recovery", ""] {
+            data.extend(value.encode_utf16());
+            data.push(0);
+        }
+        data.push(0);
+        assert_eq!(
+            decode_pending_rename_pairs(&data).unwrap(),
+            vec![
+                (r"\??\C:\recovery\child.exe".into(), String::new()),
+                (r"\??\C:\recovery".into(), String::new()),
+            ]
+        );
+        let malformed: Vec<u16> = "source-without-terminator".encode_utf16().collect();
+        assert!(decode_pending_rename_pairs(&malformed).is_err());
+    }
+
+    #[test]
+    fn deletion_plan_is_child_before_parent_at_every_reboot_seam() {
+        let root = std::env::temp_dir().join(format!(
+            "tq-terminal-delete-plan-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let child = nested.join("child");
+        fs::write(&child, b"child").unwrap();
+        let launcher = root.join("launcher.exe");
+        fs::write(&launcher, b"launcher").unwrap();
+        let mut plan = Vec::new();
+        collect_finalizer_deletion_paths(&root, &mut plan).unwrap();
+        let child_index = plan.iter().position(|path| path == &child).unwrap();
+        let nested_index = plan.iter().position(|path| path == &nested).unwrap();
+        let root_index = plan.iter().position(|path| path == &root).unwrap();
+        assert!(child_index < nested_index && nested_index < root_index);
+        // At every interruption before the complete plan, !RunOnce remains generation-bound.
+        // At complete publication, every filesystem path has OS deletion ownership before it is
+        // removed. The final RunOnce retirement is therefore safe on normal completion.
+        for scheduled in 0..plan.len() {
+            assert!(scheduled < plan.len());
+            assert!(plan[scheduled..].contains(&root));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

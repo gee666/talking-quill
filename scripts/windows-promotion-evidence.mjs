@@ -78,6 +78,34 @@ function validateIdentity(identity, label) {
     throw new Error(`${label} is invalid`);
 }
 
+function validateProductionInterruptions(value, arch) {
+  exactObject(
+    value,
+    ['fresh', 'removeFreshRecovery', 'uninstall', 'finishUninstallRecovery'],
+    `${arch} production interruption evidence`,
+  );
+  if (
+    value.fresh !== true ||
+    value.removeFreshRecovery !== true ||
+    value.uninstall !== true ||
+    value.finishUninstallRecovery !== true
+  )
+    throw new Error(`${arch} production interruption evidence is invalid`);
+}
+
+function validateTerminalCleanup(value, arch) {
+  exactObject(value, ['inspected', 'residue', 'registry'], `${arch} terminal cleanup evidence`);
+  if (
+    value.inspected !== true ||
+    !Array.isArray(value.residue) ||
+    value.residue.length !== 0 ||
+    !Array.isArray(value.registry) ||
+    value.registry.length !== 0
+  )
+    throw new Error(`${arch} terminal cleanup evidence is invalid`);
+  return { inspected: true, residue: [], registry: [] };
+}
+
 function validateSuccess(value, arch, operation, action) {
   const required = [
     'schemaVersion',
@@ -133,6 +161,7 @@ function validateSuccess(value, arch, operation, action) {
     value.authenticatedSetupPids.length !== 2
   )
     throw new Error(`${arch} ${operation} evidence did not pass exact lifecycle policy`);
+  if (operation === 'fresh') validateProductionInterruptions(value.productionInterruptions, arch);
   verifyAuthenticatedSetupReceipt(value.nativeAuthenticationReceipt, action, value.installerSha256);
   value.processIdentities.forEach((identity, index) =>
     validateIdentity(identity, `${arch} ${operation} process ${index}`),
@@ -184,6 +213,7 @@ function validateFault(value, arch) {
       'candidateSha256',
       'releaseBuildDigest',
       'faults',
+      'terminalCleanup',
       'passed',
     ],
     `${arch} fault evidence`,
@@ -201,20 +231,56 @@ function validateFault(value, arch) {
     value.faults.length !== 10
   )
     throw new Error(`${arch} fault evidence is invalid`);
+  const terminalCleanup = validateTerminalCleanup(value.terminalCleanup, arch);
   for (const fault of value.faults) {
+    exactObject(
+      fault,
+      [
+        'fault',
+        'crashExitCode',
+        'recoveryExitCode',
+        'inspectedBeforeRepair',
+        'productionRecoveryInterrupted',
+        'recoveredReleaseBuildDigest',
+        'appPathExact',
+        'quietUninstallExact',
+        'legacyServiceAbsent',
+        'legacyTaskAbsent',
+      ],
+      `${arch} fault phase result`,
+    );
     if (
-      typeof fault !== 'object' ||
-      fault === null ||
       typeof fault.fault !== 'string' ||
       fault.fault.length === 0 ||
       fault.crashExitCode !== 197 ||
       fault.recoveryExitCode !== 78 ||
       fault.inspectedBeforeRepair !== true ||
       fault.productionRecoveryInterrupted !== true ||
-      fault.recoveredReleaseBuildDigest !== value.releaseBuildDigest
+      fault.recoveredReleaseBuildDigest !== value.releaseBuildDigest ||
+      fault.appPathExact !== true ||
+      fault.quietUninstallExact !== true ||
+      fault.legacyServiceAbsent !== true ||
+      fault.legacyTaskAbsent !== true
     )
       throw new Error(`${arch} fault phase result is invalid`);
   }
+  const expectedFaults = [
+    'committed',
+    'legacyRetired',
+    'legacyRetiring',
+    'predecessorMoved',
+    'prepared',
+    'published',
+    'publishedBeforePersist',
+    'publishing',
+    'registered',
+    'staged',
+  ];
+  const actualFaults = value.faults
+    .map(({ fault }) => fault.replace(/^.*repair-|\.exe$/gu, ''))
+    .sort();
+  if (actualFaults.join(',') !== expectedFaults.sort().join(','))
+    throw new Error(`${arch} fault phase inventory is invalid`);
   return {
     kind: 'fault',
     architecture: arch,
@@ -232,8 +298,33 @@ function validateFault(value, arch) {
     installedState: null,
     faultPhase: value.faults.map(({ fault }) => fault),
     faultResult: value.faults,
+    terminalCleanup,
     evidence: value,
   };
+}
+
+function validateArchitectureBinding(records, arch) {
+  const claims = records
+    .filter(({ claims: record }) => record.architecture === arch)
+    .map(({ claims: record }) => record);
+  const fresh = claims.find(({ operation }) => operation === 'fresh');
+  const repair = claims.find(({ operation }) => operation === 'repair');
+  const fault = claims.find(({ operation }) => operation === 'fault-recovery');
+  if (
+    fresh === undefined ||
+    repair === undefined ||
+    fault === undefined ||
+    fault.packageSha256 !== repair.packageSha256 ||
+    fault.releaseBuildDigest !== repair.releaseBuildDigest ||
+    fresh.releaseBuildDigest !== repair.releaseBuildDigest ||
+    fresh.sourceCommit !== repair.sourceCommit ||
+    fresh.sourceTree !== repair.sourceTree ||
+    fault.sourceCommit !== repair.sourceCommit ||
+    fault.sourceTree !== repair.sourceTree ||
+    fresh.installedState.gatewaySha256 !== repair.installedState.gatewaySha256 ||
+    fresh.installedState.ownerSha256 !== repair.installedState.ownerSha256
+  )
+    throw new Error(`${arch} promotion evidence generation binding is invalid`);
 }
 
 async function evidenceRecords(directory) {
@@ -254,6 +345,7 @@ async function evidenceRecords(directory) {
       sha256: hash(source),
       claims: validateFault(JSON.parse(source), arch),
     });
+    validateArchitectureBinding(records, arch);
   }
   return records.sort((left, right) => left.file.localeCompare(right.file));
 }

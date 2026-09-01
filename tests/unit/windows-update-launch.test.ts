@@ -98,17 +98,15 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
     expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     expect(setup).toContain('PendingFileRenameOperations');
-    expect(setup).toContain('for target in [current]');
+    expect(setup).toContain('append_unique_deletion_path(&mut scheduled, current)?');
     expect(setup).toContain('publish_terminal_uninstall_record(paths)?');
     expect(setup).toContain('launch_terminal_uninstall_owner(paths, &terminal_generation)');
     const deletionOwnership = setup.slice(
       setup.indexOf('fn establish_finalizer_deletion_ownership'),
-      setup.indexOf('fn collect_finalizer_deletion_paths'),
+      setup.indexOf('fn collect_terminal_deletion_plan'),
     );
-    expect(deletionOwnership).not.toContain(
-      'collect_finalizer_deletion_paths(&launcher, &mut tree)?',
-    );
-    expect(setup).toContain('relocated_uninstall_matches_maintenance(target, paths)?');
+    expect(deletionOwnership).toContain('schedule_delayed_deletion_plan(&scheduled)');
+    expect(setup).toContain('relocated_uninstall_matches_maintenance(current, paths)?');
     expect(setup).toContain('authenticated_relocated_image');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
@@ -150,13 +148,22 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
-    expect(terminalCleanup.indexOf('MOVEFILE_DELAY_UNTIL_REBOOT')).toBeLessThan(
-      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?'),
+    expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
+      terminalCleanup.indexOf('schedule_delayed_deletion_plan(&deletion_plan)?'),
     );
-    expect(terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
-      terminalCleanup.indexOf('let _ = arm_mapped_image_deletion(&launcher);'),
+    expect(terminalCleanup.indexOf('schedule_delayed_deletion_plan(&deletion_plan)?')).toBeLessThan(
+      terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
     );
-    expect(terminalCleanup).not.toContain('arm_mapped_image_deletion(&launcher)?');
+    expect(terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?')).toBeLessThan(
+      terminalCleanup.lastIndexOf('clear_terminal_run_once_owner(paths, &record.generation)'),
+    );
+    expect(terminalCleanup.trimEnd()).toMatch(
+      /clear_terminal_run_once_owner\(paths, &record\.generation\)\n\}/u,
+    );
+    expect(setup).toContain('TERMINAL_RUN_ONCE_PREFIX: &str = "!Talking Quill Terminal Cleanup "');
+    expect(setup).toContain('CurrentVersion\\RunOnce');
+    expect(setup).toContain('decode_pending_rename_pairs');
+    expect(setup).toContain('destination.is_empty()');
     const lockRetirement = setup.slice(
       setup.indexOf('fn retire_machine_lock_publication'),
       setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),

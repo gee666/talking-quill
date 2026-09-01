@@ -143,6 +143,17 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('QuietUninstallString');
     expect(lifecycle).toContain('Synchronous native setup uninstall failed');
     expect(lifecycle).toContain('Recovery was not terminal before repair');
+    expect(lifecycle).toContain('Set-StrictMode -Version Latest');
+    expect(lifecycle.match(/Set-StrictMode -Version Latest/gu)).toHaveLength(2);
+    expect(lifecycle.match(/\$ErrorActionPreference = 'Stop'/gu)).toHaveLength(2);
+    expect(lifecycle.match(/\$PSNativeCommandUseErrorActionPreference = \$true/gu)).toHaveLength(2);
+    expect(lifecycle).toContain("'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce'");
+    expect(lifecycle).toContain('!Talking Quill Terminal Cleanup $terminalGeneration');
+    expect(lifecycle).not.toContain('$legacyGeneration');
+    expect(lifecycle).not.toContain('$legacyRoot');
+    expect(lifecycle).toContain(
+      "foreach ($staleGeneration in @('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'))",
+    );
     const assemble = section('assemble');
     expect(assemble).toContain('needs: [validate, package, smoke, lifecycle, fresh-lifecycle]');
     expect(assemble).toContain('windows-x64-exact-native-setup-input');
