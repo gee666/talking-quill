@@ -55,15 +55,16 @@ use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW,
+    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW,
+    RegEnumValueW, RegFlushKey, RegLoadAppKeyW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW,
@@ -95,12 +96,16 @@ const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLo
 const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
 const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
+const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
+const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
 const UNINSTALL_FINALIZER_PENDING_PREFIX: &str = ".Talking Quill.uninstall-finalizer-pending-";
 const UNINSTALL_FINALIZER_PREFIX: &str = ".Talking Quill.uninstall-finalizer-";
 const UNINSTALL_FINALIZER_NAME: &str = "Talking Quill Uninstall Finalizer.exe";
 const MEDIUM_FINALIZER_DIRECTORY_SDDL: &str =
     "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)";
 const MEDIUM_FINALIZER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;AU)";
+const MEDIUM_LAUNCHER_DIRECTORY_SDDL: &str = MEDIUM_FINALIZER_DIRECTORY_SDDL;
+const MEDIUM_LAUNCHER_FILE_SDDL: &str = MEDIUM_FINALIZER_FILE_SDDL;
 const LEGACY_LOCK_RETIREMENT_EPOCH: u8 = 3;
 
 const EXIT_USAGE: i32 = 64;
@@ -166,6 +171,15 @@ struct Transaction {
     had_predecessor: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TerminalUninstallRecord {
+    schema_version: u8,
+    generation: String,
+    phase: String,
+    maintenance_sha256: String,
+}
+
 struct Paths {
     install: PathBuf,
     staging: PathBuf,
@@ -188,8 +202,15 @@ fn run_inner() -> Result<i32> {
             .iter()
             .all(|value| value == "/TQ-RELOCATED" || value == "/S");
     let legacy_predecessor = elevated && legacy_predecessor_arguments(&arguments);
+    let terminal_recovery = elevated
+        && arguments.len() == 1
+        && arguments[0]
+            .to_str()
+            .and_then(|value| value.strip_prefix("/TQ-TERMINAL-RECOVERY="))
+            .is_some_and(|generation| validate_machine_lock_suffix(generation).is_ok());
     if !((arguments.is_empty() || (arguments.len() == 1 && arguments[0] == "/S"))
         || legacy_predecessor
+        || terminal_recovery
         || relocated)
     {
         return Err(fail(EXIT_USAGE, "The native setup accepts only /S."));
@@ -203,6 +224,7 @@ fn run_inner() -> Result<i32> {
         let mut lifecycle_parent = 0;
         let mut relocation_server = None;
         let mut relocated_finalizer = false;
+        let mut relocated_identity_guard = None;
         let action = if relocated {
             let original = process_image(parent_process_id()?)?;
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
@@ -220,12 +242,12 @@ fn run_inner() -> Result<i32> {
                         "Relocated uninstall source is not an authenticated maintenance image.",
                     ));
                 };
-            validate_relocated_uninstall_image(
+            relocated_identity_guard = Some(validate_relocated_uninstall_image(
                 &current,
                 &original,
                 &expected,
                 &controller_paths.maintenance_uninstaller,
-            )?;
+            )?);
             let (action, server, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(&expected))?;
             silent = requested_silent;
@@ -313,6 +335,7 @@ fn run_inner() -> Result<i32> {
         }
         let channel = ControllerChannel::create(action, silent, lifecycle_parent)?;
         let result = elevate(&current, silent, &channel, before_accept);
+        drop(relocated_identity_guard);
         drop(retained);
         if relocated && lifecycle_parent != 0 {
             let status = result.as_ref().copied().unwrap_or_else(|error| error.code);
@@ -333,6 +356,13 @@ fn run_inner() -> Result<i32> {
             remove_plain_tree(&controller_paths.profile)?;
         }
         return result;
+    }
+    if terminal_recovery {
+        let generation = arguments[0]
+            .to_string_lossy()
+            .trim_start_matches("/TQ-TERMINAL-RECOVERY=")
+            .to_owned();
+        return run_terminal_uninstall_recovery(&generation);
     }
     run_worker(silent, legacy_predecessor)
 }
@@ -553,7 +583,7 @@ fn validate_relocated_uninstall_image(
     original: &Path,
     expected: &Path,
     maintenance: &Path,
-) -> Result<()> {
+) -> Result<File> {
     let relocated_canonical = std::fs::canonicalize(relocated).map_err(io_failure)?;
     let temp_canonical = std::fs::canonicalize(std::env::temp_dir()).map_err(io_failure)?;
     let name = relocated_canonical
@@ -578,23 +608,23 @@ fn validate_relocated_uninstall_image(
         .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
         .open(expected)
         .map_err(io_failure)?;
-    let relocated_file = OpenOptions::new()
+    let mut relocated_file = OpenOptions::new()
         .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .share_mode(FILE_SHARE_READ)
         .open(relocated)
         .map_err(io_failure)?;
     if file_identity_text(&original_file)? != file_identity_text(&expected_file)?
         || file_hash(original)? != file_hash(expected)?
         || file_hash(original)? != file_hash(maintenance)?
-        || file_hash(relocated)? != file_hash(maintenance)?
+        || hash_reader(&mut relocated_file)? != file_hash(maintenance)?
     {
         return Err(fail(
             EXIT_REJECTED,
             "Relocated uninstall source identity does not match maintenance authority.",
         ));
     }
-    drop((original_file, expected_file, relocated_file));
-    Ok(())
+    drop((original_file, expected_file));
+    Ok(relocated_file)
 }
 
 fn create_relocated_image(source: &Path) -> Result<(PathBuf, File)> {
@@ -826,14 +856,30 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     }
     if uninstall_authorized && !path_present(&paths.transaction)? && !path_present(&paths.install)?
     {
-        // A prior finalizer removed the completion journal before crashing. The still-registered
-        // maintenance entry is authenticated residue authority and may finish only terminal cleanup.
+        // Journal-absent recovery must honor the durable terminal owner before touching its Run
+        // target. The exact maintenance image finishes residue, retires Run, then self-unlinks.
+        if let Some(record) = read_terminal_uninstall_record(&paths)? {
+            if canonical(&current)? != canonical(&paths.maintenance_uninstaller)?
+                || hex_hash(&file_hash(&current)?) != record.maintenance_sha256
+            {
+                return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
+            }
+            let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
+            retire_machine_lock_publication(&paths)?;
+            finish_terminal_uninstall(&paths)?;
+            drop(machine_lock.take());
+            drop(legacy);
+            let _ = remove_machine_lock_residue(&paths);
+            return Ok(0);
+        }
         system.unregister_app_path()?;
-        let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
         system.unregister_uninstall()?;
-        remove_maintenance_uninstaller(&paths)?;
+        clear_update_recovery(&paths)?;
+        clear_legacy_profile_relaunch_owners(&paths)?;
+        clear_machine_relaunch_owner(&paths)?;
         remove_update_recovery_launcher_residue(&paths)?;
         remove_uninstall_finalizer_residue(&paths)?;
+        let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
         drop(legacy);
         arm_mapped_image_deletion(&current)?;
         return Ok(0);
@@ -985,6 +1031,7 @@ impl MachineLock {
                     {
                         return Err(fail(EXIT_REJECTED, "Machine lock identity is invalid."));
                     }
+                    validate_acquired_machine_lock_state(program_data, &path)?;
                     return Ok(Self {
                         _legacy: legacy,
                         file,
@@ -998,6 +1045,44 @@ impl MachineLock {
         }
     }
 }
+fn validate_acquired_machine_lock_state(program_data: &Path, lock: &Path) -> Result<()> {
+    let suffix = lock
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
+        .ok_or_else(|| fail(EXIT_REJECTED, "Machine lock path is invalid."))?;
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_REJECTED, "Machine lock publication is missing."));
+    }
+    let publication = read_machine_lock_registry_string(key)?;
+    unsafe { RegCloseKey(key) };
+    match publication.as_deref() {
+        Some(value) if value == suffix => Ok(()),
+        Some(value)
+            if value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX) == Some(suffix)
+                && path_present(
+                    &program_data
+                        .join("Talking Quill Update Recovery")
+                        .join(TERMINAL_UNINSTALL_RECORD_NAME),
+                )? =>
+        {
+            Ok(())
+        }
+        _ => Err(fail(EXIT_REJECTED, "Machine lock publication changed.")),
+    }
+}
+
 impl MachineLock {
     fn take_legacy(&mut self) -> Option<LegacyMutexPair> {
         self._legacy.take()
@@ -1148,8 +1233,16 @@ fn machine_lock_file(program_data: &Path, predecessor_policy_epoch: u8) -> Resul
         .and_then(|value| value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX))
     {
         validate_machine_lock_suffix(retired)?;
-        reclaim_retired_machine_lock_directory(program_data, retired)?;
-        None
+        if !path_present(
+            &program_data
+                .join("Talking Quill Update Recovery")
+                .join(TERMINAL_UNINSTALL_RECORD_NAME),
+        )? {
+            reclaim_retired_machine_lock_directory(program_data, retired)?;
+            None
+        } else {
+            Some(retired.to_owned())
+        }
     } else {
         publication
     };
@@ -3141,6 +3234,7 @@ fn install(
     write_transaction(paths, "published", action, had_predecessor)?;
     crash_at(package, "published");
     ensure_maintenance_uninstaller(paths)?;
+    ensure_machine_relaunch_owner_installed(paths)?;
     system.register_version(paths, &package.manifest.version)?;
     write_transaction(paths, "registered", action, had_predecessor)?;
     crash_at(package, "registered");
@@ -3531,9 +3625,14 @@ fn complete_terminal_uninstall(
     machine_lock: &mut Option<MachineLock>,
 ) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
-    let legacy = retire_and_remove_machine_lock(paths, machine_lock)?;
-    finalize_uninstall(paths, system, current)?;
-    drop(legacy);
+    let mut terminal_owner = finalize_uninstall(paths, system, current)?;
+    // Keep the published lifecycle lock discoverable for the launcher handoff. The terminal
+    // maintenance worker acquires it and retires publication only after clearing HKLM Run.
+    drop(machine_lock.take());
+    let status = terminal_owner.wait().map_err(io_failure)?;
+    if !status.success() {
+        return Err(fail(EXIT_FAILURE, "Terminal uninstall recovery failed."));
+    }
     // The current worker already has verified reboot deletion ownership. Immediate POSIX
     // deletion is best-effort and cannot re-open a terminal recovery gap.
     let _ = arm_mapped_image_deletion(current);
@@ -3544,7 +3643,7 @@ fn finalize_uninstall(
     paths: &Paths,
     system: &dyn NativeSystemAdapter,
     current: &Path,
-) -> Result<()> {
+) -> Result<std::process::Child> {
     require_uninstall_cleanup_complete(paths)?;
     write_transaction(
         paths,
@@ -3554,9 +3653,10 @@ fn finalize_uninstall(
     )?;
     system.unregister_app_path()?;
     write_transaction(paths, "uninstall-app-path-retired", Action::Uninstall, true)?;
-    // Move callable recovery authority to the maintenance image before Windows
-    // takes reboot-time ownership of the finalizer tree.
+    // Move callable recovery authority to the maintenance image, then publish the stable
+    // machine launcher record before any journal or registration authority is retired.
     register_uninstall_executable(&paths.maintenance_uninstaller)?;
+    let terminal_generation = publish_terminal_uninstall_record(paths)?;
     establish_finalizer_deletion_ownership(paths, current)?;
     write_transaction(
         paths,
@@ -3575,16 +3675,9 @@ fn finalize_uninstall(
     // leave an authoritative journal without a registered owner.
     remove_transaction(paths)?;
     system.unregister_uninstall()?;
-    // HKLM Run remains the durable machine owner through journal and registration retirement.
-    // Every other image is removed first; the owner value is the final fallible mutation.
-    remove_maintenance_uninstaller(paths)?;
     remove_uninstall_finalizer_residue(paths)?;
-    remove_update_recovery_launcher_residue(paths)?;
-    clear_machine_relaunch_owner(paths)?;
-    // The now-empty protected namespace prevented Run-target squatting until the value was
-    // durably retired. Removing it is terminal best-effort work only.
-    let _ = fs::remove_dir(paths.program_data.join("Talking Quill Update Recovery"));
-    Ok(())
+    write_terminal_uninstall_phase(paths, &terminal_generation, "machine-retired")?;
+    launch_terminal_uninstall_owner(paths, &terminal_generation)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3757,6 +3850,8 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
             remove_maintenance_uninstaller(paths)?;
+            clear_machine_relaunch_owner(paths)?;
+            remove_update_recovery_launcher_residue(paths)?;
         }
         RecoveryPlan::FinishCommit => {
             if value.action == "repair" && path_present(&paths.backup)? {
@@ -4401,6 +4496,588 @@ fn clear_update_recovery(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn terminal_uninstall_root(paths: &Paths) -> PathBuf {
+    paths.program_data.join("Talking Quill Update Recovery")
+}
+
+fn terminal_uninstall_record_path(paths: &Paths) -> PathBuf {
+    terminal_uninstall_root(paths).join(TERMINAL_UNINSTALL_RECORD_NAME)
+}
+
+fn terminal_uninstall_marker_value(generation: &str) -> String {
+    format!("terminal-uninstall-v1:{generation}")
+}
+
+fn write_terminal_uninstall_record(paths: &Paths, record: &TerminalUninstallRecord) -> Result<()> {
+    let bytes = serde_json::to_vec(record)
+        .map_err(|_| fail(EXIT_FAILURE, "Cannot encode terminal uninstall recovery."))?;
+    let root = terminal_uninstall_root(paths);
+    let record_path = terminal_uninstall_record_path(paths);
+    let marker_path = root.join(TERMINAL_UNINSTALL_MARKER_NAME);
+    for (path, content) in [
+        (&record_path, String::from_utf8(bytes.clone()).unwrap()),
+        (
+            &marker_path,
+            terminal_uninstall_marker_value(&record.generation),
+        ),
+    ] {
+        let temporary = root.join(format!(
+            ".terminal-uninstall.tmp-{}",
+            random_machine_lock_suffix()?
+        ));
+        create_atomic_marker(&temporary, &content, MEDIUM_LAUNCHER_FILE_SDDL)?;
+        durable_replace(&temporary, path)?;
+        verify_atomic_marker(path, &content, MEDIUM_LAUNCHER_FILE_SDDL, None)?;
+    }
+    flush_setup_directory(&root)
+}
+
+fn random_machine_lock_suffix() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| fail(EXIT_FAILURE, "Windows randomness is unavailable."))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn read_terminal_uninstall_record(paths: &Paths) -> Result<Option<TerminalUninstallRecord>> {
+    let path = terminal_uninstall_record_path(paths);
+    if !path_present(&path)? {
+        return Ok(None);
+    }
+    assert_plain_file(&path)?;
+    let bytes = fs::read(&path).map_err(io_failure)?;
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return Err(fail(EXIT_REJECTED, "Terminal uninstall record is invalid."));
+    }
+    let record: TerminalUninstallRecord = serde_json::from_slice(&bytes)
+        .map_err(|_| fail(EXIT_REJECTED, "Terminal uninstall record is invalid."))?;
+    if record.schema_version != 1
+        || validate_machine_lock_suffix(&record.generation).is_err()
+        || !matches!(record.phase.as_str(), "armed" | "machine-retired")
+        || record.maintenance_sha256.len() != 64
+        || !record
+            .maintenance_sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal uninstall record is invalid."));
+    }
+    verify_atomic_marker(
+        &terminal_uninstall_root(paths).join(TERMINAL_UNINSTALL_MARKER_NAME),
+        &terminal_uninstall_marker_value(&record.generation),
+        MEDIUM_LAUNCHER_FILE_SDDL,
+        None,
+    )?;
+    Ok(Some(record))
+}
+
+fn ensure_machine_relaunch_owner_installed(paths: &Paths) -> Result<()> {
+    let root = terminal_uninstall_root(paths);
+    if !path_present(&root)? {
+        create_directory_with_security(&root, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?;
+        apply_lock_dacl(&root, MEDIUM_LAUNCHER_DIRECTORY_SDDL)?;
+    }
+    if !medium_launcher_directory_is_protected(&root)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine recovery launcher is not protected.",
+        ));
+    }
+    let source = paths
+        .install
+        .join("resources/helper/talking-quill-update-recovery-launcher.exe");
+    assert_plain_file(&source)?;
+    let target = root.join("talking-quill-update-recovery-launcher.exe");
+    let temporary = root.join(format!(".launcher.tmp-{}", random_machine_lock_suffix()?));
+    fs::copy(&source, &temporary).map_err(io_failure)?;
+    apply_lock_dacl(&temporary, MEDIUM_LAUNCHER_FILE_SDDL)?;
+    let copied = File::open(&temporary).map_err(io_failure)?;
+    copied.sync_all().map_err(io_failure)?;
+    drop(copied);
+    durable_replace(&temporary, &target)?;
+    let identity =
+        owned_tree_identity(&root).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+    let marker = root.join("launcher-tree-identity-v1");
+    if path_present(&marker)? {
+        verify_atomic_marker(&marker, &identity, MEDIUM_LAUNCHER_FILE_SDDL, None)?;
+    } else {
+        create_atomic_marker(&marker, &identity, MEDIUM_LAUNCHER_FILE_SDDL)?;
+    }
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WRITE,
+            ptr::null(),
+            &mut key,
+            ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot create machine recovery owner."));
+    }
+    let command = format!(
+        "\"{}\" --windows-update-relaunch-owner-v1",
+        target.display()
+    );
+    let value = wide(OsStr::new(&command));
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide(OsStr::new("Talking Quill Update Relaunch")).as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if !flushed {
+        return Err(fail(EXIT_FAILURE, "Cannot flush machine recovery owner."));
+    }
+    flush_setup_directory(&root)
+}
+
+fn require_machine_relaunch_owner(paths: &Paths) -> Result<()> {
+    let root = terminal_uninstall_root(paths);
+    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    if !medium_launcher_directory_is_protected(&root)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine recovery launcher is not protected.",
+        ));
+    }
+    assert_plain_file(&launcher)?;
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_REJECTED, "Machine recovery owner is missing."));
+    }
+    let expected = format!(
+        "\"{}\" --windows-update-relaunch-owner-v1",
+        launcher.display()
+    );
+    let actual = read_registry_value(key, "Talking Quill Update Relaunch", 1024)?;
+    unsafe { RegCloseKey(key) };
+    if actual.as_deref() == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err(fail(EXIT_REJECTED, "Machine recovery owner is invalid."))
+    }
+}
+
+fn publish_terminal_uninstall_record(paths: &Paths) -> Result<String> {
+    require_machine_relaunch_owner(paths)?;
+    let generation = random_machine_lock_suffix()?;
+    let record = TerminalUninstallRecord {
+        schema_version: 1,
+        generation: generation.clone(),
+        phase: "armed".into(),
+        maintenance_sha256: hex_hash(&file_hash(&paths.maintenance_uninstaller)?),
+    };
+    write_terminal_uninstall_record(paths, &record)?;
+    Ok(generation)
+}
+
+fn write_terminal_uninstall_phase(paths: &Paths, generation: &str, phase: &str) -> Result<()> {
+    let mut record = read_terminal_uninstall_record(paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
+    if record.generation != generation || !matches!(phase, "armed" | "machine-retired") {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall generation is invalid.",
+        ));
+    }
+    record.phase = phase.into();
+    write_terminal_uninstall_record(paths, &record)
+}
+
+fn launch_terminal_uninstall_owner(paths: &Paths, generation: &str) -> Result<std::process::Child> {
+    let launcher =
+        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    assert_plain_file(&launcher)?;
+    Command::new(launcher)
+        .arg(format!("--windows-terminal-uninstall-v1={generation}"))
+        .spawn()
+        .map_err(io_failure)
+}
+
+fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
+    let paths = paths()?;
+    let mut machine_lock = Some(MachineLock::acquire(
+        &paths.program_data,
+        120_000,
+        installed_recovery_policy_epoch(&paths)?,
+    )?);
+    let record = read_terminal_uninstall_record(&paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
+    if record.generation != generation
+        || hex_hash(&file_hash(&std::env::current_exe().map_err(io_failure)?)?)
+            != record.maintenance_sha256
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
+    }
+    let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
+    retire_machine_lock_publication(&paths)?;
+    finish_terminal_uninstall(&paths)?;
+    drop(machine_lock.take());
+    drop(legacy);
+    let _ = remove_machine_lock_residue(&paths);
+    Ok(0)
+}
+
+fn enumerate_registry_subkeys(key: *mut c_void) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut name = [0_u16; 256];
+        let mut length = name.len() as u32;
+        let status = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut length,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if status == 259 {
+            break;
+        }
+        if status != 0 {
+            return Err(fail(EXIT_FAILURE, "Cannot enumerate user registry hives."));
+        }
+        values.push(String::from_utf16_lossy(&name[..length as usize]));
+        index += 1;
+    }
+    Ok(values)
+}
+
+fn clear_legacy_relaunch_values_in_hive(hive: *mut c_void, paths: &Paths) -> Result<()> {
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const PREFIX: &str = "Talking Quill Update Relaunch ";
+    let mut run = ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            hive,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut run,
+        )
+    };
+    if opened == 2 {
+        return Ok(());
+    }
+    if opened != 0 {
+        return Err(fail(EXIT_FAILURE, "Cannot open a profile Run key."));
+    }
+    let launcher =
+        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    let mut index = 0;
+    loop {
+        let mut name = [0_u16; 512];
+        let mut length = name.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                run,
+                index,
+                name.as_mut_ptr(),
+                &mut length,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if status == 259 {
+            break;
+        }
+        if status != 0 {
+            unsafe { RegCloseKey(run) };
+            return Err(fail(EXIT_FAILURE, "Cannot enumerate a profile Run key."));
+        }
+        let value_name = String::from_utf16_lossy(&name[..length as usize]);
+        let Some(generation) = value_name.strip_prefix(PREFIX) else {
+            index += 1;
+            continue;
+        };
+        if validate_machine_lock_suffix(generation).is_err() {
+            index += 1;
+            continue;
+        }
+        let expected = format!(
+            "\"{}\" --windows-update-relaunch-v1={generation}",
+            launcher.display()
+        );
+        if read_registry_value(run, &value_name, 2048)?.as_deref() != Some(expected.as_str()) {
+            unsafe { RegCloseKey(run) };
+            return Err(fail(EXIT_REJECTED, "A legacy relaunch value was replaced."));
+        }
+        if unsafe { RegDeleteValueW(run, wide(OsStr::new(&value_name)).as_ptr()) } != 0 {
+            unsafe { RegCloseKey(run) };
+            return Err(fail(EXIT_FAILURE, "Cannot remove a legacy relaunch value."));
+        }
+    }
+    let flushed = unsafe { RegFlushKey(run) } == 0;
+    unsafe { RegCloseKey(run) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(EXIT_FAILURE, "Cannot flush profile relaunch cleanup."))
+    }
+}
+
+fn read_profile_image_path(key: *mut c_void) -> Result<Option<PathBuf>> {
+    let name = wide(OsStr::new("ProfileImagePath"));
+    let mut kind = 0;
+    let mut bytes = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if status == 2 {
+        return Ok(None);
+    }
+    if status != 0 || !matches!(kind, REG_SZ | REG_EXPAND_SZ) || bytes > 32768 {
+        return Err(fail(EXIT_REJECTED, "Profile path is invalid."));
+    }
+    let mut value = vec![0_u16; bytes as usize / 2];
+    if unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot read profile path."));
+    }
+    if value.last() == Some(&0) {
+        value.pop();
+    }
+    let text =
+        String::from_utf16(&value).map_err(|_| fail(EXIT_REJECTED, "Profile path is invalid."))?;
+    let source = wide(OsStr::new(&text));
+    let needed = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), ptr::null_mut(), 0) };
+    if needed == 0 || needed > 32768 {
+        return Err(fail(EXIT_REJECTED, "Profile path expansion failed."));
+    }
+    let mut expanded = vec![0_u16; needed as usize];
+    if unsafe { ExpandEnvironmentStringsW(source.as_ptr(), expanded.as_mut_ptr(), needed) }
+        != needed
+    {
+        return Err(fail(EXIT_REJECTED, "Profile path expansion failed."));
+    }
+    if expanded.last() == Some(&0) {
+        expanded.pop();
+    }
+    let expanded = String::from_utf16(&expanded)
+        .map_err(|_| fail(EXIT_REJECTED, "Profile path is invalid."))?;
+    let path = PathBuf::from(&expanded);
+    if expanded.contains('%')
+        || !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(fail(EXIT_REJECTED, "Profile path is not canonical."));
+    }
+    Ok(Some(path))
+}
+
+fn remove_legacy_profile_relaunch_records(root: &Path) -> Result<()> {
+    if !path_present(root)? {
+        return Ok(());
+    }
+    assert_plain_directory(root)?;
+    for entry in fs::read_dir(root).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let generation = entry.file_name().to_string_lossy().into_owned();
+        if validate_machine_lock_suffix(&generation).is_err() {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Legacy relaunch record name is invalid.",
+            ));
+        }
+        let directory = entry.path();
+        assert_plain_directory(&directory)?;
+        let record_path = directory.join("relaunch-record-v1.json");
+        assert_plain_file(&record_path)?;
+        let bytes = fs::read(&record_path).map_err(io_failure)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(fail(EXIT_REJECTED, "Legacy relaunch record is invalid."));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| fail(EXIT_REJECTED, "Legacy relaunch record is invalid."))?;
+        if value.get("schemaVersion").and_then(|value| value.as_u64()) != Some(1)
+            || value.get("generation").and_then(|value| value.as_str()) != Some(generation.as_str())
+            || !value
+                .get("request")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.starts_with("--windows-update-bootstrap-v2="))
+        {
+            return Err(fail(EXIT_REJECTED, "Legacy relaunch record is invalid."));
+        }
+        remove_plain_tree(&directory)?;
+    }
+    fs::remove_dir(root).map_err(io_failure)
+}
+
+fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
+    let loaded = enumerate_registry_subkeys(HKEY_USERS)?;
+    for sid in loaded
+        .iter()
+        .filter(|sid| sid.starts_with("S-1-5-") && !sid.ends_with("_Classes"))
+    {
+        let mut hive = ptr::null_mut();
+        if unsafe {
+            RegOpenKeyExW(
+                HKEY_USERS,
+                wide(OsStr::new(sid)).as_ptr(),
+                0,
+                KEY_READ | KEY_WRITE,
+                &mut hive,
+            )
+        } != 0
+        {
+            return Err(fail(EXIT_FAILURE, "Cannot open a loaded user hive."));
+        }
+        let result = clear_legacy_relaunch_values_in_hive(hive, paths);
+        unsafe { RegCloseKey(hive) };
+        result?;
+    }
+    const PROFILE_LIST: &str = r"Software\Microsoft\Windows NT\CurrentVersion\ProfileList";
+    let mut profiles = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(PROFILE_LIST)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut profiles,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot open the profile inventory."));
+    }
+    for sid in enumerate_registry_subkeys(profiles)? {
+        if !sid.starts_with("S-1-5-") {
+            continue;
+        }
+        let mut profile = ptr::null_mut();
+        if unsafe {
+            RegOpenKeyExW(
+                profiles,
+                wide(OsStr::new(&sid)).as_ptr(),
+                0,
+                KEY_READ,
+                &mut profile,
+            )
+        } != 0
+        {
+            unsafe { RegCloseKey(profiles) };
+            return Err(fail(EXIT_FAILURE, "Cannot open a profile record."));
+        }
+        let profile_path = read_profile_image_path(profile)?;
+        unsafe { RegCloseKey(profile) };
+        let Some(profile_path) = profile_path else {
+            continue;
+        };
+        let legacy_records =
+            profile_path.join("AppData/Local/Talking Quill/Windows Update Recovery");
+        remove_legacy_profile_relaunch_records(&legacy_records)?;
+        if loaded.iter().any(|value| value == &sid) {
+            continue;
+        }
+        let ntuser = profile_path.join("NTUSER.DAT");
+        if !path_present(&ntuser)? {
+            continue;
+        }
+        let mut offline = ptr::null_mut();
+        if unsafe {
+            RegLoadAppKeyW(
+                wide(ntuser.as_os_str()).as_ptr(),
+                &mut offline,
+                KEY_READ | KEY_WRITE,
+                0,
+                0,
+            )
+        } != 0
+        {
+            unsafe { RegCloseKey(profiles) };
+            return Err(fail(EXIT_FAILURE, "Cannot load an offline user hive."));
+        }
+        let result = clear_legacy_relaunch_values_in_hive(offline, paths);
+        let flushed = unsafe { RegFlushKey(offline) } == 0;
+        unsafe { RegCloseKey(offline) };
+        result?;
+        if !flushed {
+            unsafe { RegCloseKey(profiles) };
+            return Err(fail(EXIT_FAILURE, "Cannot flush an offline user hive."));
+        }
+    }
+    unsafe { RegCloseKey(profiles) };
+    Ok(())
+}
+
+fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
+    clear_update_recovery(paths)?;
+    clear_legacy_profile_relaunch_owners(paths)?;
+    let relaunch_records = terminal_uninstall_root(paths).join("Relaunch Records");
+    remove_plain_tree(&relaunch_records)?;
+    remove_uninstall_finalizer_residue(paths)?;
+    remove_plain_tree(&paths.install)?;
+    remove_plain_tree(&paths.backup)?;
+    remove_plain_tree(&paths.staging)?;
+    clear_machine_relaunch_owner(paths)?;
+    let root = terminal_uninstall_root(paths);
+    for name in [
+        TERMINAL_UNINSTALL_MARKER_NAME,
+        TERMINAL_UNINSTALL_RECORD_NAME,
+    ] {
+        let path = root.join(name);
+        if path_present(&path)? {
+            fs::remove_file(path).map_err(io_failure)?;
+        }
+    }
+    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    if path_present(&launcher)? {
+        arm_mapped_image_deletion(&launcher)?;
+    }
+    let _ = fs::remove_file(root.join("launcher-tree-identity-v1"));
+    let _ = fs::remove_dir(&root);
+    let current = std::env::current_exe().map_err(io_failure)?;
+    arm_mapped_image_deletion(&current)
+}
+
 fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE: &str = "Talking Quill Update Relaunch";
@@ -4558,7 +5235,7 @@ fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Resu
     }
     // The stable ProgramData launcher is deliberately not scheduled here. Its HKLM Run
     // value remains callable through the terminal commit and it is retired last afterward.
-    for target in [&paths.maintenance_uninstaller, current] {
+    for target in [current] {
         if !path_present(target)? {
             continue;
         }
@@ -5201,6 +5878,39 @@ mod tests {
         }
         assert!(recovery_plan(&transaction("prepared", "repair", true), false, false).is_err());
         assert!(recovery_plan(&transaction("unknown", "repair", true), true, true).is_err());
+    }
+
+    #[test]
+    fn terminal_uninstall_record_schema_is_strict() {
+        let valid = br#"{"schemaVersion":1,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        let record: TerminalUninstallRecord = serde_json::from_slice(valid).unwrap();
+        assert_eq!(record.phase, "armed");
+        let unknown = br#"{"schemaVersion":1,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"C:\\untrusted.exe"}"#;
+        assert!(serde_json::from_slice::<TerminalUninstallRecord>(unknown).is_err());
+    }
+
+    #[test]
+    fn legacy_profile_records_remove_only_exact_generations() {
+        let root =
+            std::env::temp_dir().join(format!("tq-profile-relaunch-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let generation = "22".repeat(16);
+        let directory = root.join(&generation);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("relaunch-record-v1.json"),
+            format!(
+                "{{\"schemaVersion\":1,\"generation\":\"{generation}\",\"request\":\"--windows-update-bootstrap-v2=dGVzdA==\"}}"
+            ),
+        )
+        .unwrap();
+        remove_legacy_profile_relaunch_records(&root).unwrap();
+        assert!(!root.exists());
+
+        fs::create_dir_all(root.join("not-owned")).unwrap();
+        assert!(remove_legacy_profile_relaunch_records(&root).is_err());
+        assert!(root.join("not-owned").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

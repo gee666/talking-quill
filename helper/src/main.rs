@@ -39,6 +39,9 @@ fn main() {
                     .starts_with("--windows-update-bootstrap-staged-v2=")
                 || value
                     .to_string_lossy()
+                    .starts_with("--windows-update-bootstrap-bound-v1=")
+                || value
+                    .to_string_lossy()
                     .starts_with("--windows-update-bootstrap-v3=")
                 || value
                     .to_string_lossy()

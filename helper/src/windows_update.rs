@@ -125,6 +125,7 @@ struct RelaunchIntent {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AppReadyRequest {
+    generation: String,
     version: String,
 }
 
@@ -141,6 +142,7 @@ struct PersistedRelaunchRecord {
     target_version: String,
     phase: String,
     completed_version: Option<String>,
+    recovery_generation: String,
     predecessor: InstalledManifest,
 }
 
@@ -159,8 +161,18 @@ struct LegacyPersistedRelaunchRecord {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TerminalUninstallRecord {
+    schema_version: u8,
+    generation: String,
+    phase: String,
+    maintenance_sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct DeferredLaunchRequest {
     parent_pid: u32,
+    generation: String,
     version: String,
 }
 
@@ -283,8 +295,15 @@ impl StagedDirectoryGuard {
         Ok(())
     }
 
-    fn register_prelaunch_cleanup(&mut self, installed_helper: &Path) -> Result<(), i32> {
-        let generation = new_recovery_generation()?;
+    fn register_prelaunch_cleanup(
+        &mut self,
+        installed_helper: &Path,
+        bound_generation: Option<&str>,
+    ) -> Result<(), i32> {
+        let generation = bound_generation
+            .map(str::to_owned)
+            .map_or_else(new_recovery_generation, Ok)?;
+        validate_generation(&generation)?;
         self.cleanup_generation = Some(generation.clone());
         persist_prelaunch_cleanup(installed_helper, &self.path, &self.identity, &generation)
     }
@@ -324,6 +343,10 @@ pub fn run_recovery_launcher_argument(argument: &std::ffi::OsStr) -> i32 {
 
 fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if let Some(generation) = argument.strip_prefix("--windows-terminal-uninstall-v1=") {
+        validate_generation(generation)?;
+        return resume_terminal_uninstall(generation);
+    }
     if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
         if is_elevated() {
             return Err(EXIT_INVALID_REQUEST);
@@ -456,7 +479,9 @@ fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
         clear_restart_recovery(&generation)?;
         return Ok(0);
     }
-    if argument.starts_with("--windows-update-bootstrap-v2=") {
+    if argument.starts_with("--windows-update-bootstrap-v2=")
+        || argument.starts_with("--windows-update-bootstrap-bound-v1=")
+    {
         return stage_bootstrap(argument).map(|()| 0);
     }
     let (encoded, previous_generation, resuming) =
@@ -511,6 +536,8 @@ const RELAUNCH_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RELAUNCH_ROOT_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x00000025;;;AU)";
 const RELAUNCH_RECORD_NAME: &str = "relaunch-record-v1.json";
 const RELAUNCH_MARKER_NAME: &str = "relaunch-record-marker-v1";
+const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
+const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
 
 fn relaunch_record_sddl(identity: &RelaunchIdentity) -> String {
     if identity.user_sid == identity.logon_sid {
@@ -540,6 +567,11 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
         return Err(EXIT_INVALID_REQUEST);
     }
     let request = parse_and_authorize_request(suffix)?;
+    // Install under the shared lifecycle lock, then reacquire in the global order before
+    // taking any user intent or generation lock.
+    launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")?;
+    let machine_lifecycle = RecoveryStateLock::acquire()?;
+    verify_machine_relaunch_owner()?;
     let intent_path = PathBuf::from(&wrapper.intent_path);
     let _intent_lock = acquire_relaunch_intent_lock(&intent_path)?;
     let intent = read_relaunch_intent(&intent_path, &wrapper.nonce)?;
@@ -553,9 +585,6 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     if predecessor.version != request.candidate.predecessor.version {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    // Machine ownership is established and flushed before a user-scoped record can exist.
-    launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")?;
-    verify_machine_relaunch_owner()?;
     let generation = new_recovery_generation()?;
     let record = PersistedRelaunchRecord {
         schema_version: 2,
@@ -568,12 +597,14 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
         target_version: intent.target_version,
         phase: "armed".into(),
         completed_version: None,
+        recovery_generation: generation.clone(),
         predecessor,
     };
     publish_relaunch_record(&record)?;
     std::fs::remove_file(&intent_path).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    let result = run_persisted_relaunch(&generation);
     drop(_intent_lock);
+    drop(machine_lifecycle);
+    let result = run_persisted_relaunch(&generation);
     let _ =
         std::fs::remove_file(intent_path.with_file_name("windows-update-relaunch-intent-v1.lock"));
     result
@@ -661,6 +692,7 @@ fn migrate_legacy_relaunch(generation: &str) -> Result<u32, i32> {
         target_version: legacy.target_version,
         phase: legacy.phase,
         completed_version: legacy.completed_version,
+        recovery_generation: generation.to_owned(),
         predecessor,
     };
     let machine_directory = relaunch_generation_directory(generation)?;
@@ -719,10 +751,69 @@ fn clear_legacy_relaunch_owner(generation: &str) -> Result<(), i32> {
     }
 }
 
-fn run_machine_relaunch_owner() -> Result<u32, i32> {
+fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
+    let root = medium_launcher_directory()?;
+    let path = root.join(TERMINAL_UNINSTALL_RECORD_NAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if bytes.is_empty()
+        || bytes.len() > 4096
+        || !has_exact_security(&path, MEDIUM_LAUNCHER_FILE_SDDL)?
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let record: TerminalUninstallRecord =
+        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if record.schema_version != 1
+        || validate_generation(&record.generation).is_err()
+        || !matches!(record.phase.as_str(), "armed" | "machine-retired")
+        || decode_hash(&record.maintenance_sha256).is_none()
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let marker = root.join(TERMINAL_UNINSTALL_MARKER_NAME);
+    let expected = format!("terminal-uninstall-v1:{}", record.generation);
+    let actual = std::fs::read_to_string(&marker).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if actual != expected || !has_exact_security(&marker, MEDIUM_LAUNCHER_FILE_SDDL)? {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(Some(record))
+}
+
+fn resume_terminal_uninstall(generation: &str) -> Result<u32, i32> {
+    let machine_lifecycle = RecoveryStateLock::acquire()?;
     verify_machine_relaunch_owner()?;
+    let record = terminal_uninstall_record()?.ok_or(EXIT_IDENTITY_MISMATCH)?;
+    if record.generation != generation {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+    let mut retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if hash_file(&mut retained).map_err(|_| EXIT_IDENTITY_MISMATCH)?
+        != decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    drop(retained);
+    drop(machine_lifecycle);
+    launch_elevated_executable(&maintenance, &format!("/TQ-TERMINAL-RECOVERY={generation}"))?;
+    Ok(0)
+}
+
+fn run_machine_relaunch_owner() -> Result<u32, i32> {
+    let machine_lifecycle = RecoveryStateLock::acquire()?;
+    verify_machine_relaunch_owner()?;
+    if let Some(record) = terminal_uninstall_record()? {
+        let generation = record.generation;
+        drop(machine_lifecycle);
+        return resume_terminal_uninstall(&generation);
+    }
     let identity = current_relaunch_identity()?;
-    for generation in relaunch_generations()? {
+    let generations = relaunch_generations()?;
+    drop(machine_lifecycle);
+    for generation in generations {
         let Ok(record) = read_persisted_relaunch_record(&generation) else {
             continue;
         };
@@ -734,6 +825,7 @@ fn run_machine_relaunch_owner() -> Result<u32, i32> {
 }
 
 fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
+    let machine_lifecycle = RecoveryStateLock::acquire()?;
     let directory = relaunch_generation_directory(generation)?;
     let _lock = acquire_relaunch_record_lock(&directory)?;
     let mut record = read_persisted_relaunch_record(generation)?;
@@ -766,20 +858,20 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
             record.phase = "launch-started".into();
             write_persisted_relaunch_record(&directory, &record)?;
         }
-        defer_launch_until_parent_exit(&surviving)?;
+        defer_launch_until_parent_exit(&surviving, generation)?;
         return Ok(0);
     }
     let target_committed = verify_post_install_request(&request).is_ok();
     let recovering_setup = record.phase == "setup-started";
     if recovering_setup
         && verified_surviving_version(&request.candidate, &record.predecessor).is_err()
+        && owned_recovery_generations()?.contains(&record.recovery_generation)
     {
-        for recovery_generation in owned_recovery_generations()? {
-            let resume = format!("--windows-update-resume-v2={recovery_generation}");
-            if launch_elevated_bootstrap(&resume).is_ok() {
-                break;
-            }
-        }
+        let resume = format!("--windows-update-resume-v2={}", record.recovery_generation);
+        drop(_lock);
+        drop(machine_lifecycle);
+        launch_elevated_bootstrap(&resume)?;
+        return run_persisted_relaunch(generation);
     }
     let recovered_survivor = recovering_setup
         && verified_surviving_version(&request.candidate, &record.predecessor).is_ok();
@@ -793,10 +885,22 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
             record.phase = "setup-started".into();
             write_persisted_relaunch_record(&directory, &record)?;
         }
-        let setup_result = launch_elevated_installed_helper(&record.request);
+        drop(_lock);
+        drop(machine_lifecycle);
+        let setup_result = launch_elevated_installed_helper(&format!(
+            "--windows-update-bootstrap-bound-v1={}:{}",
+            record.recovery_generation,
+            record
+                .request
+                .strip_prefix("--windows-update-bootstrap-v2=")
+                .ok_or(EXIT_INVALID_REQUEST)?
+        ));
+        let _machine_lifecycle = RecoveryStateLock::acquire()?;
+        let _lock = acquire_relaunch_record_lock(&directory)?;
+        record = read_persisted_relaunch_record(generation)?;
         if setup_result == Err(1223) {
-            drop(_lock);
-            remove_relaunch_record_directory(&directory)?;
+            // Login recovery cancellation is not terminal ownership evidence. Keep the exact
+            // armed generation for a later logon or maintenance recovery attempt.
             return Err(1223);
         }
     }
@@ -806,47 +910,36 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
     write_persisted_relaunch_record(&directory, &record)?;
     record.phase = "launch-started".into();
     write_persisted_relaunch_record(&directory, &record)?;
-    defer_launch_until_parent_exit(&surviving)?;
+    defer_launch_until_parent_exit(&surviving, generation)?;
     Ok(0)
 }
 
 fn acknowledge_app_ready(encoded: &str) -> Result<u32, i32> {
     let request: AppReadyRequest =
         serde_json::from_slice(&decode_base64(encoded)?).map_err(|_| EXIT_INVALID_REQUEST)?;
-    if !valid_version(&request.version) {
+    if !valid_version(&request.version) || validate_generation(&request.generation).is_err() {
         return Err(EXIT_INVALID_REQUEST);
     }
     verify_app_ready_parent()?;
     if installed_manifest_version()? != request.version {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    let mut matched = false;
-    for generation in relaunch_generations()? {
-        let directory = relaunch_generation_directory(&generation)?;
-        let Ok(lock) = acquire_relaunch_record_lock(&directory) else {
-            continue;
-        };
-        let Ok(mut record) = read_persisted_relaunch_record(&generation) else {
-            continue;
-        };
-        if record.completed_version.as_deref() != Some(request.version.as_str())
-            || !matches!(record.phase.as_str(), "launch-started" | "app-ready")
-        {
-            continue;
-        }
-        matched = true;
-        if record.phase != "app-ready" {
-            record.phase = "app-ready".into();
-            write_persisted_relaunch_record(&directory, &record)?;
-        }
-        drop(lock);
-        remove_relaunch_record_directory(&directory)?;
+    let _machine_lifecycle = RecoveryStateLock::acquire()?;
+    let directory = relaunch_generation_directory(&request.generation)?;
+    let lock = acquire_relaunch_record_lock(&directory)?;
+    let mut record = read_persisted_relaunch_record(&request.generation)?;
+    if record.completed_version.as_deref() != Some(request.version.as_str())
+        || !matches!(record.phase.as_str(), "launch-started" | "app-ready")
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
     }
-    if matched {
-        Ok(0)
-    } else {
-        Err(EXIT_IDENTITY_MISMATCH)
+    if record.phase != "app-ready" {
+        record.phase = "app-ready".into();
+        write_persisted_relaunch_record(&directory, &record)?;
     }
+    drop(lock);
+    remove_relaunch_record_directory(&directory)?;
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -972,6 +1065,7 @@ fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchR
     if record.schema_version != 2
         || record.generation != generation
         || record.user_sid != identity.user_sid
+        || validate_generation(&record.recovery_generation).is_err()
         || record.logon_sid != identity.logon_sid
         || !valid_nonce(&record.nonce)
         || !valid_version(&record.source_version)
@@ -1044,13 +1138,14 @@ fn launch_elevated_installed_helper(argument: &str) -> Result<(), i32> {
     launch_elevated_executable(&helper, argument)
 }
 
-fn defer_launch_until_parent_exit(version: &str) -> Result<(), i32> {
+fn defer_launch_until_parent_exit(version: &str, generation: &str) -> Result<(), i32> {
     let parent_pid = current_parent_process_id()?;
     if verify_installed_application_process(parent_pid).is_err() {
-        return launch_program_files_application();
+        return launch_program_files_application_for_generation(generation);
     }
     let request = DeferredLaunchRequest {
         parent_pid,
+        generation: generation.into(),
         version: version.into(),
     };
     let encoded = base64_encode(&serde_json::to_vec(&request).map_err(|_| EXIT_LAUNCH_FAILED)?);
@@ -1067,7 +1162,10 @@ fn defer_launch_until_parent_exit(version: &str) -> Result<(), i32> {
 fn launch_after_parent_exit(encoded: &str) -> Result<u32, i32> {
     let request: DeferredLaunchRequest =
         serde_json::from_slice(&decode_base64(encoded)?).map_err(|_| EXIT_INVALID_REQUEST)?;
-    if request.parent_pid == 0 || !valid_version(&request.version) {
+    if request.parent_pid == 0
+        || !valid_version(&request.version)
+        || validate_generation(&request.generation).is_err()
+    {
         return Err(EXIT_INVALID_REQUEST);
     }
     let raw = unsafe { OpenProcess(SYNCHRONIZE, 0, request.parent_pid) };
@@ -1080,7 +1178,7 @@ fn launch_after_parent_exit(encoded: &str) -> Result<u32, i32> {
     if installed_manifest_version()? != request.version {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    launch_program_files_application()?;
+    launch_program_files_application_for_generation(&request.generation)?;
     Ok(0)
 }
 
@@ -1295,6 +1393,11 @@ fn relaunch_run_command(launcher: &Path) -> Result<String, i32> {
 }
 
 fn install_machine_relaunch_owner() -> Result<(), i32> {
+    // Fixed global order: verified legacy mutex pair, then protected machine file lock.
+    let _machine_lifecycle = RecoveryStateLock::acquire()?;
+    if terminal_uninstall_record()?.is_some() {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
     let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
     let launcher = ensure_medium_launcher(&current)?;
     let root = relaunch_root()?;
@@ -1374,6 +1477,22 @@ fn launch_program_files_application() -> Result<(), i32> {
     launch_application(
         known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill/Talking Quill.exe"),
     )
+}
+
+fn launch_program_files_application_for_generation(generation: &str) -> Result<(), i32> {
+    validate_generation(generation)?;
+    let application = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill/Talking Quill.exe");
+    let metadata = std::fs::symlink_metadata(&application).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    std::process::Command::new(application)
+        .arg(format!(
+            "--windows-update-relaunch-generation-v1={generation}"
+        ))
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| EXIT_LAUNCH_FAILED)
 }
 
 fn launch_application(application: PathBuf) -> Result<(), i32> {
@@ -1551,9 +1670,19 @@ fn installed_candidate_committed(candidate: &UpdateCandidate) -> bool {
 }
 
 fn stage_bootstrap(argument: &str) -> Result<(), i32> {
-    let suffix = argument
-        .strip_prefix("--windows-update-bootstrap-v2=")
-        .ok_or(EXIT_INVALID_REQUEST)?;
+    let (bound_generation, suffix) =
+        if let Some(value) = argument.strip_prefix("--windows-update-bootstrap-bound-v1=") {
+            let (generation, suffix) = value.split_once(':').ok_or(EXIT_INVALID_REQUEST)?;
+            validate_generation(generation)?;
+            (Some(generation), suffix)
+        } else {
+            (
+                None,
+                argument
+                    .strip_prefix("--windows-update-bootstrap-v2=")
+                    .ok_or(EXIT_INVALID_REQUEST)?,
+            )
+        };
     // The installed helper authorizes the exact outer installer and candidate
     // policy before it resumes any staged elevated executable.
     let request = parse_and_authorize_request(suffix)?;
@@ -1610,7 +1739,7 @@ fn stage_bootstrap(argument: &str) -> Result<(), i32> {
     }
     drop(retained);
     directory_guard.publish(directory.clone())?;
-    directory_guard.register_prelaunch_cleanup(&recovery_launcher)?;
+    directory_guard.register_prelaunch_cleanup(&recovery_launcher, bound_generation)?;
     let cleanup_generation = directory_guard
         .cleanup_generation
         .as_deref()
@@ -2815,6 +2944,7 @@ impl RecoveryStateLock {
                     {
                         return Err(EXIT_IDENTITY_MISMATCH);
                     }
+                    validate_acquired_machine_lock_state(&path)?;
                     return Ok(Self {
                         _legacy: legacy,
                         file,
@@ -2826,6 +2956,40 @@ impl RecoveryStateLock {
                 Err(_) => return Err(EXIT_LAUNCH_FAILED),
             }
         }
+    }
+}
+
+fn validate_acquired_machine_lock_state(lock: &Path) -> Result<(), i32> {
+    let suffix = lock
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
+        .ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let publication = read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)?;
+    unsafe { RegCloseKey(key) };
+    match publication.as_deref() {
+        Some(value) if value == suffix => Ok(()),
+        Some(value)
+            if value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX) == Some(suffix)
+                && terminal_uninstall_record()?.is_some() =>
+        {
+            Ok(())
+        }
+        _ => Err(EXIT_IDENTITY_MISMATCH),
     }
 }
 
@@ -2951,8 +3115,13 @@ fn machine_lock_file(predecessor_policy_epoch: u8) -> Result<PathBuf, i32> {
         .and_then(|value| value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX))
     {
         validate_generation(retired)?;
-        reclaim_retired_machine_lock_directory(&root, retired)?;
-        None
+        // A terminal uninstall may crash after closing publication but before clearing Run.
+        // Its protected record is the only authority allowed to reuse the retained lock tree.
+        if terminal_uninstall_record()?.is_none() {
+            unsafe { RegCloseKey(key) };
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        Some(retired.to_owned())
     } else {
         published
     };
@@ -3052,23 +3221,6 @@ fn verify_machine_lock_tree(directory: &Path) -> Result<PathBuf, i32> {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     Ok(lock)
-}
-
-fn reclaim_retired_machine_lock_directory(root: &Path, suffix: &str) -> Result<(), i32> {
-    let path = root.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-    if !path.exists() {
-        return Ok(());
-    }
-    verify_machine_lock_tree(&path)?;
-    let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match remove_owned_tree(&path, &identity) {
-            Ok(()) => return Ok(()),
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return Err(EXIT_LAUNCH_FAILED),
-        }
-    }
 }
 
 fn reclaim_unpublished_machine_lock_directories(root: &Path) -> Result<(), i32> {
@@ -4062,6 +4214,7 @@ mod tests {
             target_version: "0.0.70".into(),
             phase: "armed".into(),
             completed_version: None,
+            recovery_generation: generation.clone(),
             predecessor: super::InstalledManifest {
                 version: "0.0.69".into(),
                 platform: "win32".into(),

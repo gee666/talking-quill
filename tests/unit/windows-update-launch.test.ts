@@ -81,7 +81,9 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
     expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     expect(setup).toContain('PendingFileRenameOperations');
-    expect(setup).toContain('for target in [&paths.maintenance_uninstaller, current]');
+    expect(setup).toContain('for target in [current]');
+    expect(setup).toContain('publish_terminal_uninstall_record(paths)?');
+    expect(setup).toContain('launch_terminal_uninstall_owner(paths, &terminal_generation)');
     const deletionOwnership = setup.slice(
       setup.indexOf('fn establish_finalizer_deletion_ownership'),
       setup.indexOf('fn collect_finalizer_deletion_paths'),
@@ -103,16 +105,18 @@ describe('Windows elevated updater launch', () => {
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
-    expect(finalize.indexOf('system.unregister_uninstall()?')).toBeLessThan(
-      finalize.indexOf('remove_update_recovery_launcher_residue(paths)?'),
+    expect(finalize.indexOf('publish_terminal_uninstall_record(paths)?')).toBeLessThan(
+      finalize.indexOf('remove_transaction(paths)?'),
     );
-    expect(finalize.indexOf('remove_update_recovery_launcher_residue(paths)?')).toBeLessThan(
-      finalize.indexOf('clear_machine_relaunch_owner(paths)'),
+    const terminalCleanup = setup.slice(setup.indexOf('fn finish_terminal_uninstall'));
+    expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
+      terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?'),
+    );
+    expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
+      terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
     );
     const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
-    expect(residue.indexOf('system.unregister_uninstall()?')).toBeLessThan(
-      residue.indexOf('remove_maintenance_uninstaller(&paths)?'),
-    );
+    expect(residue).toContain('read_terminal_uninstall_record(&paths)?');
   });
 
   it('persists a nonce-bound native relaunch wrapper before elevation', async () => {
@@ -137,13 +141,18 @@ describe('Windows elevated updater launch', () => {
     expect(helper).not.toContain('--windows-update-bootstrap-v3={encoded}');
     expect(helper).toContain('relaunch-record-marker-v1');
     expect(helper).toContain('MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH');
-    expect(helper).toContain('let Ok(mut record) = read_persisted_relaunch_record');
+    expect(helper).toContain('read_persisted_relaunch_record(&request.generation)?');
     expect(setup).toContain('protected launcher is a stable machine component');
     expect(helper).toContain('"setup-complete"');
     expect(helper).toContain('"launch-started"');
     expect(helper).toContain('defer_launch_until_parent_exit');
     expect(helper).toContain('verified_surviving_version');
-    expect(helper).toContain('for recovery_generation in owned_recovery_generations()?');
+    expect(helper).not.toContain('for recovery_generation in owned_recovery_generations()?');
+    expect(helper).toContain('record.recovery_generation');
+    expect(helper).toContain('validate_acquired_machine_lock_state(&path)?');
+    expect(helper).toContain('terminal_uninstall_record()?');
+    expect(setup).toContain('RegLoadAppKeyW');
+    expect(setup).toContain('clear_legacy_relaunch_values_in_hive');
     expect(helper).toContain('verify_app_ready_parent');
     expect(application.indexOf("this.#lifecycle = 'running'")).toBeLessThan(
       application.lastIndexOf('acknowledgeWindowsUpdateAppReady('),

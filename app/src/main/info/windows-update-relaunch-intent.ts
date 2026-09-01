@@ -39,8 +39,13 @@ export async function acknowledgeWindowsUpdateAppReady(
   currentVersion: string,
   launch: (executable: string, argument: string) => Promise<void>,
 ): Promise<void> {
+  const prefix = '--windows-update-relaunch-generation-v1=';
+  const generation = process.argv
+    .find((argument) => argument.startsWith(prefix))
+    ?.slice(prefix.length);
+  if (generation === undefined || !/^[0-9a-f]{32}$/.test(generation)) return;
   const argument = `--windows-update-app-ready-v1=${Buffer.from(
-    JSON.stringify({ version: currentVersion }),
+    JSON.stringify({ generation, version: currentVersion }),
     'utf8',
   ).toString('base64')}`;
   await launch(helperExecutable, argument);
