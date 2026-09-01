@@ -11,6 +11,8 @@ license = "MIT"
 [features]
 acceptance-faults = []
 stale-schema2-cleanup = []
+# Test/process harnesses only. Production builds must never enable this feature.
+machine-lock-test-namespace = []
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }

@@ -46,9 +46,20 @@ await mkdir(output, { recursive: true });
 const built = resolve(targetDirectory, target, 'release', 'talking-quill-windows-setup.exe');
 const published = resolve(output, 'talking-quill-windows-setup.exe');
 await copyFile(built, published);
-const setupSha256 = createHash('sha256')
-  .update(await readFile(published))
-  .digest('hex');
+const publishedBytes = await readFile(published);
+for (const marker of [
+  'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID',
+  'Talking Quill Tests',
+  'TalkingQuill.Tests.',
+]) {
+  if (
+    publishedBytes.includes(Buffer.from(marker, 'ascii')) ||
+    publishedBytes.includes(Buffer.from(marker, 'utf16le'))
+  ) {
+    throw new Error(`cleanup setup contains machine-lock test marker: ${marker}`);
+  }
+}
+const setupSha256 = createHash('sha256').update(publishedBytes).digest('hex');
 await writeFile(
   resolve(output, 'nonpromotable.json'),
   `${JSON.stringify({

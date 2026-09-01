@@ -45,7 +45,13 @@ await copyFile(
   published,
 );
 const productionBytes = await readFile(published);
-for (const marker of ['/TQ-CLEAN-STALE-SCHEMA2', '/TQ-DIAGNOSE-STALE-SCHEMA2']) {
+for (const marker of [
+  '/TQ-CLEAN-STALE-SCHEMA2',
+  '/TQ-DIAGNOSE-STALE-SCHEMA2',
+  'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID',
+  'Talking Quill Tests',
+  'TalkingQuill.Tests.',
+]) {
   if (
     productionBytes.includes(Buffer.from(marker, 'ascii')) ||
     productionBytes.includes(Buffer.from(marker, 'utf16le'))

@@ -66,6 +66,8 @@ can-suppress = false
 default = []
 windows-installed-acceptance = []
 windows-update-recovery-launcher = []
+# Test/process harnesses only. Production builds must never enable this feature.
+machine-lock-test-namespace = []
 
 [[bin]]
 name = "talking-quill-update-recovery-launcher"

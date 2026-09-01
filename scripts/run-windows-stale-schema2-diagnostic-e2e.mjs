@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -9,7 +9,13 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 if (process.platform !== 'win32') {
   throw new Error('The stale schema-2 packaged executable test requires Windows');
 }
+const productionNamespaceLock = await acquireProductionNamespaceLock();
+process.on('exit', () => productionNamespaceLock.stdin.end('\n'));
 const architecture = process.argv[2] ?? 'x64';
+const expectedTopology = process.env.TQ_STALE_SCHEMA2_EXPECT_TOPOLOGY ?? 'exact-orphan-lock-only';
+if (!['exact-orphan-lock-only', 'exact-schema2-fixture'].includes(expectedTopology)) {
+  throw new Error('TQ_STALE_SCHEMA2_EXPECT_TOPOLOGY is invalid');
+}
 if (!['x64', 'arm64'].includes(architecture)) {
   throw new Error('Usage: run-windows-stale-schema2-diagnostic-e2e.mjs [x64|arm64]');
 }
@@ -105,9 +111,30 @@ verifyDiagnosticChain(
   await readFile(diagnosticPath, 'utf8'),
   result.status,
   expectedRejectionStage,
+  expectedTopology,
 );
 verifyAuditChain(await readFile(auditPath, 'utf8'), result.status);
+productionNamespaceLock.stdin.end('\n');
 console.log('Packaged stale schema-2 diagnostic snapshot and chain checks passed');
+
+async function acquireProductionNamespaceLock() {
+  const owner = spawn(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$m=[Threading.Mutex]::new($false,'Global\\TalkingQuill.MachineLockTests.V1');try{if(-not $m.WaitOne(300000)){exit 2};[Console]::Out.WriteLine('ready');[Console]::Out.Flush();[Console]::In.ReadLine()|Out-Null}finally{try{$m.ReleaseMutex()}catch{};$m.Dispose()}",
+    ],
+    { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true },
+  );
+  let output = '';
+  for await (const chunk of owner.stdout) {
+    output += chunk;
+    if (output.includes('ready')) return owner;
+  }
+  throw new Error('production machine-lock test serializer did not start');
+}
 
 async function rebuildCurrentArtifacts() {
   const productionTarget = resolve(root, 'tmp', 'cargo-target', 'windows-setup-production');
@@ -287,7 +314,7 @@ function powershellText(command, extraEnvironment = {}) {
   return result.stdout.trim();
 }
 
-function verifyDiagnosticChain(text, status, expectedRejectionStage) {
+function verifyDiagnosticChain(text, status, expectedRejectionStage, expectedTopology) {
   const lines = text.trim().split('\n').map(JSON.parse);
   if (lines.length === 0) throw new Error('diagnostic chain is empty');
   const first = lines[0];
@@ -313,8 +340,7 @@ function verifyDiagnosticChain(text, status, expectedRejectionStage) {
   const last = lines.at(-1);
   if (
     (status === 0 &&
-      (last?.stageCode !== 'diagnostic.complete' ||
-        last?.evidence?.state !== 'exact-schema2-fixture')) ||
+      (last?.stageCode !== 'diagnostic.complete' || last?.evidence?.state !== expectedTopology)) ||
     (status === 78 && (last?.outcome !== 'rejected' || last?.stageCode !== expectedRejectionStage))
   ) {
     throw new Error('diagnostic terminal event does not match its exit status');

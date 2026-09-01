@@ -65,6 +65,8 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, REG_SZ, RegCloseKey, RegCreateKeyExW,
@@ -102,11 +104,124 @@ use crate::package::{self, ParsedPackage};
 
 const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const TEST_MACHINE_LOCK_DIRECTORY_SDDL: &str =
+    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;AU)";
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const TEST_MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)";
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_directory_sddl() -> &'static str {
+    TEST_MACHINE_LOCK_DIRECTORY_SDDL
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_directory_sddl() -> &'static str {
+    MACHINE_LOCK_DIRECTORY_SDDL
+}
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_file_sddl() -> &'static str {
+    TEST_MACHINE_LOCK_FILE_SDDL
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_file_sddl() -> &'static str {
+    MACHINE_LOCK_FILE_SDDL
+}
+
 const MACHINE_LOCK_RETIRED_PREFIX: &str = "retired:";
 const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLockV1";
 const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
 const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const MACHINE_LOCK_TEST_ID_ENV: &str = "TQ_MACHINE_LOCK_TEST_NAMESPACE_ID";
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_test_id() -> Result<&'static str> {
+    static ID: OnceLock<String> = OnceLock::new();
+    let value = ID.get_or_init(|| {
+        if let Ok(value) = std::env::var(MACHINE_LOCK_TEST_ID_ENV)
+            && value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return value;
+        }
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes).expect("test namespace randomness");
+        let value = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        // Child test processes inherit one opaque identifier and derive every name from it.
+        unsafe { std::env::set_var(MACHINE_LOCK_TEST_ID_ENV, &value) };
+        value
+    });
+    validate_machine_lock_suffix(value)?;
+    Ok(value)
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_registry_hive() -> HKEY {
+    HKEY_CURRENT_USER
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_registry_hive() -> HKEY {
+    HKEY_LOCAL_MACHINE
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_registry_key() -> Result<String> {
+    Ok(format!(
+        r"Software\Talking Quill Tests\{}\RecoveryStateLockV1",
+        machine_lock_test_id()?
+    ))
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_registry_key() -> Result<String> {
+    Ok(MACHINE_LOCK_REGISTRY_KEY.to_owned())
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_registry_parent() -> Result<String> {
+    Ok(format!(
+        r"Software\Talking Quill Tests\{}",
+        machine_lock_test_id()?
+    ))
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_registry_parent() -> Result<String> {
+    Ok(r"Software\Talking Quill".to_owned())
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_program_data(_production: &Path) -> Result<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tmp/machine-lock-tests/windows-setup")
+        .join(machine_lock_test_id()?);
+    fs::create_dir_all(&root).map_err(io_failure)?;
+    Ok(root)
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_program_data(production: &Path) -> Result<PathBuf> {
+    Ok(production.to_owned())
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_mutex_names() -> Result<[String; 2]> {
+    let id = machine_lock_test_id()?;
+    Ok([
+        format!(r"Local\TalkingQuill.Tests.{id}.NativeSetup.V2"),
+        format!(r"Local\TalkingQuill.Tests.{id}.UpdateRecovery.State.V1"),
+    ])
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_mutex_names() -> Result<[String; 2]> {
+    Ok([
+        r"Global\TalkingQuill.NativeSetup.V2".to_owned(),
+        r"Global\TalkingQuill.UpdateRecovery.State.V1".to_owned(),
+    ])
+}
+
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
 const TERMINAL_RECOVERY_TOMBSTONE_PREFIX: &str = ".Talking Quill.recovery-tombstone-";
 const TERMINAL_FINAL_LAUNCHER_PREFIX: &str = ".Talking Quill Terminal Relaunch-";
@@ -1314,12 +1429,15 @@ impl MachineLock {
                 Ok(file) => {
                     let expected = fs::read_to_string(path.with_extension("identity-v1"))
                         .map_err(io_failure)?;
-                    if !staged_path_is_protected(&path, false)?
+                    if !marker_security_is_exact(&path, machine_lock_file_sddl())?
                         || file_identity_text(&file)? != expected
                     {
                         return Err(fail(EXIT_REJECTED, "Machine lock identity is invalid."));
                     }
-                    validate_acquired_machine_lock_state(&paths.program_data, &path)?;
+                    validate_acquired_machine_lock_state(
+                        &machine_lock_program_data(&paths.program_data)?,
+                        &path,
+                    )?;
                     return Ok(Self {
                         _legacy: legacy,
                         file,
@@ -1340,11 +1458,12 @@ fn validate_acquired_machine_lock_state(program_data: &Path, lock: &Path) -> Res
         .and_then(|value| value.to_str())
         .and_then(|value| value.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
         .ok_or_else(|| fail(EXIT_REJECTED, "Machine lock path is invalid."))?;
+    let registry_key = machine_lock_registry_key()?;
     let mut key = ptr::null_mut();
     if unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+            machine_lock_registry_hive(),
+            wide(OsStr::new(&registry_key)).as_ptr(),
             0,
             KEY_READ,
             &mut key,
@@ -1385,9 +1504,10 @@ impl Drop for MachineLock {
 struct LegacyMutexPair([OwnedHandle; 2]);
 impl LegacyMutexPair {
     fn acquire() -> Result<Self> {
+        let names = machine_lock_mutex_names()?;
         Ok(Self([
-            acquire_verified_legacy_mutex("Global\\TalkingQuill.NativeSetup.V2")?,
-            acquire_verified_legacy_mutex("Global\\TalkingQuill.UpdateRecovery.State.V1")?,
+            acquire_verified_legacy_mutex(&names[0])?,
+            acquire_verified_legacy_mutex(&names[1])?,
         ]))
     }
 }
@@ -1493,13 +1613,23 @@ fn legacy_mutex_security_is_exact(handle: *mut c_void) -> Result<bool> {
         && !value.contains(";;;AU)"))
 }
 
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_terminal_owner_present(_paths: &Paths) -> Result<bool> {
+    Ok(false)
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_terminal_owner_present(paths: &Paths) -> Result<bool> {
+    Ok(read_terminal_uninstall_record(paths)?.is_some())
+}
+
 fn machine_lock_file(paths: &Paths, predecessor_policy_epoch: u8) -> Result<PathBuf> {
-    let program_data = &paths.program_data;
+    let program_data = machine_lock_program_data(&paths.program_data)?;
+    let registry_key = machine_lock_registry_key()?;
     let mut key = ptr::null_mut();
     if unsafe {
         RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+            machine_lock_registry_hive(),
+            wide(OsStr::new(&registry_key)).as_ptr(),
             0,
             ptr::null(),
             REG_OPTION_NON_VOLATILE,
@@ -1515,8 +1645,8 @@ fn machine_lock_file(paths: &Paths, predecessor_policy_epoch: u8) -> Result<Path
             "Cannot open the machine lock registry key.",
         ));
     }
-    reclaim_machine_lock_pending(program_data)?;
-    let terminal_owner_present = read_terminal_uninstall_record(paths)?.is_some();
+    reclaim_machine_lock_pending(&program_data)?;
+    let terminal_owner_present = machine_lock_terminal_owner_present(paths)?;
     let publication = read_machine_lock_registry_string(key)?;
     let publication = if let Some(retired) = publication
         .as_deref()
@@ -1540,7 +1670,7 @@ fn machine_lock_file(paths: &Paths, predecessor_policy_epoch: u8) -> Result<Path
                 ));
             }
             if path_present(&retired_directory)? {
-                reclaim_retired_machine_lock_directory(program_data, retired)?;
+                reclaim_retired_machine_lock_directory(&program_data, retired)?;
             }
             None
         }
@@ -1558,13 +1688,13 @@ fn machine_lock_file(paths: &Paths, predecessor_policy_epoch: u8) -> Result<Path
                 "A retired recovery policy cannot republish the machine lock.",
             ));
         }
-        reclaim_unpublished_machine_lock_directories(program_data)?;
+        reclaim_unpublished_machine_lock_directories(&program_data)?;
         let suffix = new_machine_lock_suffix()?;
         let token = new_machine_lock_suffix()?;
         let pending = program_data.join(format!("{MACHINE_LOCK_PENDING_PREFIX}{token}"));
         let published = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
         create_restricted_lock_directory(&pending)?;
-        apply_lock_dacl(&pending, MACHINE_LOCK_DIRECTORY_SDDL)?;
+        apply_lock_dacl(&pending, machine_lock_directory_sddl())?;
         let identity = owned_tree_identity(&pending).map_err(|_| {
             fail(
                 EXIT_REJECTED,
@@ -1590,7 +1720,7 @@ fn machine_lock_file(paths: &Paths, predecessor_policy_epoch: u8) -> Result<Path
                 "Cannot publish the machine lock directory.",
             ));
         }
-        flush_setup_directory(program_data)?;
+        flush_setup_directory(&program_data)?;
         let value = wide(OsStr::new(&suffix));
         if unsafe {
             RegSetValueExW(
@@ -1639,7 +1769,7 @@ fn initialize_machine_lock_tree(directory: &Path, directory_identity: &str) -> R
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .open(&lock)
         .map_err(io_failure)?;
-    apply_lock_dacl(&lock, MACHINE_LOCK_FILE_SDDL)?;
+    apply_lock_dacl(&lock, machine_lock_file_sddl())?;
     file.sync_all().map_err(io_failure)?;
     let identity = file_identity_text(&file)?;
     drop(file);
@@ -1648,7 +1778,7 @@ fn initialize_machine_lock_tree(directory: &Path, directory_identity: &str) -> R
 }
 
 fn verify_machine_lock_tree(directory: &Path) -> Result<PathBuf> {
-    if !staged_path_is_protected(directory, true)? {
+    if !marker_security_is_exact(directory, machine_lock_directory_sddl())? {
         return Err(fail(
             EXIT_REJECTED,
             "Machine lock directory is not protected.",
@@ -1668,7 +1798,7 @@ fn verify_machine_lock_tree(directory: &Path) -> Result<PathBuf> {
         ));
     }
     let lock = directory.join("recovery-state-v1.lock");
-    if !staged_path_is_protected(&lock, false)? {
+    if !marker_security_is_exact(&lock, machine_lock_file_sddl())? {
         return Err(fail(EXIT_REJECTED, "Machine lock file is not protected."));
     }
     Ok(lock)
@@ -1693,11 +1823,12 @@ fn reclaim_retired_machine_lock_directory(program_data: &Path, suffix: &str) -> 
 }
 
 fn retire_machine_lock_publication(_paths: &Paths) -> Result<String> {
+    let registry_key = machine_lock_registry_key()?;
     let mut key = ptr::null_mut();
     if unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
+            machine_lock_registry_hive(),
+            wide(OsStr::new(&registry_key)).as_ptr(),
             0,
             KEY_READ,
             &mut key,
@@ -1717,9 +1848,9 @@ fn retire_machine_lock_publication(_paths: &Paths) -> Result<String> {
         .unwrap_or(&publication)
         .to_owned();
     validate_machine_lock_suffix(&suffix)?;
-    delete_registry_tree_durable(
-        MACHINE_LOCK_REGISTRY_KEY,
-        r"Software\Talking Quill",
+    delete_machine_lock_registry_durable(
+        &registry_key,
+        &machine_lock_registry_parent()?,
         "machine lock publication",
     )?;
     Ok(suffix)
@@ -1739,7 +1870,7 @@ fn reclaim_unpublished_machine_lock_directories(program_data: &Path) -> Result<(
             continue;
         }
         let path = entry.path();
-        if !staged_path_is_protected(&path, true)? {
+        if !marker_security_is_exact(&path, machine_lock_directory_sddl())? {
             continue;
         }
         let identity =
@@ -1769,7 +1900,7 @@ fn reclaim_machine_lock_pending(program_data: &Path) -> Result<()> {
         let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
         if !metadata.is_dir()
             || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || !staged_path_is_protected(&path, true)?
+            || !marker_security_is_exact(&path, machine_lock_directory_sddl())?
         {
             continue;
         }
@@ -1866,7 +1997,7 @@ fn read_machine_lock_registry_string(key: *mut c_void) -> Result<Option<String>>
 }
 
 fn create_restricted_lock_directory(path: &Path) -> Result<()> {
-    create_directory_with_security(path, MACHINE_LOCK_DIRECTORY_SDDL)
+    create_directory_with_security(path, machine_lock_directory_sddl())
 }
 
 fn create_directory_with_security(path: &Path, descriptor_sddl: &str) -> Result<()> {
@@ -1934,7 +2065,7 @@ fn apply_lock_dacl(path: &Path, descriptor_sddl: &str) -> Result<()> {
 }
 
 fn create_or_verify_lock_marker(path: &Path, value: &str) -> Result<()> {
-    create_atomic_marker(path, value, MACHINE_LOCK_FILE_SDDL)
+    create_atomic_marker(path, value, machine_lock_file_sddl())
 }
 
 fn create_atomic_marker(path: &Path, value: &str, sddl: &str) -> Result<()> {
@@ -8601,6 +8732,41 @@ fn active_state_proof(
     Ok(hex_hash(&digest))
 }
 
+fn exact_stale_coordination_inventory(
+    program_data: &Path,
+    suffix: &str,
+    schema2_recovery: bool,
+) -> Result<()> {
+    let expected_lock = format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}").to_ascii_lowercase();
+    let mut observed = Vec::new();
+    for entry in fs::read_dir(program_data).map_err(io_failure)? {
+        let name = entry
+            .map_err(io_failure)?
+            .file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        if name == "talking quill update recovery"
+            || name.starts_with(".talking quill.machine-lock-")
+            || name.starts_with(".talking quill.machine-lifecycle-retained-")
+        {
+            observed.push(name);
+        }
+    }
+    observed.sort_unstable();
+    let mut expected = vec![expected_lock];
+    if schema2_recovery {
+        expected.push("talking quill update recovery".to_owned());
+        expected.sort_unstable();
+    }
+    if observed != expected {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Stale coordination inventory is not the exact admitted topology.",
+        ));
+    }
+    Ok(())
+}
+
 fn exact_cleanup_registry(suffix: &str) -> Result<()> {
     if exact_machine_lock_publication()?
         .as_ref()
@@ -9012,81 +9178,151 @@ fn run_direct_stale_schema2_diagnostic_inner(
         let evidence = serde_json::json!({ "fileIdentity": object.identity });
         Ok((object, evidence))
     })?;
-    let (
-        lock_root,
-        lock_tree_identity,
-        lock_file_identity,
-        pending,
-        generation_guard,
-        relaunch_guard,
-        recovery_guard,
-        bytes,
-    ) = diagnostic_stage(diagnostic, "fixture.identity", || {
-        let lock_root = RetainedStaleObject::open(&lock_directory, true)?;
-        let mut lock_tree_identity =
-            RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
-        let mut lock_file_identity = RetainedStaleObject::open(
-            &lock_directory.join("recovery-state-v1.identity-v1"),
-            false,
-        )?;
-        let recovery = program_data.join("Talking Quill Update Recovery");
-        let relaunch = recovery.join("Relaunch Records");
-        let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
-        let mut pending =
-            RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
-        let generation_guard = RetainedStaleObject::open(&generation, true)?;
-        let relaunch_guard = RetainedStaleObject::open(&relaunch, true)?;
-        let recovery_guard = RetainedStaleObject::open(&recovery, true)?;
-        for object in [
+    let (lock_root, mut lock_tree_identity, mut lock_file_identity) =
+        diagnostic_stage(diagnostic, "fixture.identity", || {
+            for (path, directory) in [
+                (&lock_directory, true),
+                (&lock_directory.join("recovery-state-v1.lock"), false),
+                (&lock_directory.join("lock-tree-identity-v1"), false),
+                (&lock_directory.join("recovery-state-v1.identity-v1"), false),
+            ] {
+                if !staged_path_is_protected(path, directory)? {
+                    return Err(fail(
+                        EXIT_REJECTED,
+                        "Machine lifecycle ACL inventory is not exact.",
+                    ));
+                }
+            }
+            let lock_root = RetainedStaleObject::open(&lock_directory, true)?;
+            let mut lock_tree_identity =
+                RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
+            let mut lock_file_identity = RetainedStaleObject::open(
+                &lock_directory.join("recovery-state-v1.identity-v1"),
+                false,
+            )?;
+            if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+                || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+                || lock_root.names()?
+                    != [
+                        "lock-tree-identity-v1",
+                        "recovery-state-v1.identity-v1",
+                        "recovery-state-v1.lock",
+                    ]
+            {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Retained stale lock identity is not exact.",
+                ));
+            }
+            Ok((
+                (lock_root, lock_tree_identity, lock_file_identity),
+                serde_json::json!({
+                    "lifecycle": lifecycle.identity,
+                }),
+            ))
+        })?;
+    let recovery = program_data.join("Talking Quill Update Recovery");
+    if !path_present(&recovery)? {
+        exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        let objects = [
             &lifecycle,
             &lock_root,
             &lock_tree_identity,
             &lock_file_identity,
-            &pending,
-            &generation_guard,
-            &relaunch_guard,
-            &recovery_guard,
-        ] {
-            object.verify()?;
-        }
-        let bytes = pending.read_all()?;
-        if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
-            || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
-            || generation_guard.names()? != [SYNTHETIC_SCHEMA2_PENDING]
-            || relaunch_guard.names()?
-                != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
-            || recovery_guard.names()? != ["Relaunch Records"]
-            || lock_root.names()?
-                != [
-                    "lock-tree-identity-v1",
-                    "recovery-state-v1.identity-v1",
-                    "recovery-state-v1.lock",
-                ]
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Retained stale fixture identity is not exact.",
-            ));
-        }
-        let evidence = serde_json::json!({
-            "lifecycle": lifecycle.identity,
-            "lockRoot": lock_root.identity,
-            "pending": pending.identity,
-        });
-        Ok((
-            (
-                lock_root,
-                lock_tree_identity,
-                lock_file_identity,
-                pending,
-                generation_guard,
-                relaunch_guard,
-                recovery_guard,
-                bytes,
-            ),
-            evidence,
-        ))
-    })?;
+        ];
+        let binding = retained_binding(&objects, &suffix);
+        diagnostic_stage(diagnostic, "image.stability", || {
+            std::thread::sleep(Duration::from_millis(750));
+            for object in objects {
+                object.verify()?;
+            }
+            exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+            retained_image
+                .seek(SeekFrom::Start(0))
+                .map_err(io_failure)?;
+            if hash_reader(&mut retained_image)? != expected_hash {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Diagnostic image changed during inspection.",
+                ));
+            }
+            Ok(((), serde_json::json!({ "fileIdentity": identity })))
+        })?;
+        diagnostic_stage(diagnostic, "audit.event", || {
+            audit.record("diagnostic-complete", &binding, &active)?;
+            Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
+        })?;
+        diagnostic_stage(diagnostic, "diagnostic.complete", || {
+            Ok((
+                (),
+                serde_json::json!({
+                    "bindingSha256": binding,
+                    "state": "exact-orphan-lock-only",
+                }),
+            ))
+        })?;
+        drop(legacy);
+        return Ok(0);
+    }
+    exact_stale_coordination_inventory(&program_data, &suffix, true)?;
+    let (pending, generation_guard, relaunch_guard, recovery_guard, bytes) =
+        diagnostic_stage(diagnostic, "fixture.identity", || {
+            let recovery = program_data.join("Talking Quill Update Recovery");
+            let relaunch = recovery.join("Relaunch Records");
+            let generation =
+                relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
+            let mut pending =
+                RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
+            let generation_guard = RetainedStaleObject::open(&generation, true)?;
+            let relaunch_guard = RetainedStaleObject::open(&relaunch, true)?;
+            let recovery_guard = RetainedStaleObject::open(&recovery, true)?;
+            for object in [
+                &lifecycle,
+                &lock_root,
+                &lock_tree_identity,
+                &lock_file_identity,
+                &pending,
+                &generation_guard,
+                &relaunch_guard,
+                &recovery_guard,
+            ] {
+                object.verify()?;
+            }
+            let bytes = pending.read_all()?;
+            if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+                || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+                || generation_guard.names()? != [SYNTHETIC_SCHEMA2_PENDING]
+                || relaunch_guard.names()?
+                    != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
+                || recovery_guard.names()? != ["Relaunch Records"]
+                || lock_root.names()?
+                    != [
+                        "lock-tree-identity-v1",
+                        "recovery-state-v1.identity-v1",
+                        "recovery-state-v1.lock",
+                    ]
+            {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Retained stale fixture identity is not exact.",
+                ));
+            }
+            let evidence = serde_json::json!({
+                "lifecycle": lifecycle.identity,
+                "lockRoot": lock_root.identity,
+                "pending": pending.identity,
+            });
+            Ok((
+                (
+                    pending,
+                    generation_guard,
+                    relaunch_guard,
+                    recovery_guard,
+                    bytes,
+                ),
+                evidence,
+            ))
+        })?;
     diagnostic_stage(diagnostic, "fixture.sha256", || {
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         if bytes != SYNTHETIC_SCHEMA2_BYTES || hex_hash(&digest) != SYNTHETIC_SCHEMA2_SHA256 {
@@ -9320,6 +9556,140 @@ fn reclaim_exact_schema2_orphan_v2(
     let mut lock_file_identity =
         RetainedStaleObject::open(&lock_directory.join("recovery-state-v1.identity-v1"), false)?;
     let recovery = program_data.join("Talking Quill Update Recovery");
+    if !path_present(&recovery)? {
+        exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+            || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+            || lock_root.names()?
+                != [
+                    "lock-tree-identity-v1",
+                    "recovery-state-v1.identity-v1",
+                    "recovery-state-v1.lock",
+                ]
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Retained orphan lock identity is not exact.",
+            ));
+        }
+        let admission = active_state_proof(
+            &program_files,
+            &program_data,
+            &system,
+            true,
+            authenticated_parent,
+        )?;
+        let objects = [
+            &lifecycle,
+            &lock_root,
+            &lock_tree_identity,
+            &lock_file_identity,
+        ];
+        for object in objects {
+            object.verify()?;
+        }
+        let binding = retained_binding(&objects, &suffix);
+        audit.record("inspected", &binding, &admission)?;
+        #[cfg(feature = "stale-schema2-cleanup")]
+        force_stale_cleanup_rejection("post-inspected")?;
+        std::thread::sleep(Duration::from_millis(750));
+        for object in objects {
+            object.verify()?;
+        }
+        if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+            || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+            || lock_root.names()?
+                != [
+                    "lock-tree-identity-v1",
+                    "recovery-state-v1.identity-v1",
+                    "recovery-state-v1.lock",
+                ]
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Retained orphan lock changed during stability wait.",
+            ));
+        }
+        exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        let second = active_state_proof(
+            &program_files,
+            &program_data,
+            &system,
+            true,
+            authenticated_parent,
+        )?;
+        exact_cleanup_registry(&suffix)?;
+        audit.record("commit-intent", &binding, &second)?;
+        #[cfg(feature = "stale-schema2-cleanup")]
+        force_stale_cleanup_rejection("post-commit-intent")?;
+        for (registry_key, registry_path) in [
+            (publication.parent, r"Software\Talking Quill"),
+            (publication.child, MACHINE_LOCK_REGISTRY_KEY),
+        ] {
+            protect_stale_registry_key(registry_key, registry_path)?;
+        }
+        if exact_machine_lock_publication()?
+            .as_ref()
+            .map(|current| current.suffix.as_str())
+            != Some(&suffix)
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Orphan machine lifecycle publication changed before mutation.",
+            ));
+        }
+        exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        lock_tree_identity.delete()?;
+        lock_file_identity.delete()?;
+        let mut lifecycle = lifecycle;
+        let lifecycle_identity = lifecycle.identity.clone();
+        let retained_lifecycle_path = program_data.join(format!(
+            ".Talking Quill.machine-lifecycle-retained-{suffix}"
+        ));
+        lifecycle.rename(&retained_lifecycle_path)?;
+        lifecycle.mark_posix_deleted()?;
+        lock_root.delete()?;
+        flush_setup_directory(&program_data)?;
+        exact_cleanup_registry(&suffix)?;
+        delete_registry_tree_durable(
+            MACHINE_LOCK_REGISTRY_KEY,
+            r"Software\Talking Quill",
+            "stale machine lifecycle publication",
+        )?;
+        if registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
+            || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
+                != Some(Vec::new())
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Registry parent gained unknown content.",
+            ));
+        }
+        delete_registry_tree_durable(
+            r"Software\Talking Quill",
+            r"Software",
+            "empty Talking Quill registry parent",
+        )?;
+        if file_identity_text(&lifecycle.file)? != lifecycle_identity {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Retained lifecycle authority changed during registry deletion.",
+            ));
+        }
+        lifecycle.finish_deleted()?;
+        flush_setup_directory(&program_data)?;
+        complete_stale_cleanup_zero_state(
+            audit,
+            &binding,
+            &program_files,
+            &program_data,
+            &system,
+            authenticated_parent,
+        )?;
+        drop(legacy);
+        return Ok(());
+    }
+    exact_stale_coordination_inventory(&program_data, &suffix, true)?;
     let relaunch = recovery.join("Relaunch Records");
     let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
     let mut pending =
@@ -9420,6 +9790,7 @@ fn reclaim_exact_schema2_orphan_v2(
         true,
         authenticated_parent,
     )?;
+    exact_stale_coordination_inventory(&program_data, &suffix, true)?;
     exact_cleanup_registry(&suffix)?;
     audit.record("commit-intent", &binding, &second)?;
     #[cfg(feature = "stale-schema2-cleanup")]
@@ -9536,15 +9907,28 @@ fn unregister_uninstall() -> Result<()> {
     )
 }
 
+fn delete_machine_lock_registry_durable(path: &str, parent: &str, label: &str) -> Result<()> {
+    delete_registry_tree_durable_in_hive(machine_lock_registry_hive(), path, parent, label)
+}
+
 fn delete_registry_tree_durable(path: &str, parent: &str, label: &str) -> Result<()> {
-    let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(path)).as_ptr()) };
+    delete_registry_tree_durable_in_hive(HKEY_LOCAL_MACHINE, path, parent, label)
+}
+
+fn delete_registry_tree_durable_in_hive(
+    hive: HKEY,
+    path: &str,
+    parent: &str,
+    label: &str,
+) -> Result<()> {
+    let status = unsafe { RegDeleteTreeW(hive, wide(OsStr::new(path)).as_ptr()) };
     if status != 0 && status != 2 {
         return Err(fail(EXIT_FAILURE, format!("Cannot remove the {label}.")));
     }
     let mut deleted = ptr::null_mut();
     let observed = unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
+            hive,
             wide(OsStr::new(path)).as_ptr(),
             0,
             KEY_READ,
@@ -9564,7 +9948,7 @@ fn delete_registry_tree_durable(path: &str, parent: &str, label: &str) -> Result
     let mut parent_key = ptr::null_mut();
     if unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
+            hive,
             wide(OsStr::new(parent)).as_ptr(),
             0,
             KEY_READ,
@@ -10041,23 +10425,27 @@ mod tests {
 
     #[test]
     fn orphaned_machine_lock_directory_is_reclaimable_after_publication_loss() {
-        let root = std::env::temp_dir().join(format!(
-            "tq-machine-lock-orphan-test-{}",
-            std::process::id()
-        ));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tmp/machine-lock-tests/windows-setup-unit")
+            .join(random_machine_lock_suffix().unwrap());
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(&root).unwrap();
         let suffix = "44".repeat(16);
         let directory = root.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-        create_restricted_lock_directory(&directory).unwrap();
-        apply_lock_dacl(&directory, MACHINE_LOCK_DIRECTORY_SDDL).unwrap();
+        fs::create_dir(&directory).unwrap();
         let identity = owned_tree_identity(&directory).unwrap();
-        create_or_verify_lock_marker(
+        if create_or_verify_lock_marker(
             &directory.join("publication-pending-v1"),
             &format!("{suffix}:{identity}"),
         )
-        .unwrap();
+        .is_err()
+        {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         initialize_machine_lock_tree(&directory, &identity).unwrap();
+        apply_lock_dacl(&directory, machine_lock_directory_sddl()).unwrap();
         reclaim_unpublished_machine_lock_directories(&root).unwrap();
         assert!(!directory.exists());
         fs::remove_dir(root).unwrap();
@@ -11143,6 +11531,42 @@ mod tests {
         );
         drop(audit);
         assert!(fs::read(&audit_path).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn orphan_lock_only_coordination_inventory_rejects_every_mixed_topology() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tmp/machine-lock-tests/orphan-inventory")
+            .join(random_machine_lock_suffix().unwrap());
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let suffix = "11".repeat(16);
+        let lock = root.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+        fs::create_dir(&lock).unwrap();
+        exact_stale_coordination_inventory(&root, &suffix, false).unwrap();
+
+        let recovery = root.join("Talking Quill Update Recovery");
+        fs::create_dir(&recovery).unwrap();
+        assert!(exact_stale_coordination_inventory(&root, &suffix, false).is_err());
+        exact_stale_coordination_inventory(&root, &suffix, true).unwrap();
+        fs::remove_dir(&recovery).unwrap();
+
+        for extra in [
+            format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{}", "22".repeat(16)),
+            format!("{MACHINE_LOCK_PENDING_PREFIX}{}", "33".repeat(16)),
+            format!(
+                ".Talking Quill.machine-lifecycle-retained-{}",
+                "44".repeat(16)
+            ),
+        ] {
+            let path = root.join(extra);
+            fs::create_dir(&path).unwrap();
+            assert!(exact_stale_coordination_inventory(&root, &suffix, false).is_err());
+            fs::remove_dir(path).unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

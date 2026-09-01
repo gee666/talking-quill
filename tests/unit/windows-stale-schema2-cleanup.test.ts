@@ -5,6 +5,12 @@ import { describe, expect, it } from 'vitest';
 
 const source = readFileSync('installer/windows-setup/src/windows.rs', 'utf8');
 const cargo = readFileSync('installer/windows-setup/Cargo.toml', 'utf8');
+const helperCargo = readFileSync('helper/Cargo.toml', 'utf8');
+const helperSource = readFileSync('helper/src/windows_update.rs', 'utf8');
+const testGuard = readFileSync('scripts/run-machine-lock-isolated-tests.mjs', 'utf8');
+const packageJson = readFileSync('package.json', 'utf8');
+const productionBuild = readFileSync('scripts/build-windows-setup.mjs', 'utf8');
+const helperBuild = readFileSync('scripts/build-helper.mjs', 'utf8');
 
 function index(text: string): number {
   const value = source.indexOf(text);
@@ -13,6 +19,28 @@ function index(text: string): number {
 }
 
 describe('Windows schema-2 stale coordination cleanup', () => {
+  it('isolates machine-lock tests under randomized project tmp and HKCU namespaces', () => {
+    expect(cargo).toContain('machine-lock-test-namespace = []');
+    expect(helperCargo).toContain('machine-lock-test-namespace = []');
+    for (const implementation of [source, helperSource]) {
+      expect(implementation).toContain('TQ_MACHINE_LOCK_TEST_NAMESPACE_ID');
+      expect(implementation).toContain('HKEY_CURRENT_USER');
+      expect(implementation).toContain('tmp/machine-lock-tests/');
+      expect(implementation).toContain('Local\\TalkingQuill.Tests.');
+      expect(implementation).toContain(
+        '#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]',
+      );
+    }
+    expect(testGuard).toContain('Global\\\\TalkingQuill.MachineLockTests.V1');
+    expect(testGuard).toContain("assertZeroProductionResidue('before')");
+    expect(testGuard).toContain("assertZeroProductionResidue('after')");
+    expect(packageJson).toContain('run-machine-lock-isolated-tests.mjs');
+    expect(productionBuild).toContain("'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID'");
+    expect(productionBuild).toContain("'Talking Quill Tests'");
+    expect(helperBuild).toContain("'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID'");
+    expect(helperBuild).toContain('Windows helper contains machine-lock test marker');
+  });
+
   it('keeps medium cleanup on authenticated UAC and production builds closed', () => {
     expect(cargo).toContain('stale-schema2-cleanup = []');
     expect(source).toContain('#[cfg(feature = "stale-schema2-cleanup")]\n    CleanStaleSchema2');
@@ -156,12 +184,18 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(source).toContain('Retained stale fixture inventory is not exact.');
     expect(source).toContain('pending.delete()?');
     expect(source).toContain('lifecycle.finish_deleted()?');
-    expect(index('pending.delete()?')).toBeLessThan(index('stale machine lifecycle publication'));
-    expect(index('lifecycle.rename(&retained_lifecycle_path)?')).toBeLessThan(
-      index('stale machine lifecycle publication'),
+    const reclaim = source.slice(index('fn reclaim_exact_schema2_orphan_v2('));
+    const schemaMutation = reclaim.indexOf('pending.delete()?');
+    const schemaRegistryDelete = reclaim.indexOf(
+      'stale machine lifecycle publication',
+      schemaMutation,
     );
-    expect(index('lifecycle.finish_deleted()?')).toBeGreaterThan(
-      index('stale machine lifecycle publication'),
+    expect(schemaMutation).toBeLessThan(schemaRegistryDelete);
+    expect(reclaim.lastIndexOf('lifecycle.rename(&retained_lifecycle_path)?')).toBeLessThan(
+      schemaRegistryDelete,
+    );
+    expect(reclaim.lastIndexOf('lifecycle.finish_deleted()?')).toBeGreaterThan(
+      schemaRegistryDelete,
     );
     expect(source).toContain(
       'let zero = active_state_proof(\n        program_files,\n        program_data,\n        system,\n        false,\n        authenticated_parent,\n    )?;',
@@ -206,8 +240,10 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       'forced_post_inspected_and_post_commit_rejections_keep_one_audit_chain',
     );
     expect(reclaim).toContain('retained_binding(&[], "no-machine-lock-publication")');
-    expect(reclaim.match(/complete_stale_cleanup_zero_state\(/g)).toHaveLength(2);
-    expect(reclaim.match(/return Ok\(\(\)\);/g)).toHaveLength(1);
+    expect(reclaim.match(/complete_stale_cleanup_zero_state\(/g)).toHaveLength(3);
+    expect(reclaim.match(/return Ok\(\(\)\);/g)).toHaveLength(2);
+    expect(reclaim).toContain('exact_stale_coordination_inventory(&program_data, &suffix, false)?');
+    expect(reclaim).toContain('exact_stale_coordination_inventory(&program_data, &suffix, true)?');
     expect(reclaim.trimEnd().endsWith('Ok(())\n}')).toBe(true);
   });
 });

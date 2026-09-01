@@ -7,6 +7,8 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
@@ -38,7 +40,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_MULTI_SZ,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
     RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
@@ -77,13 +79,96 @@ const RECOVERY_LAUNCHER_NAME: &str = "talking-quill-update-recovery-launcher.exe
 const RECOVERY_LAUNCHER_PUBLISHED_PREFIX: &str = "talking-quill-update-recovery-launcher-";
 const RECOVERY_LAUNCHER_IDENTITY_NAME: &str = "launcher-tree-identity-v1";
 const RECOVERY_LAUNCHER_PENDING_PREFIX: &str = ".Talking Quill.update-launcher-pending-";
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const MACHINE_LOCK_DIRECTORY_SDDL: &str =
+    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;AU)";
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)";
 const MACHINE_LOCK_RETIRED_PREFIX: &str = "retired:";
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLockV1";
 const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
 const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+const MACHINE_LOCK_TEST_ID_ENV: &str = "TQ_MACHINE_LOCK_TEST_NAMESPACE_ID";
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_test_id() -> Result<&'static str, i32> {
+    static ID: OnceLock<String> = OnceLock::new();
+    let value = ID.get_or_init(|| {
+        if let Ok(value) = std::env::var(MACHINE_LOCK_TEST_ID_ENV)
+            && value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return value;
+        }
+        let value = new_recovery_generation().expect("test namespace randomness");
+        unsafe { std::env::set_var(MACHINE_LOCK_TEST_ID_ENV, &value) };
+        value
+    });
+    validate_generation(value)?;
+    Ok(value)
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_registry_hive() -> HKEY {
+    HKEY_CURRENT_USER
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_registry_hive() -> HKEY {
+    HKEY_LOCAL_MACHINE
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_registry_key() -> Result<String, i32> {
+    Ok(format!(
+        r"Software\Talking Quill Tests\{}\RecoveryStateLockV1",
+        machine_lock_test_id()?
+    ))
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_registry_key() -> Result<String, i32> {
+    Ok(MACHINE_LOCK_REGISTRY_KEY.to_owned())
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_program_data() -> Result<PathBuf, i32> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("tmp/machine-lock-tests/helper")
+        .join(machine_lock_test_id()?);
+    std::fs::create_dir_all(&root).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    Ok(root)
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_program_data() -> Result<PathBuf, i32> {
+    known_folder(&FOLDERID_ProgramData)
+}
+
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_mutex_names() -> Result<[String; 2], i32> {
+    let id = machine_lock_test_id()?;
+    Ok([
+        format!(r"Local\TalkingQuill.Tests.{id}.NativeSetup.V2"),
+        format!(r"Local\TalkingQuill.Tests.{id}.UpdateRecovery.State.V1"),
+    ])
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_mutex_names() -> Result<[String; 2], i32> {
+    Ok([
+        r"Global\TalkingQuill.NativeSetup.V2".to_owned(),
+        r"Global\TalkingQuill.UpdateRecovery.State.V1".to_owned(),
+    ])
+}
+
 const LEGACY_LOCK_RETIREMENT_EPOCH: u8 = 3;
 #[used]
 static WINDOWS_RECOVERY_POLICY_EPOCH_MARKER: &str = "TALKING_QUILL_WINDOWS_RECOVERY_POLICY_EPOCH=2";
@@ -3541,6 +3626,7 @@ impl RecoveryStateLock {
     }
 
     fn retire(self) -> Result<(), i32> {
+        let registry_key = machine_lock_registry_key()?;
         let directory = self
             .path
             .parent()
@@ -3555,8 +3641,8 @@ impl RecoveryStateLock {
         let mut key = std::ptr::null_mut();
         if unsafe {
             RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+                machine_lock_registry_hive(),
+                wide_nul(Path::new(&registry_key))?.as_ptr(),
                 0,
                 KEY_READ | KEY_WRITE,
                 &mut key,
@@ -3585,8 +3671,8 @@ impl RecoveryStateLock {
         remove_owned_tree(&directory, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
         let deleted = unsafe {
             RegDeleteTreeW(
-                HKEY_LOCAL_MACHINE,
-                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+                machine_lock_registry_hive(),
+                wide_nul(Path::new(&registry_key))?.as_ptr(),
             )
         };
         if deleted == 0 || deleted == 2 {
@@ -3604,11 +3690,12 @@ fn validate_acquired_machine_lock_state(lock: &Path) -> Result<(), i32> {
         .and_then(|value| value.to_str())
         .and_then(|value| value.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
         .ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let registry_key = machine_lock_registry_key()?;
     let mut key = std::ptr::null_mut();
     if unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+            machine_lock_registry_hive(),
+            wide_nul(Path::new(&registry_key))?.as_ptr(),
             0,
             KEY_READ,
             &mut key,
@@ -3623,7 +3710,7 @@ fn validate_acquired_machine_lock_state(lock: &Path) -> Result<(), i32> {
         Some(value) if value == suffix => Ok(()),
         Some(value)
             if value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX) == Some(suffix)
-                && terminal_uninstall_record()?.is_some() =>
+                && machine_lock_terminal_owner_present()? =>
         {
             Ok(())
         }
@@ -3663,8 +3750,9 @@ struct LegacyMutexPair([OwnedHandle; 2]);
 
 impl LegacyMutexPair {
     fn acquire() -> Result<Self, i32> {
-        let first = acquire_verified_legacy_mutex("Global\\TalkingQuill.NativeSetup.V2")?;
-        let second = acquire_verified_legacy_mutex("Global\\TalkingQuill.UpdateRecovery.State.V1")?;
+        let names = machine_lock_mutex_names()?;
+        let first = acquire_verified_legacy_mutex(&names[0])?;
+        let second = acquire_verified_legacy_mutex(&names[1])?;
         Ok(Self([first, second]))
     }
 }
@@ -3727,13 +3815,23 @@ fn legacy_mutex_security_is_exact(handle: HANDLE) -> Result<bool, i32> {
         && !normalized.contains(";;;AU)"))
 }
 
+#[cfg(any(test, feature = "machine-lock-test-namespace"))]
+fn machine_lock_terminal_owner_present() -> Result<bool, i32> {
+    Ok(false)
+}
+#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+fn machine_lock_terminal_owner_present() -> Result<bool, i32> {
+    Ok(terminal_uninstall_record()?.is_some())
+}
+
 fn machine_lock_file(predecessor_policy_epoch: u8) -> Result<PathBuf, i32> {
-    let root = known_folder(&FOLDERID_ProgramData)?;
+    let root = machine_lock_program_data()?;
+    let registry_key = machine_lock_registry_key()?;
     let mut key = std::ptr::null_mut();
     if unsafe {
         RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+            machine_lock_registry_hive(),
+            wide_nul(Path::new(&registry_key))?.as_ptr(),
             0,
             std::ptr::null(),
             REG_OPTION_NON_VOLATILE,
@@ -3747,7 +3845,7 @@ fn machine_lock_file(predecessor_policy_epoch: u8) -> Result<PathBuf, i32> {
         return Err(EXIT_LAUNCH_FAILED);
     }
     reclaim_machine_lock_pending(&root)?;
-    let terminal_owner_present = terminal_uninstall_record()?.is_some();
+    let terminal_owner_present = machine_lock_terminal_owner_present()?;
     let published = read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)?;
     let published = if let Some(retired) = published
         .as_deref()

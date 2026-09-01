@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, rm, stat } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -140,6 +140,21 @@ async function stage(from, to) {
   const metadata = await stat(from);
   if (!metadata.isFile() || metadata.size === 0) throw new Error(`Missing native role: ${from}`);
   await copyFile(from, to);
+  if (platform === 'win32') {
+    const bytes = await readFile(to);
+    for (const marker of [
+      'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID',
+      'Talking Quill Tests',
+      'TalkingQuill.Tests.',
+    ]) {
+      if (
+        bytes.includes(Buffer.from(marker, 'ascii')) ||
+        bytes.includes(Buffer.from(marker, 'utf16le'))
+      ) {
+        throw new Error(`Windows helper contains machine-lock test marker: ${marker}`);
+      }
+    }
+  }
   if (platform === 'darwin') await chmod(to, 0o755);
 }
 

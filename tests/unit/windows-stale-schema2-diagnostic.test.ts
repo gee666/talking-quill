@@ -103,10 +103,10 @@ describe('packaged stale schema-2 diagnosis', () => {
     const terminal = [...diagnostic.matchAll(/"diagnostic\.complete"/gu)].map(
       (match) => match.index,
     );
-    expect(stability).toHaveLength(2);
-    expect(auditCompletion).toHaveLength(2);
-    expect(terminal).toHaveLength(2);
-    for (let index = 0; index < 2; index += 1) {
+    expect(stability).toHaveLength(3);
+    expect(auditCompletion).toHaveLength(3);
+    expect(terminal).toHaveLength(3);
+    for (let index = 0; index < 3; index += 1) {
       expect(stability[index]).toBeLessThan(auditCompletion[index] ?? -1);
       expect(auditCompletion[index]).toBeLessThan(terminal[index] ?? -1);
     }
@@ -152,7 +152,10 @@ describe('packaged stale schema-2 diagnosis', () => {
     expect(e2e).toContain('rejectedDispatch.status !== 64');
     expect(e2e).toContain('expectedRejectionStage === undefined ? [0] : [78]');
     expect(e2e).toContain('last?.stageCode !== expectedRejectionStage');
-    expect(e2e).toContain("last?.evidence?.state !== 'exact-schema2-fixture'");
+    expect(source).toContain('"state": "exact-orphan-lock-only"');
+    expect(source).toContain('exact_stale_coordination_inventory(&program_data, &suffix, false)?');
+    expect(e2e).toContain("'exact-orphan-lock-only'");
+    expect(e2e).toContain('last?.evidence?.state !== expectedTopology');
     expect(e2e).toContain("evidence?.aclAdmission !== 'legacy-exact-parent'");
     expect(e2e).toContain('evidence?.parentDescriptor !== evidence?.childDescriptor');
     expect(e2e).toContain('JSON.stringify(before.immutable) !== JSON.stringify(after.immutable)');
