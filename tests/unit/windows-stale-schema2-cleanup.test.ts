@@ -127,6 +127,31 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(source).toContain('Duration::from_millis(750)');
   });
 
+  it('admits only the exact retained legacy registry descriptor and hardens it structurally', () => {
+    expect(source).toContain(
+      'OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION',
+    );
+    expect(source).toContain('STALE_REGISTRY_LEGACY_SDDL');
+    expect(source).toContain('child_sddl == legacy && parent_sddl == legacy');
+    expect(source).toContain('LegacyExactParent');
+    expect(source).toContain('KEY_READ | KEY_WRITE | WRITE_DAC | WRITE_OWNER');
+    expect(source).toContain('REG_OPTION_OPEN_LINK');
+    expect(source).toContain(
+      'REGISTRY_DESCRIPTOR_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION',
+    );
+    expect(source).toContain('GetSecurityDescriptorOwner');
+    expect(source).toContain('GetSecurityDescriptorGroup');
+    expect(source).toContain('GetSecurityDescriptorDacl');
+    expect(source).toContain('GetSecurityDescriptorControl');
+    expect(source).toContain('GetAce');
+    expect(source).toContain('Cannot reopen protected stale registry state.');
+    expect(source).toContain('Protected stale registry descriptor did not verify structurally.');
+    expect(source).toContain('exact_current_inherited_registry_descriptor_requires_its_parent');
+    expect(source).toContain('stale_registry_acl_reorder_and_extra_ace_are_rejected');
+    expect(source).toContain('stale_registry_value_and_suffix_inventory_is_exact');
+    expect(source).toContain('hardened_registry_descriptor_is_structurally_exact');
+  });
+
   it('checks exact inventories, removes through owned-tree identities, and deletes registry last', () => {
     expect(source).toContain('Retained stale fixture inventory is not exact.');
     expect(source).toContain('pending.delete()?');

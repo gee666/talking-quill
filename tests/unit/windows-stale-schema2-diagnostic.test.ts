@@ -152,6 +152,9 @@ describe('packaged stale schema-2 diagnosis', () => {
     expect(e2e).toContain('rejectedDispatch.status !== 64');
     expect(e2e).toContain('expectedRejectionStage === undefined ? [0] : [78]');
     expect(e2e).toContain('last?.stageCode !== expectedRejectionStage');
+    expect(e2e).toContain("last?.evidence?.state !== 'exact-schema2-fixture'");
+    expect(e2e).toContain("evidence?.aclAdmission !== 'legacy-exact-parent'");
+    expect(e2e).toContain('evidence?.parentDescriptor !== evidence?.childDescriptor');
     expect(e2e).toContain('JSON.stringify(before.immutable) !== JSON.stringify(after.immutable)');
     expect(e2e).toContain('verifyDiagnosticChain');
     expect(e2e).toContain('verifyAuditChain');

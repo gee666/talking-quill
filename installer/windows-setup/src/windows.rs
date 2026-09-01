@@ -33,11 +33,13 @@ use windows_sys::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_REGISTRY_KEY,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
-    GetTokenInformation, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TOKEN_STATISTICS, TOKEN_USER, TokenElevation, TokenIntegrityLevel, TokenSessionId,
-    TokenStatistics, TokenUser,
+    ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetAce,
+    GetLengthSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+    GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, GetSidSubAuthority,
+    GetSidSubAuthorityCount, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_ELEVATION,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation,
+    TokenIntegrityLevel, TokenSessionId, TokenStatistics, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL,
@@ -50,7 +52,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FlushFileBuffers,
     GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_DELAY_UNTIL_REBOOT,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC, WriteFile,
+    PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    WriteFile,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -64,9 +67,9 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_MULTI_SZ,
-    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
-    RegEnumKeyExW, RegEnumValueW, RegFlushKey, RegLoadAppKeyW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetKeySecurity, RegSetValueExW,
+    REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegFlushKey, RegLoadAppKeyW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetKeySecurity, RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
     ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
@@ -7561,6 +7564,40 @@ fn no_owned_run_values() -> Result<bool> {
     Ok(true)
 }
 
+fn enumerate_registry_value_names(key: HKEY) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut name = [0_u16; 256];
+        let mut length = name.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut length,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if status == 259 {
+            break;
+        }
+        if status != 0 {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Cannot enumerate cleanup registry values.",
+            ));
+        }
+        names.push(String::from_utf16_lossy(&name[..length as usize]));
+        index += 1;
+    }
+    names.sort_unstable();
+    Ok(names)
+}
+
 fn registry_value_names(root: HKEY, path: &str) -> Result<Option<Vec<String>>> {
     let mut key = ptr::null_mut();
     let status =
@@ -7574,39 +7611,7 @@ fn registry_value_names(root: HKEY, path: &str) -> Result<Option<Vec<String>>> {
             "Cannot inspect cleanup registry values.",
         ));
     }
-    let result = (|| {
-        let mut names = Vec::new();
-        let mut index = 0;
-        loop {
-            let mut name = [0_u16; 256];
-            let mut length = name.len() as u32;
-            let status = unsafe {
-                RegEnumValueW(
-                    key,
-                    index,
-                    name.as_mut_ptr(),
-                    &mut length,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
-            if status == 259 {
-                break;
-            }
-            if status != 0 {
-                return Err(fail(
-                    EXIT_REJECTED,
-                    "Cannot enumerate cleanup registry values.",
-                ));
-            }
-            names.push(String::from_utf16_lossy(&name[..length as usize]));
-            index += 1;
-        }
-        names.sort_unstable();
-        Ok(names)
-    })();
+    let result = enumerate_registry_value_names(key);
     unsafe { RegCloseKey(key) };
     result.map(Some)
 }
@@ -7648,13 +7653,40 @@ fn no_owned_service_keys() -> Result<bool> {
 }
 
 const STALE_REGISTRY_HARDENED_SDDL: &str = "O:BAG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)";
+const STALE_REGISTRY_LEGACY_SDDL: &str = "O:S-1-5-21-1333774511-1103852894-3119617217-1001G:S-1-5-21-1333774511-1103852894-3119617217-513D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;BA)(A;CIID;KA;;;SY)(A;ID;KA;;;S-1-5-21-1333774511-1103852894-3119617217-1001)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;AC)(A;CIID;KR;;;S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681)";
+const REGISTRY_DESCRIPTOR_INFORMATION: u32 =
+    OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
-fn protect_stale_registry_key(key: HKEY) -> Result<()> {
-    let sddl = wide(OsStr::new(STALE_REGISTRY_HARDENED_SDDL));
+struct LocalSecurityDescriptor(*mut c_void);
+
+impl Drop for LocalSecurityDescriptor {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryAceShape {
+    kind: u8,
+    flags: u8,
+    mask: u32,
+    sid: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryDescriptorShape {
+    owner: Vec<u8>,
+    group: Vec<u8>,
+    control: u16,
+    acl_revision: u8,
+    aces: Vec<RegistryAceShape>,
+}
+
+fn descriptor_from_sddl(sddl: &str, exit_code: i32) -> Result<LocalSecurityDescriptor> {
     let mut descriptor = ptr::null_mut();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
+            wide(OsStr::new(sddl)).as_ptr(),
             SDDL_REVISION_1,
             &mut descriptor,
             ptr::null_mut(),
@@ -7662,36 +7694,18 @@ fn protect_stale_registry_key(key: HKEY) -> Result<()> {
     } == 0
         || descriptor.is_null()
     {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Cannot create stale registry cleanup ACL.",
-        ));
+        return Err(fail(exit_code, "Cannot create stale registry cleanup ACL."));
     }
-    let status = unsafe {
-        RegSetKeySecurity(
-            key,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
-        )
-    };
-    unsafe { LocalFree(descriptor) };
-    if status == 0 && unsafe { RegFlushKey(key) } == 0 {
-        Ok(())
-    } else {
-        Err(fail(
-            EXIT_FAILURE,
-            "Cannot protect stale registry cleanup state.",
-        ))
-    }
+    Ok(LocalSecurityDescriptor(descriptor))
 }
 
-fn registry_acl_is_exact(key: HKEY) -> Result<bool> {
+fn query_registry_descriptor(key: HKEY) -> Result<LocalSecurityDescriptor> {
     let mut descriptor = ptr::null_mut();
     if unsafe {
         GetSecurityInfo(
             key,
             SE_REGISTRY_KEY,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            REGISTRY_DESCRIPTOR_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
@@ -7706,18 +7720,22 @@ fn registry_acl_is_exact(key: HKEY) -> Result<bool> {
             "Cannot inspect machine lock registry ACL.",
         ));
     }
+    Ok(LocalSecurityDescriptor(descriptor))
+}
+
+fn descriptor_sddl(descriptor: &LocalSecurityDescriptor) -> Result<String> {
     let mut text = ptr::null_mut();
-    let converted = unsafe {
+    if unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
+            descriptor.0,
             SDDL_REVISION_1,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            REGISTRY_DESCRIPTOR_INFORMATION,
             &mut text,
             ptr::null_mut(),
         )
-    };
-    unsafe { LocalFree(descriptor.cast()) };
-    if converted == 0 || text.is_null() {
+    } == 0
+        || text.is_null()
+    {
         return Err(fail(
             EXIT_REJECTED,
             "Cannot encode machine lock registry ACL.",
@@ -7727,93 +7745,286 @@ fn registry_acl_is_exact(key: HKEY) -> Result<bool> {
     while unsafe { *text.add(length) } != 0 {
         length += 1;
     }
-    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) })
-        .to_ascii_uppercase();
+    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
     unsafe { LocalFree(text.cast()) };
-    Ok(value == "O:S-1-5-21-1333774511-1103852894-3119617217-1001G:S-1-5-21-1333774511-1103852894-3119617217-513D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;BA)(A;CIID;KA;;;SY)(A;ID;KA;;;S-1-5-21-1333774511-1103852894-3119617217-1001)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;AC)(A;CIID;KR;;;S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681)".to_ascii_uppercase()
-        || value == STALE_REGISTRY_HARDENED_SDDL.to_ascii_uppercase())
+    Ok(value.to_ascii_uppercase())
 }
 
-fn exact_machine_lock_publication() -> Result<Option<String>> {
-    let mut key = ptr::null_mut();
+fn descriptor_sid_bytes(sid: *mut c_void) -> Option<Vec<u8>> {
+    if sid.is_null() {
+        return None;
+    }
+    let length = unsafe { GetLengthSid(sid) } as usize;
+    (length > 0).then(|| unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), length) }.to_vec())
+}
+
+fn registry_descriptor_shape(
+    descriptor: &LocalSecurityDescriptor,
+) -> Option<RegistryDescriptorShape> {
+    let mut owner = ptr::null_mut();
+    let mut group = ptr::null_mut();
+    let mut defaulted = 0;
+    if unsafe { GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted) } == 0
+        || unsafe { GetSecurityDescriptorGroup(descriptor.0, &mut group, &mut defaulted) } == 0
+    {
+        return None;
+    }
+    let mut present = 0;
+    let mut dacl = ptr::null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+        || present == 0
+        || dacl.is_null()
+    {
+        return None;
+    }
+    let mut control = 0;
+    let mut revision = 0;
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return None;
+    }
+    let mut aces = Vec::with_capacity(unsafe { (*dacl).AceCount } as usize);
+    let mut used_acl_bytes = mem::size_of_val(unsafe { &*dacl });
+    for index in 0..unsafe { (*dacl).AceCount } as u32 {
+        let mut raw = ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut raw) } == 0 || raw.is_null() {
+            return None;
+        }
+        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+        let sid_offset = mem::size_of::<ACCESS_ALLOWED_ACE>() - mem::size_of::<u32>();
+        if ace.Header.AceType != 0 || (ace.Header.AceSize as usize) < sid_offset + 8 {
+            return None;
+        }
+        let sid_pointer = ptr::addr_of!(ace.SidStart).cast::<u8>();
+        let sub_authorities = unsafe { *sid_pointer.add(1) } as usize;
+        let sid_length = 8_usize.checked_add(4_usize.checked_mul(sub_authorities)?)?;
+        if ace.Header.AceSize as usize != sid_offset + sid_length {
+            return None;
+        }
+        let sid = unsafe { std::slice::from_raw_parts(sid_pointer, sid_length) }.to_vec();
+        used_acl_bytes = used_acl_bytes.checked_add(ace.Header.AceSize as usize)?;
+        aces.push(RegistryAceShape {
+            kind: ace.Header.AceType,
+            flags: ace.Header.AceFlags,
+            mask: ace.Mask,
+            sid,
+        });
+    }
+    if used_acl_bytes != unsafe { (*dacl).AclSize } as usize {
+        return None;
+    }
+    Some(RegistryDescriptorShape {
+        owner: descriptor_sid_bytes(owner)?,
+        group: descriptor_sid_bytes(group)?,
+        control,
+        acl_revision: unsafe { (*dacl).AclRevision },
+        aces,
+    })
+}
+
+fn hardened_registry_descriptor_is_exact(descriptor: &LocalSecurityDescriptor) -> Result<bool> {
+    let expected = descriptor_from_sddl(STALE_REGISTRY_HARDENED_SDDL, EXIT_FAILURE)?;
+    Ok(registry_descriptor_shape(descriptor).is_some()
+        && registry_descriptor_shape(descriptor) == registry_descriptor_shape(&expected))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaleRegistryAclAdmission {
+    LegacyExactParent,
+    Hardened,
+}
+
+fn stale_registry_acl_admission(
+    parent_sddl: &str,
+    child_sddl: &str,
+    parent_descriptor: &LocalSecurityDescriptor,
+    child_descriptor: &LocalSecurityDescriptor,
+) -> Result<Option<StaleRegistryAclAdmission>> {
+    let legacy = STALE_REGISTRY_LEGACY_SDDL.to_ascii_uppercase();
+    if child_sddl == legacy && parent_sddl == legacy && child_sddl == parent_sddl {
+        return Ok(Some(StaleRegistryAclAdmission::LegacyExactParent));
+    }
+    if hardened_registry_descriptor_is_exact(parent_descriptor)?
+        && hardened_registry_descriptor_is_exact(child_descriptor)?
+    {
+        Ok(Some(StaleRegistryAclAdmission::Hardened))
+    } else {
+        Ok(None)
+    }
+}
+
+fn protect_stale_registry_key(key: HKEY, path: &str) -> Result<()> {
+    let descriptor = descriptor_from_sddl(STALE_REGISTRY_HARDENED_SDDL, EXIT_FAILURE)?;
     let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(MACHINE_LOCK_REGISTRY_KEY)).as_ptr(),
-            0,
-            KEY_READ,
-            &mut key,
+        RegSetKeySecurity(
+            key,
+            REGISTRY_DESCRIPTOR_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
         )
     };
-    if status == 2 {
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    if !flushed {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot protect stale registry cleanup state.",
+        ));
+    }
+
+    let mut reopened = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(path)).as_ptr(),
+            REG_OPTION_OPEN_LINK,
+            KEY_READ,
+            &mut reopened,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot reopen protected stale registry state.",
+        ));
+    }
+    let observed = query_registry_descriptor(reopened);
+    unsafe { RegCloseKey(reopened) };
+    if !hardened_registry_descriptor_is_exact(&observed?)? {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Protected stale registry descriptor did not verify structurally.",
+        ));
+    }
+    Ok(())
+}
+
+struct ExactMachineLockPublication {
+    suffix: String,
+    parent: HKEY,
+    child: HKEY,
+    #[cfg(feature = "stale-schema2-cleanup")]
+    acl_admission: StaleRegistryAclAdmission,
+    #[cfg(feature = "stale-schema2-cleanup")]
+    parent_sddl: String,
+    #[cfg(feature = "stale-schema2-cleanup")]
+    child_sddl: String,
+}
+
+impl Drop for ExactMachineLockPublication {
+    fn drop(&mut self) {
+        unsafe {
+            RegCloseKey(self.child);
+            RegCloseKey(self.parent);
+        }
+    }
+}
+
+fn exact_machine_lock_publication() -> Result<Option<ExactMachineLockPublication>> {
+    exact_machine_lock_publication_with_access(KEY_READ)
+}
+
+fn exact_machine_lock_publication_for_mutation() -> Result<Option<ExactMachineLockPublication>> {
+    exact_machine_lock_publication_with_access(KEY_READ | KEY_WRITE | WRITE_DAC | WRITE_OWNER)
+}
+
+fn exact_machine_lock_publication_with_access(
+    access: u32,
+) -> Result<Option<ExactMachineLockPublication>> {
+    let mut parent = ptr::null_mut();
+    let parent_status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(r"Software\Talking Quill")).as_ptr(),
+            REG_OPTION_OPEN_LINK,
+            access,
+            &mut parent,
+        )
+    };
+    if parent_status == 2 {
         return Ok(None);
     }
-    if status != 0 {
+    if parent_status != 0 {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot inspect machine lock registry parent.",
+        ));
+    }
+    let mut child = ptr::null_mut();
+    let child_status = unsafe {
+        RegOpenKeyExW(
+            parent,
+            wide(OsStr::new("RecoveryStateLockV1")).as_ptr(),
+            REG_OPTION_OPEN_LINK,
+            access,
+            &mut child,
+        )
+    };
+    if child_status != 0 {
+        unsafe { RegCloseKey(parent) };
         return Err(fail(
             EXIT_REJECTED,
             "Cannot inspect machine lock publication.",
         ));
     }
-    let publication = read_machine_lock_registry_string(key)?;
-    if !registry_acl_is_exact(key)? {
-        unsafe { RegCloseKey(key) };
-        return Err(fail(
-            EXIT_REJECTED,
-            "Machine lock registry ACL is not the recognized fixture ACL.",
-        ));
-    }
-    let mut index = 0;
-    let mut values = Vec::new();
-    loop {
-        let mut name = [0_u16; 256];
-        let mut length = name.len() as u32;
-        let status = unsafe {
-            RegEnumValueW(
-                key,
-                index,
-                name.as_mut_ptr(),
-                &mut length,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
+
+    let inspected = (|| {
+        let suffix = read_machine_lock_registry_string(child)?
+            .ok_or_else(|| fail(EXIT_REJECTED, "Machine lock registry value is missing."))?;
+        validate_machine_lock_suffix(&suffix)?;
+        let child_descriptor = query_registry_descriptor(child)?;
+        let parent_descriptor = query_registry_descriptor(parent)?;
+        let child_sddl = descriptor_sddl(&child_descriptor)?;
+        let parent_sddl = descriptor_sddl(&parent_descriptor)?;
+        let acl_admission = stale_registry_acl_admission(
+            &parent_sddl,
+            &child_sddl,
+            &parent_descriptor,
+            &child_descriptor,
+        )?
+        .ok_or_else(|| {
+            fail(
+                EXIT_REJECTED,
+                "Machine lock registry ACL is not the recognized fixture ACL.",
             )
-        };
-        if status == 259 {
-            break;
-        }
-        if status != 0 {
-            unsafe { RegCloseKey(key) };
+        })?;
+        #[cfg(not(feature = "stale-schema2-cleanup"))]
+        let _ = acl_admission;
+
+        let parent_subkeys = enumerate_registry_subkeys(parent)?;
+        let parent_values = enumerate_registry_value_names(parent)?;
+        let child_values = enumerate_registry_value_names(child)?;
+        let child_subkeys = enumerate_registry_subkeys(child)?;
+        if parent_subkeys != ["RecoveryStateLockV1"]
+            || !parent_values.is_empty()
+            || !child_subkeys.is_empty()
+            || child_values != [MACHINE_LOCK_REGISTRY_VALUE]
+        {
             return Err(fail(
                 EXIT_REJECTED,
-                "Cannot enumerate machine lock publication.",
+                "Machine lock registry inventory is not exact.",
             ));
         }
-        values.push(String::from_utf16_lossy(&name[..length as usize]));
-        index += 1;
+        Ok(ExactMachineLockPublication {
+            suffix,
+            parent,
+            child,
+            #[cfg(feature = "stale-schema2-cleanup")]
+            acl_admission,
+            #[cfg(feature = "stale-schema2-cleanup")]
+            parent_sddl,
+            #[cfg(feature = "stale-schema2-cleanup")]
+            child_sddl,
+        })
+    })();
+    match inspected {
+        Ok(publication) => Ok(Some(publication)),
+        Err(error) => {
+            unsafe {
+                RegCloseKey(child);
+                RegCloseKey(parent);
+            }
+            Err(error)
+        }
     }
-    let mut child = [0_u16; 2];
-    let mut child_len = 1;
-    let child_status = unsafe {
-        RegEnumKeyExW(
-            key,
-            0,
-            child.as_mut_ptr(),
-            &mut child_len,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    unsafe { RegCloseKey(key) };
-    if values != [MACHINE_LOCK_REGISTRY_VALUE] || child_status != 259 {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Machine lock registry inventory is not exact.",
-        ));
-    }
-    Ok(publication)
 }
 
 struct RetainedStaleObject {
@@ -8391,7 +8602,10 @@ fn active_state_proof(
 }
 
 fn exact_cleanup_registry(suffix: &str) -> Result<()> {
-    if exact_machine_lock_publication()?.as_deref() != Some(suffix)
+    if exact_machine_lock_publication()?
+        .as_ref()
+        .map(|publication| publication.suffix.as_str())
+        != Some(suffix)
         || registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
             != Some(vec!["RecoveryStateLockV1".to_owned()])
         || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
@@ -8739,26 +8953,31 @@ fn run_direct_stale_schema2_diagnostic_inner(
                 serde_json::json!({ "resolved": true }),
             ))
         })?;
-    let suffix = diagnostic_stage(diagnostic, "registry.inventory", || {
-        let suffix = exact_machine_lock_publication()?;
+    let publication = diagnostic_stage(diagnostic, "registry.inventory", || {
+        let publication = exact_machine_lock_publication()?;
         let subkeys = registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
         let values = registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
-        if let Some(suffix) = suffix.as_deref() {
-            validate_machine_lock_suffix(suffix)?;
-            exact_cleanup_registry(suffix)?;
+        if let Some(publication) = publication.as_ref() {
+            exact_cleanup_registry(&publication.suffix)?;
         }
         let evidence = serde_json::json!({
-            "machineLockSuffix": suffix,
+            "machineLockSuffix": publication.as_ref().map(|value| &value.suffix),
             "subkeys": subkeys,
             "values": values,
+            "aclAdmission": publication.as_ref().map(|value| match value.acl_admission {
+                StaleRegistryAclAdmission::LegacyExactParent => "legacy-exact-parent",
+                StaleRegistryAclAdmission::Hardened => "hardened",
+            }),
+            "parentDescriptor": publication.as_ref().map(|value| &value.parent_sddl),
+            "childDescriptor": publication.as_ref().map(|value| &value.child_sddl),
         });
-        Ok((suffix, evidence))
+        Ok((publication, evidence))
     })?;
     let active = diagnostic_stage(diagnostic, "active-state.inventory", || {
         let proof = active_state_proof(&program_files, &program_data, &system, true, false)?;
         Ok((proof.clone(), serde_json::json!({ "proofSha256": proof })))
     })?;
-    let Some(suffix) = suffix else {
+    let Some(publication) = publication else {
         let binding = retained_binding(&[], "no-machine-lock-publication");
         diagnostic_stage(diagnostic, "image.stability", || {
             retained_image
@@ -8785,6 +9004,7 @@ fn run_direct_stale_schema2_diagnostic_inner(
         drop(legacy);
         return Ok(0);
     };
+    let suffix = publication.suffix.clone();
     let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
     let lifecycle = diagnostic_stage(diagnostic, "lifecycle-lock.availability", || {
         let object =
@@ -9062,7 +9282,7 @@ fn reclaim_exact_schema2_orphan_v2(
             "Production orphan reclaim requires an administrator audit path.",
         ));
     }
-    let Some(suffix) = exact_machine_lock_publication()? else {
+    let Some(publication) = exact_machine_lock_publication_for_mutation()? else {
         let binding = retained_binding(&[], "no-machine-lock-publication");
         complete_stale_cleanup_zero_state(
             audit,
@@ -9075,6 +9295,7 @@ fn reclaim_exact_schema2_orphan_v2(
         drop(legacy);
         return Ok(());
     };
+    let suffix = publication.suffix.clone();
     validate_machine_lock_suffix(&suffix)?;
     let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
     let lifecycle =
@@ -9205,32 +9426,21 @@ fn reclaim_exact_schema2_orphan_v2(
     force_stale_cleanup_rejection("post-commit-intent")?;
 
     // Repeat registry identity after the second active proof and before the first mutation.
-    if exact_machine_lock_publication()?.as_deref() != Some(&suffix) {
+    if exact_machine_lock_publication()?
+        .as_ref()
+        .map(|publication| publication.suffix.as_str())
+        != Some(&suffix)
+    {
         return Err(fail(
             EXIT_REJECTED,
             "Machine lifecycle publication changed before mutation.",
         ));
     }
-    for registry_path in [r"Software\Talking Quill", MACHINE_LOCK_REGISTRY_KEY] {
-        let mut key = ptr::null_mut();
-        if unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                wide(OsStr::new(registry_path)).as_ptr(),
-                0,
-                KEY_READ | KEY_WRITE | WRITE_DAC,
-                &mut key,
-            )
-        } != 0
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Stale registry key changed before mutation.",
-            ));
-        }
-        let result = protect_stale_registry_key(key);
-        unsafe { RegCloseKey(key) };
-        result?;
+    for (registry_key, registry_path) in [
+        (publication.parent, r"Software\Talking Quill"),
+        (publication.child, MACHINE_LOCK_REGISTRY_KEY),
+    ] {
+        protect_stale_registry_key(registry_key, registry_path)?;
     }
 
     pending.delete()?;
@@ -10546,6 +10756,95 @@ mod tests {
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), STALE_SCHEMA2_DIAGNOSTIC_STAGE_CODES.len());
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn exact_current_inherited_registry_descriptor_requires_its_parent() {
+        let legacy = STALE_REGISTRY_LEGACY_SDDL.to_ascii_uppercase();
+        let descriptor = descriptor_from_sddl(STALE_REGISTRY_LEGACY_SDDL, EXIT_REJECTED).unwrap();
+        assert_eq!(
+            stale_registry_acl_admission(&legacy, &legacy, &descriptor, &descriptor).unwrap(),
+            Some(StaleRegistryAclAdmission::LegacyExactParent)
+        );
+
+        let parent_mismatch =
+            descriptor_from_sddl(STALE_REGISTRY_HARDENED_SDDL, EXIT_REJECTED).unwrap();
+        assert_eq!(
+            stale_registry_acl_admission(
+                &STALE_REGISTRY_HARDENED_SDDL.to_ascii_uppercase(),
+                &legacy,
+                &parent_mismatch,
+                &descriptor,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_registry_acl_reorder_and_extra_ace_are_rejected() {
+        let legacy = STALE_REGISTRY_LEGACY_SDDL.to_ascii_uppercase();
+        let reordered = STALE_REGISTRY_LEGACY_SDDL.replace(
+            "(A;CIID;KR;;;BU)(A;CIID;KA;;;BA)",
+            "(A;CIID;KA;;;BA)(A;CIID;KR;;;BU)",
+        );
+        let reordered_descriptor = descriptor_from_sddl(&reordered, EXIT_REJECTED).unwrap();
+        assert_eq!(
+            stale_registry_acl_admission(
+                &legacy,
+                &reordered.to_ascii_uppercase(),
+                &reordered_descriptor,
+                &reordered_descriptor,
+            )
+            .unwrap(),
+            None
+        );
+
+        let extra = format!("{STALE_REGISTRY_HARDENED_SDDL}(A;CI;KR;;;BU)");
+        let extra_descriptor = descriptor_from_sddl(&extra, EXIT_REJECTED).unwrap();
+        assert_eq!(
+            stale_registry_acl_admission(
+                &extra.to_ascii_uppercase(),
+                &extra.to_ascii_uppercase(),
+                &extra_descriptor,
+                &extra_descriptor,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_registry_value_and_suffix_inventory_is_exact() {
+        assert!(validate_machine_lock_suffix("78bd88811b14faf1e11ba59620088aa0").is_ok());
+        assert!(validate_machine_lock_suffix("78BD88811b14faf1e11ba59620088aa0").is_err());
+        assert!(validate_machine_lock_suffix("78bd88811b14faf1e11ba59620088aa").is_err());
+        assert_ne!(
+            vec![MACHINE_LOCK_REGISTRY_VALUE, "Unexpected"],
+            vec![MACHINE_LOCK_REGISTRY_VALUE]
+        );
+        assert_ne!(REG_EXPAND_SZ, REG_SZ);
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn hardened_registry_descriptor_is_structurally_exact() {
+        let exact = descriptor_from_sddl(STALE_REGISTRY_HARDENED_SDDL, EXIT_REJECTED).unwrap();
+        assert!(hardened_registry_descriptor_is_exact(&exact).unwrap());
+        for invalid in [
+            "O:BAG:BAD:P(A;CI;KA;;;BA)(A;CI;KA;;;SY)",
+            "O:SYG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)",
+            "O:BAG:SYD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)",
+            "O:BAG:BAD:(A;CI;KA;;;SY)(A;CI;KA;;;BA)",
+            "O:BAG:BAD:P(A;CI;KR;;;SY)(A;CI;KA;;;BA)",
+            "O:BAG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;BU)",
+        ] {
+            let descriptor = descriptor_from_sddl(invalid, EXIT_REJECTED).unwrap();
+            assert!(!hardened_registry_descriptor_is_exact(&descriptor).unwrap());
+        }
     }
 
     #[cfg(feature = "stale-schema2-cleanup")]

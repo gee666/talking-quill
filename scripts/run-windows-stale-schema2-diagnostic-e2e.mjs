@@ -312,10 +312,26 @@ function verifyDiagnosticChain(text, status, expectedRejectionStage) {
   }
   const last = lines.at(-1);
   if (
-    (status === 0 && last?.stageCode !== 'diagnostic.complete') ||
+    (status === 0 &&
+      (last?.stageCode !== 'diagnostic.complete' ||
+        last?.evidence?.state !== 'exact-schema2-fixture')) ||
     (status === 78 && (last?.outcome !== 'rejected' || last?.stageCode !== expectedRejectionStage))
   ) {
     throw new Error('diagnostic terminal event does not match its exit status');
+  }
+  if (status === 0) {
+    const registry = lines.find((event) => event.stageCode === 'registry.inventory');
+    const evidence = registry?.evidence;
+    if (
+      registry?.outcome !== 'passed' ||
+      evidence?.aclAdmission !== 'legacy-exact-parent' ||
+      !/^[0-9a-f]{32}$/u.test(evidence?.machineLockSuffix ?? '') ||
+      JSON.stringify(evidence?.subkeys) !== JSON.stringify(['RecoveryStateLockV1']) ||
+      JSON.stringify(evidence?.values) !== JSON.stringify([]) ||
+      evidence?.parentDescriptor !== evidence?.childDescriptor
+    ) {
+      throw new Error('diagnostic did not admit the exact retained legacy registry fixture');
+    }
   }
 }
 
