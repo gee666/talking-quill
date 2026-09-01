@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
 const publishWorkflow = readFileSync('.github/workflows/publish-local-owner.yml', 'utf8');
+const realRebootWorkflow = readFileSync(
+  '.github/workflows/windows-real-reboot-acceptance.yml',
+  'utf8',
+);
 const stageScript = readFileSync('scripts/stage-unsigned-release.mjs', 'utf8');
 const approvedActions = new Set([
   'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
@@ -139,7 +143,7 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('--windows-update-bootstrap-v2=');
     expect(lifecycle).toContain('Start-Process -FilePath $helper');
     expect(lifecycle).toContain('--mode installed --root');
-    expect(lifecycle).toContain('Talking Quill Maintenance.exe');
+    expect(lifecycle).toContain('Talking Quill Maintenance');
     expect(lifecycle).toContain('QuietUninstallString');
     expect(lifecycle).toContain('Synchronous native setup uninstall failed');
     expect(lifecycle).toContain('Recovery was not terminal before repair');
@@ -161,7 +165,6 @@ describe('Windows native release workflow', () => {
       'failure-action-restart',
       'service-stopped-pre-DeleteService',
       'post-delete-pre-image-removal',
-      'reboot-pending-delete',
       'pre-maintenance-deletion-ownership',
       'post-maintenance-deletion-ownership',
       'post-final-launcher-ownership',
@@ -182,6 +185,15 @@ describe('Windows native release workflow', () => {
       expect(lifecycle).toContain(`'${terminalFault}'`);
     }
     expect(lifecycle).toContain('PendingFileRenameOperations');
+    expect(lifecycle).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
+    expect(realRebootWorkflow).toContain('Restart-Computer -Force');
+    expect(realRebootWorkflow).toContain('reboot-coordinator');
+    expect(realRebootWorkflow).toContain('preBootIdentity');
+    expect(realRebootWorkflow).toContain('postBootIdentity');
+    expect(realRebootWorkflow).toContain('generationBefore');
+    expect(realRebootWorkflow).toContain('generationAfter');
+    expect(realRebootWorkflow).toContain('windows-reboot-acceptance-evidence.mjs sign');
+    expect(realRebootWorkflow).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
     expect(workflow).toContain('build-windows-acceptance-fault-setup.mjs');
     expect(workflow).toContain('repair-terminalAcceptance.exe');
     expect(workflow).toContain('Nonpromotable terminal acceptance setup entered release assembly.');

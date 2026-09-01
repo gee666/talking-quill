@@ -1,0 +1,172 @@
+name: Windows real reboot acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        required: true
+        type: choice
+        options: [x64, arm64]
+      acceptance_setup_url:
+        required: true
+        type: string
+      acceptance_setup_sha256:
+        required: true
+        type: string
+      source_revision:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-real-reboot-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+env:
+  CHECKPOINT: C:\ProgramData\TalkingQuillAcceptance\real-reboot-checkpoint.json
+
+jobs:
+  prepare-reboot:
+    runs-on: [self-hosted, Windows, talking-quill-reboot-acceptance, '${{ inputs.architecture }}']
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.source_revision }}
+          persist-credentials: false
+      - name: Install candidate and persist pre-reboot checkpoint
+        shell: pwsh
+        env:
+          SETUP_URL: ${{ inputs.acceptance_setup_url }}
+          SETUP_SHA256: ${{ inputs.acceptance_setup_sha256 }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          if ($env:SETUP_URL -cnotmatch '^https://') { throw 'Acceptance setup URL must use HTTPS.' }
+          if ($env:SETUP_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:SOURCE_REVISION -cnotmatch '^[0-9a-f]{40}$') { throw 'Candidate binding is invalid.' }
+          New-Item -ItemType Directory -Force (Split-Path -Parent $env:CHECKPOINT), tmp/windows-real-reboot | Out-Null
+          $setup = (Resolve-Path tmp/windows-real-reboot).Path + '\acceptance-setup.exe'
+          Invoke-WebRequest -Uri $env:SETUP_URL -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:SETUP_SHA256) { throw 'Acceptance setup hash mismatch.' }
+          $install = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Candidate install failed: $($install.ExitCode)" }
+          $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
+          $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
+          if (-not $match.Success) { throw 'Generation-specific maintenance registration is invalid.' }
+          $beforePending = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+          $env:TQ_TERMINAL_FAULT = 'reboot-pending-delete'
+          $uninstall = Start-Process $match.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+          Remove-Item Env:TQ_TERMINAL_FAULT
+          if ($uninstall.ExitCode -eq 0) { throw 'Acceptance fault did not leave reboot-owned cleanup.' }
+          $afterPending = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations)
+          if ($afterPending.Count -le $beforePending.Count -or ($afterPending.Count - $beforePending.Count) % 2 -ne 0) { throw 'Windows did not append complete reboot-owned cleanup pairs.' }
+          for ($index = 0; $index -lt $beforePending.Count; $index++) { if ([string]$afterPending[$index] -cne [string]$beforePending[$index]) { throw 'Shared pending rename state changed before the appended candidate pairs.' } }
+          $ownedSources = [System.Collections.Generic.List[string]]::new()
+          $terminalGenerations = [System.Collections.Generic.HashSet[string]]::new()
+          for ($index = $beforePending.Count; $index -lt $afterPending.Count; $index += 2) {
+            $source = [string]$afterPending[$index]; $destination = [string]$afterPending[$index + 1]
+            $sourceMatch = [regex]::Match($source, '^\\\?\?\\.+\\\.Talking Quill Terminal Cleanup-([0-9a-f]{32})\.exe$')
+            if (-not $sourceMatch.Success -or $destination.Length -ne 0) { throw 'New pending rename pair is not an exact terminal-service deletion.' }
+            $ownedSources.Add($source); $terminalGenerations.Add($sourceMatch.Groups[1].Value) | Out-Null
+          }
+          if ($ownedSources.Count -eq 0 -or $terminalGenerations.Count -ne 1) { throw 'Candidate pending deletion ownership is not exact.' }
+          $terminalGeneration = @($terminalGenerations)[0]
+          $terminalRecord = Get-Content -Raw "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json" | ConvertFrom-Json
+          if ($terminalRecord.generation -cne $terminalGeneration) { throw 'Pending deletion generation does not match the authenticated terminal record.' }
+          $checkpoint = [ordered]@{
+            schemaVersion = 1; architecture = $env:ARCHITECTURE; candidateSha256 = $env:SETUP_SHA256
+            sourceRevision = $env:SOURCE_REVISION; machineIdentity = (Get-CimInstance Win32_ComputerSystemProduct).UUID
+            preBootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
+            generationBefore = $match.Groups[2].Value; terminalGeneration = $terminalGeneration; pendingDeleteSources = @($ownedSources)
+          }
+          $checkpoint | ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 $env:CHECKPOINT
+          Copy-Item $env:CHECKPOINT tmp/windows-real-reboot/pre-reboot-checkpoint.json
+      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ inputs.architecture }}-pre-reboot-checkpoint
+          path: tmp/windows-real-reboot/pre-reboot-checkpoint.json
+          retention-days: 30
+      - name: Schedule genuine reboot after checkpoint upload
+        shell: pwsh
+        run: |
+          $command = "Start-Sleep -Seconds 30; Restart-Computer -Force"
+          Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command',$command
+
+  reboot-coordinator:
+    needs: prepare-reboot
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Allow the dedicated runner to restart
+        run: sleep 180
+
+  verify-after-reboot:
+    needs: reboot-coordinator
+    runs-on: [self-hosted, Windows, talking-quill-reboot-acceptance, '${{ inputs.architecture }}']
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.source_revision }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+      - name: Verify reboot consumption and create candidate-bound evidence input
+        shell: pwsh
+        env:
+          ARCHITECTURE: ${{ inputs.architecture }}
+          CANDIDATE_SHA256: ${{ inputs.acceptance_setup_sha256 }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          SETUP_URL: ${{ inputs.acceptance_setup_url }}
+        run: |
+          $before = Get-Content -Raw $env:CHECKPOINT | ConvertFrom-Json
+          if ($before.machineIdentity -cne (Get-CimInstance Win32_ComputerSystemProduct).UUID) { throw 'Post-reboot job ran on a different machine.' }
+          $postBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
+          if ($postBoot -ceq $before.preBootIdentity) { throw 'A genuine reboot was not observed.' }
+          $pendingAfter = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+          if (@($before.pendingDeleteSources).Count -eq 0 -or @($pendingAfter | Where-Object { $_ -cin @($before.pendingDeleteSources) }).Count -ne 0) { throw 'Windows did not consume the exact candidate-owned pending deletes.' }
+          foreach ($source in @($before.pendingDeleteSources)) { $dosPath = ([string]$source) -replace '^\\\?\?\\',''; if (Test-Path -LiteralPath $dosPath) { throw "Windows retained candidate-owned reboot residue: $dosPath" } }
+          $setup = (Resolve-Path tmp/windows-real-reboot/acceptance-setup.exe -ErrorAction SilentlyContinue).Path
+          if (-not $setup) { Invoke-WebRequest -Uri $env:SETUP_URL -OutFile tmp/windows-real-reboot-setup.exe; $setup = (Resolve-Path tmp/windows-real-reboot-setup.exe).Path }
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:CANDIDATE_SHA256) { throw 'Post-reboot candidate hash mismatch.' }
+          $reinstall = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          if ($reinstall.ExitCode -ne 0) { throw 'Post-reboot reinstall failed.' }
+          $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
+          $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
+          if (-not $match.Success -or $match.Groups[2].Value -ceq $before.generationBefore) { throw 'Reinstall reused a deletion-sensitive generation.' }
+          $checkpointSha256 = (Get-FileHash -LiteralPath $env:CHECKPOINT -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{ schemaVersion=1; architecture=$env:ARCHITECTURE; candidateSha256=$env:CANDIDATE_SHA256; sourceRevision=$env:SOURCE_REVISION; workflowRunId='${{ github.run_id }}'; workflowRunAttempt=${{ github.run_attempt }}; checkpointSha256=$checkpointSha256; machineIdentity=$before.machineIdentity; preBootIdentity=$before.preBootIdentity; postBootIdentity=$postBoot; generationBefore=$before.generationBefore; generationAfter=$match.Groups[2].Value; terminalGeneration=$before.terminalGeneration; pendingDeleteSources=@($before.pendingDeleteSources); windowsConsumedPendingDeletes=$true } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 reboot-evidence-input.json
+      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ inputs.architecture }}-unsigned-real-reboot-evidence
+          path: reboot-evidence-input.json
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-reboot-evidence:
+    needs: verify-after-reboot
+    runs-on: ubuntu-24.04
+    environment: windows-promotion-signing
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v6.0.0
+        with:
+          name: windows-${{ inputs.architecture }}-unsigned-real-reboot-evidence
+      - name: Sign validated reboot claims outside the candidate runner
+        env:
+          TALKING_QUILL_WINDOWS_REBOOT_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64 }}
+        run: node scripts/windows-reboot-acceptance-evidence.mjs sign reboot-evidence-input.json windows-reboot-acceptance-${{ inputs.architecture }}.json
+      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ inputs.architecture }}-signed-real-reboot-evidence
+          path: windows-reboot-acceptance-${{ inputs.architecture }}.json
+          if-no-files-found: error
+          retention-days: 30

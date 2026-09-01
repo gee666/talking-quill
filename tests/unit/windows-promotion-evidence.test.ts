@@ -19,7 +19,6 @@ const terminalFaultPhases = [
   'failure-action-restart',
   'service-stopped-pre-DeleteService',
   'post-delete-pre-image-removal',
-  'reboot-pending-delete',
   'pre-maintenance-deletion-ownership',
   'post-maintenance-deletion-ownership',
   'post-final-launcher-ownership',
@@ -245,6 +244,55 @@ async function fixture() {
   ]);
   const publicKeyPath = join(root, 'promotion-key.sec1');
   await writeFile(publicKeyPath, sec1.toString('hex'));
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value !== null && typeof value === 'object')
+      return `{${Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+        .join(',')}}`;
+    return JSON.stringify(value);
+  };
+  for (const architecture of ['arm64', 'x64']) {
+    const payload = {
+      schemaVersion: 1,
+      architecture,
+      candidateSha256: 'ef'.repeat(32),
+      sourceRevision: source('b'),
+      workflowRunId: architecture === 'x64' ? '456' : '789',
+      workflowRunAttempt: 1,
+      checkpointSha256: sha('7'),
+      machineIdentity: `machine-${architecture}`,
+      preBootIdentity: 'boot-before',
+      postBootIdentity: 'boot-after',
+      generationBefore: '1'.repeat(32),
+      generationAfter: '2'.repeat(32),
+      terminalGeneration: '3'.repeat(32),
+      pendingDeleteSources: [
+        `\\??\\C:\\ProgramData\\.Talking Quill Terminal Cleanup-${'3'.repeat(32)}.exe`,
+      ],
+      windowsConsumedPendingDeletes: true,
+    };
+    const signature = sign(
+      'sha256',
+      Buffer.concat([
+        Buffer.from('TalkingQuill/windows-real-reboot-acceptance/v1\0'),
+        Buffer.from(canonical(payload)),
+      ]),
+      { key: privateKey, dsaEncoding: 'ieee-p1363' },
+    );
+    await writeFile(
+      join(directory, `windows-reboot-acceptance-${architecture}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        payload,
+        publicKeySha256: createHash('sha256')
+          .update(publicKey.export({ format: 'der', type: 'spki' }))
+          .digest('hex'),
+        signature: signature.toString('base64url'),
+      }),
+    );
+  }
   const updater = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const updaterJwk = updater.publicKey.export({ format: 'jwk' });
   if (updaterJwk.x === undefined || updaterJwk.y === undefined)
@@ -260,6 +308,7 @@ async function fixture() {
     directory,
     publicKeyPath,
     updatePublicKeyPath,
+    rebootRunIds: { x64: '456', arm64: '789' },
     output: join(directory, 'windows-promotion-lifecycle-evidence-v1.json'),
     privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
     updatePrivateKeyPkcs8Base64: updater.privateKey
@@ -322,6 +371,7 @@ describe('Windows promotion lifecycle evidence', () => {
         repository: 'owner/repository',
         workflowRunId: '123',
         publicKeyPath: value.publicKeyPath,
+        rebootRunIds: value.rebootRunIds,
       }),
     ).rejects.toThrow(/did not pass exact lifecycle policy/u);
   });

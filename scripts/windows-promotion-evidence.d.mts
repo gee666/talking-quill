@@ -3,12 +3,14 @@ export interface WindowsPromotionEvidenceOptions {
   readonly repository: string;
   readonly workflowRunId: string;
   readonly publicKeyPath: string;
+  readonly rebootRunIds?: Readonly<{ x64: string; arm64: string }>;
 }
 
 export interface CreateWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
   readonly output: string;
   readonly privateKeyPkcs8Base64: string;
   readonly updatePublicKeyPath: string;
+  readonly rebootRunIds: Readonly<{ x64: string; arm64: string }>;
 }
 
 export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
@@ -24,6 +26,7 @@ export interface WindowsPromotionEvidenceEnvelope {
     readonly sourceCommit: string;
     readonly sourceTree: string;
     readonly promotionKeySha256: string;
+    readonly rebootRunIds: Readonly<{ x64: string; arm64: string }>;
     readonly records: readonly unknown[];
   };
   readonly signature: {

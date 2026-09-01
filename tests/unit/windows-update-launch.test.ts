@@ -164,7 +164,10 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
       terminalCleanup.indexOf('post-owner-clear-posix-cleanup'),
     );
-    expect(setup).toContain('retire_fixed_reinstall_deletion_ownership(paths)?');
+    expect(setup).not.toContain('retire_fixed_reinstall_deletion_ownership');
+    expect(setup).not.toContain('retain_nonfixed_pending_pairs');
+    expect(setup).toContain('Talking Quill Maintenance-{maintenance_generation}.exe');
+    expect(setup).toContain('talking-quill-update-recovery-launcher-{maintenance_generation}.exe');
     const maintenanceRetirement = setup.slice(
       setup.indexOf('fn wait_for_terminal_service_retirement'),
       setup.indexOf('fn enumerate_registry_subkeys'),
@@ -178,6 +181,7 @@ describe('Windows elevated updater launch', () => {
     expect(setup).not.toContain('CurrentVersion\\RunOnce');
     expect(setup).toContain('decode_pending_rename_pairs');
     expect(setup).toContain('destination.is_empty()');
+    expect(setup).toContain('Pending deletion data lacks its final terminator.');
     const lockRetirement = setup.slice(
       setup.indexOf('fn retire_machine_lock_publication'),
       setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),

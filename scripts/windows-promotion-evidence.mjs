@@ -20,6 +20,7 @@ const SUCCESS_NAMES = (arch) => [
   [`windows-installer-success-${arch}.json`, 'repair', 'repair'],
 ];
 const FAULT_NAME = (arch) => `windows-installer-fault-recovery-${arch}.json`;
+const REBOOT_NAME = (arch) => `windows-reboot-acceptance-${arch}.json`;
 
 function exactObject(value, keys, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -115,7 +116,6 @@ const TERMINAL_FAULT_PHASES = [
   'pre-CreateService',
   'pre-machine-relaunch-owner-clear',
   'pre-maintenance-deletion-ownership',
-  'reboot-pending-delete',
   'service-stopped-pre-DeleteService',
 ].sort();
 
@@ -377,7 +377,82 @@ function validateArchitectureBinding(records, arch) {
     throw new Error(`${arch} promotion evidence generation binding is invalid`);
 }
 
-async function evidenceRecords(directory) {
+function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkflowRunId) {
+  const envelope = JSON.parse(source);
+  exactObject(
+    envelope,
+    ['schemaVersion', 'payload', 'publicKeySha256', 'signature'],
+    `${arch} reboot evidence`,
+  );
+  const payload = envelope.payload;
+  exactObject(
+    payload,
+    [
+      'schemaVersion',
+      'architecture',
+      'candidateSha256',
+      'sourceRevision',
+      'workflowRunId',
+      'workflowRunAttempt',
+      'checkpointSha256',
+      'machineIdentity',
+      'preBootIdentity',
+      'postBootIdentity',
+      'generationBefore',
+      'generationAfter',
+      'terminalGeneration',
+      'pendingDeleteSources',
+      'windowsConsumedPendingDeletes',
+    ],
+    `${arch} reboot evidence payload`,
+  );
+  const spkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+  const publicKey = createPublicKey({
+    key: Buffer.concat([spkiPrefix, pinned]),
+    format: 'der',
+    type: 'spki',
+  });
+  const keyHash = hash(publicKey.export({ format: 'der', type: 'spki' }));
+  const signature = Buffer.from(envelope.signature, 'base64url');
+  const signed = Buffer.concat([
+    Buffer.from('TalkingQuill/windows-real-reboot-acceptance/v1\0'),
+    Buffer.from(canonicalJson(payload)),
+  ]);
+  if (
+    envelope.schemaVersion !== 1 ||
+    payload.schemaVersion !== 1 ||
+    payload.architecture !== arch ||
+    payload.candidateSha256 !== faultClaims.terminalCleanup.acceptanceSetupSha256 ||
+    payload.sourceRevision !== faultClaims.sourceCommit ||
+    payload.workflowRunId !== expectedWorkflowRunId ||
+    !Number.isSafeInteger(payload.workflowRunAttempt) ||
+    payload.workflowRunAttempt < 1 ||
+    !SHA256.test(payload.checkpointSha256) ||
+    envelope.publicKeySha256 !== keyHash ||
+    typeof payload.machineIdentity !== 'string' ||
+    payload.machineIdentity.length === 0 ||
+    payload.preBootIdentity === payload.postBootIdentity ||
+    !/^[0-9a-f]{32}$/u.test(payload.generationBefore) ||
+    !/^[0-9a-f]{32}$/u.test(payload.generationAfter) ||
+    payload.generationBefore === payload.generationAfter ||
+    !/^[0-9a-f]{32}$/u.test(payload.terminalGeneration) ||
+    !Array.isArray(payload.pendingDeleteSources) ||
+    payload.pendingDeleteSources.length === 0 ||
+    payload.pendingDeleteSources.some(
+      (path) =>
+        typeof path !== 'string' ||
+        !path.endsWith(`.Talking Quill Terminal Cleanup-${payload.terminalGeneration}.exe`),
+    ) ||
+    new Set(payload.pendingDeleteSources).size !== payload.pendingDeleteSources.length ||
+    payload.windowsConsumedPendingDeletes !== true ||
+    signature.length !== 64 ||
+    !verifyBytes('sha256', signed, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)
+  )
+    throw new Error(`${arch} real reboot acceptance evidence is invalid`);
+  return { ...payload, sourceCommit: faultClaims.sourceCommit, sourceTree: faultClaims.sourceTree };
+}
+
+async function evidenceRecords(directory, pinned, rebootRunIds) {
   const records = [];
   for (const arch of ['arm64', 'x64']) {
     for (const [name, operation, action] of SUCCESS_NAMES(arch)) {
@@ -390,10 +465,14 @@ async function evidenceRecords(directory) {
     }
     const name = FAULT_NAME(arch);
     const source = await readFile(resolve(directory, name));
+    const faultClaims = validateFault(JSON.parse(source), arch);
+    records.push({ file: name, sha256: hash(source), claims: faultClaims });
+    const rebootName = REBOOT_NAME(arch);
+    const rebootSource = await readFile(resolve(directory, rebootName));
     records.push({
-      file: name,
-      sha256: hash(source),
-      claims: validateFault(JSON.parse(source), arch),
+      file: rebootName,
+      sha256: hash(rebootSource),
+      claims: validateRebootEvidence(rebootSource, arch, faultClaims, pinned, rebootRunIds[arch]),
     });
     validateArchitectureBinding(records, arch);
   }
@@ -408,8 +487,14 @@ export async function createWindowsPromotionEvidence({
   privateKeyPkcs8Base64,
   publicKeyPath,
   updatePublicKeyPath,
+  rebootRunIds,
 }) {
-  if (!GENERATION.test(workflowRunId) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository))
+  if (
+    !GENERATION.test(workflowRunId) ||
+    !GENERATION.test(rebootRunIds?.x64 ?? '') ||
+    !GENERATION.test(rebootRunIds?.arm64 ?? '') ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)
+  )
     throw new Error('Promotion workflow identity is invalid');
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
   const updatePinned = Buffer.from((await readFile(updatePublicKeyPath, 'utf8')).trim(), 'hex');
@@ -423,7 +508,7 @@ export async function createWindowsPromotionEvidence({
   });
   if (!publicSec1(privateKey).equals(pinned))
     throw new Error('Protected promotion key does not match the repository promotion-key pin');
-  const records = await evidenceRecords(directory);
+  const records = await evidenceRecords(directory, pinned, rebootRunIds);
   const sourceCommit = records[0].claims.sourceCommit;
   const sourceTree = records[0].claims.sourceTree;
   if (
@@ -441,6 +526,7 @@ export async function createWindowsPromotionEvidence({
     sourceCommit,
     sourceTree,
     promotionKeySha256: keyId,
+    rebootRunIds,
     records,
   };
   const signed = Buffer.concat([DOMAIN, Buffer.from(canonicalJson(payload))]);
@@ -462,6 +548,7 @@ export async function verifyWindowsPromotionEvidence({
   repository,
   workflowRunId,
   publicKeyPath,
+  rebootRunIds,
 }) {
   const source = await readFile(path, 'utf8');
   const envelope = JSON.parse(source);
@@ -476,6 +563,7 @@ export async function verifyWindowsPromotionEvidence({
       'sourceCommit',
       'sourceTree',
       'promotionKeySha256',
+      'rebootRunIds',
       'records',
     ],
     'promotion payload',
@@ -493,7 +581,15 @@ export async function verifyWindowsPromotionEvidence({
     envelope.payload.workflowRunId !== workflowRunId
   )
     throw new Error('Promotion signature identity is invalid');
-  const records = await evidenceRecords(directory);
+  const signedRebootRunIds = envelope.payload.rebootRunIds;
+  if (
+    !GENERATION.test(signedRebootRunIds?.x64 ?? '') ||
+    !GENERATION.test(signedRebootRunIds?.arm64 ?? '') ||
+    (rebootRunIds !== undefined &&
+      canonicalJson(rebootRunIds) !== canonicalJson(signedRebootRunIds))
+  )
+    throw new Error('Reboot workflow identity is invalid');
+  const records = await evidenceRecords(directory, pinned, signedRebootRunIds);
   if (canonicalJson(records) !== canonicalJson(envelope.payload.records))
     throw new Error('Promotion evidence inventory or signed claims changed');
   const spkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
@@ -517,11 +613,16 @@ function option(name) {
   return index < 0 ? undefined : process.argv[index + 1];
 }
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  const rebootX64RunId = option('--reboot-x64-run-id');
+  const rebootArm64RunId = option('--reboot-arm64-run-id');
   const common = {
     directory: resolve(option('--directory')),
     repository: option('--repository'),
     workflowRunId: option('--run-id'),
     publicKeyPath: resolve(option('--public-key')),
+    ...(rebootX64RunId === undefined && rebootArm64RunId === undefined
+      ? {}
+      : { rebootRunIds: { x64: rebootX64RunId, arm64: rebootArm64RunId } }),
   };
   if (process.argv.includes('--create')) {
     await createWindowsPromotionEvidence({

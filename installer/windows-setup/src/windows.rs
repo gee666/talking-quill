@@ -384,7 +384,9 @@ struct Paths {
     staging: PathBuf,
     backup: PathBuf,
     transaction: PathBuf,
+    maintenance_generation_record: PathBuf,
     maintenance_uninstaller: PathBuf,
+    recovery_launcher: PathBuf,
     profile: PathBuf,
     legacy_authority: PathBuf,
     legacy_quarantine: PathBuf,
@@ -4117,17 +4119,126 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
     }
 }
 
+fn maintenance_generation_from_name(name: &str) -> Option<&str> {
+    name.strip_prefix("Talking Quill Maintenance-")
+        .and_then(|value| value.strip_suffix(".exe"))
+        .filter(|generation| validate_machine_lock_suffix(generation).is_ok())
+}
+
+fn registered_maintenance_generation(program_files: &Path) -> Result<Option<String>> {
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(UNINSTALL_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Ok(None);
+    }
+    let quiet = read_registry_value(key, "QuietUninstallString", 2048)?;
+    unsafe { RegCloseKey(key) };
+    let Some(command) = quiet else {
+        return Ok(None);
+    };
+    let Some(path) = command
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix("\" /S"))
+        .map(PathBuf::from)
+    else {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Registered maintenance command is invalid.",
+        ));
+    };
+    if path.parent() != Some(program_files) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Registered maintenance path is invalid.",
+        ));
+    }
+    Ok(path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(maintenance_generation_from_name)
+        .map(str::to_owned))
+}
+
+fn current_install_generation(
+    program_files: &Path,
+    program_data: &Path,
+    generation_record: &Path,
+) -> Result<String> {
+    let current = std::env::current_exe().map_err(io_failure)?;
+    if let Some(generation) = current
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(maintenance_generation_from_name)
+    {
+        return Ok(generation.to_owned());
+    }
+    let current_text = current.to_string_lossy();
+    let recovery_context = current.starts_with(program_files)
+        || current.starts_with(program_data)
+        || current_text.contains(".TalkingQuill-uninstall-");
+    if recovery_context && let Some(generation) = registered_maintenance_generation(program_files)?
+    {
+        return Ok(generation);
+    }
+    if path_present(generation_record)? {
+        assert_plain_file(generation_record)?;
+        let generation = fs::read_to_string(generation_record).map_err(io_failure)?;
+        validate_machine_lock_suffix(&generation)?;
+        return Ok(generation);
+    }
+    let generation = random_machine_lock_suffix()?;
+    // Only the elevated worker publishes this protected generation. If it is interrupted, every
+    // recovery process reuses the durable record rather than trusting caller-controlled state.
+    if token_is_elevated()? {
+        let mut record = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(generation_record)
+            .map_err(io_failure)?;
+        record
+            .write_all(generation.as_bytes())
+            .map_err(io_failure)?;
+        record.sync_all().map_err(io_failure)?;
+        drop(record);
+        flush_setup_directory(program_files)?;
+    }
+    Ok(generation)
+}
+
 fn paths() -> Result<Paths> {
     let program_files = known_folder(&FOLDERID_ProgramFiles)?;
     let program_data = known_folder(&FOLDERID_ProgramData)?;
     let system = known_folder(&FOLDERID_System)?;
     let profile = known_folder(&FOLDERID_RoamingAppData)?.join("Talking Quill");
+    let maintenance_generation_record =
+        program_files.join(".Talking Quill.maintenance-generation-v1");
+    let maintenance_generation = current_install_generation(
+        &program_files,
+        &program_data,
+        &maintenance_generation_record,
+    )?;
+    let maintenance_uninstaller = program_files.join(format!(
+        "Talking Quill Maintenance-{maintenance_generation}.exe"
+    ));
+    let recovery_launcher = program_data.join(format!(
+        "Talking Quill Update Recovery/talking-quill-update-recovery-launcher-{maintenance_generation}.exe"
+    ));
     Ok(Paths {
         install: program_files.join("Talking Quill"),
         staging: program_files.join(".Talking Quill.native-staging"),
         backup: program_files.join(".Talking Quill.native-backup"),
         transaction: program_files.join(".Talking Quill.native-transaction-v2.json"),
-        maintenance_uninstaller: program_files.join("Talking Quill Maintenance.exe"),
+        maintenance_generation_record,
+        maintenance_uninstaller,
+        recovery_launcher,
         profile,
         legacy_authority: program_data.join("Talking Quill/KeyboardAuthority"),
         legacy_quarantine: program_data
@@ -4203,7 +4314,6 @@ fn remove_maintenance_uninstaller(paths: &Paths) -> Result<()> {
 }
 
 fn ensure_maintenance_uninstaller(paths: &Paths) -> Result<()> {
-    retire_fixed_reinstall_deletion_ownership(paths)?;
     remove_maintenance_temporary_files(paths)?;
     let source = paths.install.join("Uninstall Talking Quill.exe");
     assert_plain_file(&source)?;
@@ -4444,6 +4554,30 @@ fn read_registry_value(key: *mut c_void, name: &str, maximum: u32) -> Result<Opt
         .map_err(|_| fail(EXIT_REJECTED, "Registry string is invalid."))
 }
 
+fn reclaim_stale_maintenance_uninstallers(paths: &Paths) -> Result<()> {
+    let parent = paths
+        .maintenance_uninstaller
+        .parent()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Maintenance path has no parent."))?;
+    for entry in fs::read_dir(parent).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let path = entry.path();
+        if path == paths.maintenance_uninstaller {
+            continue;
+        }
+        let stale = entry
+            .file_name()
+            .to_str()
+            .and_then(maintenance_generation_from_name)
+            .is_some();
+        if stale {
+            assert_plain_file(&path)?;
+            fs::remove_file(path).map_err(io_failure)?;
+        }
+    }
+    flush_setup_directory(parent)
+}
+
 fn register_installed_uninstall(paths: &Paths) -> Result<()> {
     ensure_maintenance_uninstaller(paths)?;
     let manifest = paths
@@ -4457,7 +4591,8 @@ fn register_installed_uninstall(paths: &Paths) -> Result<()> {
         .and_then(|item| item.as_str())
         .ok_or_else(|| fail(EXIT_REJECTED, "Installed release version is invalid."))?;
     register_uninstall(paths, version)?;
-    register_app_path(paths)
+    register_app_path(paths)?;
+    reclaim_stale_maintenance_uninstallers(paths)
 }
 
 fn register_uninstall(paths: &Paths, version: &str) -> Result<()> {
@@ -4842,7 +4977,7 @@ fn ensure_machine_relaunch_owner_installed(paths: &Paths) -> Result<()> {
         .install
         .join("resources/helper/talking-quill-update-recovery-launcher.exe");
     assert_plain_file(&source)?;
-    let target = root.join("talking-quill-update-recovery-launcher.exe");
+    let target = paths.recovery_launcher.clone();
     let temporary = root.join(format!(".launcher.tmp-{}", random_machine_lock_suffix()?));
     fs::copy(&source, &temporary).map_err(io_failure)?;
     apply_lock_dacl(&temporary, MEDIUM_LAUNCHER_FILE_SDDL)?;
@@ -4901,7 +5036,7 @@ fn ensure_machine_relaunch_owner_installed(paths: &Paths) -> Result<()> {
 
 fn require_machine_relaunch_owner(paths: &Paths) -> Result<()> {
     let root = terminal_uninstall_root(paths);
-    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    let launcher = paths.recovery_launcher.clone();
     if !medium_launcher_directory_is_protected(&root)? {
         return Err(fail(
             EXIT_REJECTED,
@@ -5887,8 +6022,7 @@ fn clear_legacy_relaunch_values_in_hive(hive: *mut c_void, paths: &Paths) -> Res
     if opened != 0 {
         return Ok(());
     }
-    let launcher =
-        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    let launcher = paths.recovery_launcher.clone();
     let mut index = 0;
     loop {
         let mut name = [0_u16; 512];
@@ -6164,7 +6298,7 @@ fn terminal_final_launcher(paths: &Paths, generation: &str) -> Result<PathBuf> {
 }
 
 fn publish_terminal_final_launcher(paths: &Paths, generation: &str) -> Result<PathBuf> {
-    let source = terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    let source = paths.recovery_launcher.clone();
     let target = terminal_final_launcher(paths, generation)?;
     if !path_present(&target)? {
         let temporary = paths.program_data.join(format!(
@@ -6539,9 +6673,7 @@ fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
     if opened != 0 {
         return Err(fail(EXIT_FAILURE, "Cannot open machine relaunch owner."));
     }
-    let launcher = paths
-        .program_data
-        .join("Talking Quill Update Recovery/talking-quill-update-recovery-launcher.exe");
+    let launcher = paths.recovery_launcher.clone();
     let expected = format!(
         "\"{}\" --windows-update-relaunch-owner-v1",
         launcher.display()
@@ -6667,6 +6799,7 @@ fn collect_finalizer_deletion_paths(path: &Path, output: &mut Vec<PathBuf>) -> R
 fn decode_pending_rename_pairs(data: &[u16]) -> Result<Vec<(String, String)>> {
     let mut pairs = Vec::new();
     let mut cursor = 0;
+    let mut terminated = false;
     while cursor < data.len() {
         let source_start = cursor;
         while cursor < data.len() && data[cursor] != 0 {
@@ -6676,12 +6809,16 @@ fn decode_pending_rename_pairs(data: &[u16]) -> Result<Vec<(String, String)>> {
             return Err(fail(EXIT_REJECTED, "Pending deletion data is truncated."));
         }
         if cursor == source_start {
-            if data[cursor..].iter().any(|value| *value != 0) {
+            let required_terminators = if pairs.is_empty() { 2 } else { 1 };
+            if data.len() - cursor < required_terminators
+                || data[cursor..].iter().any(|value| *value != 0)
+            {
                 return Err(fail(
                     EXIT_REJECTED,
                     "Pending deletion terminator is invalid.",
                 ));
             }
+            terminated = true;
             break;
         }
         let source = String::from_utf16(&data[source_start..cursor])
@@ -6698,6 +6835,12 @@ fn decode_pending_rename_pairs(data: &[u16]) -> Result<Vec<(String, String)>> {
             .map_err(|_| fail(EXIT_REJECTED, "Pending deletion destination is invalid."))?;
         cursor += 1;
         pairs.push((source, destination));
+    }
+    if !terminated {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Pending deletion data lacks its final terminator.",
+        ));
     }
     Ok(pairs)
 }
@@ -6727,18 +6870,22 @@ fn read_pending_rename_pairs(key: HKEY) -> Result<Vec<(String, String)>> {
     {
         return Err(fail(EXIT_FAILURE, "Pending deletion ownership is invalid."));
     }
+    let capacity = bytes;
     let mut data = vec![0_u16; bytes as usize / 2];
     let mut actual = bytes;
+    let mut actual_type = 0_u32;
     if unsafe {
         RegQueryValueExW(
             key,
             wide(OsStr::new(VALUE)).as_ptr(),
             ptr::null_mut(),
-            ptr::null_mut(),
+            &mut actual_type,
             data.as_mut_ptr().cast(),
             &mut actual,
         )
     } != 0
+        || actual_type != REG_MULTI_SZ
+        || actual > capacity
         || !actual.is_multiple_of(2)
     {
         return Err(fail(
@@ -6767,103 +6914,6 @@ fn open_session_manager(access: u32) -> Result<HKEY> {
     } else {
         Ok(key)
     }
-}
-
-fn encode_pending_rename_pairs(pairs: &[(String, String)]) -> Vec<u16> {
-    let mut data = Vec::new();
-    for (source, destination) in pairs {
-        data.extend(source.encode_utf16());
-        data.push(0);
-        data.extend(destination.encode_utf16());
-        data.push(0);
-    }
-    data.push(0);
-    data
-}
-
-fn fixed_pending_target(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_start_matches(r"\\?\")
-        .to_ascii_lowercase()
-}
-
-fn retain_nonfixed_pending_pairs(
-    before: &[(String, String)],
-    fixed: &[String],
-) -> Result<Vec<(String, String)>> {
-    let mut retained = Vec::with_capacity(before.len());
-    for (source, destination) in before {
-        let normalized = normalized_pending_source(source);
-        if fixed.iter().any(|target| target == &normalized) {
-            if !destination.is_empty() {
-                return Err(fail(
-                    EXIT_REJECTED,
-                    "Fixed reinstall deletion ownership is malformed.",
-                ));
-            }
-        } else {
-            retained.push((source.clone(), destination.clone()));
-        }
-    }
-    Ok(retained)
-}
-
-fn retire_fixed_reinstall_deletion_ownership(paths: &Paths) -> Result<()> {
-    let fixed = [
-        fixed_pending_target(&paths.maintenance_uninstaller),
-        fixed_pending_target(
-            &terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe"),
-        ),
-    ];
-    let key = open_session_manager(KEY_READ | KEY_WRITE)?;
-    let before = read_pending_rename_pairs(key)?;
-    let retained = match retain_nonfixed_pending_pairs(&before, &fixed) {
-        Ok(retained) => retained,
-        Err(error) => {
-            unsafe { RegCloseKey(key) };
-            return Err(error);
-        }
-    };
-    if retained == before {
-        unsafe { RegCloseKey(key) };
-        return Ok(());
-    }
-    const VALUE: &str = "PendingFileRenameOperations";
-    let status = if retained.is_empty() {
-        unsafe { RegDeleteValueW(key, wide(OsStr::new(VALUE)).as_ptr()) }
-    } else {
-        let encoded = encode_pending_rename_pairs(&retained);
-        unsafe {
-            RegSetValueExW(
-                key,
-                wide(OsStr::new(VALUE)).as_ptr(),
-                0,
-                REG_MULTI_SZ,
-                encoded.as_ptr().cast(),
-                u32::try_from(encoded.len() * mem::size_of::<u16>())
-                    .map_err(|_| fail(EXIT_FAILURE, "Pending deletion state is too large."))?,
-            )
-        }
-    };
-    let flushed =
-        (status == 0 || retained.is_empty() && status == 2) && unsafe { RegFlushKey(key) } == 0;
-    let after = if flushed {
-        read_pending_rename_pairs(key)
-    } else {
-        Err(fail(
-            EXIT_FAILURE,
-            "Cannot flush fixed reinstall deletion retirement.",
-        ))
-    };
-    unsafe { RegCloseKey(key) };
-    if after? != retained {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Fixed reinstall deletion retirement was not exact.",
-        ));
-    }
-    Ok(())
 }
 
 fn normalized_pending_source(value: &str) -> String {
@@ -7149,6 +7199,10 @@ fn cleanup_transaction_residue(root: &Path) -> Result<()> {
 fn remove_transaction(paths: &Paths) -> Result<()> {
     if paths.transaction.exists() {
         let file = open_plain_handle(&paths.transaction, false, true)?;
+        delete_retained(&file)?;
+    }
+    if paths.maintenance_generation_record.exists() {
+        let file = open_plain_handle(&paths.maintenance_generation_record, false, true)?;
         delete_retained(&file)?;
     }
     Ok(())
@@ -7455,36 +7509,27 @@ mod tests {
         );
         let malformed: Vec<u16> = "source-without-terminator".encode_utf16().collect();
         assert!(decode_pending_rename_pairs(&malformed).is_err());
-    }
-
-    #[test]
-    fn reinstall_removes_only_exact_fixed_pending_deletions() {
-        let fixed = vec![
-            r"c:\program files\talking quill maintenance.exe".into(),
-            r"c:\programdata\talking quill update recovery\talking-quill-update-recovery-launcher.exe"
-                .into(),
-        ];
-        let pairs = vec![
-            (
-                r"\??\C:\Program Files\Talking Quill Maintenance.exe".into(),
-                String::new(),
-            ),
-            (
-                r"\??\C:\ProgramData\.Talking Quill Terminal Relaunch-11111111111111111111111111111111.exe"
-                    .into(),
-                String::new(),
-            ),
-            (r"\??\C:\unrelated.exe".into(), String::new()),
-        ];
+        let mut missing_final = Vec::new();
+        for value in [r"\??\C:\final.exe", ""] {
+            missing_final.extend(value.encode_utf16());
+            missing_final.push(0);
+        }
+        assert!(decode_pending_rename_pairs(&missing_final).is_err());
+        assert!(decode_pending_rename_pairs(&[0]).is_err());
+        assert_eq!(decode_pending_rename_pairs(&[0, 0]).unwrap(), Vec::new());
+        let mut rename = Vec::new();
+        for value in [r"\??\C:\source.exe", r"\??\C:\destination.exe"] {
+            rename.extend(value.encode_utf16());
+            rename.push(0);
+        }
+        rename.push(0);
         assert_eq!(
-            retain_nonfixed_pending_pairs(&pairs, &fixed).unwrap(),
-            pairs[1..]
+            decode_pending_rename_pairs(&rename).unwrap(),
+            vec![(
+                r"\??\C:\source.exe".into(),
+                r"\??\C:\destination.exe".into()
+            )]
         );
-        let attacked = vec![(
-            r"\??\C:\Program Files\Talking Quill Maintenance.exe".into(),
-            r"\??\C:\attacker.exe".into(),
-        )];
-        assert!(retain_nonfixed_pending_pairs(&attacked, &fixed).is_err());
     }
 
     #[test]
@@ -7633,7 +7678,7 @@ mod tests {
             std::env::temp_dir().join(format!("tq-relocated-source-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir(&root).unwrap();
-        let maintenance = root.join("Talking Quill Maintenance.exe");
+        let maintenance = root.join(format!("Talking Quill Maintenance-{suffix}.exe"));
         let installed = root.join("Uninstall Talking Quill.exe");
         let relocated = std::env::temp_dir().join(format!(".TalkingQuill-uninstall-{suffix}.exe"));
         let _ = fs::remove_file(&relocated);
@@ -7743,7 +7788,13 @@ mod tests {
             staging: root.join("staging"),
             backup: root.join("backup"),
             transaction: root.join("transaction.json"),
-            maintenance_uninstaller: root.join("Talking Quill Maintenance.exe"),
+            maintenance_generation_record: root.join("maintenance-generation-v1"),
+            maintenance_uninstaller: root
+                .join(format!("Talking Quill Maintenance-{}.exe", "11".repeat(16))),
+            recovery_launcher: root.join(format!(
+                "Talking Quill Update Recovery/talking-quill-update-recovery-launcher-{}.exe",
+                "11".repeat(16)
+            )),
             profile: root.join("profile"),
             legacy_authority: root.join("legacy"),
             legacy_quarantine: root.join("quarantine"),

@@ -74,6 +74,7 @@ const MEDIUM_LAUNCHER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;
 const RETRY_COUNTER_SDDL: &str =
     "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120089;;;AU)(A;;0x00000004;;;AU)";
 const RECOVERY_LAUNCHER_NAME: &str = "talking-quill-update-recovery-launcher.exe";
+const RECOVERY_LAUNCHER_PUBLISHED_PREFIX: &str = "talking-quill-update-recovery-launcher-";
 const RECOVERY_LAUNCHER_IDENTITY_NAME: &str = "launcher-tree-identity-v1";
 const RECOVERY_LAUNCHER_PENDING_PREFIX: &str = ".Talking Quill.update-launcher-pending-";
 const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
@@ -698,6 +699,25 @@ fn clear_legacy_relaunch_owner(generation: &str) -> Result<(), i32> {
     Ok(())
 }
 
+fn maintenance_path_from_command(command: &str) -> Result<PathBuf, i32> {
+    let path = command
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .map(PathBuf::from)
+        .ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+    let valid_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix("Talking Quill Maintenance-"))
+        .and_then(|value| value.strip_suffix(".exe"))
+        .is_some_and(|generation| validate_generation(generation).is_ok());
+    if path.parent() != Some(program_files.as_path()) || !valid_name {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(path)
+}
+
 fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     let root = medium_launcher_directory()?;
     let path = root.join(TERMINAL_UNINSTALL_RECORD_NAME);
@@ -719,7 +739,7 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     }
     let record: TerminalUninstallRecord =
         serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+    let maintenance = maintenance_path_from_command(&record.uninstall_command)?;
     let uninstall_command = format!("\"{}\"", maintenance.display());
     if record.schema_version != 3
         || validate_generation(&record.generation).is_err()
@@ -768,9 +788,6 @@ fn journal_owned_terminal_maintenance() -> Result<Option<PathBuf>, i32> {
     {
         return Ok(None);
     }
-    let maintenance = program_files.join("Talking Quill Maintenance.exe");
-    let retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    drop(retained);
     let mut key = std::ptr::null_mut();
     if unsafe {
         RegOpenKeyExW(
@@ -787,12 +804,15 @@ fn journal_owned_terminal_maintenance() -> Result<Option<PathBuf>, i32> {
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    let expected = format!("\"{}\" /S", maintenance.display());
-    let quiet = read_registry_string(key, "QuietUninstallString");
+    let quiet = read_registry_string(key, "QuietUninstallString")?;
     unsafe { RegCloseKey(key) };
-    if quiet?.as_deref() != Some(expected.as_str()) {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
+    let maintenance = quiet
+        .as_deref()
+        .and_then(|value| value.strip_suffix(" /S"))
+        .ok_or(EXIT_IDENTITY_MISMATCH)
+        .and_then(maintenance_path_from_command)?;
+    let retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    drop(retained);
     Ok(Some(maintenance))
 }
 
@@ -800,8 +820,7 @@ fn run_machine_relaunch_owner() -> Result<u32, i32> {
     let machine_lifecycle = RecoveryStateLock::acquire()?;
     verify_machine_relaunch_owner()?;
     if let Some(record) = terminal_uninstall_record()? {
-        let maintenance =
-            known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+        let maintenance = maintenance_path_from_command(&record.uninstall_command)?;
         if !maintenance.exists()
             && matches!(
                 record.phase.as_str(),
@@ -1600,8 +1619,7 @@ fn finish_terminal_without_maintenance() -> Result<(), i32> {
 fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
     let program_data = known_folder(&FOLDERID_ProgramData)?;
     let mut tombstones = Vec::new();
-    let mut maintenance_hash = None;
-    let mut authenticated_empty_tombstone = false;
+    let mut maintenance_images = Vec::new();
     for entry in std::fs::read_dir(&program_data).map_err(|_| EXIT_LAUNCH_FAILED)? {
         let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1624,7 +1642,6 @@ fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
                 return Err(EXIT_IDENTITY_MISMATCH);
             }
             let record_path = path.join("terminal-uninstall-record-v1.json");
-            let launcher = path.join("talking-quill-update-recovery-launcher.exe");
             let mut inventory = std::fs::read_dir(&path)
                 .map_err(|_| EXIT_LAUNCH_FAILED)?
                 .map(|entry| {
@@ -1635,18 +1652,22 @@ fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
                 .collect::<Result<Vec<_>, _>>()?;
             inventory.sort();
             if record_path.exists() {
-                let mut pre_content = vec![
+                let launcher_names = inventory
+                    .iter()
+                    .filter(|name| {
+                        name.strip_prefix(RECOVERY_LAUNCHER_PUBLISHED_PREFIX)
+                            .and_then(|value| value.strip_suffix(".exe"))
+                            .is_some_and(|value| validate_generation(value).is_ok())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut expected = vec![
                     "launcher-tree-identity-v1".to_owned(),
-                    "talking-quill-update-recovery-launcher.exe".to_owned(),
                     "terminal-uninstall-record-v1.json".to_owned(),
                 ];
-                pre_content.sort();
-                let mut post_content = vec![
-                    "launcher-tree-identity-v1".to_owned(),
-                    "terminal-uninstall-record-v1.json".to_owned(),
-                ];
-                post_content.sort();
-                if inventory != pre_content && inventory != post_content {
+                expected.extend(launcher_names.iter().cloned());
+                expected.sort();
+                if inventory != expected {
                     return Err(EXIT_IDENTITY_MISMATCH);
                 }
                 let record: TerminalUninstallRecord = serde_json::from_slice(
@@ -1664,10 +1685,13 @@ fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
                 {
                     return Err(EXIT_IDENTITY_MISMATCH);
                 }
-                maintenance_hash =
-                    Some(decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?);
-                if launcher.exists() {
-                    std::fs::remove_file(&launcher).map_err(|_| EXIT_LAUNCH_FAILED)?;
+                maintenance_images.push((
+                    maintenance_path_from_command(&record.uninstall_command)?,
+                    decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?,
+                ));
+                for launcher_name in launcher_names {
+                    std::fs::remove_file(path.join(launcher_name))
+                        .map_err(|_| EXIT_LAUNCH_FAILED)?;
                 }
                 std::fs::remove_file(&record_path).map_err(|_| EXIT_LAUNCH_FAILED)?;
             } else {
@@ -1685,7 +1709,6 @@ fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
                 {
                     return Err(EXIT_IDENTITY_MISMATCH);
                 }
-                authenticated_empty_tombstone = true;
             }
             std::fs::remove_file(&marker).map_err(|_| EXIT_LAUNCH_FAILED)?;
             tombstones.push(path.clone());
@@ -1694,23 +1717,20 @@ fn cleanup_terminal_recovery_tombstones() -> Result<Vec<PathBuf>, i32> {
             .next()
             .is_none()
         {
-            authenticated_empty_tombstone = true;
             tombstones.push(path.clone());
         } else {
             return Err(EXIT_IDENTITY_MISMATCH);
         }
     }
-    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
-    if maintenance.exists() {
-        if let Some(expected) = maintenance_hash {
-            let mut file = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-            if hash_file(&mut file).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected {
-                return Err(EXIT_IDENTITY_MISMATCH);
-            }
-            drop(file);
-        } else if !authenticated_empty_tombstone {
+    for (maintenance, expected) in maintenance_images {
+        if !maintenance.exists() {
+            continue;
+        }
+        let mut file = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut file).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected {
             return Err(EXIT_IDENTITY_MISMATCH);
         }
+        drop(file);
         let metadata = std::fs::symlink_metadata(&maintenance).map_err(|_| EXIT_LAUNCH_FAILED)?;
         if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(EXIT_IDENTITY_MISMATCH);
@@ -1727,6 +1747,48 @@ fn normalized_pending_delete_source(value: &str) -> String {
         .or_else(|| replaced.strip_prefix(r"\\?\"))
         .unwrap_or(&replaced)
         .to_ascii_lowercase()
+}
+
+fn decode_pending_delete_pairs(data: &[u16]) -> Result<Vec<(String, String)>, i32> {
+    let mut pairs = Vec::new();
+    let mut cursor = 0;
+    let mut terminated = false;
+    while cursor < data.len() {
+        let source_start = cursor;
+        while cursor < data.len() && data[cursor] != 0 {
+            cursor += 1;
+        }
+        if cursor == data.len() {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        if cursor == source_start {
+            let required = if pairs.is_empty() { 2 } else { 1 };
+            if data.len() - cursor < required || data[cursor..].iter().any(|value| *value != 0) {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            terminated = true;
+            break;
+        }
+        let source =
+            String::from_utf16(&data[source_start..cursor]).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        cursor += 1;
+        let destination_start = cursor;
+        while cursor < data.len() && data[cursor] != 0 {
+            cursor += 1;
+        }
+        if cursor == data.len() {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        let destination = String::from_utf16(&data[destination_start..cursor])
+            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        cursor += 1;
+        pairs.push((source, destination));
+    }
+    if terminated {
+        Ok(pairs)
+    } else {
+        Err(EXIT_IDENTITY_MISMATCH)
+    }
 }
 
 fn pending_delete_owned(path: &Path) -> Result<bool, i32> {
@@ -1759,50 +1821,51 @@ fn pending_delete_owned(path: &Path) -> Result<bool, i32> {
             &mut bytes,
         )
     };
-    if queried != 0 || value_type != REG_MULTI_SZ || bytes == 0 || bytes > 1024 * 1024 {
+    if queried == 2 {
         unsafe { RegCloseKey(key) };
         return Ok(false);
     }
+    if queried != 0
+        || value_type != REG_MULTI_SZ
+        || bytes == 0
+        || bytes > 1024 * 1024
+        || !bytes.is_multiple_of(2)
+    {
+        unsafe { RegCloseKey(key) };
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let capacity = bytes;
+    let mut actual = bytes;
+    let mut actual_type = 0_u32;
     let mut data = vec![0_u16; bytes as usize / 2];
     if unsafe {
         RegQueryValueExW(
             key,
             name.as_ptr(),
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut actual_type,
             data.as_mut_ptr().cast(),
-            &mut bytes,
+            &mut actual,
         )
     } != 0
+        || actual_type != REG_MULTI_SZ
+        || actual > capacity
+        || !actual.is_multiple_of(2)
     {
         unsafe { RegCloseKey(key) };
         return Err(EXIT_LAUNCH_FAILED);
     }
     unsafe { RegCloseKey(key) };
-    data.truncate(bytes as usize / 2);
-    let mut strings = Vec::new();
-    let mut start = 0;
-    for index in 0..data.len() {
-        if data[index] == 0 {
-            if index == start && data[index..].iter().all(|value| *value == 0) {
-                break;
-            }
-            strings
-                .push(String::from_utf16(&data[start..index]).map_err(|_| EXIT_IDENTITY_MISMATCH)?);
-            start = index + 1;
-        }
-    }
-    if !strings.len().is_multiple_of(2) {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
+    data.truncate(actual as usize / 2);
+    let pairs = decode_pending_delete_pairs(&data)?;
     let expected = path
         .to_string_lossy()
         .replace('/', "\\")
         .trim_start_matches(r"\\?\")
         .to_ascii_lowercase();
-    Ok(strings
-        .chunks_exact(2)
-        .any(|pair| pair[1].is_empty() && normalized_pending_delete_source(&pair[0]) == expected))
+    Ok(pairs.iter().any(|(source, destination)| {
+        destination.is_empty() && normalized_pending_delete_source(source) == expected
+    }))
 }
 
 fn schedule_and_verify_pending_delete(path: &Path) -> Result<(), i32> {
@@ -2838,6 +2901,20 @@ fn apply_restricted_dacl(path: &Path, sddl: &str) -> Result<(), i32> {
     Ok(())
 }
 
+fn published_recovery_launcher_name(source: &File, source_hash: [u8; 32]) -> Result<String, i32> {
+    let mut digest = Sha256::new();
+    digest.update(source_hash);
+    digest.update(file_identity_text(source)?.as_bytes());
+    let hash = digest.finalize();
+    let generation = hash[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "{RECOVERY_LAUNCHER_PUBLISHED_PREFIX}{generation}.exe"
+    ))
+}
+
 fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
     let source = installed_helper
         .parent()
@@ -2845,11 +2922,17 @@ fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
         .join(RECOVERY_LAUNCHER_NAME);
     let mut source_file = open_locked(&source).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     let source_hash = hash_file(&mut source_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let published_name = published_recovery_launcher_name(&source_file, source_hash)?;
     let directory = medium_launcher_directory()?;
     reclaim_incomplete_launcher_directories(directory.parent().ok_or(EXIT_IDENTITY_MISMATCH)?)?;
     if !directory.exists() {
-        publish_medium_launcher_directory(&directory, &mut source_file, source_hash)?;
-        return Ok(directory.join(RECOVERY_LAUNCHER_NAME));
+        publish_medium_launcher_directory(
+            &directory,
+            &mut source_file,
+            source_hash,
+            &published_name,
+        )?;
+        return Ok(directory.join(&published_name));
     }
     let metadata = std::fs::symlink_metadata(&directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if !metadata.is_dir()
@@ -2880,7 +2963,7 @@ fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
             .and_then(|_| identity_file.sync_all())
             .map_err(|_| EXIT_LAUNCH_FAILED)?;
     }
-    let target = directory.join(RECOVERY_LAUNCHER_NAME);
+    let target = directory.join(&published_name);
     if target.exists() {
         let mut existing = open_locked(&target).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
         if hash_file(&mut existing).map_err(|_| EXIT_IDENTITY_MISMATCH)? == source_hash
@@ -2889,10 +2972,7 @@ fn ensure_medium_launcher(installed_helper: &Path) -> Result<PathBuf, i32> {
             return Ok(target);
         }
     }
-    let temporary = directory.join(format!(
-        ".{RECOVERY_LAUNCHER_NAME}.tmp-{}",
-        std::process::id()
-    ));
+    let temporary = directory.join(format!(".{published_name}.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&temporary);
     let mut output = OpenOptions::new()
         .write(true)
@@ -2935,6 +3015,7 @@ fn publish_medium_launcher_directory(
     directory: &Path,
     source_file: &mut File,
     source_hash: [u8; 32],
+    published_name: &str,
 ) -> Result<(), i32> {
     let parent = directory.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
     let token = new_recovery_generation()?;
@@ -2955,7 +3036,7 @@ fn publish_medium_launcher_directory(
             .write_all(identity.as_bytes())
             .and_then(|_| marker_file.sync_all())
             .map_err(|_| EXIT_LAUNCH_FAILED)?;
-        let launcher = pending.join(RECOVERY_LAUNCHER_NAME);
+        let launcher = pending.join(published_name);
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -3048,8 +3129,55 @@ fn medium_launcher_directory() -> Result<PathBuf, i32> {
     Ok(known_folder(&FOLDERID_ProgramData)?.join("Talking Quill Update Recovery"))
 }
 
+fn valid_published_recovery_launcher(path: &Path, directory: &Path) -> bool {
+    path.parent() == Some(directory)
+        && path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.strip_prefix(RECOVERY_LAUNCHER_PUBLISHED_PREFIX))
+            .and_then(|value| value.strip_suffix(".exe"))
+            .is_some_and(|generation| {
+                generation.len() == 32
+                    && generation
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+}
+
 fn medium_launcher_path() -> Result<PathBuf, i32> {
-    Ok(medium_launcher_directory()?.join(RECOVERY_LAUNCHER_NAME))
+    let directory = medium_launcher_directory()?;
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if valid_published_recovery_launcher(&current, &directory) {
+        return Ok(current);
+    }
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RUN_ONCE_KEY))?.as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let command = read_registry_string(key, RELAUNCH_RUN_VALUE)?;
+    unsafe { RegCloseKey(key) };
+    let Some(path) = command
+        .as_deref()
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix("\" --windows-update-relaunch-owner-v1"))
+        .map(PathBuf::from)
+    else {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    };
+    if valid_published_recovery_launcher(&path, &directory) {
+        Ok(path)
+    } else {
+        Err(EXIT_IDENTITY_MISMATCH)
+    }
 }
 
 fn recovery_binding_path(generation: &str) -> Result<PathBuf, i32> {
@@ -4688,11 +4816,44 @@ mod tests {
         RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
         UpdatePredecessor, UpdateRole, authorization_transcript, canonical_candidate_layout,
         create_directory_with_sddl, create_restricted_directory, decode_base64,
-        publish_relaunch_record, read_persisted_relaunch_record,
+        decode_pending_delete_pairs, publish_relaunch_record, read_persisted_relaunch_record,
         reclaim_incomplete_launcher_directories, reclaim_incomplete_recovery_directories,
         recovery_value_name, remove_relaunch_record_directory, validate_generation,
         write_persisted_relaunch_record,
     };
+    #[test]
+    fn pending_delete_pairs_preserve_final_empty_destinations_and_terminators() {
+        let encode = |values: &[&str], final_terminator: bool| {
+            let mut data = Vec::new();
+            for value in values {
+                data.extend(value.encode_utf16());
+                data.push(0);
+            }
+            if final_terminator {
+                data.push(0);
+            }
+            data
+        };
+        assert_eq!(
+            decode_pending_delete_pairs(&encode(&[r"\??\C:\old.exe", ""], true)).unwrap(),
+            vec![(r"\??\C:\old.exe".into(), String::new())]
+        );
+        assert_eq!(
+            decode_pending_delete_pairs(&encode(
+                &[r"\??\C:\a.exe", "", r"\??\C:\b.exe", r"\??\C:\c.exe"],
+                true,
+            ))
+            .unwrap(),
+            vec![
+                (r"\??\C:\a.exe".into(), String::new()),
+                (r"\??\C:\b.exe".into(), r"\??\C:\c.exe".into()),
+            ]
+        );
+        assert!(decode_pending_delete_pairs(&encode(&[r"\??\C:\old.exe", ""], false)).is_err());
+        assert!(decode_pending_delete_pairs(&[0]).is_err());
+        assert_eq!(decode_pending_delete_pairs(&[0, 0]).unwrap(), Vec::new());
+    }
+
     #[test]
     fn relaunch_record_marker_and_each_phase_are_power_loss_safe() {
         let generation = super::new_recovery_generation().unwrap();

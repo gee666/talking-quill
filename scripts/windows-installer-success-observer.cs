@@ -119,11 +119,14 @@ internal static class SuccessfulSetupObserver
             string owner = Path.Combine(installedRoot, @"resources\helper\talking-quill-keyboard-owner.exe");
             bool installedIdentityBound = File.Exists(gateway) && File.Exists(owner) &&
                 Hash(gateway) == package["gatewaySha256"] && Hash(owner) == package["ownerSha256"];
-            string maintenance = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Talking Quill Maintenance.exe");
+            string maintenance = null;
             bool registrationsExact = false, appPathExact = false;
             using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill")) {
-                registrationsExact = key != null && Convert.ToString(key.GetValue("UninstallString")) == "\"" + maintenance + "\"" &&
-                    Convert.ToString(key.GetValue("QuietUninstallString")) == "\"" + maintenance + "\" /S";
+                string quiet = key == null ? "" : Convert.ToString(key.GetValue("QuietUninstallString"));
+                Match maintenanceMatch = Regex.Match(quiet, "^\\\"(.+\\\\Talking Quill Maintenance-[0-9a-f]{32}\\.exe)\\\" /S$", RegexOptions.CultureInvariant);
+                maintenance = maintenanceMatch.Success ? maintenanceMatch.Groups[1].Value : null;
+                registrationsExact = maintenance != null && File.Exists(maintenance) &&
+                    Convert.ToString(key.GetValue("UninstallString")) == "\"" + maintenance + "\"";
             }
             using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe")) {
                 appPathExact = key != null && Convert.ToString(key.GetValue("")) == Path.Combine(installedRoot, "Talking Quill.exe") &&
