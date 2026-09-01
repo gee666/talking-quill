@@ -93,17 +93,64 @@ function validateProductionInterruptions(value, arch) {
     throw new Error(`${arch} production interruption evidence is invalid`);
 }
 
+const TERMINAL_FAULT_PHASES = [
+  'failure-action-restart',
+  'post-delete-pre-image-removal',
+  'post-final-launcher-ownership',
+  'post-final-launcher-posix-delete',
+  'post-journal-removal',
+  'post-machine-relaunch-owner-clear',
+  'post-maintenance-deletion-ownership',
+  'post-maintenance-posix-delete',
+  'post-record-pre-start',
+  'post-root-tombstone-rename',
+  'post-service-pre-record',
+  'post-tombstone-content-removal',
+  'post-tombstone-marker-removal',
+  'post-tombstone-removal',
+  'post-uninstall-unregister',
+  'pre-CreateService',
+  'pre-machine-relaunch-owner-clear',
+  'pre-maintenance-deletion-ownership',
+  'reboot-pending-delete',
+  'service-stopped-pre-DeleteService',
+].sort();
+
 function validateTerminalCleanup(value, arch) {
-  exactObject(value, ['inspected', 'residue', 'registry'], `${arch} terminal cleanup evidence`);
+  exactObject(
+    value,
+    ['acceptanceSetupSha256', 'inspected', 'residue', 'registry', 'scenarios'],
+    `${arch} terminal cleanup evidence`,
+  );
+  const phases = value.scenarios?.map(({ phase }) => phase);
   if (
     value.inspected !== true ||
+    !/^[0-9a-f]{64}$/u.test(value.acceptanceSetupSha256) ||
+    !Array.isArray(value.scenarios) ||
+    value.scenarios.some(
+      (scenario) =>
+        Object.keys(scenario).sort().join(',') !==
+          'acceptanceSetupSha256,installedUninstallerSha256,isolated,phase,recovered' ||
+        scenario.acceptanceSetupSha256 !== value.acceptanceSetupSha256 ||
+        scenario.installedUninstallerSha256 !== value.acceptanceSetupSha256 ||
+        scenario.isolated !== true ||
+        scenario.recovered !== true,
+    ) ||
+    new Set(phases).size !== phases.length ||
+    [...phases].sort().join(',') !== TERMINAL_FAULT_PHASES.join(',') ||
     !Array.isArray(value.residue) ||
     value.residue.length !== 0 ||
     !Array.isArray(value.registry) ||
     value.registry.length !== 0
   )
     throw new Error(`${arch} terminal cleanup evidence is invalid`);
-  return { inspected: true, residue: [], registry: [] };
+  return {
+    acceptanceSetupSha256: value.acceptanceSetupSha256,
+    inspected: true,
+    scenarios: value.scenarios,
+    residue: [],
+    registry: [],
+  };
 }
 
 function validateSuccess(value, arch, operation, action) {

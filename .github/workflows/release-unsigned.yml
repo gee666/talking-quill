@@ -245,12 +245,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-setup.mjs ${{ matrix.arch }}
-          mkdir -p tmp/windows-fault-artifacts/${{ matrix.arch }}
+          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-acceptance-fault-setup.mjs ${{ matrix.arch }}
+          mkdir -p tmp/windows-fault-artifacts/${{ matrix.arch }} tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}
           for phase in staged prepared predecessorMoved publishing publishedBeforePersist published registered committed legacyRetiring legacyRetired; do
             TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE="$phase" node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
             mv release/Talking-Quill-*-repair-"$phase".exe tmp/windows-fault-artifacts/${{ matrix.arch }}/
           done
+          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE=terminalAcceptance node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
+          mv release/Talking-Quill-*-repair-terminalAcceptance.exe tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/
           # Fault-bearing packages are diagnostics only; successful repair is exercised with
           # an exact copy of the installed production image in the lifecycle job.
       # Transfer the provenance-bound bytes to the architecture-native smoke
@@ -271,6 +273,7 @@ jobs:
             tmp/release-upload/release-manifest.json
             release/${{ matrix.unpacked }}/**
             tmp/windows-fault-artifacts/${{ matrix.arch }}/*.exe
+            tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -494,6 +497,13 @@ jobs:
             @{ schemaVersion = $staleSchema; generation = $staleGeneration; request = '--windows-update-bootstrap-v2=dGVzdA=='; nonce = ('11' * 16); sourceVersion = '0.0.69'; targetVersion = '0.0.70'; phase = 'armed'; completedVersion = $null } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $staleRoot 'relaunch-record-v1.json') -Encoding utf8
             New-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "Talking Quill Update Relaunch $staleGeneration" -Value ('"' + $recoveryLauncher + '" --windows-update-relaunch-v1=' + $staleGeneration) -PropertyType String -Force | Out-Null
           }
+          $terminalAcceptanceSetups = @(Get-ChildItem 'preserved/tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/Talking-Quill-*-repair-terminalAcceptance.exe')
+          if ($terminalAcceptanceSetups.Count -ne 1) { throw 'Expected one isolated nonpromotable terminal acceptance setup.' }
+          $terminalAcceptanceSetup = $terminalAcceptanceSetups[0].FullName
+          $terminalAcceptanceHash = (Get-FileHash -LiteralPath $terminalAcceptanceSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($terminalAcceptanceHash -ceq $repairHash) { throw 'Terminal acceptance setup was not built separately from production.' }
+          $recoveryLauncherHash = (Get-FileHash -LiteralPath $recoveryLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
+          $terminalFaultEvidence = @()
           $terminalFaults = @(
             'pre-CreateService',
             'post-service-pre-record',
@@ -501,9 +511,29 @@ jobs:
             'failure-action-restart',
             'service-stopped-pre-DeleteService',
             'post-delete-pre-image-removal',
-            'reboot-pending-delete'
+            'reboot-pending-delete',
+            'pre-maintenance-deletion-ownership',
+            'post-maintenance-deletion-ownership',
+            'post-final-launcher-ownership',
+            'post-uninstall-unregister',
+            'post-journal-removal',
+            'post-root-tombstone-rename',
+            'post-tombstone-content-removal',
+            'post-tombstone-marker-removal',
+            'post-tombstone-removal',
+            'post-maintenance-posix-delete',
+            'post-final-launcher-posix-delete',
+            'pre-machine-relaunch-owner-clear',
+            'post-machine-relaunch-owner-clear'
           )
           foreach ($terminalFault in $terminalFaults) {
+            $baselineUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
+            if (-not (Test-Path -LiteralPath $baselineUninstaller) -or (Get-FileHash -LiteralPath $baselineUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $repairHash) { throw "Terminal scenario did not start from the exact production baseline at $terminalFault" }
+            if (@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue).Count -ne 0 -or (Test-Path -LiteralPath "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json")) { throw "Terminal scenario inherited active cleanup authority at $terminalFault" }
+            $acceptanceInstall = Start-Process -FilePath $terminalAcceptanceSetup -ArgumentList '/S' -Wait -PassThru
+            if ($acceptanceInstall.ExitCode -ne 0) { throw "Isolated terminal acceptance setup failed at $terminalFault: $($acceptanceInstall.ExitCode)" }
+            $installedAcceptanceUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
+            if ((Get-FileHash -LiteralPath $installedAcceptanceUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $terminalAcceptanceHash) { throw "Installed terminal acceptance uninstaller hash mismatch at $terminalFault" }
             Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
             New-Item -Path 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Force | Out-Null
             New-ItemProperty -LiteralPath 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Name Phase -Value $terminalFault -PropertyType String -Force | Out-Null
@@ -513,15 +543,20 @@ jobs:
               $maintenancePath = "$env:ProgramFiles\Talking Quill Maintenance.exe"
               $maintenanceQuiet = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString -ErrorAction SilentlyContinue
               $maintenanceHash = if (Test-Path -LiteralPath $maintenancePath) { (Get-FileHash -LiteralPath $maintenancePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
-              $callableMaintenance = ($maintenanceQuiet -ceq ('"' + $maintenancePath + '" /S')) -and ($maintenanceHash -ceq $repairHash)
+              $callableMaintenance = ($maintenanceQuiet -ceq ('"' + $maintenancePath + '" /S')) -and ($maintenanceHash -ceq $terminalAcceptanceHash)
               $terminalServiceCandidates = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'TalkingQuillTerminalCleanup-%'" -ErrorAction SilentlyContinue | Where-Object { $_.StartMode -ceq 'Auto' -and $_.StartName -ceq 'LocalSystem' -and $_.PathName -cmatch '^"(.+\.Talking Quill Terminal Cleanup-[0-9a-f]{32}\.exe)" /TQ-TERMINAL-SERVICE=[0-9a-f]{32}$' })
               $autoTerminalService = $terminalServiceCandidates.Count -eq 1
               if ($autoTerminalService) {
                 $serviceImage = [regex]::Match($terminalServiceCandidates[0].PathName, '^"(.+\.exe)"').Groups[1].Value
-                $autoTerminalService = (Test-Path -LiteralPath $serviceImage) -and ((Get-FileHash -LiteralPath $serviceImage -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $repairHash)
+                $autoTerminalService = (Test-Path -LiteralPath $serviceImage) -and ((Get-FileHash -LiteralPath $serviceImage -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $terminalAcceptanceHash)
               }
-              if (-not $callableMaintenance -and -not $autoTerminalService) { throw "Terminal fault retained no authenticated callable authority at $terminalFault" }
+              $machineOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
+              $machineOwnerMatch = if ($null -ne $machineOwnerCommand) { [regex]::Match($machineOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$') } else { $null }
+              $authenticatedMachineOwner = $null -ne $machineOwnerMatch -and $machineOwnerMatch.Success -and (Test-Path -LiteralPath $machineOwnerMatch.Groups[1].Value) -and ((Get-FileHash -LiteralPath $machineOwnerMatch.Groups[1].Value -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $recoveryLauncherHash)
+              $terminalWorkCommitted = $terminalFault -in @('post-final-launcher-posix-delete', 'pre-machine-relaunch-owner-clear', 'post-machine-relaunch-owner-clear')
+              if (-not $callableMaintenance -and -not $autoTerminalService -and -not $authenticatedMachineOwner -and -not $terminalWorkCommitted) { throw "Terminal fault retained no authenticated callable authority at $terminalFault" }
             }
+            $recoveredBySetup = $false
             if ($terminalFault -ceq 'failure-action-restart') {
               if ($faultedUninstall.ExitCode -ne 0) { throw "Terminal service failure action did not recover: $($faultedUninstall.ExitCode)" }
             } elseif ($terminalFault -ceq 'reboot-pending-delete') {
@@ -539,20 +574,37 @@ jobs:
                 }
               }
               Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -Value $retainedPendingRename.ToArray() -Type MultiString
-              $terminalResume = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
+              $resumeOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
+              $resumeOwnerPath = if ($null -ne $resumeOwnerCommand) { [regex]::Match($resumeOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$').Groups[1].Value } else { $null }
+              $terminalResume = if ($null -ne $resumeOwnerPath -and (Test-Path -LiteralPath $resumeOwnerPath)) { Start-Process -FilePath $resumeOwnerPath -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru } else { Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru }
               if ($terminalResume.ExitCode -ne 0) { throw "Pending-delete terminal owner recovery failed: $($terminalResume.ExitCode)" }
             } else {
               if ($faultedUninstall.ExitCode -ne 197) { throw "Terminal fault did not interrupt at $terminalFault: $($faultedUninstall.ExitCode)" }
-              $terminalResume = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
-              if ($terminalResume.ExitCode -ne 0) { throw "Terminal owner recovery failed at $terminalFault: $($terminalResume.ExitCode)" }
+              $resumeOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
+              $resumeOwnerPath = if ($null -ne $resumeOwnerCommand) { [regex]::Match($resumeOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$').Groups[1].Value } else { $null }
+              if ($terminalFault -cne 'post-machine-relaunch-owner-clear') {
+                if ($null -eq $resumeOwnerPath -or -not (Test-Path -LiteralPath $resumeOwnerPath)) { throw "Terminal fault lost its machine recovery owner at $terminalFault" }
+                $terminalResume = Start-Process -FilePath $resumeOwnerPath -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
+                if ($terminalResume.ExitCode -ne 0) { throw "Terminal owner recovery failed at $terminalFault: $($terminalResume.ExitCode)" }
+              }
             }
             $terminalRecoveryDeadline = (Get-Date).AddSeconds(240)
-            while ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") -and (Get-Date) -lt $terminalRecoveryDeadline) { Start-Sleep -Milliseconds 250 }
-            if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw "Terminal owner recovery timed out at $terminalFault" }
+            do {
+              $terminalMaintenanceRemains = -not $recoveredBySetup -and (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe")
+              $pendingTerminalState = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+              $terminalTombstonesRemain = @(Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill.recovery-tombstone-*' | Where-Object { @($pendingTerminalState) -notcontains ('\??\' + $_.FullName) }).Count -ne 0
+              $terminalRunRemains = $null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)
+              if (-not $terminalMaintenanceRemains -and -not $terminalTombstonesRemain -and -not $terminalRunRemains) { break }
+              Start-Sleep -Milliseconds 250
+            } while ((Get-Date) -lt $terminalRecoveryDeadline)
+            if ($terminalMaintenanceRemains -or $terminalTombstonesRemain -or $terminalRunRemains) { throw "Terminal owner recovery timed out at $terminalFault" }
             if (@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue).Count -ne 0) { throw "Terminal service remained after $terminalFault" }
             if (@(Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill Terminal Cleanup-*.exe').Count -ne 0) { throw "Terminal image remained after $terminalFault" }
-            $terminalRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
-            if ($terminalRepair.ExitCode -ne 0) { throw "Terminal fault reinstall failed at $terminalFault: $($terminalRepair.ExitCode)" }
+            $terminalFaultEvidence += @{ phase = $terminalFault; acceptanceSetupSha256 = $terminalAcceptanceHash; installedUninstallerSha256 = $terminalAcceptanceHash; isolated = $true; recovered = $true }
+            if (-not $recoveredBySetup) {
+              $terminalRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
+              if ($terminalRepair.ExitCode -ne 0) { throw "Terminal fault reinstall failed at $terminalFault: $($terminalRepair.ExitCode)" }
+            }
           }
           Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
           $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -PassThru
@@ -578,6 +630,11 @@ jobs:
           if (-not $normalRelocated) { throw 'Normal uninstall did not execute through one relocated worker.' }
           if (-not $terminalOwnerObserved) { throw 'Terminal uninstall did not publish a durable launcher-owned record.' }
           if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
+          $pendingTerminalDeletion = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+          $osOwnedTerminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Relaunch-*.exe' })
+          foreach ($ownedResidue in $osOwnedTerminalResidue) {
+            if (-not (@($pendingTerminalDeletion) -contains ('\??\' + $ownedResidue.FullName))) { throw "Terminal residue lacks exact reboot deletion ownership: $($ownedResidue.FullName)" }
+          }
           $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
           $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
           $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
@@ -594,7 +651,7 @@ jobs:
           }
           if ($terminalResidue.Count -ne 0 -or $terminalRegistry.Count -ne 0) { throw 'Synchronous uninstall retained protected recovery residue.' }
           $faultDocument = Get-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
-          $faultDocument | Add-Member -NotePropertyName terminalCleanup -NotePropertyValue @{ inspected = $true; residue = @($terminalResidue); registry = @($terminalRegistry) }
+          $faultDocument | Add-Member -NotePropertyName terminalCleanup -NotePropertyValue @{ inspected = $true; acceptanceSetupSha256 = $terminalAcceptanceHash; scenarios = @($terminalFaultEvidence); residue = @($terminalResidue); registry = @($terminalRegistry) }
           $faultDocument | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
 
       - name: Upload successful authenticated lifecycle evidence
@@ -836,6 +893,7 @@ jobs:
           node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --public-key build/windows-promotion-public-key.sec1 --update-public-key build/windows-update-public-key.sec1
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
+          if find release-artifacts -type f -name '*terminalAcceptance*' | grep -q .; then echo 'Nonpromotable terminal acceptance setup entered release assembly.' >&2; exit 1; fi
           node --input-type=module - <<'NODE'
           import fs from 'node:fs';
           import crypto from 'node:crypto';

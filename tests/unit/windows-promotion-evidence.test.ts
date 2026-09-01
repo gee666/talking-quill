@@ -12,6 +12,28 @@ const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(removeTestDirectory)));
 const sha = (byte: string) => byte.repeat(64);
 const source = (byte: string) => byte.repeat(40);
+const terminalFaultPhases = [
+  'pre-CreateService',
+  'post-service-pre-record',
+  'post-record-pre-start',
+  'failure-action-restart',
+  'service-stopped-pre-DeleteService',
+  'post-delete-pre-image-removal',
+  'reboot-pending-delete',
+  'pre-maintenance-deletion-ownership',
+  'post-maintenance-deletion-ownership',
+  'post-final-launcher-ownership',
+  'post-uninstall-unregister',
+  'post-journal-removal',
+  'post-root-tombstone-rename',
+  'post-tombstone-content-removal',
+  'post-tombstone-marker-removal',
+  'post-tombstone-removal',
+  'post-maintenance-posix-delete',
+  'post-final-launcher-posix-delete',
+  'pre-machine-relaunch-owner-clear',
+  'post-machine-relaunch-owner-clear',
+];
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest();
 const le32 = (value: number) => {
   const bytes = Buffer.alloc(4);
@@ -174,7 +196,19 @@ function fault(architecture: string) {
       legacyServiceAbsent: true,
       legacyTaskAbsent: true,
     })),
-    terminalCleanup: { inspected: true, residue: [] as string[], registry: [] as string[] },
+    terminalCleanup: {
+      acceptanceSetupSha256: 'ef'.repeat(32),
+      inspected: true,
+      scenarios: terminalFaultPhases.map((phase) => ({
+        phase,
+        acceptanceSetupSha256: 'ef'.repeat(32),
+        installedUninstallerSha256: 'ef'.repeat(32),
+        isolated: true,
+        recovered: true,
+      })),
+      residue: [] as string[],
+      registry: [] as string[],
+    },
     passed: true,
   };
 }
@@ -244,7 +278,13 @@ describe('Windows promotion lifecycle evidence', () => {
       claims: {
         kind: string;
         action: string;
-        terminalCleanup?: { inspected: boolean; residue: unknown[]; registry: unknown[] };
+        terminalCleanup?: {
+          acceptanceSetupSha256: string;
+          inspected: boolean;
+          scenarios: unknown[];
+          residue: unknown[];
+          registry: unknown[];
+        };
       };
     }[];
     expect(
@@ -252,11 +292,14 @@ describe('Windows promotion lifecycle evidence', () => {
         .filter(({ claims }) => claims.kind === 'fault')
         .every(({ claims }) => claims.action === 'fault'),
     ).toBe(true);
-    expect(records.find(({ claims }) => claims.kind === 'fault')?.claims.terminalCleanup).toEqual({
-      inspected: true,
-      residue: [],
-      registry: [],
-    });
+    expect(records.find(({ claims }) => claims.kind === 'fault')?.claims.terminalCleanup).toEqual(
+      expect.objectContaining({
+        acceptanceSetupSha256: 'ef'.repeat(32),
+        inspected: true,
+        residue: [],
+        registry: [],
+      }),
+    );
     await expect(
       verifyWindowsPromotionEvidence({
         path: value.output,

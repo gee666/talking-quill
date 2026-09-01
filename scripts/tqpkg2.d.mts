@@ -34,7 +34,8 @@ export interface Tqpkg2Manifest {
     | 'registered'
     | 'committed'
     | 'legacyRetiring'
-    | 'legacyRetired';
+    | 'legacyRetired'
+    | 'terminalAcceptance';
   readonly treeSha256: string;
   readonly files: readonly Tqpkg2File[];
 }

@@ -30,8 +30,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
-    GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    OPEN_EXISTING, SYNCHRONIZE,
+    GetFileInformationByHandle, MOVEFILE_DELAY_UNTIL_REBOOT, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -39,8 +39,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumValueW, RegFlushKey,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CreateMutexW, CreateProcessW, GetCurrentProcess, GetCurrentProcessId,
@@ -362,6 +362,12 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
             return Err(EXIT_INVALID_REQUEST);
         }
         return run_machine_relaunch_owner();
+    }
+    if argument == "--windows-update-relaunch-owner-retire-v1" {
+        if !is_elevated() {
+            return Err(EXIT_NOT_ELEVATED);
+        }
+        return retire_no_work_machine_relaunch_owner();
     }
     let generation = if let Some(generation) = argument.strip_prefix("--windows-update-resume-v2=")
     {
@@ -719,7 +725,14 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
         || validate_generation(&record.generation).is_err()
         || !matches!(
             record.phase.as_str(),
-            "armed" | "machine-retired" | "cleanup-complete"
+            "armed"
+                | "machine-retired"
+                | "cleanup-complete"
+                | "final-launcher-owned"
+                | "maintenance-deletion-owned"
+                | "maintenance-deleted"
+                | "uninstall-unregistered"
+                | "journal-removed"
         )
         || decode_hash(&record.maintenance_sha256).is_none()
         || record.uninstall_command != uninstall_command
@@ -789,6 +802,25 @@ fn run_machine_relaunch_owner() -> Result<u32, i32> {
     if let Some(record) = terminal_uninstall_record()? {
         let maintenance =
             known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+        if !maintenance.exists()
+            && matches!(
+                record.phase.as_str(),
+                "final-launcher-owned"
+                    | "maintenance-deletion-owned"
+                    | "uninstall-unregistered"
+                    | "journal-removed"
+            )
+            && std::env::current_exe()
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name.to_owned()))
+                .and_then(|name| name.to_str().map(str::to_owned))
+                .is_some_and(|name| name.starts_with(".Talking Quill Terminal Relaunch-"))
+        {
+            let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+            drop(machine_lifecycle);
+            launch_elevated_executable(&current, "--windows-update-relaunch-owner-retire-v1")?;
+            return Ok(0);
+        }
         let mut retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
         if hash_file(&mut retained).map_err(|_| EXIT_IDENTITY_MISMATCH)?
             != decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
@@ -807,6 +839,16 @@ fn run_machine_relaunch_owner() -> Result<u32, i32> {
     }
     let identity = current_relaunch_identity()?;
     let generations = relaunch_generations()?;
+    if generations.is_empty()
+        && !known_folder(&FOLDERID_ProgramFiles)?
+            .join("Talking Quill")
+            .exists()
+    {
+        let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+        drop(machine_lifecycle);
+        launch_elevated_executable(&current, "--windows-update-relaunch-owner-retire-v1")?;
+        return Ok(0);
+    }
     drop(machine_lifecycle);
     for generation in generations {
         let Ok(record) = read_persisted_relaunch_record(&generation) else {
@@ -1484,13 +1526,197 @@ fn verify_machine_relaunch_owner() -> Result<(), i32> {
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
-    let expected = relaunch_run_command(&medium_launcher_path()?)?;
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let program_data = known_folder(&FOLDERID_ProgramData)?;
+    let final_launcher = current.parent() == Some(program_data.as_path())
+        && current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(".Talking Quill Terminal Relaunch-"))
+            .and_then(|suffix| suffix.strip_suffix(".exe"))
+            .is_some_and(|generation| validate_generation(generation).is_ok());
+    let expected_path = if final_launcher {
+        current
+    } else {
+        medium_launcher_path()?
+    };
+    let expected = relaunch_run_command(&expected_path)?;
     let actual = read_registry_string(key, RELAUNCH_RUN_VALUE)?;
     unsafe { RegCloseKey(key) };
     if actual.as_deref() == Some(expected.as_str()) {
         Ok(())
     } else {
         Err(EXIT_IDENTITY_MISMATCH)
+    }
+}
+
+fn finish_terminal_without_maintenance() -> Result<(), i32> {
+    let Some(record) = terminal_uninstall_record()? else {
+        return Ok(());
+    };
+    if !matches!(
+        record.phase.as_str(),
+        "final-launcher-owned"
+            | "maintenance-deletion-owned"
+            | "uninstall-unregistered"
+            | "journal-removed"
+    ) {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    let generation = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".Talking Quill Terminal Relaunch-"))
+        .and_then(|suffix| suffix.strip_suffix(".exe"))
+        .ok_or(EXIT_IDENTITY_MISMATCH)?;
+    if generation != record.generation {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let uninstall = wide_nul(Path::new(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill",
+    ))?;
+    let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, uninstall.as_ptr()) };
+    if status != 0 && status != 2 {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+    let transaction = program_files.join(".Talking Quill.native-transaction-v2.json");
+    if transaction.exists() {
+        std::fs::remove_file(transaction).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    let root = known_folder(&FOLDERID_ProgramData)?.join("Talking Quill Update Recovery");
+    if root.exists() {
+        let tombstone = known_folder(&FOLDERID_ProgramData)?
+            .join(format!(".Talking Quill.recovery-tombstone-{generation}"));
+        if tombstone.exists() {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        std::fs::rename(root, tombstone).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    Ok(())
+}
+
+fn cleanup_terminal_recovery_tombstones() -> Result<(), i32> {
+    let program_data = known_folder(&FOLDERID_ProgramData)?;
+    let mut maintenance_hash = None;
+    let mut authenticated_empty_tombstone = false;
+    for entry in std::fs::read_dir(&program_data).map_err(|_| EXIT_LAUNCH_FAILED)? {
+        let entry = entry.map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(generation) = name.strip_prefix(".Talking Quill.recovery-tombstone-") else {
+            continue;
+        };
+        validate_generation(generation)?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !has_exact_security(&path, RELAUNCH_ROOT_SDDL)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        let marker = path.join("launcher-tree-identity-v1");
+        if marker.exists() {
+            let identity = owned_tree_identity(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+            if !std::fs::read_to_string(&marker).is_ok_and(|value| value == identity) {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            let record: TerminalUninstallRecord = serde_json::from_slice(
+                &std::fs::read(path.join("terminal-uninstall-record-v1.json"))
+                    .map_err(|_| EXIT_IDENTITY_MISMATCH)?,
+            )
+            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+            if record.generation != generation
+                || !matches!(
+                    record.phase.as_str(),
+                    "final-launcher-owned"
+                        | "maintenance-deletion-owned"
+                        | "uninstall-unregistered"
+                        | "journal-removed"
+                )
+            {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            maintenance_hash =
+                Some(decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?);
+            remove_owned_tree(&path, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        } else if std::fs::read_dir(&path)
+            .map_err(|_| EXIT_LAUNCH_FAILED)?
+            .next()
+            .is_none()
+        {
+            authenticated_empty_tombstone = true;
+            std::fs::remove_dir(&path).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        } else {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+    }
+    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+    if maintenance.exists() {
+        if let Some(expected) = maintenance_hash {
+            let mut file = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+            if hash_file(&mut file).map_err(|_| EXIT_IDENTITY_MISMATCH)? != expected {
+                return Err(EXIT_IDENTITY_MISMATCH);
+            }
+            drop(file);
+        } else if !authenticated_empty_tombstone {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        let metadata = std::fs::symlink_metadata(&maintenance).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        std::fs::remove_file(maintenance).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    }
+    Ok(())
+}
+
+fn retire_no_work_machine_relaunch_owner() -> Result<u32, i32> {
+    let machine_lifecycle = RecoveryStateLock::acquire()?;
+    verify_machine_relaunch_owner()?;
+    finish_terminal_without_maintenance()?;
+    cleanup_terminal_recovery_tombstones()?;
+    if terminal_uninstall_record()?.is_some()
+        || journal_owned_terminal_maintenance()?.is_some()
+        || !relaunch_generations()?.is_empty()
+        || known_folder(&FOLDERID_ProgramFiles)?
+            .join("Talking Quill")
+            .exists()
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let current = std::env::current_exe().map_err(|_| EXIT_LAUNCH_FAILED)?;
+    machine_lifecycle.retire()?;
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(RELAUNCH_RUN_KEY))?.as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
+    let deleted =
+        unsafe { RegDeleteValueW(key, wide_nul(Path::new(RELAUNCH_RUN_VALUE))?.as_ptr()) };
+    let flushed = deleted == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if !flushed
+        || unsafe {
+            MoveFileExW(
+                wide_nul(&current)?.as_ptr(),
+                std::ptr::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        } == 0
+    {
+        Err(EXIT_LAUNCH_FAILED)
+    } else {
+        Ok(0)
     }
 }
 
@@ -2957,6 +3183,7 @@ fn visible_retry_path(directory: &Path, generation: &str) -> Result<PathBuf, i32
 struct RecoveryStateLock {
     _legacy: Option<LegacyMutexPair>,
     file: File,
+    path: PathBuf,
 }
 
 impl RecoveryStateLock {
@@ -2991,6 +3218,7 @@ impl RecoveryStateLock {
                     return Ok(Self {
                         _legacy: legacy,
                         file,
+                        path,
                     });
                 }
                 Err(_) if Instant::now() < deadline => {
@@ -2998,6 +3226,62 @@ impl RecoveryStateLock {
                 }
                 Err(_) => return Err(EXIT_LAUNCH_FAILED),
             }
+        }
+    }
+
+    fn retire(self) -> Result<(), i32> {
+        let directory = self
+            .path
+            .parent()
+            .ok_or(EXIT_IDENTITY_MISMATCH)?
+            .to_path_buf();
+        let suffix = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(MACHINE_LOCK_DIRECTORY_PREFIX))
+            .ok_or(EXIT_IDENTITY_MISMATCH)?;
+        let identity = owned_tree_identity(&directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        let mut key = std::ptr::null_mut();
+        if unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+                0,
+                KEY_READ | KEY_WRITE,
+                &mut key,
+            )
+        } != 0
+        {
+            return Err(EXIT_LAUNCH_FAILED);
+        }
+        let value = wide_nul(Path::new(&format!("{MACHINE_LOCK_RETIRED_PREFIX}{suffix}")))?;
+        let status = unsafe {
+            RegSetValueExW(
+                key,
+                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_VALUE))?.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                (value.len() * 2) as u32,
+            )
+        };
+        let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+        unsafe { RegCloseKey(key) };
+        if !flushed {
+            return Err(EXIT_LAUNCH_FAILED);
+        }
+        drop(self);
+        remove_owned_tree(&directory, &identity).map_err(|_| EXIT_LAUNCH_FAILED)?;
+        let deleted = unsafe {
+            RegDeleteTreeW(
+                HKEY_LOCAL_MACHINE,
+                wide_nul(Path::new(MACHINE_LOCK_REGISTRY_KEY))?.as_ptr(),
+            )
+        };
+        if deleted == 0 || deleted == 2 {
+            Ok(())
+        } else {
+            Err(EXIT_LAUNCH_FAILED)
         }
     }
 }

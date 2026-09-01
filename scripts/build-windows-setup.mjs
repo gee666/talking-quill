@@ -19,9 +19,6 @@ const cargoArguments = [
   '--release',
   '--locked',
 ];
-if (process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD === '1') {
-  cargoArguments.push('--features', 'acceptance-faults');
-}
 const result = spawnSync('cargo', cargoArguments, {
   cwd: repositoryRoot,
   stdio: 'inherit',

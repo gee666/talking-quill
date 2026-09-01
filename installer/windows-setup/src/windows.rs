@@ -105,6 +105,8 @@ const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
 const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
+const TERMINAL_RECOVERY_TOMBSTONE_PREFIX: &str = ".Talking Quill.recovery-tombstone-";
+const TERMINAL_FINAL_LAUNCHER_PREFIX: &str = ".Talking Quill Terminal Relaunch-";
 const TERMINAL_SERVICE_PREFIX: &str = "TalkingQuillTerminalCleanup-";
 const TERMINAL_SERVICE_IMAGE_PREFIX: &str = ".Talking Quill Terminal Cleanup-";
 const TERMINAL_SERVICE_PENDING_PREFIX: &str = ".Talking Quill.terminal-cleanup-pending-";
@@ -202,7 +204,28 @@ fn take_terminal_acceptance_fault(phase: &str) -> Result<bool> {
     if selected.as_deref() != Some(phase) {
         return Ok(false);
     }
-    let _ = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(KEY)).as_ptr()) };
+    let deleted = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(KEY)).as_ptr()) };
+    let mut parent = ptr::null_mut();
+    let flushed = deleted == 0
+        && unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                wide(OsStr::new(r"Software")).as_ptr(),
+                0,
+                KEY_READ,
+                &mut parent,
+            )
+        } == 0
+        && unsafe { RegFlushKey(parent) } == 0;
+    if !parent.is_null() {
+        unsafe { RegCloseKey(parent) };
+    }
+    if !flushed {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot consume terminal acceptance fault.",
+        ));
+    }
     Ok(true)
 }
 
@@ -1007,6 +1030,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         ensure_uninstall_finalizer_registered(&current, &paths)?;
     }
     recover_with_adapter(&paths, &system)?;
+    recover_terminal_recovery_tombstones(&paths)?;
     if finishing_existing_uninstall {
         if authenticated_controller
             .as_ref()
@@ -1030,7 +1054,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             {
                 return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
             }
-            if record.phase != "cleanup-complete" {
+            if matches!(record.phase.as_str(), "armed" | "machine-retired") {
                 resume_terminal_service(&paths, &record)?;
             }
             drop(machine_lock.take());
@@ -4769,7 +4793,14 @@ fn read_terminal_uninstall_record(paths: &Paths) -> Result<Option<TerminalUninst
         || validate_machine_lock_suffix(&record.generation).is_err()
         || !matches!(
             record.phase.as_str(),
-            "armed" | "machine-retired" | "cleanup-complete"
+            "armed"
+                | "machine-retired"
+                | "cleanup-complete"
+                | "final-launcher-owned"
+                | "maintenance-deletion-owned"
+                | "maintenance-deleted"
+                | "uninstall-unregistered"
+                | "journal-removed"
         )
         || record.maintenance_sha256.len() != 64
         || !record
@@ -5254,7 +5285,17 @@ fn write_terminal_uninstall_phase(paths: &Paths, generation: &str, phase: &str) 
     let mut record = read_terminal_uninstall_record(paths)?
         .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
     if record.generation != generation
-        || !matches!(phase, "armed" | "machine-retired" | "cleanup-complete")
+        || !matches!(
+            phase,
+            "armed"
+                | "machine-retired"
+                | "cleanup-complete"
+                | "final-launcher-owned"
+                | "maintenance-deletion-owned"
+                | "maintenance-deleted"
+                | "uninstall-unregistered"
+                | "journal-removed"
+        )
     {
         return Err(fail(
             EXIT_REJECTED,
@@ -5279,7 +5320,15 @@ fn terminal_uninstall_recovery_step(
     match (phase, journal_present) {
         ("armed", true) => Ok(TerminalUninstallRecoveryStep::RetireMachine),
         ("machine-retired", true) => Ok(TerminalUninstallRecoveryStep::FinishCleanup),
-        ("cleanup-complete", true) => Ok(TerminalUninstallRecoveryStep::CleanupComplete),
+        (
+            "cleanup-complete"
+            | "final-launcher-owned"
+            | "maintenance-deletion-owned"
+            | "maintenance-deleted"
+            | "uninstall-unregistered"
+            | "journal-removed",
+            _,
+        ) => Ok(TerminalUninstallRecoveryStep::CleanupComplete),
         _ => Err(fail(
             EXIT_REJECTED,
             "Terminal uninstall recovery phase is invalid.",
@@ -5567,7 +5616,7 @@ fn service_cleanup_topology_is_complete(paths: &Paths, generation: &str) -> Resu
     if !registry_key_absent(
         r"Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe",
     )? || registry_key_absent(UNINSTALL_KEY)?
-        || !registry_key_absent(MACHINE_LOCK_REGISTRY_KEY)?
+        || registry_key_absent(MACHINE_LOCK_REGISTRY_KEY)?
     {
         return Ok(false);
     }
@@ -5576,7 +5625,6 @@ fn service_cleanup_topology_is_complete(paths: &Paths, generation: &str) -> Resu
         let name = name.to_string_lossy();
         if name.starts_with(UNINSTALL_FINALIZER_PREFIX)
             || name.starts_with(UNINSTALL_FINALIZER_PENDING_PREFIX)
-            || name.starts_with(MACHINE_LOCK_DIRECTORY_PREFIX)
             || name.starts_with(MACHINE_LOCK_PENDING_PREFIX)
         {
             return Ok(false);
@@ -5629,11 +5677,7 @@ fn run_terminal_cleanup_service(generation: &str) -> Result<()> {
         ));
     }
     finish_terminal_service_cleanup(&paths)?;
-    let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
-    let suffix = retire_machine_lock_publication(&paths)?;
     drop(machine_lock.take());
-    remove_machine_lock_residue(&paths, &suffix)?;
-    drop(legacy);
     write_terminal_uninstall_phase(&paths, generation, "cleanup-complete")?;
     if !service_cleanup_topology_is_complete(&paths, generation)? {
         return Err(fail(
@@ -5713,7 +5757,16 @@ fn wait_for_terminal_service_retirement(paths: &Paths, generation: &str) -> Resu
                 ));
             }
             let complete = read_terminal_uninstall_record(paths)?.is_some_and(|value| {
-                value.generation == generation && value.phase == "cleanup-complete"
+                value.generation == generation
+                    && matches!(
+                        value.phase.as_str(),
+                        "cleanup-complete"
+                            | "final-launcher-owned"
+                            | "maintenance-deletion-owned"
+                            | "maintenance-deleted"
+                            | "uninstall-unregistered"
+                            | "journal-removed"
+                    )
             });
             if !complete {
                 return Err(fail(
@@ -5738,7 +5791,16 @@ fn wait_for_terminal_service_retirement(paths: &Paths, generation: &str) -> Resu
         }
         if status.dwCurrentState == SERVICE_STOPPED {
             let complete = read_terminal_uninstall_record(paths)?.is_some_and(|value| {
-                value.generation == generation && value.phase == "cleanup-complete"
+                value.generation == generation
+                    && matches!(
+                        value.phase.as_str(),
+                        "cleanup-complete"
+                            | "final-launcher-owned"
+                            | "maintenance-deletion-owned"
+                            | "maintenance-deleted"
+                            | "uninstall-unregistered"
+                            | "journal-removed"
+                    )
             });
             if status.dwWin32ExitCode == 0 && complete {
                 verify_terminal_service_registration(paths, &record)?;
@@ -6086,10 +6148,216 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn terminal_recovery_tombstone(paths: &Paths, generation: &str) -> Result<PathBuf> {
+    validate_machine_lock_suffix(generation)?;
+    Ok(paths
+        .program_data
+        .join(format!("{TERMINAL_RECOVERY_TOMBSTONE_PREFIX}{generation}")))
+}
+
+fn terminal_final_launcher(paths: &Paths, generation: &str) -> Result<PathBuf> {
+    validate_machine_lock_suffix(generation)?;
+    Ok(paths
+        .program_data
+        .join(format!("{TERMINAL_FINAL_LAUNCHER_PREFIX}{generation}.exe")))
+}
+
+fn publish_terminal_final_launcher(paths: &Paths, generation: &str) -> Result<PathBuf> {
+    let source = terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+    let target = terminal_final_launcher(paths, generation)?;
+    if !path_present(&target)? {
+        let temporary = paths.program_data.join(format!(
+            ".Talking Quill.terminal-relaunch-pending-{}.exe",
+            random_machine_lock_suffix()?
+        ));
+        fs::copy(&source, &temporary).map_err(io_failure)?;
+        apply_lock_dacl(&temporary, MEDIUM_LAUNCHER_FILE_SDDL)?;
+        File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(io_failure)?;
+        durable_replace(&temporary, &target)?;
+    }
+    if file_hash(&source)? != file_hash(&target)?
+        || !marker_security_is_exact(&target, MEDIUM_LAUNCHER_FILE_SDDL)?
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal final launcher is invalid."));
+    }
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(RUN_KEY)).as_ptr(),
+            0,
+            KEY_READ | KEY_WRITE,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot open machine relaunch owner."));
+    }
+    let command = format!(
+        "\"{}\" --windows-update-relaunch-owner-v1",
+        target.display()
+    );
+    let value = wide(OsStr::new(&command));
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide(OsStr::new("Talking Quill Update Relaunch")).as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
+    };
+    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if !flushed {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot publish terminal final launcher.",
+        ));
+    }
+    flush_setup_directory(&paths.program_data)?;
+    Ok(target)
+}
+
+fn pending_deletion_is_owned(path: &Path) -> Result<bool> {
+    let expected = canonical(path)?;
+    let key = open_session_manager(KEY_READ)?;
+    let pairs = read_pending_rename_pairs(key)?;
+    unsafe { RegCloseKey(key) };
+    Ok(pairs.iter().any(|(source, destination)| {
+        destination.is_empty() && normalized_pending_source(source) == expected
+    }))
+}
+
+fn remove_terminal_recovery_tombstone(_paths: &Paths, tombstone: &Path) -> Result<()> {
+    if !path_present(tombstone)? {
+        return Ok(());
+    }
+    if !medium_launcher_directory_is_protected(tombstone)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery tombstone is unprotected.",
+        ));
+    }
+    let marker = tombstone.join("launcher-tree-identity-v1");
+    if path_present(&marker)? {
+        let identity = owned_tree_identity(tombstone)
+            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        verify_atomic_marker(&marker, &identity, MEDIUM_LAUNCHER_FILE_SDDL, None)?;
+        let mut tree = Vec::new();
+        collect_finalizer_deletion_paths(tombstone, &mut tree)?;
+        for target in tree {
+            if target == tombstone || target == marker {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&target).map_err(io_failure)?;
+            if metadata.is_dir() {
+                fs::remove_dir(&target).map_err(io_failure)?;
+            } else {
+                fs::remove_file(&target).map_err(io_failure)?;
+            }
+        }
+        flush_setup_directory(tombstone)?;
+        terminal_maintenance_crash_at("post-tombstone-content-removal");
+        fs::remove_file(&marker).map_err(io_failure)?;
+        flush_setup_directory(tombstone)?;
+        terminal_maintenance_crash_at("post-tombstone-marker-removal");
+    } else if fs::read_dir(tombstone)
+        .map_err(io_failure)?
+        .next()
+        .transpose()
+        .map_err(io_failure)?
+        .is_some()
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery tombstone is invalid.",
+        ));
+    }
+    flush_setup_directory(tombstone)?;
+    terminal_maintenance_crash_at("post-tombstone-removal");
+    Ok(())
+}
+
+fn recover_terminal_recovery_tombstones(paths: &Paths) -> Result<()> {
+    let mut tombstones = Vec::new();
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(generation) = name.strip_prefix(TERMINAL_RECOVERY_TOMBSTONE_PREFIX) else {
+            continue;
+        };
+        validate_machine_lock_suffix(generation)?;
+        let tombstone = entry.path();
+        let marker = tombstone.join("launcher-tree-identity-v1");
+        if path_present(&marker)? {
+            let record_path = tombstone.join(TERMINAL_UNINSTALL_RECORD_NAME);
+            let bytes = fs::read(&record_path).map_err(io_failure)?;
+            let record: TerminalUninstallRecord = serde_json::from_slice(&bytes)
+                .map_err(|_| fail(EXIT_REJECTED, "Terminal tombstone record is invalid."))?;
+            if record.generation != generation
+                || !matches!(
+                    record.phase.as_str(),
+                    "final-launcher-owned"
+                        | "maintenance-deletion-owned"
+                        | "uninstall-unregistered"
+                        | "journal-removed"
+                )
+            {
+                return Err(fail(EXIT_REJECTED, "Terminal tombstone record is invalid."));
+            }
+        }
+        remove_terminal_recovery_tombstone(paths, &tombstone)?;
+        tombstones.push(tombstone);
+    }
+    if !tombstones.is_empty() || !path_present(&terminal_uninstall_root(paths))? {
+        for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+            let entry = entry.map_err(io_failure)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(suffix) = name
+                .strip_prefix(TERMINAL_FINAL_LAUNCHER_PREFIX)
+                .and_then(|value| value.strip_suffix(".exe"))
+            else {
+                continue;
+            };
+            validate_machine_lock_suffix(suffix)?;
+            let path = entry.path();
+            if !marker_security_is_exact(&path, MEDIUM_LAUNCHER_FILE_SDDL)? {
+                return Err(fail(EXIT_REJECTED, "Terminal final launcher is invalid."));
+            }
+            if !pending_deletion_is_owned(&path)? {
+                schedule_terminal_service_deletion(&path)?;
+            }
+        }
+        for tombstone in &tombstones {
+            if !pending_deletion_is_owned(tombstone)? {
+                schedule_empty_terminal_tombstone_deletion(tombstone)?;
+            }
+        }
+        if !tombstones.is_empty() {
+            clear_machine_relaunch_owner(paths)?;
+        }
+        flush_setup_directory(&paths.program_data)?;
+    }
+    Ok(())
+}
+
 fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     let record = read_terminal_uninstall_record(paths)?
         .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
-    if record.phase != "cleanup-complete" {
+    if !matches!(
+        record.phase.as_str(),
+        "cleanup-complete"
+            | "final-launcher-owned"
+            | "maintenance-deletion-owned"
+            | "maintenance-deleted"
+            | "uninstall-unregistered"
+            | "journal-removed"
+    ) {
         return Err(fail(
             EXIT_REJECTED,
             "Terminal uninstall cleanup is not complete.",
@@ -6118,34 +6386,98 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     remove_uninstall_finalizer_residue(paths)?;
     let root = terminal_uninstall_root(paths);
     remove_plain_tree(&root.join("Relaunch Records"))?;
-    let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
-    let suffix = retire_machine_lock_publication(paths)?;
-    drop(machine_lock.take());
-    remove_machine_lock_residue(paths, &suffix)?;
-    drop(legacy);
-    clear_machine_relaunch_owner(paths)?;
-    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
-    if path_present(&launcher)? {
-        arm_mapped_image_deletion(&launcher)?;
+    require_machine_relaunch_owner(paths)?;
+    if record.phase == "cleanup-complete" {
+        publish_terminal_final_launcher(paths, &record.generation)?;
+        write_terminal_uninstall_phase(paths, &record.generation, "final-launcher-owned")?;
+        terminal_maintenance_crash_at("post-final-launcher-ownership");
+    }
+    let published_phase = read_terminal_uninstall_record(paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?
+        .phase;
+    if published_phase == "final-launcher-owned" {
+        terminal_maintenance_crash_at("pre-maintenance-deletion-ownership");
+        if hex_hash(&file_hash(&paths.maintenance_uninstaller)?) != record.maintenance_sha256 {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal maintenance image is invalid.",
+            ));
+        }
+        schedule_terminal_service_deletion(&paths.maintenance_uninstaller)?;
+        write_terminal_uninstall_phase(paths, &record.generation, "maintenance-deletion-owned")?;
+        terminal_maintenance_crash_at("post-maintenance-deletion-ownership");
+    }
+    let mut phase = read_terminal_uninstall_record(paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?
+        .phase;
+    if phase == "maintenance-deletion-owned" {
+        if !path_present(&paths.maintenance_uninstaller)?
+            || !pending_deletion_is_owned(&paths.maintenance_uninstaller)?
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal maintenance deletion ownership is invalid.",
+            ));
+        }
+        publish_terminal_final_launcher(paths, &record.generation)?;
+        unregister_uninstall()?;
+        write_terminal_uninstall_phase(paths, &record.generation, "uninstall-unregistered")?;
+        terminal_maintenance_crash_at("post-uninstall-unregister");
+        phase = "uninstall-unregistered".into();
+    }
+    if phase == "uninstall-unregistered" {
+        remove_transaction(paths)?;
+        write_terminal_uninstall_phase(paths, &record.generation, "journal-removed")?;
+        terminal_maintenance_crash_at("post-journal-removal");
+        phase = "journal-removed".into();
+    }
+    if phase != "journal-removed" {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal maintenance phase is invalid.",
+        ));
     }
     let identity =
         owned_tree_identity(&root).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-    if !medium_launcher_directory_is_protected(&root)? {
+    if !medium_launcher_directory_is_protected(&root)?
+        || !fs::read_to_string(root.join("launcher-tree-identity-v1"))
+            .is_ok_and(|value| value == identity)
+    {
         return Err(fail(
             EXIT_REJECTED,
             "Terminal recovery root identity is invalid.",
         ));
     }
-    // Retire the journal while the protected record, machine launcher, uninstall registration,
-    // and maintenance image are still callable. A crash can therefore re-enter finalization.
-    remove_transaction(paths)?;
-    remove_owned_tree(&root, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-
-    unregister_uninstall()?;
+    let tombstone = terminal_recovery_tombstone(paths, &record.generation)?;
+    if path_present(&tombstone)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery tombstone already exists.",
+        ));
+    }
+    fs::rename(&root, &tombstone).map_err(io_failure)?;
+    flush_setup_directory(&paths.program_data)?;
+    terminal_maintenance_crash_at("post-root-tombstone-rename");
+    remove_terminal_recovery_tombstone(paths, &tombstone)?;
     if path_present(&paths.maintenance_uninstaller)? {
         arm_mapped_image_deletion(&paths.maintenance_uninstaller)?;
     }
-    flush_setup_directory(&paths.program_data)
+    terminal_maintenance_crash_at("post-maintenance-posix-delete");
+    let final_launcher = terminal_final_launcher(paths, &record.generation)?;
+    schedule_empty_terminal_tombstone_deletion(&tombstone)?;
+    terminal_maintenance_crash_at("post-final-launcher-posix-delete");
+    let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
+    let suffix = retire_machine_lock_publication(paths)?;
+    drop(machine_lock.take());
+    remove_machine_lock_residue(paths, &suffix)?;
+    drop(legacy);
+    terminal_maintenance_crash_at("pre-machine-relaunch-owner-clear");
+    clear_machine_relaunch_owner(paths)?;
+    terminal_maintenance_crash_at("post-machine-relaunch-owner-clear");
+    if !pending_deletion_is_owned(&final_launcher)? {
+        schedule_terminal_service_deletion(&final_launcher)?;
+    }
+    Ok(())
 }
 
 fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
@@ -6175,7 +6507,23 @@ fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
         launcher.display()
     );
     let actual = read_registry_value(key, VALUE, 1024)?;
-    if actual.as_deref().is_some_and(|value| value != expected) {
+    let final_owner = actual.as_deref().is_some_and(|value| {
+        let prefix = format!(
+            "\"{}\\{TERMINAL_FINAL_LAUNCHER_PREFIX}",
+            paths.program_data.display()
+        );
+        let suffix = ".exe\" --windows-update-relaunch-owner-v1";
+        value.starts_with(&prefix)
+            && value.ends_with(suffix)
+            && value[prefix.len()..value.len() - suffix.len()].len() == 32
+            && value[prefix.len()..value.len() - suffix.len()]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    });
+    if actual
+        .as_deref()
+        .is_some_and(|value| value != expected && !final_owner)
+    {
         unsafe { RegCloseKey(key) };
         return Err(fail(EXIT_REJECTED, "Machine relaunch owner was replaced."));
     }
@@ -6429,6 +6777,56 @@ fn schedule_terminal_service_deletion(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn schedule_empty_terminal_tombstone_deletion(path: &Path) -> Result<()> {
+    if !medium_launcher_directory_is_protected(path)?
+        || fs::read_dir(path)
+            .map_err(io_failure)?
+            .next()
+            .transpose()
+            .map_err(io_failure)?
+            .is_some()
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal recovery tombstone is invalid.",
+        ));
+    }
+    let expected = canonical(path)?;
+    let before_key = open_session_manager(KEY_READ)?;
+    let before = read_pending_rename_pairs(before_key)?;
+    unsafe { RegCloseKey(before_key) };
+    if unsafe {
+        MoveFileExW(
+            wide(path.as_os_str()).as_ptr(),
+            ptr::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    } == 0
+    {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Windows could not own tombstone deletion.",
+        ));
+    }
+    let key = open_session_manager(KEY_READ | KEY_WRITE)?;
+    let after = read_pending_rename_pairs(key)?;
+    let valid = after.len() == before.len() + 1
+        && after.get(..before.len()) == Some(before.as_slice())
+        && after.last().is_some_and(|(source, destination)| {
+            destination.is_empty() && normalized_pending_source(source) == expected
+        });
+    let flushed = valid && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if flushed {
+        Ok(())
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Tombstone deletion ownership is invalid.",
+        ))
+    }
 }
 
 fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
@@ -7003,11 +7401,22 @@ mod tests {
             terminal_uninstall_recovery_step("machine-retired", true).unwrap(),
             TerminalUninstallRecoveryStep::FinishCleanup
         );
-        assert_eq!(
-            terminal_uninstall_recovery_step("cleanup-complete", true).unwrap(),
-            TerminalUninstallRecoveryStep::CleanupComplete
-        );
-        assert!(terminal_uninstall_recovery_step("cleanup-complete", false).is_err());
+        for phase in [
+            "cleanup-complete",
+            "final-launcher-owned",
+            "maintenance-deletion-owned",
+            "maintenance-deleted",
+            "uninstall-unregistered",
+            "journal-removed",
+        ] {
+            for journal_present in [true, false] {
+                assert_eq!(
+                    terminal_uninstall_recovery_step(phase, journal_present).unwrap(),
+                    TerminalUninstallRecoveryStep::CleanupComplete,
+                    "{phase}:{journal_present}"
+                );
+            }
+        }
     }
 
     #[test]

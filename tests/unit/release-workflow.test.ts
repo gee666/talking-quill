@@ -162,10 +162,28 @@ describe('Windows native release workflow', () => {
       'service-stopped-pre-DeleteService',
       'post-delete-pre-image-removal',
       'reboot-pending-delete',
+      'pre-maintenance-deletion-ownership',
+      'post-maintenance-deletion-ownership',
+      'post-final-launcher-ownership',
+      'post-uninstall-unregister',
+      'post-journal-removal',
+      'post-root-tombstone-rename',
+      'post-tombstone-content-removal',
+      'post-tombstone-marker-removal',
+      'post-tombstone-removal',
+      'post-maintenance-posix-delete',
+      'post-final-launcher-posix-delete',
+      'pre-machine-relaunch-owner-clear',
+      'post-machine-relaunch-owner-clear',
     ]) {
       expect(lifecycle).toContain(`'${terminalFault}'`);
     }
     expect(lifecycle).toContain('PendingFileRenameOperations');
+    expect(workflow).toContain('build-windows-acceptance-fault-setup.mjs');
+    expect(workflow).toContain('repair-terminalAcceptance.exe');
+    expect(workflow).toContain('Nonpromotable terminal acceptance setup entered release assembly.');
+    expect(lifecycle).toContain('$terminalAcceptanceHash');
+    expect(lifecycle).toContain('Installed terminal acceptance uninstaller hash mismatch');
     expect(lifecycle).not.toContain('$legacyGeneration');
     expect(lifecycle).not.toContain('$legacyRoot');
     expect(lifecycle).toContain(

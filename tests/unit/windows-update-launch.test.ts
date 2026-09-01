@@ -150,8 +150,16 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
-    expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
-      terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
+    expect(
+      terminalCleanup.indexOf(
+        'schedule_terminal_service_deletion(&paths.maintenance_uninstaller)?',
+      ),
+    ).toBeLessThan(terminalCleanup.indexOf('unregister_uninstall()?'));
+    expect(terminalCleanup.indexOf('fs::rename(&root, &tombstone)')).toBeLessThan(
+      terminalCleanup.indexOf('remove_terminal_recovery_tombstone(paths, &tombstone)?'),
+    );
+    expect(terminalCleanup.indexOf('post-final-launcher-posix-delete')).toBeLessThan(
+      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?'),
     );
     const maintenanceRetirement = setup.slice(
       setup.indexOf('fn wait_for_terminal_service_retirement'),
@@ -171,12 +179,8 @@ describe('Windows elevated updater launch', () => {
       setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),
     );
     expect(lockRetirement).toContain('delete_registry_tree_durable(');
-    const terminalRecovery = setup.slice(
-      setup.indexOf('fn run_terminal_cleanup_service'),
-      setup.indexOf('fn enumerate_registry_subkeys'),
-    );
-    expect(terminalRecovery.indexOf('retire_machine_lock_publication(&paths)?')).toBeLessThan(
-      terminalRecovery.indexOf('remove_machine_lock_residue(&paths, &suffix)?'),
+    expect(setup.indexOf('retire_machine_lock_publication(paths)?')).toBeLessThan(
+      setup.indexOf('remove_machine_lock_residue(paths, &suffix)?'),
     );
     const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
     expect(residue).toContain('read_terminal_uninstall_record(&paths)?');

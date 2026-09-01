@@ -33,9 +33,43 @@ const output = resolve(
   outputDirectory,
   `Talking-Quill-${packageJson.version}-win-${architecture}-${artifactKind}.exe`,
 );
-const stub = resolve(root, 'tmp', 'windows-setup', architecture, 'talking-quill-windows-setup.exe');
-if (faultPhase !== null && process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1') {
+const acceptanceFaultPackage = faultPhase !== null;
+const stub = resolve(
+  root,
+  acceptanceFaultPackage ? 'tmp/windows-setup-acceptance-faults' : 'tmp/windows-setup',
+  architecture,
+  'talking-quill-windows-setup.exe',
+);
+if (
+  acceptanceFaultPackage &&
+  process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1'
+) {
   throw new Error('native fault phase is permitted only in an installed-acceptance build');
+}
+if (acceptanceFaultPackage && packageMode !== 'repair') {
+  throw new Error('acceptance-fault setup is restricted to repair packages');
+}
+if (acceptanceFaultPackage) {
+  const metadata = JSON.parse(
+    await readFile(
+      resolve(root, 'tmp', 'windows-setup-acceptance-faults', architecture, 'nonpromotable.json'),
+      'utf8',
+    ),
+  );
+  const stubSha256 = createHash('sha256')
+    .update(await readFile(stub))
+    .digest('hex');
+  if (
+    Object.keys(metadata).sort().join(',') !==
+      'acceptanceFaults,architecture,promotable,schemaVersion,setupSha256' ||
+    metadata.schemaVersion !== 1 ||
+    metadata.architecture !== architecture ||
+    metadata.acceptanceFaults !== true ||
+    metadata.promotable !== false ||
+    metadata.setupSha256 !== stubSha256
+  ) {
+    throw new Error('acceptance-fault setup metadata is invalid');
+  }
 }
 const sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '';
 const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '';

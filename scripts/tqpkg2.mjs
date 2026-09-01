@@ -203,6 +203,7 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
           'committed',
           'legacyRetiring',
           'legacyRetired',
+          'terminalAcceptance',
         ].includes(manifest.faultPhase))) ||
     !Array.isArray(manifest.files) ||
     manifest.files.length === 0 ||

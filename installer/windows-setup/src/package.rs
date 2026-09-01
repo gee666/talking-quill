@@ -276,6 +276,7 @@ fn validate_manifest(
                     | "committed"
                     | "legacyRetiring"
                     | "legacyRetired"
+                    | "terminalAcceptance"
             )
         })
         || !hex_digest(&manifest.tree_sha256)
