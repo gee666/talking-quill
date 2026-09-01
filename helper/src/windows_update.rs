@@ -156,6 +156,10 @@ struct TerminalUninstallRecord {
     maintenance_sha256: String,
     uninstall_command: String,
     quiet_uninstall_command: String,
+    service_name: String,
+    service_image: String,
+    service_sha256: String,
+    service_file_identity: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -335,10 +339,6 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
     if argument.starts_with("--windows-update-bootstrap-v2=") {
         authorize_released_no_record_bootstrap(argument)?;
-    }
-    if let Some(generation) = argument.strip_prefix("--windows-terminal-uninstall-v1=") {
-        validate_generation(generation)?;
-        return run_terminal_run_once_owner(generation);
     }
     if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
         if is_elevated() {
@@ -534,8 +534,6 @@ const RELAUNCH_RECORD_NAME: &str = "relaunch-record-v1.json";
 const RELAUNCH_MARKER_NAME: &str = "relaunch-record-marker-v1";
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
 const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
-const TERMINAL_RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
-const TERMINAL_RUN_ONCE_PREFIX: &str = "!Talking Quill Terminal Cleanup ";
 
 fn relaunch_record_sddl(identity: &RelaunchIdentity) -> String {
     if identity.user_sid == identity.logon_sid {
@@ -712,12 +710,19 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
         serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
     let uninstall_command = format!("\"{}\"", maintenance.display());
-    if record.schema_version != 2
+    if record.schema_version != 3
         || validate_generation(&record.generation).is_err()
         || !matches!(record.phase.as_str(), "armed" | "machine-retired")
         || decode_hash(&record.maintenance_sha256).is_none()
         || record.uninstall_command != uninstall_command
         || record.quiet_uninstall_command != format!("{uninstall_command} /S")
+        || record.service_name != format!("TalkingQuillTerminalCleanup-{}", record.generation)
+        || !record.service_image.ends_with(&format!(
+            ".Talking Quill Terminal Cleanup-{}.exe",
+            record.generation
+        ))
+        || decode_hash(&record.service_sha256).is_none()
+        || record.service_file_identity.is_empty()
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
@@ -730,218 +735,9 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     Ok(Some(record))
 }
 
-fn terminal_run_once_name(generation: &str) -> Result<String, i32> {
-    validate_generation(generation)?;
-    Ok(format!("{TERMINAL_RUN_ONCE_PREFIX}{generation}"))
-}
-
-fn terminal_run_once_command(generation: &str) -> Result<String, i32> {
-    validate_generation(generation)?;
-    Ok(format!(
-        "\"{}\" --windows-terminal-uninstall-v1={generation}",
-        medium_launcher_path()?.display()
-    ))
-}
-
-fn verify_terminal_run_once_owner(generation: &str) -> Result<(), i32> {
-    let name = terminal_run_once_name(generation)?;
-    let expected = terminal_run_once_command(generation)?;
-    let mut key = std::ptr::null_mut();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide_nul(Path::new(TERMINAL_RUN_ONCE_KEY))?.as_ptr(),
-            0,
-            KEY_READ,
-            &mut key,
-        )
-    } != 0
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let mut index = 0_u32;
-    loop {
-        let mut candidate = [0_u16; 512];
-        let mut length = candidate.len() as u32;
-        let status = unsafe {
-            RegEnumValueW(
-                key,
-                index,
-                candidate.as_mut_ptr(),
-                &mut length,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if status == 259 {
-            break;
-        }
-        if status != 0 {
-            unsafe { RegCloseKey(key) };
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-        let candidate = String::from_utf16(&candidate[..length as usize])
-            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-        if candidate.starts_with(TERMINAL_RUN_ONCE_PREFIX) && candidate != name {
-            unsafe { RegCloseKey(key) };
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-        index += 1;
-    }
-    let actual = read_registry_string(key, &name);
-    unsafe { RegCloseKey(key) };
-    if actual?.as_deref() == Some(expected.as_str()) {
-        Ok(())
-    } else {
-        Err(EXIT_IDENTITY_MISMATCH)
-    }
-}
-
-fn registry_key_is_absent(path: &str) -> Result<bool, i32> {
-    let mut key = std::ptr::null_mut();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide_nul(Path::new(path))?.as_ptr(),
-            0,
-            KEY_READ,
-            &mut key,
-        )
-    };
-    if status == 0 {
-        unsafe { RegCloseKey(key) };
-        Ok(false)
-    } else if status == 2 {
-        Ok(true)
-    } else {
-        Err(EXIT_IDENTITY_MISMATCH)
-    }
-}
-
-fn path_is_absent(path: &Path) -> Result<bool, i32> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(_) => Err(EXIT_IDENTITY_MISMATCH),
-    }
-}
-
-fn absent_terminal_topology_is_complete() -> Result<bool, i32> {
-    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
-    for path in [
-        program_files.join("Talking Quill"),
-        program_files.join(".Talking Quill.native-staging"),
-        program_files.join(".Talking Quill.native-backup"),
-        program_files.join(".Talking Quill.native-transaction-v2.json"),
-        program_files.join("Talking Quill Maintenance.exe"),
-    ] {
-        if !path_is_absent(&path)? {
-            return Ok(false);
-        }
-    }
-    for key in [
-        r"Software\Talking Quill\RecoveryStateLockV1",
-        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill",
-        r"Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe",
-    ] {
-        if !registry_key_is_absent(key)? {
-            return Ok(false);
-        }
-    }
-    let root = medium_launcher_directory()?;
-    for entry in std::fs::read_dir(&root).map_err(|_| EXIT_IDENTITY_MISMATCH)? {
-        let name = entry
-            .map_err(|_| EXIT_IDENTITY_MISMATCH)?
-            .file_name()
-            .into_string()
-            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-        if !matches!(
-            name.as_str(),
-            "talking-quill-update-recovery-launcher.exe" | "launcher-tree-identity-v1"
-        ) {
-            return Ok(false);
-        }
-    }
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
-    for entry in std::fs::read_dir(program_data).map_err(|_| EXIT_IDENTITY_MISMATCH)? {
-        let name = entry
-            .map_err(|_| EXIT_IDENTITY_MISMATCH)?
-            .file_name()
-            .into_string()
-            .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-        if name.starts_with(".Talking Quill.uninstall-finalizer-") {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum TerminalRunOnceAction {
-    Resume,
-    RetireAbsentRecord,
-}
-
-fn terminal_run_once_action(
-    requested_generation: &str,
-    record_generation: Option<&str>,
-    absent_topology_complete: bool,
-) -> Result<TerminalRunOnceAction, i32> {
-    match record_generation {
-        Some(record_generation) if record_generation == requested_generation => {
-            Ok(TerminalRunOnceAction::Resume)
-        }
-        Some(_) => Err(EXIT_IDENTITY_MISMATCH),
-        None if absent_topology_complete => Ok(TerminalRunOnceAction::RetireAbsentRecord),
-        None => Err(EXIT_IDENTITY_MISMATCH),
-    }
-}
-
-fn run_terminal_run_once_owner(generation: &str) -> Result<u32, i32> {
-    verify_terminal_run_once_owner(generation)?;
-    let record = terminal_uninstall_record()?;
-    let absent_topology_complete = record.is_none() && absent_terminal_topology_is_complete()?;
-    match terminal_run_once_action(
-        generation,
-        record.as_ref().map(|value| value.generation.as_str()),
-        absent_topology_complete,
-    )? {
-        TerminalRunOnceAction::Resume => resume_terminal_uninstall(generation),
-        // !RunOnce remains present until this command returns. With both protected record files
-        // absent, success lets Windows retire the exact generation-specific value.
-        TerminalRunOnceAction::RetireAbsentRecord => Ok(0),
-    }
-}
-
-fn resume_terminal_uninstall(generation: &str) -> Result<u32, i32> {
-    let machine_lifecycle = RecoveryStateLock::acquire()?;
-    let record = terminal_uninstall_record()?.ok_or(EXIT_IDENTITY_MISMATCH)?;
-    if record.generation != generation {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
-    let mut retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if hash_file(&mut retained).map_err(|_| EXIT_IDENTITY_MISMATCH)?
-        != decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    drop(retained);
-    drop(machine_lifecycle);
-    launch_elevated_executable(&maintenance, &format!("/TQ-TERMINAL-RECOVERY={generation}"))?;
-    Ok(0)
-}
-
 fn run_machine_relaunch_owner() -> Result<u32, i32> {
     let machine_lifecycle = RecoveryStateLock::acquire()?;
     verify_machine_relaunch_owner()?;
-    if let Some(record) = terminal_uninstall_record()? {
-        let generation = record.generation;
-        drop(machine_lifecycle);
-        return resume_terminal_uninstall(&generation);
-    }
     let identity = current_relaunch_identity()?;
     let generations = relaunch_generations()?;
     drop(machine_lifecycle);
@@ -4386,14 +4182,13 @@ fn base64_value(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         MEDIUM_LAUNCHER_DIRECTORY_SDDL, PersistedRelaunchRecord, RECOVERY_LAUNCHER_PENDING_PREFIX,
-        RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, TERMINAL_RUN_ONCE_KEY, TerminalRunOnceAction,
-        UpdateAuthorization, UpdateCandidate, UpdatePredecessor, UpdateRole,
-        authorization_transcript, canonical_candidate_layout, create_directory_with_sddl,
-        create_restricted_directory, decode_base64, publish_relaunch_record,
-        read_persisted_relaunch_record, reclaim_incomplete_launcher_directories,
-        reclaim_incomplete_recovery_directories, recovery_value_name,
-        remove_relaunch_record_directory, terminal_run_once_action, terminal_run_once_name,
-        validate_generation, write_persisted_relaunch_record,
+        RUN_ONCE_VALUE_PREFIX, StagedDirectoryGuard, UpdateAuthorization, UpdateCandidate,
+        UpdatePredecessor, UpdateRole, authorization_transcript, canonical_candidate_layout,
+        create_directory_with_sddl, create_restricted_directory, decode_base64,
+        publish_relaunch_record, read_persisted_relaunch_record,
+        reclaim_incomplete_launcher_directories, reclaim_incomplete_recovery_directories,
+        recovery_value_name, remove_relaunch_record_directory, validate_generation,
+        write_persisted_relaunch_record,
     };
     #[test]
     fn relaunch_record_marker_and_each_phase_are_power_loss_safe() {
@@ -4747,29 +4542,6 @@ mod tests {
                 .verifying_key()
                 .verify(&authorization_transcript(&value).unwrap(), &signature)
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn terminal_run_once_is_generation_bound_and_absent_record_is_self_retiring() {
-        let generation = "11".repeat(16);
-        assert_eq!(
-            terminal_run_once_action(&generation, Some(&generation), false).unwrap(),
-            TerminalRunOnceAction::Resume
-        );
-        assert_eq!(
-            terminal_run_once_action(&generation, None, true).unwrap(),
-            TerminalRunOnceAction::RetireAbsentRecord
-        );
-        assert!(terminal_run_once_action(&generation, Some(&"22".repeat(16)), true).is_err());
-        assert!(terminal_run_once_action(&generation, None, false).is_err());
-        assert_eq!(
-            terminal_run_once_name(&generation).unwrap(),
-            format!("!Talking Quill Terminal Cleanup {generation}")
-        );
-        assert_eq!(
-            TERMINAL_RUN_ONCE_KEY,
-            r"Software\Microsoft\Windows\CurrentVersion\RunOnce"
         );
     }
 

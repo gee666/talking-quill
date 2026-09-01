@@ -464,8 +464,13 @@ jobs:
             $appPath = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe' -Name '(default)').'(default)'
             $quiet = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString).QuietUninstallString
             $legacyServiceAbsent = $null -eq (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
+            $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
             & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
-            $legacyTaskAbsent = $LASTEXITCODE -ne 0
+            $taskQueryExit = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+            if ($taskQueryExit -notin @(0, 1)) { throw "Legacy task query failed: $taskQueryExit" }
+            $legacyTaskAbsent = $taskQueryExit -eq 1
             if ($appPath -cne "$env:ProgramFiles\Talking Quill\Talking Quill.exe" -or $quiet -cne ('"' + "$env:ProgramFiles\Talking Quill Maintenance.exe" + '" /S') -or -not $legacyServiceAbsent -or -not $legacyTaskAbsent) { throw "Recovered registrations or legacy authority are invalid: $($fault.Name)" }
             $faultEvidence += @{ fault = $fault.Name; crashExitCode = 197; recoveryExitCode = 78; recoveredReleaseBuildDigest = $recoveredIdentity.releaseBuildDigest; inspectedBeforeRepair = $true; productionRecoveryInterrupted = $recoveryInterrupted; appPathExact = $true; quietUninstallExact = $true; legacyServiceAbsent = $true; legacyTaskAbsent = $true }
             $postRecoveryRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
@@ -498,11 +503,12 @@ jobs:
             $normalRelocated = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ([IO.Path]::GetTempPath().TrimEnd('\') + '\.TalkingQuill-uninstall-*.exe') }).Count -eq 1
             $terminalRecordPath = "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json"
             if (Test-Path -LiteralPath $terminalRecordPath) {
-              $terminalGeneration = (Get-Content -LiteralPath $terminalRecordPath -Raw | ConvertFrom-Json).generation
-              if ($terminalGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Terminal RunOnce generation is invalid.' }
-              $terminalRunOnceName = "!Talking Quill Terminal Cleanup $terminalGeneration"
-              $terminalRunOnce = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce' -Name $terminalRunOnceName -ErrorAction SilentlyContinue
-              $terminalOwnerObserved = $terminalOwnerObserved -or ($terminalRunOnce -ceq ('"' + $recoveryLauncher + '" --windows-terminal-uninstall-v1=' + $terminalGeneration))
+              $terminalRecord = Get-Content -LiteralPath $terminalRecordPath -Raw | ConvertFrom-Json
+              $terminalGeneration = $terminalRecord.generation
+              if ($terminalGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Terminal service generation is invalid.' }
+              $terminalService = Get-CimInstance Win32_Service -Filter "Name='TalkingQuillTerminalCleanup-$terminalGeneration'" -ErrorAction SilentlyContinue
+              $expectedServiceCommand = '"' + $terminalRecord.serviceImage + '" /TQ-TERMINAL-SERVICE=' + $terminalGeneration
+              $terminalOwnerObserved = $terminalOwnerObserved -or ($null -ne $terminalService -and $terminalService.StartMode -ceq 'Auto' -and $terminalService.StartName -ceq 'LocalSystem' -and $terminalService.PathName -ceq $expectedServiceCommand)
             }
             if ($normalRelocated -and $terminalOwnerObserved) { break }
             Start-Sleep -Milliseconds 10
@@ -511,17 +517,14 @@ jobs:
           if (-not $normalRelocated) { throw 'Normal uninstall did not execute through one relocated worker.' }
           if (-not $terminalOwnerObserved) { throw 'Terminal uninstall did not publish a durable launcher-owned record.' }
           if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
-          $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' } | ForEach-Object FullName)
+          $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
           $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
           $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
           $terminalRegistry = @($terminalKeys)
           $terminalRelaunchOwner = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
           if ($null -ne $terminalRelaunchOwner) { $terminalRegistry += 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run::Talking Quill Update Relaunch' }
-          $runOncePath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
-          if (Test-Path -LiteralPath $runOncePath) {
-            $terminalRunOnceNames = @((Get-ItemProperty -LiteralPath $runOncePath).PSObject.Properties | Where-Object { $_.Name -like '!Talking Quill Terminal Cleanup *' } | ForEach-Object Name)
-            $terminalRegistry += @($terminalRunOnceNames | ForEach-Object { "${runOncePath}::$_" })
-          }
+          $terminalServices = @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue)
+          $terminalRegistry += @($terminalServices | ForEach-Object { "SCM::$($_.Name)" })
           foreach ($staleGeneration in @('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')) {
             $staleRoot = Join-Path $env:LOCALAPPDATA "Talking Quill\Windows Update Recovery\$staleGeneration"
             $staleProfileValue = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "Talking Quill Update Relaunch $staleGeneration" -ErrorAction SilentlyContinue
@@ -667,20 +670,22 @@ jobs:
             "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine",
             "$env:ProgramData\Talking Quill Update Recovery"
           ) | Where-Object { Test-Path -LiteralPath $_ }
-          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' } | ForEach-Object FullName)
+          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
           $runProperties = @((Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).PSObject.Properties)
           $recoveryValues = @($runProperties | Where-Object { $_.Name -like 'Talking Quill Update Recovery *' -or $_.Name -ceq 'Talking Quill Update Relaunch' })
-          $terminalRunOnceValues = @()
-          if (Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce') {
-            $terminalRunOnceValues = @((Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce').PSObject.Properties | Where-Object Name -like '!Talking Quill Terminal Cleanup *')
-          }
+          $terminalServices = @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue)
           $uninstallRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
           $appPathRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe'
           $machineLockRegistration = Test-Path -LiteralPath 'HKLM:\Software\Talking Quill\RecoveryStateLockV1'
           $legacyService = $null -ne (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
+          $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
           & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
-          $legacyTask = $LASTEXITCODE -eq 0
-          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $terminalRunOnceValues.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $machineLockRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, RunOnce, machine lock, finalizer, registration, service, or task state.' }
+          $taskQueryExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+          if ($taskQueryExit -notin @(0, 1)) { throw "Legacy task query failed: $taskQueryExit" }
+          $legacyTask = $taskQueryExit -eq 0
+          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $terminalServices.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $machineLockRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, terminal service, machine lock, finalizer, registration, legacy service, or task state.' }
           $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
           $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; removeFreshRecovery = $removeFreshRecoveryInterrupted; uninstall = $uninstallInterrupted; finishUninstallRecovery = $finishUninstallRecoveryInterrupted }
           $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8

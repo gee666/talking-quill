@@ -6,6 +6,7 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
 
@@ -68,10 +69,15 @@ use windows_sys::Win32::System::Registry::{
     RegSetValueExW,
 };
 use windows_sys::Win32::System::Services::{
-    CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW,
-    QUERY_SERVICE_CONFIGW, QueryServiceConfigW, QueryServiceStatus, SC_HANDLE, SC_MANAGER_CONNECT,
-    SERVICE_CONTROL_STOP, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_STATUS, SERVICE_STOP,
-    SERVICE_STOPPED,
+    ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
+    OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW,
+    QueryServiceObjectSecurity, QueryServiceStatus, RegisterServiceCtrlHandlerW, SC_ACTION,
+    SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE,
+    SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP,
+    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+    SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED,
+    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceObjectSecurity, SetServiceStatus,
+    StartServiceCtrlDispatcherW, StartServiceW,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, GetCurrentProcess, GetExitCodeProcess, GetProcessId, OpenProcess,
@@ -99,8 +105,11 @@ const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
 const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
 const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
-const TERMINAL_RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
-const TERMINAL_RUN_ONCE_PREFIX: &str = "!Talking Quill Terminal Cleanup ";
+const TERMINAL_SERVICE_PREFIX: &str = "TalkingQuillTerminalCleanup-";
+const TERMINAL_SERVICE_IMAGE_PREFIX: &str = ".Talking Quill Terminal Cleanup-";
+const TERMINAL_SERVICE_PENDING_PREFIX: &str = ".Talking Quill.terminal-cleanup-pending-";
+const TERMINAL_SERVICE_FILE_SDDL: &str = MACHINE_LOCK_FILE_SDDL;
+const TERMINAL_SERVICE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LC;;;AU)";
 const UNINSTALL_FINALIZER_PENDING_PREFIX: &str = ".Talking Quill.uninstall-finalizer-pending-";
 const UNINSTALL_FINALIZER_PREFIX: &str = ".Talking Quill.uninstall-finalizer-";
 const UNINSTALL_FINALIZER_NAME: &str = "Talking Quill Uninstall Finalizer.exe";
@@ -123,8 +132,17 @@ unsafe extern "system" {
     fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
 
+static TERMINAL_SERVICE_GENERATION: OnceLock<String> = OnceLock::new();
+
 pub fn run() -> i32 {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1
+        && let Some(generation) = arguments[0]
+            .to_str()
+            .and_then(|value| value.strip_prefix("/TQ-TERMINAL-SERVICE="))
+    {
+        return run_terminal_service_dispatcher(generation).unwrap_or_else(|error| error.code);
+    }
     // Internal relocated and elevated roles never own UI. Authentication still
     // determines operation authority inside run_inner.
     let silent = arguments
@@ -157,6 +175,81 @@ fn fail(code: i32, message: impl Into<String>) -> SetupError {
     }
 }
 
+fn terminal_service_name(generation: &str) -> Result<String> {
+    validate_machine_lock_suffix(generation)?;
+    Ok(format!("{TERMINAL_SERVICE_PREFIX}{generation}"))
+}
+
+fn run_terminal_service_dispatcher(generation: &str) -> Result<i32> {
+    validate_machine_lock_suffix(generation)?;
+    TERMINAL_SERVICE_GENERATION
+        .set(generation.to_owned())
+        .map_err(|_| {
+            fail(
+                EXIT_REJECTED,
+                "Terminal service generation was already set.",
+            )
+        })?;
+    let mut service_name = wide(OsStr::new(&terminal_service_name(generation)?));
+    let table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: service_name.as_mut_ptr(),
+            lpServiceProc: Some(terminal_service_main),
+        },
+        SERVICE_TABLE_ENTRYW::default(),
+    ];
+    if unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) } == 0 {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Terminal cleanup service dispatcher failed.",
+        ));
+    }
+    Ok(0)
+}
+
+unsafe extern "system" fn terminal_service_control(_control: u32) {}
+
+unsafe extern "system" fn terminal_service_main(_argc: u32, _argv: *mut *mut u16) {
+    let Some(generation) = TERMINAL_SERVICE_GENERATION.get() else {
+        return;
+    };
+    let service_name = match terminal_service_name(generation) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let handle = unsafe {
+        RegisterServiceCtrlHandlerW(
+            wide(OsStr::new(&service_name)).as_ptr(),
+            Some(terminal_service_control),
+        )
+    };
+    if handle.is_null() {
+        return;
+    }
+    let mut status = SERVICE_STATUS {
+        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwCurrentState: SERVICE_START_PENDING,
+        dwControlsAccepted: 0,
+        dwWin32ExitCode: 0,
+        dwServiceSpecificExitCode: 0,
+        dwCheckPoint: 1,
+        dwWaitHint: 120_000,
+    };
+    unsafe { SetServiceStatus(handle, &status) };
+    status.dwCurrentState = SERVICE_RUNNING;
+    status.dwCheckPoint = 0;
+    status.dwWaitHint = 0;
+    unsafe { SetServiceStatus(handle, &status) };
+    let result = std::panic::catch_unwind(|| run_terminal_cleanup_service(generation));
+    status.dwCurrentState = SERVICE_STOPPED;
+    status.dwWin32ExitCode = match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => error.code as u32,
+        Err(_) => EXIT_FAILURE as u32,
+    };
+    unsafe { SetServiceStatus(handle, &status) };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Install,
@@ -183,6 +276,10 @@ struct TerminalUninstallRecord {
     maintenance_sha256: String,
     uninstall_command: String,
     quiet_uninstall_command: String,
+    service_name: String,
+    service_image: String,
+    service_sha256: String,
+    service_file_identity: String,
 }
 
 struct Paths {
@@ -207,15 +304,8 @@ fn run_inner() -> Result<i32> {
             .iter()
             .all(|value| value == "/TQ-RELOCATED" || value == "/S");
     let legacy_predecessor = elevated && legacy_predecessor_arguments(&arguments);
-    let terminal_recovery = elevated
-        && arguments.len() == 1
-        && arguments[0]
-            .to_str()
-            .and_then(|value| value.strip_prefix("/TQ-TERMINAL-RECOVERY="))
-            .is_some_and(|generation| validate_machine_lock_suffix(generation).is_ok());
     if !((arguments.is_empty() || (arguments.len() == 1 && arguments[0] == "/S"))
         || legacy_predecessor
-        || terminal_recovery
         || relocated)
     {
         return Err(fail(EXIT_USAGE, "The native setup accepts only /S."));
@@ -361,13 +451,6 @@ fn run_inner() -> Result<i32> {
             remove_plain_tree(&controller_paths.profile)?;
         }
         return result;
-    }
-    if terminal_recovery {
-        let generation = arguments[0]
-            .to_string_lossy()
-            .trim_start_matches("/TQ-TERMINAL-RECOVERY=")
-            .to_owned();
-        return run_terminal_uninstall_recovery(&generation);
     }
     run_worker(silent, legacy_predecessor)
 }
@@ -873,20 +956,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             {
                 return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
             }
-            if record.phase == "armed" {
-                retire_terminal_machine_state(
-                    &paths,
-                    &WindowsNativeSystem,
-                    &current,
-                    &record.generation,
-                )?;
-            }
-            let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
-            let suffix = retire_machine_lock_publication(&paths)?;
+            resume_terminal_service(&paths, &record)?;
             drop(machine_lock.take());
-            remove_machine_lock_residue(&paths, &suffix)?;
-            finish_terminal_uninstall(&paths)?;
-            drop(legacy);
+            wait_for_terminal_service_retirement(&paths, &record.generation)?;
             return Ok(0);
         }
         system.unregister_app_path()?;
@@ -3460,9 +3532,7 @@ fn service_executable(command: &str) -> Option<PathBuf> {
 
 fn owned_legacy_executable(executable: &Path, paths: &Paths) -> Result<bool> {
     assert_plain_file(executable)?;
-    let executable = canonical(executable)?;
-    let authority = format!("{}\\", canonical(&paths.legacy_authority)?);
-    Ok(executable.starts_with(&authority))
+    canonical_path_is_within(executable, &paths.legacy_authority)
 }
 
 fn retire_legacy_task(paths: &Paths) -> Result<()> {
@@ -3647,29 +3717,28 @@ fn complete_terminal_uninstall(
     machine_lock: &mut Option<MachineLock>,
 ) -> Result<()> {
     require_uninstall_cleanup_complete(paths)?;
-    let mut terminal_owner = finalize_uninstall(paths, system, current)?;
-    // Keep the published lifecycle lock discoverable for the launcher handoff. The terminal
-    // maintenance worker acquires it and retires publication only after clearing HKLM Run.
+    let generation = if let Some(record) = read_terminal_uninstall_record(paths)? {
+        resume_terminal_service(paths, &record)?;
+        record.generation
+    } else {
+        finalize_uninstall(paths, system, current)?
+    };
+    // The service cannot acquire the lifecycle lock until its creator releases it.
     drop(machine_lock.take());
-    let status = terminal_owner.wait().map_err(io_failure)?;
-    if !status.success() {
-        return Err(fail(EXIT_FAILURE, "Terminal uninstall recovery failed."));
-    }
-    Ok(())
+    wait_for_terminal_service_retirement(paths, &generation)
 }
 
 fn finalize_uninstall(
     paths: &Paths,
     system: &dyn NativeSystemAdapter,
     current: &Path,
-) -> Result<std::process::Child> {
+) -> Result<String> {
     require_uninstall_cleanup_complete(paths)?;
-    // Publish the stable owner before retiring any machine registration. An armed owner with
-    // a surviving journal re-enters the full setup recovery path.
+    // Publish and start the protected SCM owner before retiring any callable registration.
     register_uninstall_executable(&paths.maintenance_uninstaller)?;
-    let terminal_generation = publish_terminal_uninstall_record(paths)?;
-    retire_terminal_machine_state(paths, system, current, &terminal_generation)?;
-    launch_terminal_uninstall_owner(paths, &terminal_generation)
+    let terminal_generation = publish_terminal_uninstall_record(paths, current)?;
+    let _ = system;
+    Ok(terminal_generation)
 }
 
 fn retire_terminal_machine_state(
@@ -3700,13 +3769,7 @@ fn retire_terminal_machine_state(
         system.unregister_app_path()?;
         write_transaction(paths, "uninstall-app-path-retired", Action::Uninstall, true)?;
         register_uninstall_executable(&paths.maintenance_uninstaller)?;
-        establish_finalizer_deletion_ownership(paths, current)?;
-        write_transaction(
-            paths,
-            "uninstall-finalizer-deletion-owned",
-            Action::Uninstall,
-            true,
-        )?;
+        let _ = current;
         write_transaction(
             paths,
             "uninstall-registration-retiring",
@@ -4609,7 +4672,7 @@ fn read_terminal_uninstall_record(paths: &Paths) -> Result<Option<TerminalUninst
     let record: TerminalUninstallRecord = serde_json::from_slice(&bytes)
         .map_err(|_| fail(EXIT_REJECTED, "Terminal uninstall record is invalid."))?;
     let (uninstall_command, quiet_uninstall_command) = terminal_uninstall_commands(paths);
-    if record.schema_version != 2
+    if record.schema_version != 3
         || validate_machine_lock_suffix(&record.generation).is_err()
         || !matches!(record.phase.as_str(), "armed" | "machine-retired")
         || record.maintenance_sha256.len() != 64
@@ -4619,6 +4682,15 @@ fn read_terminal_uninstall_record(paths: &Paths) -> Result<Option<TerminalUninst
             .all(|value| value.is_ascii_hexdigit())
         || record.uninstall_command != uninstall_command
         || record.quiet_uninstall_command != quiet_uninstall_command
+        || record.service_name != terminal_service_name(&record.generation)?
+        || record.service_image
+            != terminal_service_image(paths, &record.generation)?.to_string_lossy()
+        || record.service_sha256.len() != 64
+        || !record
+            .service_sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+        || record.service_file_identity.is_empty()
     {
         return Err(fail(EXIT_REJECTED, "Terminal uninstall record is invalid."));
     }
@@ -4741,175 +4813,285 @@ fn require_machine_relaunch_owner(paths: &Paths) -> Result<()> {
     }
 }
 
-fn terminal_run_once_name(generation: &str) -> Result<String> {
+fn terminal_service_image(paths: &Paths, generation: &str) -> Result<PathBuf> {
     validate_machine_lock_suffix(generation)?;
-    Ok(format!("{TERMINAL_RUN_ONCE_PREFIX}{generation}"))
+    Ok(paths
+        .program_data
+        .join(format!("{TERMINAL_SERVICE_IMAGE_PREFIX}{generation}.exe")))
 }
 
-fn terminal_run_once_command(paths: &Paths, generation: &str) -> Result<String> {
-    validate_machine_lock_suffix(generation)?;
-    let launcher =
-        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
+fn terminal_service_record_path(image: &Path) -> PathBuf {
+    PathBuf::from(format!("{}:terminal-record-v1", image.display()))
+}
+
+fn write_terminal_service_record(record: &TerminalUninstallRecord) -> Result<()> {
+    let bytes = serde_json::to_vec(record)
+        .map_err(|_| fail(EXIT_FAILURE, "Cannot serialize terminal service record."))?;
+    let path = terminal_service_record_path(Path::new(&record.service_image));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(io_failure)?;
+    file.write_all(&bytes).map_err(io_failure)?;
+    file.sync_all().map_err(io_failure)
+}
+
+fn read_terminal_service_record(current: &Path) -> Result<TerminalUninstallRecord> {
+    let bytes = fs::read(terminal_service_record_path(current)).map_err(io_failure)?;
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return Err(fail(EXIT_REJECTED, "Terminal service record is invalid."));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| fail(EXIT_REJECTED, "Terminal service record is invalid."))
+}
+
+fn terminal_service_command(paths: &Paths, generation: &str) -> Result<String> {
     Ok(format!(
-        "\"{}\" --windows-terminal-uninstall-v1={generation}",
-        launcher.display()
+        "\"{}\" /TQ-TERMINAL-SERVICE={generation}",
+        terminal_service_image(paths, generation)?.display()
     ))
 }
 
-fn require_single_terminal_run_once_generation(key: HKEY, generation: &str) -> Result<()> {
-    let expected = terminal_run_once_name(generation)?;
-    let mut index = 0_u32;
-    loop {
-        let mut name = [0_u16; 512];
-        let mut length = name.len() as u32;
-        let status = unsafe {
-            RegEnumValueW(
-                key,
-                index,
-                name.as_mut_ptr(),
-                &mut length,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
+fn publish_terminal_service_image(
+    paths: &Paths,
+    source: &Path,
+    generation: &str,
+) -> Result<(String, String)> {
+    assert_plain_file(source)?;
+    let pending = paths.program_data.join(format!(
+        "{TERMINAL_SERVICE_PENDING_PREFIX}{}.exe",
+        random_machine_lock_suffix()?
+    ));
+    let published = terminal_service_image(paths, generation)?;
+    assert_plain_absent(&pending)?;
+    assert_plain_absent(&published)?;
+    fs::copy(source, &pending).map_err(io_failure)?;
+    apply_lock_dacl(&pending, TERMINAL_SERVICE_FILE_SDDL)?;
+    let file = File::open(&pending).map_err(io_failure)?;
+    file.sync_all().map_err(io_failure)?;
+    let file_identity = file_identity_text(&file)?;
+    drop(file);
+    let sha256 = hex_hash(&file_hash(&pending)?);
+    if sha256 != hex_hash(&file_hash(source)?) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal service image changed during publication.",
+        ));
+    }
+    durable_rename(&pending, &published)?;
+    flush_setup_directory(&paths.program_data)?;
+    assert_plain_file(&published)?;
+    let published_file = File::open(&published).map_err(io_failure)?;
+    let published_identity = file_identity_text(&published_file)?;
+    drop(published_file);
+    if published_identity != file_identity
+        || !marker_security_is_exact(&published, TERMINAL_SERVICE_FILE_SDDL)?
+        || file_hash(&published)? != file_hash(source)?
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal service publication is invalid.",
+        ));
+    }
+    Ok((sha256, file_identity))
+}
+
+fn terminal_service_dacl_is_exact(service: SC_HANDLE) -> Result<bool> {
+    let mut needed = 0;
+    unsafe {
+        QueryServiceObjectSecurity(
+            service,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 || needed > 64 * 1024 {
+        return Err(fail(EXIT_REJECTED, "Cannot inspect terminal service ACL."));
+    }
+    let mut actual = vec![0_u8; needed as usize];
+    if unsafe {
+        QueryServiceObjectSecurity(
+            service,
+            DACL_SECURITY_INFORMATION,
+            actual.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(fail(EXIT_REJECTED, "Cannot read terminal service ACL."));
+    }
+    let expected_wide = wide(OsStr::new(TERMINAL_SERVICE_SDDL));
+    let mut expected = ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            expected_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut expected,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(fail(EXIT_FAILURE, "Cannot create terminal service ACL."));
+    }
+    let convert = |descriptor: *mut c_void| -> Result<String> {
+        let mut text = ptr::null_mut();
+        if unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
                 ptr::null_mut(),
             )
-        };
-        if status == 259 {
-            return Ok(());
-        }
-        if status != 0 {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Cannot enumerate terminal RunOnce owners.",
-            ));
-        }
-        let name = String::from_utf16(&name[..length as usize])
-            .map_err(|_| fail(EXIT_REJECTED, "Terminal RunOnce name is invalid."))?;
-        if name.starts_with(TERMINAL_RUN_ONCE_PREFIX) && name != expected {
+        } == 0
+        {
             return Err(fail(
                 EXIT_REJECTED,
-                "Another terminal RunOnce owner exists.",
+                "Cannot normalize terminal service ACL.",
             ));
         }
-        index += 1;
-    }
-}
-
-fn install_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
-    let name = terminal_run_once_name(generation)?;
-    let command = terminal_run_once_command(paths, generation)?;
-    let mut key = ptr::null_mut();
-    if unsafe {
-        RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
-            0,
-            ptr::null_mut(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_READ | KEY_WRITE,
-            ptr::null(),
-            &mut key,
-            ptr::null_mut(),
-        )
-    } != 0
-    {
-        return Err(fail(EXIT_FAILURE, "Cannot create terminal RunOnce owner."));
-    }
-    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
-        unsafe { RegCloseKey(key) };
-        return Err(error);
-    }
-    let value = wide(OsStr::new(&command));
-    let status = unsafe {
-        RegSetValueExW(
-            key,
-            wide(OsStr::new(&name)).as_ptr(),
-            0,
-            REG_SZ,
-            value.as_ptr().cast(),
-            (value.len() * 2) as u32,
-        )
+        let value = unsafe { wide_ptr_string(text) };
+        unsafe { LocalFree(text.cast()) };
+        Ok(value)
     };
-    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
-    unsafe { RegCloseKey(key) };
-    if flushed {
-        Ok(())
-    } else {
-        Err(fail(EXIT_FAILURE, "Cannot flush terminal RunOnce owner."))
-    }
+    let expected_text = convert(expected)?;
+    unsafe { LocalFree(expected) };
+    Ok(convert(actual.as_mut_ptr().cast())? == expected_text)
 }
 
-fn require_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
-    let name = terminal_run_once_name(generation)?;
-    let expected = terminal_run_once_command(paths, generation)?;
-    let mut key = ptr::null_mut();
+fn apply_terminal_service_dacl(service: SC_HANDLE) -> Result<()> {
+    let sddl = wide(OsStr::new(TERMINAL_SERVICE_SDDL));
+    let mut descriptor = ptr::null_mut();
     if unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
-            0,
-            KEY_READ,
-            &mut key,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
         )
-    } != 0
+    } == 0
     {
-        return Err(fail(EXIT_REJECTED, "Terminal RunOnce owner is missing."));
+        return Err(fail(EXIT_FAILURE, "Cannot create terminal service ACL."));
     }
-    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
-        unsafe { RegCloseKey(key) };
-        return Err(error);
-    }
-    let actual = read_registry_value(key, &name, 1024)?;
-    unsafe { RegCloseKey(key) };
-    if actual.as_deref() == Some(expected.as_str()) {
+    let applied = unsafe {
+        SetServiceObjectSecurity(
+            service,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    } != 0;
+    unsafe { LocalFree(descriptor) };
+    if applied && terminal_service_dacl_is_exact(service)? {
         Ok(())
     } else {
-        Err(fail(EXIT_REJECTED, "Terminal RunOnce owner is invalid."))
+        Err(fail(EXIT_FAILURE, "Cannot protect terminal service."))
     }
 }
 
-fn clear_terminal_run_once_owner(paths: &Paths, generation: &str) -> Result<()> {
-    let name = terminal_run_once_name(generation)?;
-    let expected = terminal_run_once_command(paths, generation)?;
-    let mut key = ptr::null_mut();
-    let opened = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(TERMINAL_RUN_ONCE_KEY)).as_ptr(),
-            0,
-            KEY_READ | KEY_WRITE,
-            &mut key,
-        )
+fn configure_terminal_service_restarts(service: SC_HANDLE) -> Result<()> {
+    let mut actions = [SC_ACTION {
+        Type: SC_ACTION_RESTART,
+        Delay: 60_000,
+    }; 3];
+    let failure_actions = SERVICE_FAILURE_ACTIONSW {
+        dwResetPeriod: 86_400,
+        lpRebootMsg: ptr::null_mut(),
+        lpCommand: ptr::null_mut(),
+        cActions: actions.len() as u32,
+        lpsaActions: actions.as_mut_ptr(),
     };
-    if opened == 2 {
-        return Ok(());
-    }
-    if opened != 0 {
-        return Err(fail(EXIT_FAILURE, "Cannot open terminal RunOnce owner."));
-    }
-    if let Err(error) = require_single_terminal_run_once_generation(key, generation) {
-        unsafe { RegCloseKey(key) };
-        return Err(error);
-    }
-    let actual = read_registry_value(key, &name, 1024)?;
-    if actual.as_deref().is_some_and(|value| value != expected) {
-        unsafe { RegCloseKey(key) };
-        return Err(fail(EXIT_REJECTED, "Terminal RunOnce owner was replaced."));
-    }
-    if actual.is_some() && unsafe { RegDeleteValueW(key, wide(OsStr::new(&name)).as_ptr()) } != 0 {
-        unsafe { RegCloseKey(key) };
-        return Err(fail(EXIT_FAILURE, "Cannot retire terminal RunOnce owner."));
-    }
-    let flushed = unsafe { RegFlushKey(key) } == 0;
-    unsafe { RegCloseKey(key) };
-    if flushed {
-        Ok(())
-    } else {
+    if unsafe {
+        ChangeServiceConfig2W(
+            service,
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            (&failure_actions as *const SERVICE_FAILURE_ACTIONSW).cast(),
+        )
+    } == 0
+    {
         Err(fail(
             EXIT_FAILURE,
-            "Cannot flush terminal RunOnce retirement.",
+            "Cannot configure terminal service recovery.",
         ))
+    } else {
+        Ok(())
     }
+}
+
+fn install_and_start_terminal_service(
+    paths: &Paths,
+    record: &TerminalUninstallRecord,
+) -> Result<()> {
+    let manager = unsafe {
+        OpenSCManagerW(
+            ptr::null(),
+            ptr::null(),
+            SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE,
+        )
+    };
+    if manager.is_null() {
+        return Err(fail(EXIT_FAILURE, "Cannot open the service manager."));
+    }
+    let command = terminal_service_command(paths, &record.generation)?;
+    let mut service = unsafe {
+        CreateServiceW(
+            manager,
+            wide(OsStr::new(&record.service_name)).as_ptr(),
+            wide(OsStr::new(&record.service_name)).as_ptr(),
+            SERVICE_ALL_ACCESS,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL,
+            wide(OsStr::new(&command)).as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    if service.is_null() && unsafe { GetLastError() } == 1073 {
+        service = unsafe {
+            OpenServiceW(
+                manager,
+                wide(OsStr::new(&record.service_name)).as_ptr(),
+                SERVICE_ALL_ACCESS,
+            )
+        };
+    }
+    if service.is_null() {
+        unsafe { CloseServiceHandle(manager) };
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot create or open terminal cleanup service.",
+        ));
+    }
+    let result = apply_terminal_service_dacl(service)
+        .and_then(|()| configure_terminal_service_restarts(service))
+        .and_then(|()| {
+            if unsafe { StartServiceW(service, 0, ptr::null()) } == 0
+                && unsafe { GetLastError() } != 1056
+            {
+                Err(fail(EXIT_FAILURE, "Cannot start terminal cleanup service."))
+            } else {
+                Ok(())
+            }
+        });
+    unsafe {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+    }
+    result
+}
+
+fn resume_terminal_service(paths: &Paths, record: &TerminalUninstallRecord) -> Result<()> {
+    let image = PathBuf::from(&record.service_image);
+    validate_terminal_service_image(record, &image)?;
+    install_and_start_terminal_service(paths, record)?;
+    verify_terminal_service_registration(paths, record)
 }
 
 fn terminal_uninstall_commands(paths: &Paths) -> (String, String) {
@@ -4917,20 +5099,60 @@ fn terminal_uninstall_commands(paths: &Paths) -> (String, String) {
     (executable.clone(), format!("{executable} /S"))
 }
 
-fn publish_terminal_uninstall_record(paths: &Paths) -> Result<String> {
+fn reclaim_unpublished_terminal_service_images(paths: &Paths) -> Result<()> {
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let entry = entry.map_err(io_failure)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let suffix = name
+            .strip_prefix(TERMINAL_SERVICE_IMAGE_PREFIX)
+            .or_else(|| name.strip_prefix(TERMINAL_SERVICE_PENDING_PREFIX));
+        let Some(suffix) = suffix else {
+            continue;
+        };
+        let generation = suffix.strip_suffix(".exe").unwrap_or("");
+        if validate_machine_lock_suffix(generation).is_err() {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal service namespace is invalid.",
+            ));
+        }
+        let path = entry.path();
+        assert_plain_file(&path)?;
+        if !marker_security_is_exact(&path, TERMINAL_SERVICE_FILE_SDDL)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal service residue is unprotected.",
+            ));
+        }
+        fs::remove_file(path).map_err(io_failure)?;
+    }
+    flush_setup_directory(&paths.program_data)
+}
+
+fn publish_terminal_uninstall_record(paths: &Paths, current: &Path) -> Result<String> {
     require_machine_relaunch_owner(paths)?;
+    reclaim_unpublished_terminal_service_images(paths)?;
     let generation = random_machine_lock_suffix()?;
+    let (service_sha256, service_file_identity) =
+        publish_terminal_service_image(paths, current, &generation)?;
     let (uninstall_command, quiet_uninstall_command) = terminal_uninstall_commands(paths);
     let record = TerminalUninstallRecord {
-        schema_version: 2,
+        schema_version: 3,
         generation: generation.clone(),
         phase: "armed".into(),
         maintenance_sha256: hex_hash(&file_hash(&paths.maintenance_uninstaller)?),
         uninstall_command,
         quiet_uninstall_command,
+        service_name: terminal_service_name(&generation)?,
+        service_image: terminal_service_image(paths, &generation)?
+            .to_string_lossy()
+            .into_owned(),
+        service_sha256,
+        service_file_identity,
     };
+    write_terminal_service_record(&record)?;
     write_terminal_uninstall_record(paths, &record)?;
-    install_terminal_run_once_owner(paths, &generation)?;
+    install_and_start_terminal_service(paths, &record)?;
     Ok(generation)
 }
 
@@ -4945,16 +5167,6 @@ fn write_terminal_uninstall_phase(paths: &Paths, generation: &str, phase: &str) 
     }
     record.phase = phase.into();
     write_terminal_uninstall_record(paths, &record)
-}
-
-fn launch_terminal_uninstall_owner(paths: &Paths, generation: &str) -> Result<std::process::Child> {
-    let launcher =
-        terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
-    assert_plain_file(&launcher)?;
-    Command::new(launcher)
-        .arg(format!("--windows-terminal-uninstall-v1={generation}"))
-        .spawn()
-        .map_err(io_failure)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4981,22 +5193,235 @@ fn terminal_uninstall_recovery_step(
     }
 }
 
-fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
+fn validate_terminal_service_image(record: &TerminalUninstallRecord, current: &Path) -> Result<()> {
+    let file = File::open(current).map_err(io_failure)?;
+    let identity = file_identity_text(&file)?;
+    drop(file);
+    if canonical(current)? != canonical(Path::new(&record.service_image))?
+        || record.service_name != terminal_service_name(&record.generation)?
+        || hex_hash(&file_hash(current)?) != record.service_sha256
+        || identity != record.service_file_identity
+        || !marker_security_is_exact(current, TERMINAL_SERVICE_FILE_SDDL)?
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal service image is invalid."));
+    }
+    Ok(())
+}
+
+fn terminal_service_handle(
+    record: &TerminalUninstallRecord,
+    access: u32,
+) -> Result<(ServiceHandle, ServiceHandle)> {
+    let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return Err(fail(EXIT_FAILURE, "Cannot open terminal service manager."));
+    }
+    let manager = ServiceHandle(manager);
+    let service = unsafe {
+        OpenServiceW(
+            manager.0,
+            wide(OsStr::new(&record.service_name)).as_ptr(),
+            access,
+        )
+    };
+    if service.is_null() {
+        return Err(fail(EXIT_REJECTED, "Terminal cleanup service is missing."));
+    }
+    Ok((manager, ServiceHandle(service)))
+}
+
+fn verify_terminal_service_registration(
+    paths: &Paths,
+    record: &TerminalUninstallRecord,
+) -> Result<()> {
+    let (_manager, service) =
+        terminal_service_handle(record, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS)?;
+    let mut needed = 0;
+    unsafe { QueryServiceConfigW(service.0, ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot inspect terminal service identity.",
+        ));
+    }
+    let mut storage = vec![0_usize; (needed as usize).div_ceil(mem::size_of::<usize>())];
+    if unsafe { QueryServiceConfigW(service.0, storage.as_mut_ptr().cast(), needed, &mut needed) }
+        == 0
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot read terminal service identity.",
+        ));
+    }
+    let config = unsafe { &*storage.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
+    let binary = unsafe { wide_ptr_string(config.lpBinaryPathName) };
+    let account = if config.lpServiceStartName.is_null() {
+        String::new()
+    } else {
+        unsafe { wide_ptr_string(config.lpServiceStartName) }
+    };
+    if config.dwServiceType != SERVICE_WIN32_OWN_PROCESS
+        || config.dwStartType != SERVICE_AUTO_START
+        || config.dwErrorControl != SERVICE_ERROR_NORMAL
+        || !account.eq_ignore_ascii_case("LocalSystem")
+        || binary != terminal_service_command(paths, &record.generation)?
+        || !terminal_service_dacl_is_exact(service.0)?
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal service registration is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn registry_key_absent(path: &str) -> Result<bool> {
+    let mut key = ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(path)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if status == 0 {
+        unsafe { RegCloseKey(key) };
+        Ok(false)
+    } else if status == 2 {
+        Ok(true)
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Cannot inspect terminal cleanup registry.",
+        ))
+    }
+}
+
+fn machine_relaunch_owner_is_absent() -> Result<bool> {
+    let mut key = ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(r"Software\Microsoft\Windows\CurrentVersion\Run")).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if status == 2 {
+        return Ok(true);
+    }
+    if status != 0 {
+        return Err(fail(EXIT_FAILURE, "Cannot inspect machine relaunch owner."));
+    }
+    let absent = read_registry_value(key, "Talking Quill Update Relaunch", 1024)?.is_none();
+    unsafe { RegCloseKey(key) };
+    Ok(absent)
+}
+
+fn terminal_cleanup_topology_is_complete(paths: &Paths, generation: &str) -> Result<bool> {
+    for path in [
+        &paths.install,
+        &paths.staging,
+        &paths.backup,
+        &paths.transaction,
+        &paths.maintenance_uninstaller,
+        &terminal_uninstall_root(paths),
+    ] {
+        if path_present(path)? {
+            return Ok(false);
+        }
+    }
+    for key in [
+        MACHINE_LOCK_REGISTRY_KEY,
+        UNINSTALL_KEY,
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe",
+    ] {
+        if !registry_key_absent(key)? {
+            return Ok(false);
+        }
+    }
+    if !machine_relaunch_owner_is_absent()? {
+        return Ok(false);
+    }
+    let current_service_image = format!("{TERMINAL_SERVICE_IMAGE_PREFIX}{generation}.exe");
+    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
+        let name = entry.map_err(io_failure)?.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with(TERMINAL_SERVICE_IMAGE_PREFIX) && name != current_service_image)
+            || name.starts_with(TERMINAL_SERVICE_PENDING_PREFIX)
+            || name.starts_with(UNINSTALL_FINALIZER_PREFIX)
+            || name.starts_with(UNINSTALL_FINALIZER_PENDING_PREFIX)
+            || name.starts_with(MACHINE_LOCK_DIRECTORY_PREFIX)
+            || name.starts_with(MACHINE_LOCK_PENDING_PREFIX)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn retire_terminal_service(
+    paths: &Paths,
+    record: &TerminalUninstallRecord,
+    current: &Path,
+) -> Result<()> {
+    schedule_terminal_service_deletion(current)?;
+    let (_manager, service) = terminal_service_handle(record, DELETE | SERVICE_QUERY_CONFIG)?;
+    verify_terminal_service_registration(paths, record)?;
+    if unsafe { DeleteService(service.0) } == 0 {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Cannot delete terminal cleanup service.",
+        ));
+    }
+    arm_mapped_image_deletion(current)?;
+    flush_setup_directory(&paths.program_data)
+}
+
+fn run_terminal_cleanup_service(generation: &str) -> Result<()> {
     let paths = paths()?;
+    let current = std::env::current_exe().map_err(io_failure)?;
+    let record = read_terminal_service_record(&current)?;
+    if record.generation != generation {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall generation is invalid.",
+        ));
+    }
+    validate_terminal_service_image(&record, &current)?;
+    verify_terminal_service_registration(&paths, &record)?;
+    let Some(root_record) = read_terminal_uninstall_record(&paths)? else {
+        if !terminal_cleanup_topology_is_complete(&paths, generation)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Terminal cleanup topology is incomplete.",
+            ));
+        }
+        return retire_terminal_service(&paths, &record, &current);
+    };
+    if root_record.generation != record.generation
+        || root_record.maintenance_sha256 != record.maintenance_sha256
+        || root_record.uninstall_command != record.uninstall_command
+        || root_record.quiet_uninstall_command != record.quiet_uninstall_command
+        || root_record.service_name != record.service_name
+        || root_record.service_image != record.service_image
+        || root_record.service_sha256 != record.service_sha256
+        || root_record.service_file_identity != record.service_file_identity
+        || !matches!(
+            (record.phase.as_str(), root_record.phase.as_str()),
+            ("armed", "armed") | ("armed", "machine-retired")
+        )
+    {
+        return Err(fail(EXIT_REJECTED, "Terminal records do not match."));
+    }
     let mut machine_lock = Some(MachineLock::acquire(
         &paths,
         120_000,
         installed_recovery_policy_epoch(&paths)?,
     )?);
-    let current = std::env::current_exe().map_err(io_failure)?;
-    let record = read_terminal_uninstall_record(&paths)?
-        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
-    if record.generation != generation
-        || hex_hash(&file_hash(&current)?) != record.maintenance_sha256
-    {
-        return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
-    }
-    install_terminal_run_once_owner(&paths, generation)?;
     if terminal_uninstall_recovery_step(&record.phase, path_present(&paths.transaction)?)?
         == TerminalUninstallRecoveryStep::RetireMachine
     {
@@ -5004,9 +5429,8 @@ fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
     }
     let retired = read_terminal_uninstall_record(&paths)?
         .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
-    if retired.generation != generation
-        || terminal_uninstall_recovery_step(&retired.phase, path_present(&paths.transaction)?)?
-            != TerminalUninstallRecoveryStep::FinishCleanup
+    if terminal_uninstall_recovery_step(&retired.phase, path_present(&paths.transaction)?)?
+        != TerminalUninstallRecoveryStep::FinishCleanup
     {
         return Err(fail(
             EXIT_REJECTED,
@@ -5019,7 +5443,51 @@ fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
     remove_machine_lock_residue(&paths, &suffix)?;
     finish_terminal_uninstall(&paths)?;
     drop(legacy);
-    Ok(0)
+
+    // Establish OS ownership of only the authenticated service image before deleting the
+    // restartable SCM owner. After DeleteService succeeds, no further authority is required.
+    retire_terminal_service(&paths, &record, &current)
+}
+
+fn wait_for_terminal_service_retirement(paths: &Paths, generation: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let name = terminal_service_name(generation)?;
+    loop {
+        let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
+        if manager.is_null() {
+            return Err(fail(EXIT_FAILURE, "Cannot poll terminal cleanup service."));
+        }
+        let service = unsafe {
+            OpenServiceW(
+                manager,
+                wide(OsStr::new(&name)).as_ptr(),
+                SERVICE_QUERY_STATUS,
+            )
+        };
+        let absent = service.is_null() && unsafe { GetLastError() } == 1060;
+        if !service.is_null() {
+            unsafe { CloseServiceHandle(service) };
+        }
+        unsafe { CloseServiceHandle(manager) };
+        if absent {
+            if !terminal_cleanup_topology_is_complete(paths, generation)?
+                || path_present(&terminal_service_image(paths, generation)?)?
+            {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Terminal cleanup left protected residue.",
+                ));
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Terminal cleanup service did not retire.",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn enumerate_registry_subkeys(key: *mut c_void) -> Result<Vec<String>> {
@@ -5342,7 +5810,6 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
             "Terminal uninstall machine state is not retired.",
         ));
     }
-    require_terminal_run_once_owner(paths, &record.generation)?;
     clear_update_recovery(paths)?;
     clear_legacy_profile_relaunch_owners(paths)?;
     let root = terminal_uninstall_root(paths);
@@ -5351,24 +5818,16 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
 
-    // RunOnce is now the terminal callable owner. Retire ordinary Run before any object is
-    // scheduled, so a reboot can never retain a persistent value whose launcher was deleted.
     clear_machine_relaunch_owner(paths)?;
-    let current = std::env::current_exe().map_err(io_failure)?;
-    let deletion_plan = collect_terminal_deletion_plan(paths, &current)?;
-    schedule_delayed_deletion_plan(&deletion_plan)?;
 
-    // Normal completion does not depend on reboot. POSIX disposition removes mapped images,
-    // then identity-bound tree removal clears every remaining protected object.
+    // Normal completion uses POSIX disposition for mapped native images. The only reboot
+    // deletion owned by the terminal service is its own verified image.
     let launcher = root.join("talking-quill-update-recovery-launcher.exe");
     if path_present(&launcher)? {
         arm_mapped_image_deletion(&launcher)?;
     }
     if path_present(&paths.maintenance_uninstaller)? {
         arm_mapped_image_deletion(&paths.maintenance_uninstaller)?;
-    }
-    if current != launcher && current != paths.maintenance_uninstaller && path_present(&current)? {
-        arm_mapped_image_deletion(&current)?;
     }
     remove_uninstall_finalizer_residue(paths)?;
     let identity =
@@ -5383,11 +5842,7 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
         ));
     }
     remove_owned_tree(&root, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-    flush_setup_directory(&paths.program_data)?;
-
-    // This deletion and flush are the last fallible mutation. If the process crashed earlier,
-    // Windows owns the complete postorder filesystem deletion and !RunOnce removes itself.
-    clear_terminal_run_once_owner(paths, &record.generation)
+    flush_setup_directory(&paths.program_data)
 }
 
 fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
@@ -5493,113 +5948,6 @@ fn relocated_uninstall_matches_maintenance(target: &Path, paths: &Paths) -> Resu
         })
         && path_present(&paths.maintenance_uninstaller)?
         && file_hash(target)? == file_hash(&paths.maintenance_uninstaller)?)
-}
-
-fn collect_owned_finalizer_deletion_paths(paths: &Paths, output: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(&paths.program_data).map_err(io_failure)? {
-        let entry = entry.map_err(io_failure)?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let pending_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PENDING_PREFIX);
-        let published_suffix = name.strip_prefix(UNINSTALL_FINALIZER_PREFIX);
-        if pending_suffix.is_none() && published_suffix.is_none() {
-            continue;
-        }
-        let pending =
-            pending_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        let published =
-            published_suffix.is_some_and(|suffix| validate_machine_lock_suffix(suffix).is_ok());
-        if !pending && !published {
-            return Err(fail(EXIT_REJECTED, "Finalizer namespace entry is invalid."));
-        }
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
-        if !metadata.is_dir()
-            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || !medium_launcher_directory_is_protected(&path)?
-        {
-            return Err(fail(EXIT_REJECTED, "Finalizer directory is invalid."));
-        }
-        let identity =
-            owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-        if !pending
-            && !fs::read_to_string(path.join("finalizer-tree-identity-v1"))
-                .is_ok_and(|value| value == identity)
-        {
-            return Err(fail(EXIT_REJECTED, "Finalizer identity is invalid."));
-        }
-        collect_finalizer_deletion_paths(&path, output)?;
-    }
-    Ok(())
-}
-
-fn append_unique_deletion_path(output: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
-    let canonical_path = canonical(path)?;
-    if !output
-        .iter()
-        .filter_map(|existing| canonical(existing).ok())
-        .any(|existing| existing == canonical_path)
-    {
-        output.push(path.to_path_buf());
-    }
-    Ok(())
-}
-
-fn establish_finalizer_deletion_ownership(paths: &Paths, current: &Path) -> Result<()> {
-    let mut scheduled = Vec::new();
-    collect_owned_finalizer_deletion_paths(paths, &mut scheduled)?;
-    if path_present(current)? {
-        assert_plain_file(current)?;
-        let canonical_target = canonical(current)?;
-        let authorized = canonical_target == canonical(&paths.maintenance_uninstaller)?
-            || is_uninstall_finalizer(current)?
-            || relocated_uninstall_matches_maintenance(current, paths)?;
-        if !authorized {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Terminal uninstall executable identity is invalid.",
-            ));
-        }
-        append_unique_deletion_path(&mut scheduled, current)?;
-    }
-    schedule_delayed_deletion_plan(&scheduled)
-}
-
-fn collect_terminal_deletion_plan(paths: &Paths, current: &Path) -> Result<Vec<PathBuf>> {
-    let root = terminal_uninstall_root(paths);
-    if !medium_launcher_directory_is_protected(&root)? {
-        return Err(fail(EXIT_REJECTED, "Terminal recovery root is invalid."));
-    }
-    let identity =
-        owned_tree_identity(&root).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-    if fs::read_to_string(root.join("launcher-tree-identity-v1")).map_err(io_failure)? != identity {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Terminal recovery root identity is invalid.",
-        ));
-    }
-    let mut plan = Vec::new();
-    collect_owned_finalizer_deletion_paths(paths, &mut plan)?;
-    if path_present(&paths.maintenance_uninstaller)? {
-        assert_plain_file(&paths.maintenance_uninstaller)?;
-        append_unique_deletion_path(&mut plan, &paths.maintenance_uninstaller)?;
-    }
-    if path_present(current)? {
-        assert_plain_file(current)?;
-        append_unique_deletion_path(&mut plan, current)?;
-    }
-    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
-    let mut root_plan = Vec::new();
-    collect_finalizer_deletion_paths(&root, &mut root_plan)?;
-    for path in root_plan
-        .iter()
-        .filter(|path| path.as_path() != launcher && path.as_path() != root)
-    {
-        append_unique_deletion_path(&mut plan, path)?;
-    }
-    append_unique_deletion_path(&mut plan, &launcher)?;
-    append_unique_deletion_path(&mut plan, &root)?;
-    Ok(plan)
 }
 
 fn collect_finalizer_deletion_paths(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -5731,53 +6079,51 @@ fn open_session_manager(access: u32) -> Result<HKEY> {
 }
 
 fn normalized_pending_source(value: &str) -> String {
-    value.trim_start_matches(r"\??\").to_ascii_lowercase()
+    let value = value.replace('/', "\\");
+    if let Some(unc) = value.strip_prefix(r"\??\UNC\") {
+        format!(r"\\{}", unc.to_ascii_lowercase())
+    } else {
+        value
+            .strip_prefix(r"\??\")
+            .or_else(|| value.strip_prefix(r"\\?\"))
+            .unwrap_or(&value)
+            .to_ascii_lowercase()
+    }
 }
 
-fn schedule_delayed_deletion_plan(expected: &[PathBuf]) -> Result<()> {
-    if expected.is_empty() {
+fn schedule_terminal_service_deletion(path: &Path) -> Result<()> {
+    assert_plain_file(path)?;
+    let expected_path = canonical(path)?;
+    let before_key = open_session_manager(KEY_READ)?;
+    let before = read_pending_rename_pairs(before_key)?;
+    unsafe { RegCloseKey(before_key) };
+    if unsafe {
+        MoveFileExW(
+            wide(path.as_os_str()).as_ptr(),
+            ptr::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    } == 0
+    {
         return Err(fail(
-            EXIT_REJECTED,
-            "No deletion ownership plan was available.",
+            EXIT_FAILURE,
+            "Windows could not take terminal service deletion ownership.",
         ));
     }
-    let before_key = open_session_manager(KEY_READ)?;
-    let mut before = read_pending_rename_pairs(before_key)?;
-    unsafe { RegCloseKey(before_key) };
-    for path in expected {
-        if unsafe {
-            MoveFileExW(
-                wide(path.as_os_str()).as_ptr(),
-                ptr::null(),
-                MOVEFILE_DELAY_UNTIL_REBOOT,
-            )
-        } == 0
-        {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Windows could not take delayed deletion ownership.",
-            ));
-        }
-        let key = open_session_manager(KEY_READ | KEY_WRITE)?;
-        let after = read_pending_rename_pairs(key)?;
-        let expected_path = fs::canonicalize(path).map_err(io_failure)?;
-        let valid = after.get(..before.len()) == Some(before.as_slice())
-            && after
-                .get(before.len())
-                .is_some_and(|(source, destination)| {
-                    destination.is_empty()
-                        && normalized_pending_source(source)
-                            == expected_path.to_string_lossy().to_ascii_lowercase()
-                });
-        let flushed = valid && unsafe { RegFlushKey(key) } == 0;
-        unsafe { RegCloseKey(key) };
-        if !flushed {
-            return Err(fail(
-                EXIT_FAILURE,
-                "Delayed deletion ownership or ordering is invalid.",
-            ));
-        }
-        before = after;
+    let key = open_session_manager(KEY_READ | KEY_WRITE)?;
+    let after = read_pending_rename_pairs(key)?;
+    let valid = after.len() == before.len() + 1
+        && after.get(..before.len()) == Some(before.as_slice())
+        && after.last().is_some_and(|(source, destination)| {
+            destination.is_empty() && normalized_pending_source(source) == expected_path
+        });
+    let flushed = valid && unsafe { RegFlushKey(key) } == 0;
+    unsafe { RegCloseKey(key) };
+    if !flushed {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Terminal service deletion ownership is invalid.",
+        ));
     }
     Ok(())
 }
@@ -6103,6 +6449,12 @@ fn canonical(path: &Path) -> Result<String> {
         .replace('/', "\\")
         .to_lowercase())
 }
+
+fn canonical_path_is_within(path: &Path, root: &Path) -> Result<bool> {
+    let path = PathBuf::from(canonical(path)?);
+    let root = PathBuf::from(canonical(root)?);
+    Ok(path.starts_with(root))
+}
 fn io_failure(error: std::io::Error) -> SetupError {
     fail(EXIT_FAILURE, error.to_string())
 }
@@ -6268,7 +6620,29 @@ mod tests {
     }
 
     #[test]
-    fn deletion_plan_is_child_before_parent_at_every_reboot_seam() {
+    fn canonical_prefix_checks_are_component_aware() {
+        let root = std::env::temp_dir().join(format!("tq-prefix-test-{}", std::process::id()));
+        let child = root.join("child");
+        let sibling = root.with_file_name(format!(
+            "{}-sibling",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&sibling);
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        assert!(canonical_path_is_within(&child, &root).unwrap());
+        assert!(!canonical_path_is_within(&sibling, &root).unwrap());
+        assert_eq!(
+            normalized_pending_source(r"\??\UNC\server\share\cleanup.exe"),
+            r"\\server\share\cleanup.exe"
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(sibling).unwrap();
+    }
+
+    #[test]
+    fn finalizer_cleanup_is_child_before_parent() {
         let root = std::env::temp_dir().join(format!(
             "tq-terminal-delete-plan-test-{}",
             std::process::id()
@@ -6287,13 +6661,7 @@ mod tests {
         let nested_index = plan.iter().position(|path| path == &nested).unwrap();
         let root_index = plan.iter().position(|path| path == &root).unwrap();
         assert!(child_index < nested_index && nested_index < root_index);
-        // At every interruption before the complete plan, !RunOnce remains generation-bound.
-        // At complete publication, every filesystem path has OS deletion ownership before it is
-        // removed. The final RunOnce retirement is therefore safe on normal completion.
-        for scheduled in 0..plan.len() {
-            assert!(scheduled < plan.len());
-            assert!(plan[scheduled..].contains(&root));
-        }
+        assert_eq!(plan.last(), Some(&root));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6341,10 +6709,10 @@ mod tests {
 
     #[test]
     fn terminal_uninstall_record_schema_is_strict() {
-        let valid = br#"{"schemaVersion":2,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\"","quietUninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\" /S"}"#;
+        let valid = br#"{"schemaVersion":3,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\"","quietUninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\" /S","serviceName":"TalkingQuillTerminalCleanup-11111111111111111111111111111111","serviceImage":"C:\\ProgramData\\.Talking Quill Terminal Cleanup-11111111111111111111111111111111.exe","serviceSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","serviceFileIdentity":"1:2"}"#;
         let record: TerminalUninstallRecord = serde_json::from_slice(valid).unwrap();
         assert_eq!(record.phase, "armed");
-        let unknown = br#"{"schemaVersion":2,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\"","quietUninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\" /S","path":"C:\\untrusted.exe"}"#;
+        let unknown = br#"{"schemaVersion":3,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","uninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\"","quietUninstallCommand":"\"C:\\Program Files\\Talking Quill Maintenance.exe\" /S","serviceName":"TalkingQuillTerminalCleanup-11111111111111111111111111111111","serviceImage":"C:\\ProgramData\\cleanup.exe","serviceSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","serviceFileIdentity":"1:2","path":"C:\\untrusted.exe"}"#;
         assert!(serde_json::from_slice::<TerminalUninstallRecord>(unknown).is_err());
     }
 

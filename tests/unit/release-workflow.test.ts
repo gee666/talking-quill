@@ -147,8 +147,13 @@ describe('Windows native release workflow', () => {
     expect(lifecycle.match(/Set-StrictMode -Version Latest/gu)).toHaveLength(2);
     expect(lifecycle.match(/\$ErrorActionPreference = 'Stop'/gu)).toHaveLength(2);
     expect(lifecycle.match(/\$PSNativeCommandUseErrorActionPreference = \$true/gu)).toHaveLength(2);
-    expect(lifecycle).toContain("'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce'");
-    expect(lifecycle).toContain('!Talking Quill Terminal Cleanup $terminalGeneration');
+    expect(lifecycle).toContain(
+      'Get-CimInstance Win32_Service -Filter "Name=\'TalkingQuillTerminalCleanup-$terminalGeneration\'"',
+    );
+    expect(lifecycle).toContain("Get-Service -Name 'TalkingQuillTerminalCleanup-*'");
+    expect(lifecycle).not.toContain('!Talking Quill Terminal Cleanup');
+    expect(lifecycle).toContain('$PSNativeCommandUseErrorActionPreference = $false');
+    expect(lifecycle).toContain('$taskQueryExit -notin @(0, 1)');
     expect(lifecycle).not.toContain('$legacyGeneration');
     expect(lifecycle).not.toContain('$legacyRoot');
     expect(lifecycle).toContain(

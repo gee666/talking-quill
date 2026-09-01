@@ -87,7 +87,7 @@ describe('Windows elevated updater launch', () => {
     }
   });
 
-  it('keeps a callable finalizer through terminal commit and uses native POSIX self-removal', async () => {
+  it('hands terminal cleanup to an authenticated transient native service', async () => {
     const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
     expect(setup).toContain('uninstall-finalizer-publishing');
     expect(setup).toContain('uninstall-app-path-retiring');
@@ -98,31 +98,25 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('FILE_DISPOSITION_FLAG_POSIX_SEMANTICS');
     expect(setup).toContain('MOVEFILE_DELAY_UNTIL_REBOOT');
     expect(setup).toContain('PendingFileRenameOperations');
-    expect(setup).toContain('append_unique_deletion_path(&mut scheduled, current)?');
-    expect(setup).toContain('publish_terminal_uninstall_record(paths)?');
-    expect(setup).toContain('launch_terminal_uninstall_owner(paths, &terminal_generation)');
-    const deletionOwnership = setup.slice(
-      setup.indexOf('fn establish_finalizer_deletion_ownership'),
-      setup.indexOf('fn collect_terminal_deletion_plan'),
-    );
-    expect(deletionOwnership).toContain('schedule_delayed_deletion_plan(&scheduled)');
-    expect(setup).toContain('relocated_uninstall_matches_maintenance(current, paths)?');
+    expect(setup).toContain('publish_terminal_uninstall_record(paths, current)?');
+    expect(setup).toContain('StartServiceCtrlDispatcherW');
+    expect(setup).toContain('CreateServiceW');
+    expect(setup).toContain('SERVICE_AUTO_START');
+    expect(setup).toContain('SERVICE_WIN32_OWN_PROCESS');
+    expect(setup).toContain('/TQ-TERMINAL-SERVICE={generation}');
+    expect(setup).toContain('schedule_terminal_service_deletion(current)?');
+    expect(setup).not.toContain('schedule_delayed_deletion_plan');
+    expect(setup).toContain('fn relocated_uninstall_matches_maintenance');
     expect(setup).toContain('authenticated_relocated_image');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
     );
-    expect(
-      finalize.indexOf('register_uninstall_executable(&paths.maintenance_uninstaller)?'),
-    ).toBeLessThan(finalize.indexOf('establish_finalizer_deletion_ownership(paths, current)?'));
-    expect(
-      finalize.indexOf('establish_finalizer_deletion_ownership(paths, current)?'),
-    ).toBeLessThan(finalize.indexOf('remove_transaction(paths)?'));
+    expect(finalize.indexOf('publish_terminal_uninstall_record(paths, current)?')).toBeLessThan(
+      finalize.indexOf('remove_transaction(paths)?'),
+    );
     expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
-    );
-    expect(finalize.indexOf('publish_terminal_uninstall_record(paths)?')).toBeLessThan(
-      finalize.indexOf('remove_transaction(paths)?'),
     );
     const retirement = setup.slice(
       setup.indexOf('fn retire_terminal_machine_state'),
@@ -149,19 +143,12 @@ describe('Windows elevated updater launch', () => {
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
     expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
-      terminalCleanup.indexOf('schedule_delayed_deletion_plan(&deletion_plan)?'),
-    );
-    expect(terminalCleanup.indexOf('schedule_delayed_deletion_plan(&deletion_plan)?')).toBeLessThan(
       terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
     );
-    expect(terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?')).toBeLessThan(
-      terminalCleanup.lastIndexOf('clear_terminal_run_once_owner(paths, &record.generation)'),
-    );
-    expect(terminalCleanup.trimEnd()).toMatch(
-      /clear_terminal_run_once_owner\(paths, &record\.generation\)\n\}/u,
-    );
-    expect(setup).toContain('TERMINAL_RUN_ONCE_PREFIX: &str = "!Talking Quill Terminal Cleanup "');
-    expect(setup).toContain('CurrentVersion\\RunOnce');
+    expect(setup).toContain('DeleteService(service.0)');
+    expect(setup).toContain('arm_mapped_image_deletion(current)?');
+    expect(setup).not.toContain('TERMINAL_RUN_ONCE_PREFIX');
+    expect(setup).not.toContain('CurrentVersion\\RunOnce');
     expect(setup).toContain('decode_pending_rename_pairs');
     expect(setup).toContain('destination.is_empty()');
     const lockRetirement = setup.slice(
@@ -170,7 +157,7 @@ describe('Windows elevated updater launch', () => {
     );
     expect(lockRetirement).toContain('delete_registry_tree_durable(');
     const terminalRecovery = setup.slice(
-      setup.indexOf('fn run_terminal_uninstall_recovery'),
+      setup.indexOf('fn run_terminal_cleanup_service'),
       setup.indexOf('fn enumerate_registry_subkeys'),
     );
     expect(terminalRecovery.indexOf('retire_machine_lock_publication(&paths)?')).toBeLessThan(
