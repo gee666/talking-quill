@@ -104,20 +104,25 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('SERVICE_AUTO_START');
     expect(setup).toContain('SERVICE_WIN32_OWN_PROCESS');
     expect(setup).toContain('/TQ-TERMINAL-SERVICE={generation}');
-    expect(setup).toContain('schedule_terminal_service_deletion(current)?');
+    expect(setup).toContain('schedule_terminal_service_deletion(&image)?');
     expect(setup).not.toContain('schedule_delayed_deletion_plan');
     expect(setup).toContain('fn relocated_uninstall_matches_maintenance');
     expect(setup).toContain('authenticated_relocated_image');
-    const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
-    expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
-      finalize.indexOf('system.unregister_uninstall()?'),
+    const publication = setup.slice(
+      setup.indexOf('fn publish_terminal_uninstall_record'),
+      setup.indexOf('fn write_terminal_uninstall_phase'),
     );
-    expect(finalize.indexOf('publish_terminal_uninstall_record(paths, current)?')).toBeLessThan(
-      finalize.indexOf('remove_transaction(paths)?'),
+    expect(publication.indexOf('install_terminal_service(paths, &record, false)?')).toBeLessThan(
+      publication.indexOf('write_terminal_uninstall_record(paths, &record)?'),
     );
-    expect(finalize.indexOf('remove_transaction(paths)?')).toBeLessThan(
-      finalize.indexOf('system.unregister_uninstall()?'),
+    expect(publication.indexOf('write_terminal_uninstall_record(paths, &record)?')).toBeLessThan(
+      publication.indexOf('install_terminal_service(paths, &published, true)?'),
     );
+    expect(setup).not.toContain('terminal-uninstall-record-marker-v1');
+    expect(setup).not.toContain(':terminal-record-v1');
+    expect(setup).toContain('record_file_identity');
+    expect(setup).toContain('SERVICE_CONFIG_FAILURE_ACTIONS_FLAG');
+    expect(setup).toContain('ERROR_SERVICE_SPECIFIC_ERROR');
     const retirement = setup.slice(
       setup.indexOf('fn retire_terminal_machine_state'),
       setup.indexOf('enum RecoveryPlan'),
@@ -125,13 +130,16 @@ describe('Windows elevated updater launch', () => {
     expect(retirement.indexOf('recover_with_adapter(paths, system)?')).toBeLessThan(
       retirement.indexOf('system.unregister_app_path()?'),
     );
-    expect(retirement.indexOf('remove_transaction(paths)?')).toBeLessThan(
-      retirement.indexOf('write_terminal_uninstall_phase(paths, generation, "machine-retired")'),
-    );
-    expect(
-      retirement.indexOf('write_terminal_uninstall_phase(paths, generation, "machine-retired")'),
-    ).toBeLessThan(retirement.lastIndexOf('system.unregister_uninstall()'));
+    expect(retirement).not.toContain('remove_transaction(paths)?');
+    expect(retirement).not.toContain('system.unregister_uninstall()');
     expect(retirement).toContain('register_uninstall_executable(&paths.maintenance_uninstaller)?');
+    const serviceCleanup = setup.slice(
+      setup.indexOf('fn run_terminal_cleanup_service'),
+      setup.indexOf('fn remove_retired_terminal_service_image'),
+    );
+    expect(serviceCleanup).toContain('"cleanup-complete"');
+    expect(serviceCleanup).not.toContain('DeleteService(');
+    expect(serviceCleanup).not.toContain('arm_mapped_image_deletion(&current)');
     expect(setup).toContain(
       'RegCreateKeyExW(\n            HKEY_LOCAL_MACHINE,\n            wide(OsStr::new(UNINSTALL_KEY))',
     );
@@ -145,8 +153,15 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
       terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
     );
-    expect(setup).toContain('DeleteService(service.0)');
-    expect(setup).toContain('arm_mapped_image_deletion(current)?');
+    const maintenanceRetirement = setup.slice(
+      setup.indexOf('fn wait_for_terminal_service_retirement'),
+      setup.indexOf('fn enumerate_registry_subkeys'),
+    );
+    expect(maintenanceRetirement).toContain('DeleteService(service.0)');
+    expect(maintenanceRetirement).toContain('if error != 1060');
+    expect(maintenanceRetirement).toContain(
+      'remove_retired_terminal_service_image(paths, &record)?',
+    );
     expect(setup).not.toContain('TERMINAL_RUN_ONCE_PREFIX');
     expect(setup).not.toContain('CurrentVersion\\RunOnce');
     expect(setup).toContain('decode_pending_rename_pairs');

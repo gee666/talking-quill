@@ -154,6 +154,18 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).not.toContain('!Talking Quill Terminal Cleanup');
     expect(lifecycle).toContain('$PSNativeCommandUseErrorActionPreference = $false');
     expect(lifecycle).toContain('$taskQueryExit -notin @(0, 1)');
+    for (const terminalFault of [
+      'pre-CreateService',
+      'post-service-pre-record',
+      'post-record-pre-start',
+      'failure-action-restart',
+      'service-stopped-pre-DeleteService',
+      'post-delete-pre-image-removal',
+      'reboot-pending-delete',
+    ]) {
+      expect(lifecycle).toContain(`'${terminalFault}'`);
+    }
+    expect(lifecycle).toContain('PendingFileRenameOperations');
     expect(lifecycle).not.toContain('$legacyGeneration');
     expect(lifecycle).not.toContain('$legacyRoot');
     expect(lifecycle).toContain(

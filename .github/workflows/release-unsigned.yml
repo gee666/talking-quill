@@ -494,6 +494,67 @@ jobs:
             @{ schemaVersion = $staleSchema; generation = $staleGeneration; request = '--windows-update-bootstrap-v2=dGVzdA=='; nonce = ('11' * 16); sourceVersion = '0.0.69'; targetVersion = '0.0.70'; phase = 'armed'; completedVersion = $null } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $staleRoot 'relaunch-record-v1.json') -Encoding utf8
             New-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "Talking Quill Update Relaunch $staleGeneration" -Value ('"' + $recoveryLauncher + '" --windows-update-relaunch-v1=' + $staleGeneration) -PropertyType String -Force | Out-Null
           }
+          $terminalFaults = @(
+            'pre-CreateService',
+            'post-service-pre-record',
+            'post-record-pre-start',
+            'failure-action-restart',
+            'service-stopped-pre-DeleteService',
+            'post-delete-pre-image-removal',
+            'reboot-pending-delete'
+          )
+          foreach ($terminalFault in $terminalFaults) {
+            Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
+            New-Item -Path 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Force | Out-Null
+            New-ItemProperty -LiteralPath 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Name Phase -Value $terminalFault -PropertyType String -Force | Out-Null
+            $faultedUninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -Wait -PassThru
+            Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
+            if ($terminalFault -cne 'failure-action-restart') {
+              $maintenancePath = "$env:ProgramFiles\Talking Quill Maintenance.exe"
+              $maintenanceQuiet = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString -ErrorAction SilentlyContinue
+              $maintenanceHash = if (Test-Path -LiteralPath $maintenancePath) { (Get-FileHash -LiteralPath $maintenancePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+              $callableMaintenance = ($maintenanceQuiet -ceq ('"' + $maintenancePath + '" /S')) -and ($maintenanceHash -ceq $repairHash)
+              $terminalServiceCandidates = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'TalkingQuillTerminalCleanup-%'" -ErrorAction SilentlyContinue | Where-Object { $_.StartMode -ceq 'Auto' -and $_.StartName -ceq 'LocalSystem' -and $_.PathName -cmatch '^"(.+\.Talking Quill Terminal Cleanup-[0-9a-f]{32}\.exe)" /TQ-TERMINAL-SERVICE=[0-9a-f]{32}$' })
+              $autoTerminalService = $terminalServiceCandidates.Count -eq 1
+              if ($autoTerminalService) {
+                $serviceImage = [regex]::Match($terminalServiceCandidates[0].PathName, '^"(.+\.exe)"').Groups[1].Value
+                $autoTerminalService = (Test-Path -LiteralPath $serviceImage) -and ((Get-FileHash -LiteralPath $serviceImage -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $repairHash)
+              }
+              if (-not $callableMaintenance -and -not $autoTerminalService) { throw "Terminal fault retained no authenticated callable authority at $terminalFault" }
+            }
+            if ($terminalFault -ceq 'failure-action-restart') {
+              if ($faultedUninstall.ExitCode -ne 0) { throw "Terminal service failure action did not recover: $($faultedUninstall.ExitCode)" }
+            } elseif ($terminalFault -ceq 'reboot-pending-delete') {
+              if ($faultedUninstall.ExitCode -eq 0) { throw 'Reboot-pending terminal image deletion unexpectedly completed.' }
+              $pendingRename = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations
+              if (-not (@($pendingRename) -match 'Talking Quill Terminal Cleanup-[0-9a-f]{32}\.exe')) { throw 'Reboot-pending terminal image deletion was not recorded.' }
+              Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill Terminal Cleanup-*.exe' | Remove-Item -Force
+              $retainedPendingRename = [System.Collections.Generic.List[string]]::new()
+              for ($pendingIndex = 0; $pendingIndex -lt $pendingRename.Count; $pendingIndex += 2) {
+                $pendingSource = [string]$pendingRename[$pendingIndex]
+                $pendingDestination = if ($pendingIndex + 1 -lt $pendingRename.Count) { [string]$pendingRename[$pendingIndex + 1] } else { throw 'Pending rename data had an incomplete pair.' }
+                if ($pendingSource -notmatch 'Talking Quill Terminal Cleanup-[0-9a-f]{32}\.exe$') {
+                  $retainedPendingRename.Add($pendingSource)
+                  $retainedPendingRename.Add($pendingDestination)
+                }
+              }
+              Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -Value $retainedPendingRename.ToArray() -Type MultiString
+              $terminalResume = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
+              if ($terminalResume.ExitCode -ne 0) { throw "Pending-delete terminal owner recovery failed: $($terminalResume.ExitCode)" }
+            } else {
+              if ($faultedUninstall.ExitCode -ne 197) { throw "Terminal fault did not interrupt at $terminalFault: $($faultedUninstall.ExitCode)" }
+              $terminalResume = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
+              if ($terminalResume.ExitCode -ne 0) { throw "Terminal owner recovery failed at $terminalFault: $($terminalResume.ExitCode)" }
+            }
+            $terminalRecoveryDeadline = (Get-Date).AddSeconds(240)
+            while ((Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") -and (Get-Date) -lt $terminalRecoveryDeadline) { Start-Sleep -Milliseconds 250 }
+            if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw "Terminal owner recovery timed out at $terminalFault" }
+            if (@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue).Count -ne 0) { throw "Terminal service remained after $terminalFault" }
+            if (@(Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill Terminal Cleanup-*.exe').Count -ne 0) { throw "Terminal image remained after $terminalFault" }
+            $terminalRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
+            if ($terminalRepair.ExitCode -ne 0) { throw "Terminal fault reinstall failed at $terminalFault: $($terminalRepair.ExitCode)" }
+          }
+          Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
           $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -PassThru
           $normalRelocated = $false
           $terminalOwnerObserved = $false

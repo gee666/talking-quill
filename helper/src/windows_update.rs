@@ -160,6 +160,16 @@ struct TerminalUninstallRecord {
     service_image: String,
     service_sha256: String,
     service_file_identity: String,
+    record_file_identity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SetupTransaction {
+    schema_version: u8,
+    phase: String,
+    action: String,
+    had_predecessor: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -533,7 +543,6 @@ const RELAUNCH_ROOT_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x00000
 const RELAUNCH_RECORD_NAME: &str = "relaunch-record-v1.json";
 const RELAUNCH_MARKER_NAME: &str = "relaunch-record-marker-v1";
 const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
-const TERMINAL_UNINSTALL_MARKER_NAME: &str = "terminal-uninstall-record-marker-v1";
 
 fn relaunch_record_sddl(identity: &RelaunchIdentity) -> String {
     if identity.user_sid == identity.logon_sid {
@@ -689,16 +698,12 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(EXIT_IDENTITY_MISMATCH),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(root.join(TERMINAL_UNINSTALL_MARKER_NAME)) {
-                Err(marker_error) if marker_error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(None)
-                }
-                _ => Err(EXIT_IDENTITY_MISMATCH),
-            };
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(EXIT_IDENTITY_MISMATCH),
     }
+    let file = File::open(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let record_identity = file_identity_text(&file)?;
+    drop(file);
     let bytes = std::fs::read(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if bytes.is_empty()
         || bytes.len() > 4096
@@ -712,7 +717,10 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     let uninstall_command = format!("\"{}\"", maintenance.display());
     if record.schema_version != 3
         || validate_generation(&record.generation).is_err()
-        || !matches!(record.phase.as_str(), "armed" | "machine-retired")
+        || !matches!(
+            record.phase.as_str(),
+            "armed" | "machine-retired" | "cleanup-complete"
+        )
         || decode_hash(&record.maintenance_sha256).is_none()
         || record.uninstall_command != uninstall_command
         || record.quiet_uninstall_command != format!("{uninstall_command} /S")
@@ -723,21 +731,80 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
         ))
         || decode_hash(&record.service_sha256).is_none()
         || record.service_file_identity.is_empty()
+        || record.record_file_identity != record_identity
     {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let marker = root.join(TERMINAL_UNINSTALL_MARKER_NAME);
-    let expected = format!("terminal-uninstall-v1:{}", record.generation);
-    let actual = std::fs::read_to_string(&marker).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if actual != expected || !has_exact_security(&marker, MEDIUM_LAUNCHER_FILE_SDDL)? {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     Ok(Some(record))
 }
 
+fn journal_owned_terminal_maintenance() -> Result<Option<PathBuf>, i32> {
+    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+    let transaction_path = program_files.join(".Talking Quill.native-transaction-v2.json");
+    let bytes = match std::fs::read(&transaction_path) {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= 4096 => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        _ => return Err(EXIT_IDENTITY_MISMATCH),
+    };
+    let transaction: SetupTransaction =
+        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if transaction.schema_version != 2
+        || transaction.action != "uninstall"
+        || transaction.phase != "uninstall-cleanup-complete"
+        || !transaction.had_predecessor
+    {
+        return Ok(None);
+    }
+    let maintenance = program_files.join("Talking Quill Maintenance.exe");
+    let retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    drop(retained);
+    let mut key = std::ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_nul(Path::new(
+                r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill",
+            ))?
+            .as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let expected = format!("\"{}\" /S", maintenance.display());
+    let quiet = read_registry_string(key, "QuietUninstallString");
+    unsafe { RegCloseKey(key) };
+    if quiet?.as_deref() != Some(expected.as_str()) {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(Some(maintenance))
+}
+
 fn run_machine_relaunch_owner() -> Result<u32, i32> {
     let machine_lifecycle = RecoveryStateLock::acquire()?;
     verify_machine_relaunch_owner()?;
+    if let Some(record) = terminal_uninstall_record()? {
+        let maintenance =
+            known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+        let mut retained = open_locked(&maintenance).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+        if hash_file(&mut retained).map_err(|_| EXIT_IDENTITY_MISMATCH)?
+            != decode_hash(&record.maintenance_sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        drop(retained);
+        drop(machine_lifecycle);
+        launch_elevated_executable(&maintenance, "/S")?;
+        return Ok(0);
+    }
+    if let Some(maintenance) = journal_owned_terminal_maintenance()? {
+        drop(machine_lifecycle);
+        launch_elevated_executable(&maintenance, "/S")?;
+        return Ok(0);
+    }
     let identity = current_relaunch_identity()?;
     let generations = relaunch_generations()?;
     drop(machine_lifecycle);
