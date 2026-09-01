@@ -169,12 +169,15 @@ describe('Windows native release workflow', () => {
       'post-journal-removal',
       'post-root-tombstone-rename',
       'post-tombstone-content-removal',
+      'post-tombstone-record-removal',
       'post-tombstone-marker-removal',
       'post-tombstone-removal',
       'post-maintenance-posix-delete',
+      'post-final-deletion-ownership',
       'post-final-launcher-posix-delete',
       'pre-machine-relaunch-owner-clear',
       'post-machine-relaunch-owner-clear',
+      'post-owner-clear-posix-cleanup',
     ]) {
       expect(lifecycle).toContain(`'${terminalFault}'`);
     }

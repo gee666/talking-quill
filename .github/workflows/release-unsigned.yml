@@ -519,12 +519,15 @@ jobs:
             'post-journal-removal',
             'post-root-tombstone-rename',
             'post-tombstone-content-removal',
+            'post-tombstone-record-removal',
             'post-tombstone-marker-removal',
             'post-tombstone-removal',
             'post-maintenance-posix-delete',
+            'post-final-deletion-ownership',
             'post-final-launcher-posix-delete',
             'pre-machine-relaunch-owner-clear',
-            'post-machine-relaunch-owner-clear'
+            'post-machine-relaunch-owner-clear',
+            'post-owner-clear-posix-cleanup'
           )
           foreach ($terminalFault in $terminalFaults) {
             $baselineUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
@@ -534,6 +537,8 @@ jobs:
             if ($acceptanceInstall.ExitCode -ne 0) { throw "Isolated terminal acceptance setup failed at $terminalFault: $($acceptanceInstall.ExitCode)" }
             $installedAcceptanceUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
             if ((Get-FileHash -LiteralPath $installedAcceptanceUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $terminalAcceptanceHash) { throw "Installed terminal acceptance uninstaller hash mismatch at $terminalFault" }
+            $reinstallPending = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+            if (@($reinstallPending) -contains ('\??\' + "$env:ProgramFiles\Talking Quill Maintenance.exe") -or @($reinstallPending) -contains ('\??\' + $recoveryLauncher)) { throw "Reinstall retained a fixed-path reboot deletion at $terminalFault" }
             Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
             New-Item -Path 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Force | Out-Null
             New-ItemProperty -LiteralPath 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Name Phase -Value $terminalFault -PropertyType String -Force | Out-Null
@@ -553,7 +558,7 @@ jobs:
               $machineOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
               $machineOwnerMatch = if ($null -ne $machineOwnerCommand) { [regex]::Match($machineOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$') } else { $null }
               $authenticatedMachineOwner = $null -ne $machineOwnerMatch -and $machineOwnerMatch.Success -and (Test-Path -LiteralPath $machineOwnerMatch.Groups[1].Value) -and ((Get-FileHash -LiteralPath $machineOwnerMatch.Groups[1].Value -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $recoveryLauncherHash)
-              $terminalWorkCommitted = $terminalFault -in @('post-final-launcher-posix-delete', 'pre-machine-relaunch-owner-clear', 'post-machine-relaunch-owner-clear')
+              $terminalWorkCommitted = $terminalFault -in @('post-final-launcher-posix-delete', 'pre-machine-relaunch-owner-clear', 'post-machine-relaunch-owner-clear', 'post-owner-clear-posix-cleanup')
               if (-not $callableMaintenance -and -not $autoTerminalService -and -not $authenticatedMachineOwner -and -not $terminalWorkCommitted) { throw "Terminal fault retained no authenticated callable authority at $terminalFault" }
             }
             $recoveredBySetup = $false
@@ -582,7 +587,7 @@ jobs:
               if ($faultedUninstall.ExitCode -ne 197) { throw "Terminal fault did not interrupt at $terminalFault: $($faultedUninstall.ExitCode)" }
               $resumeOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
               $resumeOwnerPath = if ($null -ne $resumeOwnerCommand) { [regex]::Match($resumeOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$').Groups[1].Value } else { $null }
-              if ($terminalFault -cne 'post-machine-relaunch-owner-clear') {
+              if ($terminalFault -notin @('post-machine-relaunch-owner-clear', 'post-owner-clear-posix-cleanup')) {
                 if ($null -eq $resumeOwnerPath -or -not (Test-Path -LiteralPath $resumeOwnerPath)) { throw "Terminal fault lost its machine recovery owner at $terminalFault" }
                 $terminalResume = Start-Process -FilePath $resumeOwnerPath -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
                 if ($terminalResume.ExitCode -ne 0) { throw "Terminal owner recovery failed at $terminalFault: $($terminalResume.ExitCode)" }

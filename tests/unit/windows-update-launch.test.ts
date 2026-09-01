@@ -158,9 +158,13 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.indexOf('fs::rename(&root, &tombstone)')).toBeLessThan(
       terminalCleanup.indexOf('remove_terminal_recovery_tombstone(paths, &tombstone)?'),
     );
-    expect(terminalCleanup.indexOf('post-final-launcher-posix-delete')).toBeLessThan(
+    expect(terminalCleanup.indexOf('post-final-deletion-ownership')).toBeLessThan(
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?'),
     );
+    expect(terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
+      terminalCleanup.indexOf('post-owner-clear-posix-cleanup'),
+    );
+    expect(setup).toContain('retire_fixed_reinstall_deletion_ownership(paths)?');
     const maintenanceRetirement = setup.slice(
       setup.indexOf('fn wait_for_terminal_service_retirement'),
       setup.indexOf('fn enumerate_registry_subkeys'),

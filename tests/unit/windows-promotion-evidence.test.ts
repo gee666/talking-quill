@@ -27,12 +27,15 @@ const terminalFaultPhases = [
   'post-journal-removal',
   'post-root-tombstone-rename',
   'post-tombstone-content-removal',
+  'post-tombstone-record-removal',
   'post-tombstone-marker-removal',
   'post-tombstone-removal',
   'post-maintenance-posix-delete',
+  'post-final-deletion-ownership',
   'post-final-launcher-posix-delete',
   'pre-machine-relaunch-owner-clear',
   'post-machine-relaunch-owner-clear',
+  'post-owner-clear-posix-cleanup',
 ];
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest();
 const le32 = (value: number) => {

@@ -4203,6 +4203,7 @@ fn remove_maintenance_uninstaller(paths: &Paths) -> Result<()> {
 }
 
 fn ensure_maintenance_uninstaller(paths: &Paths) -> Result<()> {
+    retire_fixed_reinstall_deletion_ownership(paths)?;
     remove_maintenance_temporary_files(paths)?;
     let source = paths.install.join("Uninstall Talking Quill.exe");
     assert_plain_file(&source)?;
@@ -6250,8 +6251,23 @@ fn remove_terminal_recovery_tombstone(_paths: &Paths, tombstone: &Path) -> Resul
         verify_atomic_marker(&marker, &identity, MEDIUM_LAUNCHER_FILE_SDDL, None)?;
         let mut tree = Vec::new();
         collect_finalizer_deletion_paths(tombstone, &mut tree)?;
+        let record = tombstone.join(TERMINAL_UNINSTALL_RECORD_NAME);
+        let record_present = path_present(&record)?;
+        if !record_present {
+            let entries = fs::read_dir(tombstone)
+                .map_err(io_failure)?
+                .map(|entry| entry.map(|value| value.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(io_failure)?;
+            if entries != [OsString::from("launcher-tree-identity-v1")] {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Terminal marker-only tombstone inventory is invalid.",
+                ));
+            }
+        }
         for target in tree {
-            if target == tombstone || target == marker {
+            if target == tombstone || target == marker || target == record {
                 continue;
             }
             let metadata = fs::symlink_metadata(&target).map_err(io_failure)?;
@@ -6263,6 +6279,11 @@ fn remove_terminal_recovery_tombstone(_paths: &Paths, tombstone: &Path) -> Resul
         }
         flush_setup_directory(tombstone)?;
         terminal_maintenance_crash_at("post-tombstone-content-removal");
+        if record_present {
+            fs::remove_file(&record).map_err(io_failure)?;
+            flush_setup_directory(tombstone)?;
+            terminal_maintenance_crash_at("post-tombstone-record-removal");
+        }
         fs::remove_file(&marker).map_err(io_failure)?;
         flush_setup_directory(tombstone)?;
         terminal_maintenance_crash_at("post-tombstone-marker-removal");
@@ -6296,19 +6317,21 @@ fn recover_terminal_recovery_tombstones(paths: &Paths) -> Result<()> {
         let marker = tombstone.join("launcher-tree-identity-v1");
         if path_present(&marker)? {
             let record_path = tombstone.join(TERMINAL_UNINSTALL_RECORD_NAME);
-            let bytes = fs::read(&record_path).map_err(io_failure)?;
-            let record: TerminalUninstallRecord = serde_json::from_slice(&bytes)
-                .map_err(|_| fail(EXIT_REJECTED, "Terminal tombstone record is invalid."))?;
-            if record.generation != generation
-                || !matches!(
-                    record.phase.as_str(),
-                    "final-launcher-owned"
-                        | "maintenance-deletion-owned"
-                        | "uninstall-unregistered"
-                        | "journal-removed"
-                )
-            {
-                return Err(fail(EXIT_REJECTED, "Terminal tombstone record is invalid."));
+            if path_present(&record_path)? {
+                let bytes = fs::read(&record_path).map_err(io_failure)?;
+                let record: TerminalUninstallRecord = serde_json::from_slice(&bytes)
+                    .map_err(|_| fail(EXIT_REJECTED, "Terminal tombstone record is invalid."))?;
+                if record.generation != generation
+                    || !matches!(
+                        record.phase.as_str(),
+                        "final-launcher-owned"
+                            | "maintenance-deletion-owned"
+                            | "uninstall-unregistered"
+                            | "journal-removed"
+                    )
+                {
+                    return Err(fail(EXIT_REJECTED, "Terminal tombstone record is invalid."));
+                }
             }
         }
         remove_terminal_recovery_tombstone(paths, &tombstone)?;
@@ -6464,7 +6487,19 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     }
     terminal_maintenance_crash_at("post-maintenance-posix-delete");
     let final_launcher = terminal_final_launcher(paths, &record.generation)?;
-    schedule_empty_terminal_tombstone_deletion(&tombstone)?;
+    if !pending_deletion_is_owned(&final_launcher)? {
+        schedule_terminal_service_deletion(&final_launcher)?;
+    }
+    if !pending_deletion_is_owned(&tombstone)? {
+        schedule_empty_terminal_tombstone_deletion(&tombstone)?;
+    }
+    if !pending_deletion_is_owned(&final_launcher)? || !pending_deletion_is_owned(&tombstone)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal final deletion ownership is invalid.",
+        ));
+    }
+    terminal_maintenance_crash_at("post-final-deletion-ownership");
     terminal_maintenance_crash_at("post-final-launcher-posix-delete");
     let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
     let suffix = retire_machine_lock_publication(paths)?;
@@ -6474,9 +6509,14 @@ fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
     terminal_maintenance_crash_at("pre-machine-relaunch-owner-clear");
     clear_machine_relaunch_owner(paths)?;
     terminal_maintenance_crash_at("post-machine-relaunch-owner-clear");
-    if !pending_deletion_is_owned(&final_launcher)? {
-        schedule_terminal_service_deletion(&final_launcher)?;
+    if path_present(&final_launcher)? {
+        arm_mapped_image_deletion(&final_launcher)?;
     }
+    if path_present(&tombstone)? {
+        fs::remove_dir(&tombstone).map_err(io_failure)?;
+        flush_setup_directory(&paths.program_data)?;
+    }
+    terminal_maintenance_crash_at("post-owner-clear-posix-cleanup");
     Ok(())
 }
 
@@ -6727,6 +6767,103 @@ fn open_session_manager(access: u32) -> Result<HKEY> {
     } else {
         Ok(key)
     }
+}
+
+fn encode_pending_rename_pairs(pairs: &[(String, String)]) -> Vec<u16> {
+    let mut data = Vec::new();
+    for (source, destination) in pairs {
+        data.extend(source.encode_utf16());
+        data.push(0);
+        data.extend(destination.encode_utf16());
+        data.push(0);
+    }
+    data.push(0);
+    data
+}
+
+fn fixed_pending_target(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_start_matches(r"\\?\")
+        .to_ascii_lowercase()
+}
+
+fn retain_nonfixed_pending_pairs(
+    before: &[(String, String)],
+    fixed: &[String],
+) -> Result<Vec<(String, String)>> {
+    let mut retained = Vec::with_capacity(before.len());
+    for (source, destination) in before {
+        let normalized = normalized_pending_source(source);
+        if fixed.iter().any(|target| target == &normalized) {
+            if !destination.is_empty() {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Fixed reinstall deletion ownership is malformed.",
+                ));
+            }
+        } else {
+            retained.push((source.clone(), destination.clone()));
+        }
+    }
+    Ok(retained)
+}
+
+fn retire_fixed_reinstall_deletion_ownership(paths: &Paths) -> Result<()> {
+    let fixed = [
+        fixed_pending_target(&paths.maintenance_uninstaller),
+        fixed_pending_target(
+            &terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe"),
+        ),
+    ];
+    let key = open_session_manager(KEY_READ | KEY_WRITE)?;
+    let before = read_pending_rename_pairs(key)?;
+    let retained = match retain_nonfixed_pending_pairs(&before, &fixed) {
+        Ok(retained) => retained,
+        Err(error) => {
+            unsafe { RegCloseKey(key) };
+            return Err(error);
+        }
+    };
+    if retained == before {
+        unsafe { RegCloseKey(key) };
+        return Ok(());
+    }
+    const VALUE: &str = "PendingFileRenameOperations";
+    let status = if retained.is_empty() {
+        unsafe { RegDeleteValueW(key, wide(OsStr::new(VALUE)).as_ptr()) }
+    } else {
+        let encoded = encode_pending_rename_pairs(&retained);
+        unsafe {
+            RegSetValueExW(
+                key,
+                wide(OsStr::new(VALUE)).as_ptr(),
+                0,
+                REG_MULTI_SZ,
+                encoded.as_ptr().cast(),
+                u32::try_from(encoded.len() * mem::size_of::<u16>())
+                    .map_err(|_| fail(EXIT_FAILURE, "Pending deletion state is too large."))?,
+            )
+        }
+    };
+    let flushed =
+        (status == 0 || retained.is_empty() && status == 2) && unsafe { RegFlushKey(key) } == 0;
+    let after = if flushed {
+        read_pending_rename_pairs(key)
+    } else {
+        Err(fail(
+            EXIT_FAILURE,
+            "Cannot flush fixed reinstall deletion retirement.",
+        ))
+    };
+    unsafe { RegCloseKey(key) };
+    if after? != retained {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Fixed reinstall deletion retirement was not exact.",
+        ));
+    }
+    Ok(())
 }
 
 fn normalized_pending_source(value: &str) -> String {
@@ -7318,6 +7455,36 @@ mod tests {
         );
         let malformed: Vec<u16> = "source-without-terminator".encode_utf16().collect();
         assert!(decode_pending_rename_pairs(&malformed).is_err());
+    }
+
+    #[test]
+    fn reinstall_removes_only_exact_fixed_pending_deletions() {
+        let fixed = vec![
+            r"c:\program files\talking quill maintenance.exe".into(),
+            r"c:\programdata\talking quill update recovery\talking-quill-update-recovery-launcher.exe"
+                .into(),
+        ];
+        let pairs = vec![
+            (
+                r"\??\C:\Program Files\Talking Quill Maintenance.exe".into(),
+                String::new(),
+            ),
+            (
+                r"\??\C:\ProgramData\.Talking Quill Terminal Relaunch-11111111111111111111111111111111.exe"
+                    .into(),
+                String::new(),
+            ),
+            (r"\??\C:\unrelated.exe".into(), String::new()),
+        ];
+        assert_eq!(
+            retain_nonfixed_pending_pairs(&pairs, &fixed).unwrap(),
+            pairs[1..]
+        );
+        let attacked = vec![(
+            r"\??\C:\Program Files\Talking Quill Maintenance.exe".into(),
+            r"\??\C:\attacker.exe".into(),
+        )];
+        assert!(retain_nonfixed_pending_pairs(&attacked, &fixed).is_err());
     }
 
     #[test]
