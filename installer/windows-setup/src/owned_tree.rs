@@ -23,6 +23,13 @@ pub fn owned_tree_identity(path: &Path) -> Result<String, OwnedTreeError> {
     platform::identity(path)
 }
 
+#[cfg(windows)]
+pub fn retained_directory_names(
+    handle: std::os::windows::io::RawHandle,
+) -> Result<Vec<String>, OwnedTreeError> {
+    platform::retained_names(handle)
+}
+
 pub fn remove_owned_tree(path: &Path, expected_identity: &str) -> Result<(), OwnedTreeError> {
     let (device, inode) = parse_identity(expected_identity)?;
     platform::remove(path, device, inode)
@@ -187,6 +194,13 @@ mod platform {
             mark_deleted(child.0)?;
         }
         Ok(())
+    }
+
+    pub(super) fn retained_names(handle: HANDLE) -> Result<Vec<String>, OwnedTreeError> {
+        directory_names(handle)?
+            .into_iter()
+            .map(|name| String::from_utf16(&name).map_err(|_| OwnedTreeError::InvalidPath))
+            .collect()
     }
 
     fn directory_names(handle: HANDLE) -> Result<Vec<Vec<u16>>, OwnedTreeError> {

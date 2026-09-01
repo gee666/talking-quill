@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -45,8 +45,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
+    FILE_FLAG_OVERLAPPED, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
     FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FlushFileBuffers,
     GetFileInformationByHandle, GetFileInformationByHandleEx, MOVEFILE_DELAY_UNTIL_REBOOT,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
@@ -94,7 +94,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDOK, IDYES, MB_ICONQUESTION, MB_OKCANCEL, MB_YESNO, MessageBoxW,
 };
 
-use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
+use crate::owned_tree::{owned_tree_identity, remove_owned_tree, retained_directory_names};
 use crate::package::{self, ParsedPackage};
 
 const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
@@ -693,7 +693,7 @@ fn retain_controller_image(path: &Path, delete_on_close: bool) -> Result<OwnedHa
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
-fn rename_retained(handle: &OwnedHandle, destination: &Path) -> Result<()> {
+fn rename_handle(handle: std::os::windows::io::RawHandle, destination: &Path) -> Result<()> {
     let name: Vec<u16> = destination.as_os_str().encode_wide().collect();
     let name_bytes = name
         .len()
@@ -714,7 +714,7 @@ fn rename_retained(handle: &OwnedHandle, destination: &Path) -> Result<()> {
     }
     if unsafe {
         SetFileInformationByHandle(
-            handle.as_raw_handle(),
+            handle,
             FileRenameInfo,
             info.cast(),
             u32::try_from(total)
@@ -725,6 +725,10 @@ fn rename_retained(handle: &OwnedHandle, destination: &Path) -> Result<()> {
         return Err(io_failure(std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+fn rename_retained(handle: &OwnedHandle, destination: &Path) -> Result<()> {
+    rename_handle(handle.as_raw_handle(), destination)
 }
 
 fn arm_mapped_image_deletion(path: &Path) -> Result<()> {
@@ -7117,14 +7121,9 @@ fn remove_uninstall_finalizer_residue(paths: &Paths) -> Result<()> {
 
 const SYNTHETIC_SCHEMA2_GENERATION: &str = "78bd88811b14faf1e11ba59620088aa0";
 const SYNTHETIC_SCHEMA2_PENDING: &str = ".relaunch-pending-f3d466fe9027728be142ba84d6258074";
-const SYNTHETIC_SCHEMA2_USER_SID: &str = "S-1-5-21-1333774511-1103852894-3119617217-1001";
 const SYNTHETIC_SCHEMA2_SHA256: &str =
     "abb2d6183c58b6ec52e28f6befbe43d949d2eeaf1998122921118272da8f3bad";
 const SYNTHETIC_SCHEMA2_BYTES: &[u8] = br#"{"schemaVersion":2,"generation":"78bd88811b14faf1e11ba59620088aa0","userSid":"S-1-5-21-1333774511-1103852894-3119617217-1001","logonSid":"S-1-5-21-1333774511-1103852894-3119617217-1001","request":"--windows-update-bootstrap-v2=dGVzdA==","nonce":"11111111111111111111111111111111","sourceVersion":"0.0.69","targetVersion":"0.0.70","phase":"armed","completedVersion":null,"predecessor":{"version":"0.0.69","platform":"win32","architecture":"x64","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTree":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","releaseBuildDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","roles":[]}}"#;
-
-fn audit_stale_cleanup(event: &str) {
-    eprintln!("talking-quill stale-schema2-cleanup: {event}");
-}
 
 fn registry_key_present(root: HKEY, path: &str) -> Result<bool> {
     let mut key = ptr::null_mut();
@@ -7151,64 +7150,6 @@ fn directory_names(path: &Path) -> Result<Vec<String>> {
         .map_err(io_failure)?;
     names.sort_unstable();
     Ok(names)
-}
-
-fn schema2_fixture_acl_is_exact(path: &Path, directory: bool) -> Result<bool> {
-    let mut descriptor = ptr::null_mut();
-    if unsafe {
-        GetNamedSecurityInfoW(
-            wide(path.as_os_str()).as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    } != 0
-        || descriptor.is_null()
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Cannot inspect the schema-2 fixture ACL.",
-        ));
-    }
-    let mut text = ptr::null_mut();
-    let converted = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
-            SDDL_REVISION_1,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut text,
-            ptr::null_mut(),
-        )
-    };
-    unsafe { LocalFree(descriptor.cast()) };
-    if converted == 0 || text.is_null() {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Cannot encode the schema-2 fixture ACL.",
-        ));
-    }
-    let mut length = 0;
-    while unsafe { *text.add(length) } != 0 {
-        length += 1;
-    }
-    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) })
-        .to_ascii_uppercase();
-    unsafe { LocalFree(text.cast()) };
-    let inheritance = if directory { "OICI;" } else { ";" };
-    let expected = format!(
-        "D:P(A;{inheritance}FA;;;SY)(A;{inheritance}FA;;;BA)(A;{inheritance}FA;;;{})",
-        SYNTHETIC_SCHEMA2_USER_SID
-    )
-    .to_ascii_uppercase();
-    Ok(
-        (value.starts_with(&format!("O:{}", SYNTHETIC_SCHEMA2_USER_SID).to_ascii_uppercase())
-            && value.ends_with(&expected))
-            || (directory && value == MACHINE_LOCK_DIRECTORY_SDDL.to_ascii_uppercase()),
-    )
 }
 
 fn no_talking_quill_process_except_authenticated_pair() -> Result<bool> {
@@ -7445,10 +7386,13 @@ fn registry_value_names(root: HKEY, path: &str) -> Result<Option<Vec<String>>> {
         return Ok(None);
     }
     if status != 0 {
-        return Err(fail(EXIT_REJECTED, "Cannot inspect stale registry values."));
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cannot inspect cleanup registry values.",
+        ));
     }
     let result = (|| {
-        let mut values = Vec::new();
+        let mut names = Vec::new();
         let mut index = 0;
         loop {
             let mut name = [0_u16; 256];
@@ -7471,14 +7415,14 @@ fn registry_value_names(root: HKEY, path: &str) -> Result<Option<Vec<String>>> {
             if status != 0 {
                 return Err(fail(
                     EXIT_REJECTED,
-                    "Cannot enumerate stale registry values.",
+                    "Cannot enumerate cleanup registry values.",
                 ));
             }
-            values.push(String::from_utf16_lossy(&name[..length as usize]));
+            names.push(String::from_utf16_lossy(&name[..length as usize]));
             index += 1;
         }
-        values.sort_unstable();
-        Ok(values)
+        names.sort_unstable();
+        Ok(names)
     })();
     unsafe { RegCloseKey(key) };
     result.map(Some)
@@ -7556,47 +7500,6 @@ fn protect_stale_registry_key(key: HKEY) -> Result<()> {
             "Cannot protect stale registry cleanup state.",
         ))
     }
-}
-
-fn registry_acl_is_hardened(key: HKEY) -> Result<bool> {
-    let mut descriptor = ptr::null_mut();
-    if unsafe {
-        GetSecurityInfo(
-            key,
-            SE_REGISTRY_KEY,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    } != 0
-        || descriptor.is_null()
-    {
-        return Err(fail(EXIT_REJECTED, "Cannot inspect hardened registry ACL."));
-    }
-    let mut text = ptr::null_mut();
-    let converted = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
-            SDDL_REVISION_1,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut text,
-            ptr::null_mut(),
-        )
-    };
-    unsafe { LocalFree(descriptor.cast()) };
-    if converted == 0 || text.is_null() {
-        return Err(fail(EXIT_REJECTED, "Cannot encode hardened registry ACL."));
-    }
-    let mut length = 0;
-    while unsafe { *text.add(length) } != 0 {
-        length += 1;
-    }
-    let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
-    unsafe { LocalFree(text.cast()) };
-    Ok(value.eq_ignore_ascii_case(STALE_REGISTRY_HARDENED_SDDL))
 }
 
 fn registry_acl_is_exact(key: HKEY) -> Result<bool> {
@@ -7730,212 +7633,568 @@ fn exact_machine_lock_publication() -> Result<Option<String>> {
     Ok(publication)
 }
 
-fn reclaim_exact_schema2_orphan(developer_command: bool) -> Result<()> {
-    audit_stale_cleanup(if developer_command {
-        "authenticated developer preflight"
-    } else {
-        "authenticated fresh-setup preflight"
-    });
-    if !token_is_elevated()? {
-        return Err(fail(EXIT_REJECTED, "Stale cleanup requires elevation."));
+struct RetainedStaleObject {
+    file: File,
+    identity: String,
+    path: PathBuf,
+    directory: bool,
+}
+
+impl RetainedStaleObject {
+    fn open(path: &Path, directory: bool) -> Result<Self> {
+        Self::open_with_share(path, directory, 0)
     }
-    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
-    let system = known_folder(&FOLDERID_System)?;
-    let recovery = program_data.join("Talking Quill Update Recovery");
-    let relaunch_root = recovery.join("Relaunch Records");
-    let generation = relaunch_root.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
-    let pending = generation.join(SYNTHETIC_SCHEMA2_PENDING);
-    let publication = exact_machine_lock_publication()?;
-    let lock_directories = fs::read_dir(&program_data)
-        .map_err(io_failure)?
-        .map(|entry| entry.map_err(io_failure))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(MACHINE_LOCK_DIRECTORY_PREFIX)
-        })
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    let talking_quill_children = registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
-    let talking_quill_values = registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
-    let fixture_absent = !path_present(&recovery)?
-        && publication.is_none()
-        && lock_directories.is_empty()
-        && talking_quill_children.is_none()
-        && talking_quill_values.is_none();
-    if fixture_absent {
-        if developer_command
-            && (registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?
-                || registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?
-                || !no_owned_run_values()?
-                || !no_talking_quill_process_except_authenticated_pair()?
-                || !no_owned_service_keys()?
-                || !no_owned_task_files(&system)?
-                || path_present(&program_files.join("Talking Quill"))?
-                || path_present(&program_files.join(".Talking Quill.native-transaction-v2.json"))?
-                || path_present(&system.join("Tasks/TalkingQuillKeyboardAuthority"))?)
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Developer preflight found active or unknown machine state.",
-            ));
-        }
-        audit_stale_cleanup("zero coordination residue; no action");
-        return Ok(());
+
+    fn open_lifecycle(path: &Path) -> Result<Self> {
+        // Delete sharing permits POSIX unlink while a duplicate retains the same verified file
+        // object. Read and write sharing remain denied, so an active lifecycle owner conflicts.
+        Self::open_with_share(path, false, FILE_SHARE_DELETE)
     }
-    let parent_only_prefix = !path_present(&recovery)?
-        && publication.is_none()
-        && lock_directories.is_empty()
-        && talking_quill_children.as_deref() == Some(&[])
-        && talking_quill_values.as_deref() == Some(&[]);
-    if parent_only_prefix {
-        if registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?
-            || registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?
-            || !no_owned_run_values()?
-            || !no_talking_quill_process_except_authenticated_pair()?
-            || !no_owned_service_keys()?
-            || !no_owned_task_files(&system)?
-            || path_present(&program_files.join("Talking Quill"))?
-            || path_present(&program_files.join(".Talking Quill.native-transaction-v2.json"))?
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Active state blocks registry-prefix cleanup.",
-            ));
-        }
-        let mut parent = ptr::null_mut();
-        if unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                wide(OsStr::new(r"Software\Talking Quill")).as_ptr(),
-                0,
-                KEY_READ | KEY_WRITE | WRITE_DAC,
-                &mut parent,
+
+    fn open_with_share(path: &Path, directory: bool, share: u32) -> Result<Self> {
+        let raw = unsafe {
+            CreateFileW(
+                wide(path.as_os_str()).as_ptr(),
+                FILE_GENERIC_READ | DELETE,
+                share,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT
+                    | if directory {
+                        FILE_FLAG_BACKUP_SEMANTICS
+                    } else {
+                        0
+                    },
+                ptr::null_mut(),
             )
-        } != 0
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(fail(
+                EXIT_REJECTED,
+                "A stale fixture object is active or unavailable.",
+            ));
+        }
+        let file = unsafe { File::from_raw_handle(raw) };
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0
+            || (information.dwFileAttributes & 0x10 != 0) != directory
+            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         {
             return Err(fail(
                 EXIT_REJECTED,
-                "Cannot retain registry cleanup prefix.",
+                "A retained stale fixture identity is invalid.",
             ));
         }
-        let hardened = registry_acl_is_hardened(parent);
-        unsafe { RegCloseKey(parent) };
-        if !hardened? {
+        let identity = file_identity_text(&file)?;
+        Ok(Self {
+            file,
+            identity,
+            path: path.to_owned(),
+            directory,
+        })
+    }
+
+    fn verify(&self) -> Result<()> {
+        if file_identity_text(&self.file)? != self.identity {
             return Err(fail(
                 EXIT_REJECTED,
-                "Registry-only cleanup prefix ACL is unknown.",
+                "A retained stale fixture identity changed.",
             ));
         }
-        delete_registry_tree_durable(
-            r"Software\Talking Quill",
-            r"Software",
-            "empty Talking Quill registry parent",
-        )?;
-        audit_stale_cleanup("completed registry-only cleanup prefix; zero residue proven");
-        return Ok(());
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(self.file.as_raw_handle(), &mut information) } == 0
+            || (information.dwFileAttributes & 0x10 != 0) != self.directory
+            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "A retained stale fixture type changed.",
+            ));
+        }
+        Ok(())
     }
-    let suffix = publication.ok_or_else(|| {
-        fail(
-            EXIT_REJECTED,
-            "Unknown coordination state: publication is absent.",
-        )
-    })?;
-    validate_machine_lock_suffix(&suffix)?;
-    if registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-        != Some(vec!["RecoveryStateLockV1".to_owned()])
-        || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Talking Quill registry inventory is not exact.",
-        ));
+
+    fn names(&self) -> Result<Vec<String>> {
+        if !self.directory {
+            return Err(fail(
+                EXIT_REJECTED,
+                "A retained file has no child inventory.",
+            ));
+        }
+        let mut names = retained_directory_names(self.file.as_raw_handle())
+            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
+        names.sort_unstable();
+        Ok(names)
     }
-    let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
-    if (!lock_directories.is_empty() && lock_directories != [lock_directory.clone()])
-        || registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?
-        || registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?
-        || !no_owned_run_values()?
-        || !no_talking_quill_process_except_authenticated_pair()?
-        || !no_owned_service_keys()?
-        || !no_owned_task_files(&system)?
-        || terminal_service_exists("TalkingQuillKeyboardAuthority")?
-        || path_present(&program_files.join("Talking Quill"))?
-        || path_present(&program_files.join(".Talking Quill.native-staging"))?
-        || path_present(&program_files.join(".Talking Quill.native-backup"))?
-        || path_present(&program_files.join(".Talking Quill.native-transaction-v2.json"))?
-        || path_present(&program_files.join(".Talking Quill.maintenance-generation-v1"))?
-        || path_present(&program_data.join("Talking Quill/KeyboardAuthority"))?
-        || path_present(
-            &program_data.join("Talking Quill/.KeyboardAuthority.retirement-quarantine"),
-        )?
-        || path_present(&system.join("Tasks/TalkingQuillKeyboardAuthority"))?
+
+    fn read_all(&mut self) -> Result<Vec<u8>> {
+        self.file.seek(SeekFrom::Start(0)).map_err(io_failure)?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes).map_err(io_failure)?;
+        Ok(bytes)
+    }
+
+    fn rename(&mut self, destination: &Path) -> Result<()> {
+        rename_handle(self.file.as_raw_handle(), destination)?;
+        self.path = destination.to_owned();
+        Ok(())
+    }
+
+    fn mark_posix_deleted(&self) -> Result<()> {
+        let disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        };
+        if unsafe {
+            SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileDispositionInfoEx,
+                (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
+                mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+            )
+        } == 0
+        {
+            return Err(io_failure(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn mark_deleted(&self) -> Result<()> {
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        if unsafe {
+            SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(io_failure(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn finish_deleted(self) -> Result<()> {
+        let path = self.path.clone();
+        drop(self);
+        if path_present(&path)? {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Windows retained a handle-deleted stale object.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn delete(self) -> Result<()> {
+        self.mark_deleted()?;
+        self.finish_deleted()
+    }
+}
+
+struct StaleCleanupAudit {
+    file: File,
+    parent: PathBuf,
+    identity: String,
+    operation: String,
+    chain: [u8; 32],
+}
+
+impl StaleCleanupAudit {
+    fn open() -> Result<Self> {
+        let path = std::env::var_os("TQ_STALE_SCHEMA2_AUDIT_PATH")
+            .map(PathBuf::from)
+            .ok_or_else(|| fail(EXIT_REJECTED, "TQ_STALE_SCHEMA2_AUDIT_PATH is required."))?;
+        if !path.is_absolute() {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Stale cleanup audit path must be absolute.",
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| fail(EXIT_REJECTED, "Audit path has no parent."))?
+            .to_owned();
+        assert_plain_directory(&parent)?;
+        let mut file = OpenOptions::new()
+            .append(true)
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(&path)
+            .map_err(|_| {
+                fail(
+                    EXIT_REJECTED,
+                    "Administrator must pre-create the protected cleanup audit file.",
+                )
+            })?;
+        if !staged_path_is_protected(&path, false)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Cleanup audit is not administrator protected.",
+            ));
+        }
+        let identity = file_identity_text(&file)?;
+        file.seek(SeekFrom::Start(0)).map_err(io_failure)?;
+        let mut prior = Vec::new();
+        file.read_to_end(&mut prior).map_err(io_failure)?;
+        let mut nonce = [0_u8; 32];
+        getrandom::fill(&mut nonce)
+            .map_err(|_| fail(EXIT_FAILURE, "Audit operation randomness is unavailable."))?;
+        let operation: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut initial = Sha256::new();
+        initial.update(b"TalkingQuill/stale-schema2-audit-chain/v1\0");
+        initial.update(identity.as_bytes());
+        initial.update(&prior);
+        initial.update(operation.as_bytes());
+        Ok(Self {
+            file,
+            parent,
+            identity,
+            operation,
+            chain: initial.finalize().into(),
+        })
+    }
+
+    fn record(&mut self, stage: &str, binding: &str, proof: &str) -> Result<()> {
+        let previous = hex_hash(&self.chain);
+        let mut event = Sha256::new();
+        event.update(self.chain);
+        event.update(stage.as_bytes());
+        event.update(binding.as_bytes());
+        event.update(proof.as_bytes());
+        self.chain = event.finalize().into();
+        let line = format!(
+            "{{\"schemaVersion\":1,\"operation\":\"stale-schema2-cleanup\",\"operationId\":\"{}\",\"auditIdentity\":\"{}\",\"stage\":\"{stage}\",\"bindingSha256\":\"{binding}\",\"proofSha256\":\"{proof}\",\"previousSha256\":\"{previous}\",\"eventSha256\":\"{}\"}}\n",
+            self.operation,
+            self.identity,
+            hex_hash(&self.chain),
+        );
+        self.file.write_all(line.as_bytes()).map_err(io_failure)?;
+        self.file.sync_all().map_err(io_failure)?;
+        flush_setup_directory(&self.parent)
+    }
+}
+
+fn retained_binding(objects: &[&RetainedStaleObject], suffix: &str) -> String {
+    let mut entries = objects
+        .iter()
+        .map(|object| format!("{}:{}", object.path.display(), object.identity))
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    let mut hash = Sha256::new();
+    hash.update(b"TalkingQuill/stale-schema2-cleanup-binding/v1\0");
+    hash.update(suffix.as_bytes());
+    for entry in entries {
+        hash.update(entry.as_bytes());
+        hash.update([0]);
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    hex_hash(&digest)
+}
+
+fn active_state_proof(
+    program_files: &Path,
+    program_data: &Path,
+    system: &Path,
+    allow_coordination: bool,
+) -> Result<String> {
+    let fixed_paths = [
+        program_files.join("Talking Quill"),
+        program_files.join(".Talking Quill.native-staging"),
+        program_files.join(".Talking Quill.native-backup"),
+        program_files.join(".Talking Quill.native-transaction-v2.json"),
+        program_files.join(".Talking Quill.maintenance-generation-v1"),
+        program_data.join("Talking Quill/KeyboardAuthority"),
+        program_data.join("Talking Quill/.KeyboardAuthority.retirement-quarantine"),
+        system.join("Tasks/TalkingQuillKeyboardAuthority"),
+    ];
+    let uninstall_present = registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?;
+    let app_path_present = registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?;
+    let run_absent = no_owned_run_values()?;
+    let processes_absent = no_talking_quill_process_except_authenticated_pair()?;
+    let services_absent = no_owned_service_keys()?;
+    let tasks_absent = no_owned_task_files(system)?;
+    let legacy_service_present = terminal_service_exists("TalkingQuillKeyboardAuthority")?;
+    if fixed_paths
+        .iter()
+        .any(|path| path_present(path).unwrap_or(true))
+        || uninstall_present
+        || app_path_present
+        || !run_absent
+        || !processes_absent
+        || !services_absent
+        || !tasks_absent
+        || legacy_service_present
     {
         return Err(fail(
             EXIT_REJECTED,
             "Active or unknown Talking Quill state blocks stale cleanup.",
         ));
     }
-    let recovery_present = path_present(&recovery)?;
-    let lock_present = path_present(&lock_directory)?;
-    if recovery_present && !lock_present {
-        return Err(fail(EXIT_REJECTED, "Cleanup prefix order is invalid."));
-    }
-    let generation_present = path_present(&generation)?;
-    if recovery_present
-        && (directory_names(&recovery)? != ["Relaunch Records"]
-            || if generation_present {
-                directory_names(&relaunch_root)?
-                    != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
-                    || directory_names(&generation)? != [SYNTHETIC_SCHEMA2_PENDING]
-                    || !schema2_fixture_acl_is_exact(&generation, true)?
-                    || !schema2_fixture_acl_is_exact(&pending, false)?
-            } else {
-                !directory_names(&relaunch_root)?.is_empty()
-            })
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Escaped schema-2 fixture inventory or cleanup prefix is not exact.",
-        ));
-    }
-    if generation_present {
-        let bytes = fs::read(&pending).map_err(io_failure)?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if bytes != SYNTHETIC_SCHEMA2_BYTES || hex_hash(&digest) != SYNTHETIC_SCHEMA2_SHA256 {
+    let mut evidence = fixed_paths
+        .iter()
+        .map(|path| format!("absent:{}", path.display()))
+        .collect::<Vec<_>>();
+    evidence.extend([
+        format!("uninstall-present:{uninstall_present}"),
+        format!("app-path-present:{app_path_present}"),
+        format!("run-absent:{run_absent}"),
+        format!("processes-absent:{processes_absent}"),
+        format!("services-absent:{services_absent}"),
+        format!("tasks-absent:{tasks_absent}"),
+        format!("legacy-service-present:{legacy_service_present}"),
+    ]);
+    let mut program_files_inventory = Vec::new();
+    for entry in fs::read_dir(program_files).map_err(io_failure)? {
+        let name = entry
+            .map_err(io_failure)?
+            .file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        program_files_inventory.push(name.clone());
+        if name.starts_with("talking quill maintenance-")
+            || name.starts_with(".talking quill.native-transaction-v2.tmp-")
+        {
             return Err(fail(
                 EXIT_REJECTED,
-                "Escaped schema-2 fixture hash or content is not recognized.",
+                "Program Files recovery residue blocks stale cleanup.",
             ));
         }
     }
-    if lock_present {
-        verify_machine_lock_tree(&lock_directory)?;
-        if directory_names(&lock_directory)?
+    program_files_inventory.sort_unstable();
+    evidence.extend(
+        program_files_inventory
+            .into_iter()
+            .map(|name| format!("pf:{name}")),
+    );
+    let mut program_data_inventory = Vec::new();
+    for entry in fs::read_dir(program_data).map_err(io_failure)? {
+        let name = entry
+            .map_err(io_failure)?
+            .file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        program_data_inventory.push(name.clone());
+        let coordination = name == "talking quill update recovery"
+            || name.starts_with(".talking quill.machine-lock-")
+            || name.starts_with(".talking quill.machine-lifecycle-retained-");
+        let other = name.starts_with(".talking quill.update-")
+            || name.starts_with(".talking quill.uninstall-finalizer-")
+            || name.starts_with(".talking quill.terminal-")
+            || name.starts_with("talking quill terminal");
+        if other || (coordination && !allow_coordination) {
+            return Err(fail(
+                EXIT_REJECTED,
+                "ProgramData recovery residue blocks stale cleanup.",
+            ));
+        }
+    }
+    program_data_inventory.sort_unstable();
+    evidence.extend(
+        program_data_inventory
+            .into_iter()
+            .map(|name| format!("pd:{name}")),
+    );
+    let talking_quill_registry =
+        registry_key_present(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?;
+    if !allow_coordination && talking_quill_registry {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Talking Quill registry residue remains.",
+        ));
+    }
+    evidence.push(format!(
+        "talking-quill-registry-present:{talking_quill_registry}"
+    ));
+    evidence.push(format!("allow-coordination:{allow_coordination}"));
+    evidence.sort_unstable();
+    let mut hash = Sha256::new();
+    hash.update(b"TalkingQuill/stale-schema2-machine-proof/v2\0");
+    for entry in evidence {
+        hash.update(entry.as_bytes());
+        hash.update([0]);
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    Ok(hex_hash(&digest))
+}
+
+fn exact_cleanup_registry(suffix: &str) -> Result<()> {
+    if exact_machine_lock_publication()?.as_deref() != Some(suffix)
+        || registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
+            != Some(vec!["RecoveryStateLockV1".to_owned()])
+        || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Cleanup registry inventory is not exact.",
+        ));
+    }
+    Ok(())
+}
+
+fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
+    if !token_is_elevated()? {
+        return Err(fail(EXIT_REJECTED, "Stale cleanup requires elevation."));
+    }
+    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+    let program_data = known_folder(&FOLDERID_ProgramData)?;
+    let system = known_folder(&FOLDERID_System)?;
+    let legacy = LegacyMutexPair::acquire()?;
+    let Some(suffix) = exact_machine_lock_publication()? else {
+        let recovery = program_data.join("Talking Quill Update Recovery");
+        let lock_residue = fs::read_dir(&program_data)
+            .map_err(io_failure)?
+            .map(|entry| entry.map_err(io_failure))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with(&MACHINE_LOCK_DIRECTORY_PREFIX.to_ascii_lowercase())
+            });
+        if path_present(&recovery)?
+            || lock_residue
+            || registry_key_present(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Unknown coordination state has no lifecycle lock.",
+            ));
+        }
+        return Ok(());
+    };
+    validate_machine_lock_suffix(&suffix)?;
+    let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
+    let lifecycle =
+        RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
+    exact_cleanup_registry(&suffix)?;
+    if !developer_command && std::env::var_os("TQ_STALE_SCHEMA2_AUDIT_PATH").is_none() {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Production orphan reclaim requires an administrator audit path.",
+        ));
+    }
+    let mut audit = StaleCleanupAudit::open()?;
+
+    // The lifecycle file is retained before any process, role, service, task, Run, registration,
+    // journal, terminal, Program Files, or ProgramData activity inspection.
+    if !staged_path_is_protected(&lock_directory, true)?
+        || !staged_path_is_protected(&lock_directory.join("recovery-state-v1.lock"), false)?
+        || !staged_path_is_protected(&lock_directory.join("lock-tree-identity-v1"), false)?
+        || !staged_path_is_protected(&lock_directory.join("recovery-state-v1.identity-v1"), false)?
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine lifecycle ACL inventory is not exact.",
+        ));
+    }
+    let lock_root = RetainedStaleObject::open(&lock_directory, true)?;
+    let mut lock_tree_identity =
+        RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
+    let mut lock_file_identity =
+        RetainedStaleObject::open(&lock_directory.join("recovery-state-v1.identity-v1"), false)?;
+    let recovery = program_data.join("Talking Quill Update Recovery");
+    let relaunch = recovery.join("Relaunch Records");
+    let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
+    let mut pending =
+        RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
+    let admission = active_state_proof(&program_files, &program_data, &system, true)?;
+    // The pending file and lifecycle lock are exclusive before this first mutation. Harden each
+    // parent from the inside out, then retain it without sharing. Exact handle inventories below
+    // reject anything that appeared before hardening.
+    apply_lock_dacl(&generation, MACHINE_LOCK_DIRECTORY_SDDL)?;
+    let generation_guard = RetainedStaleObject::open(&generation, true)?;
+    apply_lock_dacl(&relaunch, MACHINE_LOCK_DIRECTORY_SDDL)?;
+    let relaunch_guard = RetainedStaleObject::open(&relaunch, true)?;
+    apply_lock_dacl(&recovery, MACHINE_LOCK_DIRECTORY_SDDL)?;
+    let recovery_guard = RetainedStaleObject::open(&recovery, true)?;
+    let bytes = pending.read_all()?;
+    let lock_root_marker = String::from_utf8(lock_tree_identity.read_all()?)
+        .map_err(|_| fail(EXIT_REJECTED, "Machine lock root marker is not UTF-8."))?;
+    let lock_file_marker = String::from_utf8(lock_file_identity.read_all()?)
+        .map_err(|_| fail(EXIT_REJECTED, "Machine lifecycle marker is not UTF-8."))?;
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    if bytes != SYNTHETIC_SCHEMA2_BYTES
+        || lock_root_marker != lock_root.identity
+        || lock_file_marker != lifecycle.identity
+        || hex_hash(&digest) != SYNTHETIC_SCHEMA2_SHA256
+        || generation_guard.names()? != [SYNTHETIC_SCHEMA2_PENDING]
+        || relaunch_guard.names()? != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
+        || recovery_guard.names()? != ["Relaunch Records"]
+        || lock_root.names()?
             != [
                 "lock-tree-identity-v1",
                 "recovery-state-v1.identity-v1",
                 "recovery-state-v1.lock",
             ]
-            || !staged_path_is_protected(&lock_directory.join("lock-tree-identity-v1"), false)?
-            || !staged_path_is_protected(
-                &lock_directory.join("recovery-state-v1.identity-v1"),
-                false,
-            )?
-        {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Machine lock fixture inventory is not exact.",
-            ));
-        }
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Retained stale fixture inventory is not exact.",
+        ));
     }
-    // Follow the same global order as normal setup. The legacy pair excludes cooperating old
-    // owners; exclusive file handles reject active or pre-opened mutable fixture state.
-    let legacy = LegacyMutexPair::acquire()?;
+    for object in [
+        &lifecycle,
+        &lock_root,
+        &lock_tree_identity,
+        &lock_file_identity,
+        &pending,
+        &generation_guard,
+        &relaunch_guard,
+        &recovery_guard,
+    ] {
+        object.verify()?;
+    }
+    let objects = [
+        &lifecycle,
+        &lock_root,
+        &lock_tree_identity,
+        &lock_file_identity,
+        &pending,
+        &generation_guard,
+        &relaunch_guard,
+        &recovery_guard,
+    ];
+    let binding = retained_binding(&objects, &suffix);
+    audit.record("inspected", &binding, &admission)?;
+    std::thread::sleep(Duration::from_millis(750));
+    for object in objects {
+        object.verify()?;
+    }
+    if pending.read_all()? != SYNTHETIC_SCHEMA2_BYTES
+        || lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+        || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+        || generation_guard.names()? != [SYNTHETIC_SCHEMA2_PENDING]
+        || relaunch_guard.names()? != [format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}")]
+        || recovery_guard.names()? != ["Relaunch Records"]
+        || lock_root.names()?
+            != [
+                "lock-tree-identity-v1",
+                "recovery-state-v1.identity-v1",
+                "recovery-state-v1.lock",
+            ]
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Retained fixture changed during the stability wait.",
+        ));
+    }
+    let second = active_state_proof(&program_files, &program_data, &system, true)?;
+    exact_cleanup_registry(&suffix)?;
+    audit.record("commit-intent", &binding, &second)?;
+
+    // Repeat registry identity after the second active proof and before the first mutation.
+    if exact_machine_lock_publication()?.as_deref() != Some(&suffix) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Machine lifecycle publication changed before mutation.",
+        ));
+    }
     for registry_path in [r"Software\Talking Quill", MACHINE_LOCK_REGISTRY_KEY] {
         let mut key = ptr::null_mut();
         if unsafe {
@@ -7950,144 +8209,67 @@ fn reclaim_exact_schema2_orphan(developer_command: bool) -> Result<()> {
         {
             return Err(fail(
                 EXIT_REJECTED,
-                "Stale registry key changed before protection.",
+                "Stale registry key changed before mutation.",
             ));
         }
-        let protected = protect_stale_registry_key(key);
+        let result = protect_stale_registry_key(key);
         unsafe { RegCloseKey(key) };
-        protected?;
+        result?;
     }
-    if registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-        != Some(vec!["RecoveryStateLockV1".to_owned()])
-        || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
-        || exact_machine_lock_publication()?.as_deref() != Some(&suffix)
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Registry inventory changed during protection.",
-        ));
-    }
-    let pending_guard = if generation_present {
-        Some(
-            OpenOptions::new()
-                .read(true)
-                .share_mode(0)
-                .open(&pending)
-                .map_err(|_| fail(EXIT_REJECTED, "Schema-2 fixture is active or mutable."))?,
-        )
-    } else {
-        None
-    };
-    let exclusive = if lock_present {
-        Some(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .share_mode(0)
-                .open(lock_directory.join("recovery-state-v1.lock"))
-                .map_err(|_| {
-                    fail(
-                        EXIT_REJECTED,
-                        "Machine lock is active or cannot be opened exclusively.",
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
-    let generation_identity = if generation_present {
-        apply_lock_dacl(&generation, MACHINE_LOCK_DIRECTORY_SDDL)?;
-        Some(
-            owned_tree_identity(&generation)
-                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?,
-        )
-    } else {
-        None
-    };
-    let lock_identity = if lock_present {
-        Some(
-            owned_tree_identity(&lock_directory)
-                .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?,
-        )
-    } else {
-        None
-    };
-    let lock_file_identity = exclusive.as_ref().map(file_identity_text).transpose()?;
-    std::thread::sleep(Duration::from_millis(750));
-    if generation_identity.as_ref().is_some_and(|identity| {
-        owned_tree_identity(&generation).ok().as_ref() != Some(identity)
-            || directory_names(&generation).ok().as_deref()
-                != Some(&[SYNTHETIC_SCHEMA2_PENDING.to_owned()])
-    }) || lock_identity.as_ref().is_some_and(|identity| {
-        owned_tree_identity(&lock_directory).ok().as_ref() != Some(identity)
-            || directory_names(&lock_directory).ok().as_deref()
-                != Some(&[
-                    "lock-tree-identity-v1".to_owned(),
-                    "recovery-state-v1.identity-v1".to_owned(),
-                    "recovery-state-v1.lock".to_owned(),
-                ])
-    }) || exclusive.as_ref().map(file_identity_text).transpose()? != lock_file_identity
-        || exact_machine_lock_publication()?.as_deref() != Some(&suffix)
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Stale coordination identities changed during the stability wait.",
-        ));
-    }
-    drop(pending_guard);
-    if let Some(identity) = generation_identity {
-        audit_stale_cleanup("preconditions exact; deleting relaunch fixture");
-        remove_owned_tree(&generation, &identity)
-            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-    }
-    if recovery_present {
-        fs::remove_dir(&relaunch_root).map_err(io_failure)?;
-        fs::remove_dir(&recovery).map_err(io_failure)?;
-        flush_setup_directory(&program_data)?;
-    }
-    drop(exclusive);
-    if let Some(identity) = lock_identity {
-        audit_stale_cleanup("deleting nonexclusive machine lock tree");
-        remove_owned_tree(&lock_directory, &identity)
-            .map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
-        flush_setup_directory(&program_data)?;
-    }
-    audit_stale_cleanup("deleting registry publication last");
+
+    pending.delete()?;
+    generation_guard.delete()?;
+    relaunch_guard.delete()?;
+    recovery_guard.delete()?;
+    lock_tree_identity.delete()?;
+    lock_file_identity.delete()?;
+    // Move the retained lifecycle file out of its tree, mark it delete-pending, and keep that
+    // same identity handle through registry-last deletion. This lets the now-empty lock tree be
+    // handle-deleted without releasing lifecycle authority.
+    let mut lifecycle = lifecycle;
+    let lifecycle_identity = lifecycle.identity.clone();
+    let retained_lifecycle_path = program_data.join(format!(
+        ".Talking Quill.machine-lifecycle-retained-{suffix}"
+    ));
+    lifecycle.rename(&retained_lifecycle_path)?;
+    lifecycle.mark_posix_deleted()?;
+    lock_root.delete()?;
+    flush_setup_directory(&program_data)?;
+    exact_cleanup_registry(&suffix)?;
     delete_registry_tree_durable(
         MACHINE_LOCK_REGISTRY_KEY,
         r"Software\Talking Quill",
-        "stale machine lock publication",
+        "stale machine lifecycle publication",
     )?;
-    if registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-        .is_some_and(|children| !children.is_empty())
-        || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-            .is_some_and(|values| !values.is_empty())
+    if registry_subkeys(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
+        || registry_value_names(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? != Some(Vec::new())
     {
         return Err(fail(
             EXIT_REJECTED,
-            "Registry parent changed before last-key deletion.",
+            "Registry parent gained unknown content.",
         ));
     }
-    if registry_key_present(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")? {
-        delete_registry_tree_durable(
-            r"Software\Talking Quill",
-            r"Software",
-            "empty Talking Quill registry parent",
-        )?;
-    }
-    drop(legacy);
-    if path_present(&recovery)?
-        || path_present(&lock_directory)?
-        || registry_key_present(HKEY_LOCAL_MACHINE, r"Software\Talking Quill")?
-        || !no_owned_run_values()?
-    {
+    delete_registry_tree_durable(
+        r"Software\Talking Quill",
+        r"Software",
+        "empty Talking Quill registry parent",
+    )?;
+    if file_identity_text(&lifecycle.file)? != lifecycle_identity {
         return Err(fail(
-            EXIT_FAILURE,
-            "Stale cleanup did not prove zero residue.",
+            EXIT_REJECTED,
+            "Retained lifecycle authority changed during registry deletion.",
         ));
     }
-    audit_stale_cleanup("deleted verified objects; zero residue proven");
+    lifecycle.finish_deleted()?;
+    flush_setup_directory(&program_data)?;
+    let zero = active_state_proof(&program_files, &program_data, &system, false)?;
+    audit.record("completed", &binding, &zero)?;
+    drop(legacy);
     Ok(())
+}
+
+fn reclaim_exact_schema2_orphan(developer_command: bool) -> Result<()> {
+    reclaim_exact_schema2_orphan_v2(developer_command)
 }
 
 fn remove_machine_lock_residue(paths: &Paths, suffix: &str) -> Result<()> {
@@ -9294,5 +9476,214 @@ mod tests {
             )
         );
         assert!(deadline_ms(Instant::now() - Duration::from_millis(1)).is_err());
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_retained_handles_block_mutation_and_prove_zero() {
+        let root = std::env::temp_dir().join(format!("tq-stale-retained-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let child = root.join("fixture");
+        fs::write(&child, b"exact").unwrap();
+        let child_guard = RetainedStaleObject::open(&child, false).unwrap();
+        apply_lock_dacl(&root, MACHINE_LOCK_DIRECTORY_SDDL).unwrap();
+        let root_guard = RetainedStaleObject::open(&root, true).unwrap();
+        assert!(OpenOptions::new().write(true).open(&child).is_err());
+        let mutation = root.join("mutation");
+        let mutation_attempt = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&mutation);
+        child_guard.verify().unwrap();
+        root_guard.verify().unwrap();
+        child_guard.delete().unwrap();
+        if mutation_attempt.is_ok() {
+            drop(mutation_attempt);
+            assert!(root_guard.delete().is_err());
+            assert!(
+                mutation.exists(),
+                "an unretained mutation must never be deleted"
+            );
+            fs::remove_file(mutation).unwrap();
+            fs::remove_dir(root).unwrap();
+        } else {
+            root_guard.delete().unwrap();
+            assert!(!root.exists() && !child.exists());
+        }
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_concurrent_installer_lifecycle_lock_is_rejected() {
+        if let (Some(lock), Some(ready)) = (
+            std::env::var_os("TQ_STALE_LOCK_CHILD"),
+            std::env::var_os("TQ_STALE_LOCK_READY"),
+        ) {
+            let _guard = RetainedStaleObject::open(Path::new(&lock), false).unwrap();
+            fs::write(ready, b"ready").unwrap();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let root = std::env::temp_dir().join(format!("tq-stale-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let lock = root.join("recovery-state-v1.lock");
+        let ready = root.join("ready");
+        fs::write(&lock, b"").unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows::tests::stale_concurrent_installer_lifecycle_lock_is_rejected",
+                "--nocapture",
+            ])
+            .env("TQ_STALE_LOCK_CHILD", &lock)
+            .env("TQ_STALE_LOCK_READY", &ready)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists());
+        assert!(RetainedStaleObject::open(&lock, false).is_err());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_active_process_state_is_rejected() {
+        if std::env::var_os("TQ_STALE_ACTIVE_CHILD").is_some() {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let root = std::env::temp_dir().join(format!("tq-stale-active-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let image = root.join("Talking Quill Active Test.exe");
+        fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
+        let mut child = Command::new(&image)
+            .args([
+                "--exact",
+                "windows::tests::stale_active_process_state_is_rejected",
+                "--nocapture",
+            ])
+            .env("TQ_STALE_ACTIVE_CHILD", "1")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(!no_talking_quill_process_except_authenticated_pair().unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_cleanup_authorization_is_authenticated_cross_process() {
+        if std::env::var_os("TQ_STALE_AUTH_CHILD").is_some() {
+            let image = std::env::current_exe().unwrap();
+            let (action, _, silent, parent) =
+                WorkerChannel::connect_and_authenticate(&image, None).unwrap();
+            assert!(action == Action::CleanStaleSchema2 && silent && parent != 0);
+            return;
+        }
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        let channel =
+            ControllerChannel::create(Action::CleanStaleSchema2, true, std::process::id()).unwrap();
+        let image = std::env::current_exe().unwrap();
+        let mut child = Command::new(&image)
+            .args([
+                "--exact",
+                "windows::tests::stale_cleanup_authorization_is_authenticated_cross_process",
+                "--nocapture",
+            ])
+            .env("TQ_STALE_AUTH_CHILD", "1")
+            .spawn()
+            .unwrap();
+        let mut duplicate = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    child.as_raw_handle(),
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        let shell = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+        let worker = channel.authenticate(&shell, &image, None).unwrap();
+        assert_eq!(unsafe { GetProcessId(worker.as_raw_handle()) }, child.id());
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_audit_is_flushed_and_identity_bound() {
+        let root = std::env::temp_dir().join(format!("tq-stale-audit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let path = root.join("audit.jsonl");
+        fs::write(&path, b"").unwrap();
+        apply_lock_dacl(&path, MACHINE_LOCK_FILE_SDDL).unwrap();
+        unsafe { std::env::set_var("TQ_STALE_SCHEMA2_AUDIT_PATH", &path) };
+        let mut audit = StaleCleanupAudit::open().unwrap();
+        unsafe { std::env::remove_var("TQ_STALE_SCHEMA2_AUDIT_PATH") };
+        audit
+            .record("commit-intent", &"ab".repeat(32), &"cd".repeat(32))
+            .unwrap();
+        audit
+            .record("completed", &"ab".repeat(32), &"ef".repeat(32))
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+        assert!(content.contains("commit-intent") && content.contains("completed"));
+        assert!(content.contains(&"ab".repeat(32)) && content.contains(&"ef".repeat(32)));
+        drop(audit);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn stale_interrupted_registry_last_never_claims_zero() {
+        let root =
+            std::env::temp_dir().join(format!("tq-stale-registry-last-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let registry_publication = root.join("RecoveryStateLockV1");
+        fs::write(&registry_publication, b"suffix").unwrap();
+        let fixture = root.join("fixture");
+        fs::create_dir(&fixture).unwrap();
+        let lifecycle_path = fixture.join("recovery-state-v1.lock");
+        fs::write(&lifecycle_path, b"").unwrap();
+        let lifecycle = RetainedStaleObject::open_lifecycle(&lifecycle_path).unwrap();
+        let fixture_guard = RetainedStaleObject::open(&fixture, true).unwrap();
+        let mut lifecycle = lifecycle;
+        let lifecycle_identity = lifecycle.identity.clone();
+        let retained = root.join("retained-lifecycle.lock");
+        lifecycle.rename(&retained).unwrap();
+        lifecycle.mark_posix_deleted().unwrap();
+        fixture_guard.delete().unwrap();
+        assert!(
+            registry_publication.exists(),
+            "registry-last interruption must remain observable while lifecycle authority remains"
+        );
+        fs::remove_file(&registry_publication).unwrap();
+        assert_eq!(
+            file_identity_text(&lifecycle.file).unwrap(),
+            lifecycle_identity
+        );
+        lifecycle.finish_deleted().unwrap();
+        assert!(!fixture.exists() && !registry_publication.exists() && !retained.exists());
+        fs::remove_dir(root).unwrap();
     }
 }

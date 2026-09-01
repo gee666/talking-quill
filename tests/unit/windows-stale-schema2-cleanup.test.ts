@@ -47,34 +47,37 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     for (const check of [
       'registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?',
       'registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?',
-      '!no_owned_run_values()?',
-      '!no_talking_quill_process_except_authenticated_pair()?',
-      '!no_owned_service_keys()?',
+      'let run_absent = no_owned_run_values()?;',
+      'let processes_absent = no_talking_quill_process_except_authenticated_pair()?;',
+      'let services_absent = no_owned_service_keys()?;',
       'Tasks/TalkingQuillKeyboardAuthority',
       '.Talking Quill.native-transaction-v2.json',
     ]) {
       expect(source).toContain(check);
     }
     expect(index('let legacy = LegacyMutexPair::acquire()?;')).toBeLessThan(
-      index('Machine lock is active or cannot be opened exclusively.'),
+      index('RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?'),
     );
+    expect(
+      index('RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?'),
+    ).toBeLessThan(index('active_state_proof(&program_files, &program_data, &system, true)?'));
     expect(source).toContain('share_mode(0)');
     expect(source).toContain('Duration::from_millis(750)');
   });
 
   it('checks exact inventories, removes through owned-tree identities, and deletes registry last', () => {
-    expect(source).toContain('Machine lock fixture inventory is not exact.');
-    expect(source).toContain('Escaped schema-2 fixture inventory or cleanup prefix is not exact.');
-    expect(source).toContain('remove_owned_tree(&generation, &identity)');
-    expect(source).toContain('remove_owned_tree(&lock_directory, &identity)');
-    expect(index('remove_owned_tree(&generation, &identity)')).toBeLessThan(
-      index('deleting registry publication last'),
+    expect(source).toContain('Retained stale fixture inventory is not exact.');
+    expect(source).toContain('pending.delete()?');
+    expect(source).toContain('lifecycle.finish_deleted()?');
+    expect(index('pending.delete()?')).toBeLessThan(index('stale machine lifecycle publication'));
+    expect(index('lifecycle.rename(&retained_lifecycle_path)?')).toBeLessThan(
+      index('stale machine lifecycle publication'),
     );
-    expect(index('remove_owned_tree(&lock_directory, &identity)')).toBeLessThan(
-      index('deleting registry publication last'),
+    expect(index('lifecycle.finish_deleted()?')).toBeGreaterThan(
+      index('stale machine lifecycle publication'),
     );
-    expect(source).toContain('Stale cleanup did not prove zero residue.');
-    expect(source).toContain('deleted verified objects; zero residue proven');
+    expect(source).toContain('active_state_proof(&program_files, &program_data, &system, false)?');
+    expect(source).toContain('audit.record("completed", &binding, &zero)?');
   });
 
   it('limits production reclaim to authenticated fresh installs before paths create state', () => {
@@ -83,6 +86,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     );
     expect(production).toBeGreaterThan(index('TQPKG2 architecture does not match'));
     expect(production).toBeLessThan(index('let mut paths = paths()?;'));
-    expect(source).toContain('Cleanup prefix order is invalid.');
+    expect(source).toContain('Unknown coordination state has no lifecycle lock.');
+    expect(source).toContain('TQ_STALE_SCHEMA2_AUDIT_PATH is required.');
   });
 });
