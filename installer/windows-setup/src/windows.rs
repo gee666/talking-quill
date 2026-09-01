@@ -147,12 +147,11 @@ pub fn run() -> i32 {
     }
     // Internal relocated and elevated roles never own UI. Authentication still
     // determines operation authority inside run_inner.
-    let silent = arguments
+    let silent = arguments.iter().any(|value| {
+        value == "/S" || value == "/TQ-RELOCATED" || value == "/TQ-CLEAN-STALE-SCHEMA2"
+    }) || arguments
         .iter()
-        .any(|value| value == "/S" || value == "/TQ-RELOCATED")
-        || arguments
-            .iter()
-            .any(|value| value.to_string_lossy().starts_with("/TQUPDATE="));
+        .any(|value| value.to_string_lossy().starts_with("/TQUPDATE="));
     match run_inner() {
         Ok(code) => code,
         Err(error) => {
@@ -396,6 +395,17 @@ struct Paths {
     program_data: PathBuf,
 }
 
+#[cfg(feature = "stale-schema2-cleanup")]
+fn direct_cleanup_arguments(arguments: &[OsString], elevated: bool) -> bool {
+    elevated && arguments.len() == 1 && arguments[0] == "/TQ-CLEAN-STALE-SCHEMA2"
+}
+
+#[cfg(feature = "stale-schema2-cleanup")]
+const fn direct_cleanup_token_is_authorized(elevated: bool, integrity_rid: u32) -> bool {
+    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
+    elevated && integrity_rid >= SECURITY_MANDATORY_HIGH_RID
+}
+
 fn run_inner() -> Result<i32> {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let elevated = token_is_elevated()?;
@@ -410,14 +420,24 @@ fn run_inner() -> Result<i32> {
         !elevated && arguments.len() == 1 && arguments[0] == "/TQ-CLEAN-STALE-SCHEMA2";
     #[cfg(not(feature = "stale-schema2-cleanup"))]
     let cleanup_requested = false;
+    #[cfg(feature = "stale-schema2-cleanup")]
+    let direct_cleanup_requested = direct_cleanup_arguments(&arguments, elevated);
+    #[cfg(not(feature = "stale-schema2-cleanup"))]
+    let direct_cleanup_requested = false;
     if !((arguments.is_empty() || (arguments.len() == 1 && arguments[0] == "/S"))
         || legacy_predecessor
         || relocated
-        || cleanup_requested)
+        || cleanup_requested
+        || direct_cleanup_requested)
     {
         return Err(fail(EXIT_USAGE, "The native setup accepts only /S."));
     }
     let mut silent = arguments.first().is_some_and(|value| value == "/S") || cleanup_requested;
+    #[cfg(feature = "stale-schema2-cleanup")]
+    if direct_cleanup_requested {
+        run_direct_elevated_stale_schema2_cleanup()?;
+        return Ok(0);
+    }
     if !elevated {
         let current =
             std::env::current_exe().map_err(|error| fail(EXIT_FAILURE, error.to_string()))?;
@@ -988,7 +1008,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     let requested_action = authenticated_controller.as_ref().map(|value| value.0);
     #[cfg(feature = "stale-schema2-cleanup")]
     if requested_action == Some(Action::CleanStaleSchema2) {
-        reclaim_exact_schema2_orphan(true)?;
+        reclaim_exact_schema2_orphan(true, true)?;
         return Ok(0);
     }
     let mut image = File::open(&current).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
@@ -1016,7 +1036,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         ));
     }
     if package.manifest.package_mode == "fresh" && requested_action == Some(Action::Install) {
-        reclaim_exact_schema2_orphan(false)?;
+        reclaim_exact_schema2_orphan(false, true)?;
     }
     let mut paths = paths()?;
     let predecessor_policy_epoch = installed_recovery_policy_epoch(&paths)?;
@@ -3034,6 +3054,52 @@ fn validate_predecessor_arguments(package: &ParsedPackage, current: &Path) -> Re
         ));
     }
     Ok(())
+}
+
+fn protected_file_handle_acl_is_exact(file: &File) -> Result<bool> {
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+        || descriptor.is_null()
+    {
+        return Err(fail(EXIT_REJECTED, "Cannot inspect protected file ACL."));
+    }
+    let mut text = ptr::null_mut();
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut text,
+            ptr::null_mut(),
+        )
+    };
+    unsafe { LocalFree(descriptor.cast()) };
+    if converted == 0 || text.is_null() {
+        return Err(fail(EXIT_REJECTED, "Cannot encode protected file ACL."));
+    }
+    let mut length = 0;
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
+    unsafe { LocalFree(text.cast()) };
+    Ok([
+        "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+        "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)",
+    ]
+    .iter()
+    .any(|value| sddl.eq_ignore_ascii_case(value)))
 }
 
 fn staged_path_is_protected(path: &Path, directory: bool) -> Result<bool> {
@@ -7152,7 +7218,7 @@ fn directory_names(path: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn no_talking_quill_process_except_authenticated_pair() -> Result<bool> {
+fn no_talking_quill_process_except_authenticated_pair(authenticated_parent: bool) -> Result<bool> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(fail(
@@ -7161,7 +7227,7 @@ fn no_talking_quill_process_except_authenticated_pair() -> Result<bool> {
         ));
     }
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-    let parent = parent_process_id()?;
+    let parent = authenticated_parent.then(parent_process_id).transpose()?;
     let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
     entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
     if unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } == 0 {
@@ -7180,7 +7246,10 @@ fn no_talking_quill_process_except_authenticated_pair() -> Result<bool> {
             String::from_utf16_lossy(&entry.szExeFile[..executable_length]).to_ascii_lowercase();
         let candidate = snapshot_name.starts_with("talking quill")
             || snapshot_name.starts_with("talking-quill");
-        if candidate && entry.th32ProcessID != std::process::id() && entry.th32ProcessID != parent {
+        if candidate
+            && entry.th32ProcessID != std::process::id()
+            && Some(entry.th32ProcessID) != parent
+        {
             let image = process_image(entry.th32ProcessID)?;
             let name = image
                 .file_name()
@@ -7830,7 +7899,7 @@ impl StaleCleanupAudit {
                     "Administrator must pre-create the protected cleanup audit file.",
                 )
             })?;
-        if !staged_path_is_protected(&path, false)? {
+        if !protected_file_handle_acl_is_exact(&file)? {
             return Err(fail(
                 EXIT_REJECTED,
                 "Cleanup audit is not administrator protected.",
@@ -7900,6 +7969,7 @@ fn active_state_proof(
     program_data: &Path,
     system: &Path,
     allow_coordination: bool,
+    authenticated_parent: bool,
 ) -> Result<String> {
     let fixed_paths = [
         program_files.join("Talking Quill"),
@@ -7914,7 +7984,8 @@ fn active_state_proof(
     let uninstall_present = registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?;
     let app_path_present = registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?;
     let run_absent = no_owned_run_values()?;
-    let processes_absent = no_talking_quill_process_except_authenticated_pair()?;
+    let processes_absent =
+        no_talking_quill_process_except_authenticated_pair(authenticated_parent)?;
     let services_absent = no_owned_service_keys()?;
     let tasks_absent = no_owned_task_files(system)?;
     let legacy_service_present = terminal_service_exists("TalkingQuillKeyboardAuthority")?;
@@ -8010,6 +8081,7 @@ fn active_state_proof(
         "talking-quill-registry-present:{talking_quill_registry}"
     ));
     evidence.push(format!("allow-coordination:{allow_coordination}"));
+    evidence.push(format!("authenticated-parent:{authenticated_parent}"));
     evidence.sort_unstable();
     let mut hash = Sha256::new();
     hash.update(b"TalkingQuill/stale-schema2-machine-proof/v2\0");
@@ -8041,12 +8113,146 @@ fn complete_stale_cleanup_zero_state(
     program_files: &Path,
     program_data: &Path,
     system: &Path,
+    authenticated_parent: bool,
 ) -> Result<()> {
-    let zero = active_state_proof(program_files, program_data, system, false)?;
+    let zero = active_state_proof(
+        program_files,
+        program_data,
+        system,
+        false,
+        authenticated_parent,
+    )?;
     audit.record("completed", binding, &zero)
 }
 
-fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
+#[cfg(feature = "stale-schema2-cleanup")]
+fn direct_cleanup_source_identity() -> Result<(&'static str, &'static str)> {
+    let commit = option_env!("TALKING_QUILL_RELEASE_COMMIT").ok_or_else(|| {
+        fail(
+            EXIT_REJECTED,
+            "Direct cleanup build source commit is unavailable.",
+        )
+    })?;
+    let tree = option_env!("TALKING_QUILL_RELEASE_TREE").ok_or_else(|| {
+        fail(
+            EXIT_REJECTED,
+            "Direct cleanup build source tree is unavailable.",
+        )
+    })?;
+    let exact_git_identity = |value: &str| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !exact_git_identity(commit) || !exact_git_identity(tree) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup build source identity is invalid.",
+        ));
+    }
+    Ok((commit, tree))
+}
+
+#[cfg(feature = "stale-schema2-cleanup")]
+fn open_authenticated_direct_cleanup_image() -> Result<(File, [u8; 32])> {
+    let current = std::env::current_exe().map_err(io_failure)?;
+    let kernel_image = process_image(std::process::id())?;
+    if canonical(&current)? != canonical(&kernel_image)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup process image does not match its self path.",
+        ));
+    }
+    let mut image = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&current)
+        .map_err(|_| fail(EXIT_REJECTED, "Direct cleanup image cannot be retained."))?;
+    let parent = current
+        .parent()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Direct cleanup image has no parent."))?;
+    if !staged_path_is_protected(parent, true)? || !protected_file_handle_acl_is_exact(&image)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup image is not administrator protected.",
+        ));
+    }
+    let identity = file_identity_text(&image)?;
+    let length = image.metadata().map_err(io_failure)?.len();
+    let digest = hash_reader(&mut image)?;
+    image.seek(SeekFrom::Start(0)).map_err(io_failure)?;
+    let package = package::parse(&mut image, length).map_err(|error| {
+        fail(
+            EXIT_REJECTED,
+            format!("Direct cleanup TQPKG2 validation failed: {error:?}"),
+        )
+    })?;
+    let (source_commit, source_tree) = direct_cleanup_source_identity()?;
+    let expected_architecture = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "unsupported"
+    };
+    if package.manifest.source_commit != source_commit
+        || package.manifest.source_tree != source_tree
+        || package.manifest.architecture != expected_architecture
+        || package.manifest.package_mode != "fresh"
+        || package.manifest.predecessor.is_some()
+        || package.manifest.fault_phase.is_some()
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup image does not match its compiled source identity.",
+        ));
+    }
+    let path_image = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&kernel_image)
+        .map_err(|_| fail(EXIT_REJECTED, "Direct cleanup process image changed."))?;
+    if file_identity_text(&path_image)? != identity {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup process image identity changed.",
+        ));
+    }
+    Ok((image, digest))
+}
+
+#[cfg(feature = "stale-schema2-cleanup")]
+fn run_direct_elevated_stale_schema2_cleanup() -> Result<()> {
+    if !direct_cleanup_token_is_authorized(
+        token_is_elevated()?,
+        peer_claims(std::process::id())?.integrity_rid,
+    ) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct stale cleanup requires a high elevated token.",
+        ));
+    }
+    let (mut retained_image, expected_hash) = open_authenticated_direct_cleanup_image()?;
+    reclaim_exact_schema2_orphan(true, false)?;
+    retained_image
+        .seek(SeekFrom::Start(0))
+        .map_err(io_failure)?;
+    if hash_reader(&mut retained_image)? != expected_hash {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Direct cleanup image changed during the operation.",
+        ));
+    }
+    Ok(())
+}
+
+fn reclaim_exact_schema2_orphan_v2(
+    developer_command: bool,
+    authenticated_parent: bool,
+) -> Result<()> {
     if !token_is_elevated()? {
         return Err(fail(EXIT_REJECTED, "Stale cleanup requires elevation."));
     }
@@ -8069,6 +8275,7 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
             &program_files,
             &program_data,
             &system,
+            authenticated_parent,
         )?;
         drop(legacy);
         return Ok(());
@@ -8101,7 +8308,13 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
     let generation = relaunch.join(format!("1594b190881d1328-{SYNTHETIC_SCHEMA2_GENERATION}"));
     let mut pending =
         RetainedStaleObject::open(&generation.join(SYNTHETIC_SCHEMA2_PENDING), false)?;
-    let admission = active_state_proof(&program_files, &program_data, &system, true)?;
+    let admission = active_state_proof(
+        &program_files,
+        &program_data,
+        &system,
+        true,
+        authenticated_parent,
+    )?;
     // The pending file and lifecycle lock are exclusive before this first mutation. Harden each
     // parent from the inside out, then retain it without sharing. Exact handle inventories below
     // reject anything that appeared before hardening.
@@ -8182,7 +8395,13 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
             "Retained fixture changed during the stability wait.",
         ));
     }
-    let second = active_state_proof(&program_files, &program_data, &system, true)?;
+    let second = active_state_proof(
+        &program_files,
+        &program_data,
+        &system,
+        true,
+        authenticated_parent,
+    )?;
     exact_cleanup_registry(&suffix)?;
     audit.record("commit-intent", &binding, &second)?;
 
@@ -8266,13 +8485,14 @@ fn reclaim_exact_schema2_orphan_v2(developer_command: bool) -> Result<()> {
         &program_files,
         &program_data,
         &system,
+        authenticated_parent,
     )?;
     drop(legacy);
     Ok(())
 }
 
-fn reclaim_exact_schema2_orphan(developer_command: bool) -> Result<()> {
-    reclaim_exact_schema2_orphan_v2(developer_command)
+fn reclaim_exact_schema2_orphan(developer_command: bool, authenticated_parent: bool) -> Result<()> {
+    reclaim_exact_schema2_orphan_v2(developer_command, authenticated_parent)
 }
 
 fn remove_machine_lock_residue(paths: &Paths, suffix: &str) -> Result<()> {
@@ -9483,6 +9703,51 @@ mod tests {
 
     #[cfg(feature = "stale-schema2-cleanup")]
     #[test]
+    fn direct_stale_cleanup_rejects_wrong_arguments_and_token_modes() {
+        let command = OsString::from("/TQ-CLEAN-STALE-SCHEMA2");
+        assert!(direct_cleanup_arguments(
+            std::slice::from_ref(&command),
+            true
+        ));
+        assert!(!direct_cleanup_arguments(
+            std::slice::from_ref(&command),
+            false
+        ));
+        assert!(!direct_cleanup_arguments(&[], true));
+        assert!(!direct_cleanup_arguments(
+            &[command.clone(), OsString::from("/S")],
+            true,
+        ));
+        assert!(!direct_cleanup_arguments(&[OsString::from("/S")], true));
+        assert!(direct_cleanup_token_is_authorized(true, 0x3000));
+        assert!(direct_cleanup_token_is_authorized(true, 0x4000));
+        assert!(!direct_cleanup_token_is_authorized(false, 0x3000));
+        assert!(!direct_cleanup_token_is_authorized(true, 0x2fff));
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
+    fn direct_stale_cleanup_rejects_missing_relative_and_unprotected_audits() {
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("TQ_STALE_SCHEMA2_AUDIT_PATH") };
+        assert!(StaleCleanupAudit::open().is_err());
+        unsafe { std::env::set_var("TQ_STALE_SCHEMA2_AUDIT_PATH", "audit.jsonl") };
+        assert!(StaleCleanupAudit::open().is_err());
+
+        let root =
+            std::env::temp_dir().join(format!("tq-stale-unprotected-audit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let path = root.join("audit.jsonl");
+        fs::write(&path, b"").unwrap();
+        unsafe { std::env::set_var("TQ_STALE_SCHEMA2_AUDIT_PATH", &path) };
+        assert!(StaleCleanupAudit::open().is_err());
+        unsafe { std::env::remove_var("TQ_STALE_SCHEMA2_AUDIT_PATH") };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "stale-schema2-cleanup")]
+    #[test]
     fn stale_retained_handles_block_mutation_and_prove_zero() {
         let root = std::env::temp_dir().join(format!("tq-stale-retained-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -9579,7 +9844,7 @@ mod tests {
             .spawn()
             .unwrap();
         std::thread::sleep(Duration::from_millis(250));
-        assert!(!no_talking_quill_process_except_authenticated_pair().unwrap());
+        assert!(!no_talking_quill_process_except_authenticated_pair(true).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
         fs::remove_dir_all(root).unwrap();
@@ -9683,6 +9948,7 @@ mod tests {
                 &program_files,
                 &program_data,
                 &system,
+                true,
             )
             .is_err()
         );

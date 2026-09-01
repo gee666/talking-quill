@@ -13,18 +13,71 @@ function index(text: string): number {
 }
 
 describe('Windows schema-2 stale coordination cleanup', () => {
-  it('is a feature-gated authenticated elevated operation', () => {
+  it('keeps medium cleanup on authenticated UAC and production builds closed', () => {
     expect(cargo).toContain('stale-schema2-cleanup = []');
     expect(source).toContain('#[cfg(feature = "stale-schema2-cleanup")]\n    CleanStaleSchema2');
+    expect(source).toContain(
+      '#[cfg(not(feature = "stale-schema2-cleanup"))]\n    let cleanup_requested = false;',
+    );
+    expect(source).toContain(
+      '#[cfg(not(feature = "stale-schema2-cleanup"))]\n    let direct_cleanup_requested = false;',
+    );
     expect(source).toContain('WorkerChannel::connect_and_authenticate(&current, None)?');
     expect(index('requested_action == Some(Action::CleanStaleSchema2)')).toBeGreaterThan(
       index('WorkerChannel::connect_and_authenticate(&current, None)?'),
     );
+    expect(source).toContain('let result = elevate(&current, true, &channel, None);');
     expect(source).toContain('if !token_is_elevated()?');
   });
 
+  it('admits only the exact direct command from a high elevated feature build', () => {
+    expect(source).toContain(
+      'elevated && arguments.len() == 1 && arguments[0] == "/TQ-CLEAN-STALE-SCHEMA2";',
+    );
+    expect(index('if direct_cleanup_requested {')).toBeLessThan(index('if !elevated {'));
+    expect(source).toContain(
+      'run_direct_elevated_stale_schema2_cleanup()?;\n        return Ok(0);',
+    );
+    expect(source).toContain('const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;');
+    expect(source).toContain('integrity_rid >= SECURITY_MANDATORY_HIGH_RID');
+    expect(source).toContain('peer_claims(std::process::id())?.integrity_rid');
+    expect(source).toContain('"Direct stale cleanup requires a high elevated token."');
+    expect(source).toContain('direct_stale_cleanup_rejects_wrong_arguments_and_token_modes');
+  });
+
+  it('binds direct cleanup to the running package image and compiled source identity', () => {
+    expect(source).toContain('canonical(&current)? != canonical(&kernel_image)?');
+    expect(source).toContain('.share_mode(FILE_SHARE_READ)');
+    expect(source).toContain('let package = package::parse(&mut image, length)');
+    expect(source).toContain('option_env!("TALKING_QUILL_RELEASE_COMMIT")');
+    expect(source).toContain('option_env!("TALKING_QUILL_RELEASE_TREE")');
+    expect(source).toContain('package.manifest.source_commit != source_commit');
+    expect(source).toContain('package.manifest.source_tree != source_tree');
+    expect(source).toContain('package.manifest.package_mode != "fresh"');
+    expect(source).toContain('package.manifest.predecessor.is_some()');
+    expect(source).toContain('package.manifest.fault_phase.is_some()');
+    expect(source).toContain('!staged_path_is_protected(parent, true)?');
+    expect(source).toContain('!protected_file_handle_acl_is_exact(&image)?');
+    expect(source).toContain('file_identity_text(&path_image)? != identity');
+    expect(source).toContain('hash_reader(&mut retained_image)? != expected_hash');
+  });
+
+  it('rejects missing, relative, unprotected, or replaceable audit paths', () => {
+    expect(source).toContain('TQ_STALE_SCHEMA2_AUDIT_PATH is required.');
+    expect(source).toContain('if !path.is_absolute()');
+    expect(source).toContain('share_mode(FILE_SHARE_READ)');
+    expect(source).toContain(
+      'custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)',
+    );
+    expect(source).toContain('if !protected_file_handle_acl_is_exact(&file)?');
+    expect(source).toContain('"Cleanup audit is not administrator protected."');
+    expect(source).toContain(
+      'direct_stale_cleanup_rejects_missing_relative_and_unprotected_audits',
+    );
+  });
+
   it('pins the exact unpublished synthetic record bytes and hash', () => {
-    const literal = source.match(/const SYNTHETIC_SCHEMA2_BYTES: &\[u8\] = br#"(.+?)"#;/s)?.[1];
+    const literal = /const SYNTHETIC_SCHEMA2_BYTES: &\[u8\] = br#"(.+?)"#;/s.exec(source)?.[1];
     expect(literal).toBeDefined();
     expect(JSON.parse(literal ?? '')).toMatchObject({
       schemaVersion: 2,
@@ -48,7 +101,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       'registry_key_present(HKEY_LOCAL_MACHINE, UNINSTALL_KEY)?',
       'registry_key_present(HKEY_LOCAL_MACHINE, APP_PATH_KEY)?',
       'let run_absent = no_owned_run_values()?;',
-      'let processes_absent = no_talking_quill_process_except_authenticated_pair()?;',
+      'no_talking_quill_process_except_authenticated_pair(authenticated_parent)?;',
       'let services_absent = no_owned_service_keys()?;',
       'Tasks/TalkingQuillKeyboardAuthority',
       '.Talking Quill.native-transaction-v2.json',
@@ -60,7 +113,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     );
     expect(
       index('RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?'),
-    ).toBeLessThan(index('active_state_proof(&program_files, &program_data, &system, true)?'));
+    ).toBeLessThan(index('let admission = active_state_proof('));
     expect(source).toContain('share_mode(0)');
     expect(source).toContain('Duration::from_millis(750)');
   });
@@ -77,9 +130,14 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       index('stale machine lifecycle publication'),
     );
     expect(source).toContain(
-      'let zero = active_state_proof(program_files, program_data, system, false)?;',
+      'let zero = active_state_proof(\n        program_files,\n        program_data,\n        system,\n        false,\n        authenticated_parent,\n    )?;',
     );
     expect(source).toContain('audit.record("completed", binding, &zero)');
+    expect(source).toContain('reclaim_exact_schema2_orphan(true, false)?;');
+    expect(source).toContain('reclaim_exact_schema2_orphan(true, true)?;');
+    expect(source).toContain(
+      'no_talking_quill_process_except_authenticated_pair(authenticated_parent)?;',
+    );
   });
 
   it('limits production reclaim to authenticated fresh installs before paths create state', () => {
@@ -94,7 +152,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
   it('requires a protected completion audit and full zero proof on every successful branch', () => {
     const reclaim = source.slice(
       index('fn reclaim_exact_schema2_orphan_v2('),
-      index('fn reclaim_exact_schema2_orphan(developer_command:'),
+      index('fn reclaim_exact_schema2_orphan(developer_command: bool, authenticated_parent: bool)'),
     );
     expect(reclaim.indexOf('let mut audit = StaleCleanupAudit::open()?;')).toBeLessThan(
       reclaim.indexOf('let Some(suffix) = exact_machine_lock_publication()? else'),
