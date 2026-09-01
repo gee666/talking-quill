@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseTqpkg2 } from './tqpkg2.mjs';
@@ -13,6 +13,14 @@ const architecture = process.argv[2] ?? 'x64';
 if (!['x64', 'arm64'].includes(architecture)) {
   throw new Error('Usage: run-windows-stale-schema2-diagnostic-e2e.mjs [x64|arm64]');
 }
+const sourceCommit = git(['rev-parse', 'HEAD']);
+const sourceTree = git(['rev-parse', 'HEAD^{tree}']);
+if (!/^[0-9a-f]{40}$/u.test(sourceCommit) || !/^[0-9a-f]{40}$/u.test(sourceTree)) {
+  throw new Error('packaged diagnostic test requires exact current Git source identity');
+}
+if (git(['status', '--porcelain', '--untracked-files=no']) !== '') {
+  throw new Error('packaged diagnostic test requires a clean tracked worktree');
+}
 const version = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version;
 const canonical = resolve(
   root,
@@ -24,17 +32,27 @@ const packagedDiagnostic = resolve(
   'release',
   `Talking-Quill-${version}-win-${architecture}-stale-schema2-cleanup.exe`,
 );
+await rebuildCurrentArtifacts();
 const canonicalPackage = parseTqpkg2(await readFile(canonical), architecture);
-if (canonicalPackage.manifest.packageMode !== 'fresh') {
-  throw new Error('canonical packaged executable is not a fresh TQPKG2 package');
+if (
+  canonicalPackage.manifest.packageMode !== 'fresh' ||
+  canonicalPackage.manifest.sourceCommit !== sourceCommit ||
+  canonicalPackage.manifest.sourceTree !== sourceTree
+) {
+  throw new Error('canonical packaged executable is not bound to the current Git source');
 }
 const diagnosticPackage = parseTqpkg2(await readFile(packagedDiagnostic), architecture, {
   allowStaleSchema2Cleanup: true,
 });
-if (diagnosticPackage.manifest.packageMode !== 'stale-schema2-cleanup') {
-  throw new Error('diagnostic packaged executable has the wrong TQPKG2 package mode');
+if (
+  diagnosticPackage.manifest.packageMode !== 'stale-schema2-cleanup' ||
+  diagnosticPackage.manifest.sourceCommit !== sourceCommit ||
+  diagnosticPackage.manifest.sourceTree !== sourceTree
+) {
+  throw new Error('diagnostic packaged executable is not bound to the current Git source');
 }
 const testRoot = resolve(root, 'tmp', 'stale-schema2-packaged-diagnostic-e2e');
+await rm(testRoot, { recursive: true, force: true });
 await mkdir(testRoot, { recursive: true });
 protect(testRoot, true);
 const diagnostic = resolve(testRoot, 'Talking Quill Stale Schema2 Diagnostic.exe');
@@ -90,6 +108,61 @@ verifyDiagnosticChain(
 );
 verifyAuditChain(await readFile(auditPath, 'utf8'), result.status);
 console.log('Packaged stale schema-2 diagnostic snapshot and chain checks passed');
+
+async function rebuildCurrentArtifacts() {
+  const productionTarget = resolve(root, 'tmp', 'cargo-target', 'windows-setup-production');
+  const cleanupTarget = resolve(root, 'tmp', 'cargo-target', 'windows-setup-stale-schema2-cleanup');
+  const productionOutput = resolve(root, 'tmp', 'windows-setup', architecture);
+  const cleanupOutput = resolve(root, 'tmp', 'windows-setup-stale-schema2-cleanup', architecture);
+  await Promise.all([
+    rm(productionTarget, { recursive: true, force: true }),
+    rm(cleanupTarget, { recursive: true, force: true }),
+    rm(productionOutput, { recursive: true, force: true }),
+    rm(cleanupOutput, { recursive: true, force: true }),
+    rm(canonical, { force: true }),
+    rm(packagedDiagnostic, { force: true }),
+    rm(`${packagedDiagnostic}.nonpromotable.json`, { force: true }),
+  ]);
+  const sourceEnvironment = {
+    ...process.env,
+    TALKING_QUILL_RELEASE_COMMIT: sourceCommit,
+    TALKING_QUILL_RELEASE_TREE: sourceTree,
+  };
+  runNode('scripts/build-windows-setup.mjs', [architecture], sourceEnvironment);
+  runNode('scripts/build-windows-stale-schema2-cleanup-setup.mjs', [architecture], {
+    ...sourceEnvironment,
+    TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
+  });
+  runNode('scripts/pack-windows-native.mjs', [architecture, 'release'], {
+    ...sourceEnvironment,
+    TALKING_QUILL_PACKAGE_MODE: 'fresh',
+  });
+  runNode('scripts/pack-windows-native.mjs', [architecture, 'release'], {
+    ...sourceEnvironment,
+    TALKING_QUILL_PACKAGE_MODE: 'stale-schema2-cleanup',
+    TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
+  });
+}
+
+function runNode(script, arguments_, environment) {
+  const result = spawnSync(process.execPath, [resolve(root, script), ...arguments_], {
+    cwd: root,
+    env: environment,
+    stdio: 'inherit',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error(`${script} failed before packaged runtime testing`);
+}
+
+function git(arguments_) {
+  const result = spawnSync('git', arguments_, {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error(result.stderr || `git ${arguments_.join(' ')} failed`);
+  return result.stdout.trim();
+}
 
 function protect(path, directory) {
   const sddl = directory

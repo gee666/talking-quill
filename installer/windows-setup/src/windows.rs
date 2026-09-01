@@ -8760,10 +8760,6 @@ fn run_direct_stale_schema2_diagnostic_inner(
     })?;
     let Some(suffix) = suffix else {
         let binding = retained_binding(&[], "no-machine-lock-publication");
-        diagnostic_stage(diagnostic, "audit.event", || {
-            audit.record("diagnostic-complete", &binding, &active)?;
-            Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
-        })?;
         diagnostic_stage(diagnostic, "image.stability", || {
             retained_image
                 .seek(SeekFrom::Start(0))
@@ -8775,6 +8771,10 @@ fn run_direct_stale_schema2_diagnostic_inner(
                 ));
             }
             Ok(((), serde_json::json!({ "fileIdentity": identity })))
+        })?;
+        diagnostic_stage(diagnostic, "audit.event", || {
+            audit.record("diagnostic-complete", &binding, &active)?;
+            Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
         })?;
         diagnostic_stage(diagnostic, "diagnostic.complete", || {
             Ok((
@@ -8891,10 +8891,6 @@ fn run_direct_stale_schema2_diagnostic_inner(
         &recovery_guard,
     ];
     let binding = retained_binding(&objects, &suffix);
-    diagnostic_stage(diagnostic, "audit.event", || {
-        audit.record("diagnostic-complete", &binding, &active)?;
-        Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
-    })?;
     diagnostic_stage(diagnostic, "image.stability", || {
         retained_image
             .seek(SeekFrom::Start(0))
@@ -8906,6 +8902,10 @@ fn run_direct_stale_schema2_diagnostic_inner(
             ));
         }
         Ok(((), serde_json::json!({ "fileIdentity": identity })))
+    })?;
+    diagnostic_stage(diagnostic, "audit.event", || {
+        audit.record("diagnostic-complete", &binding, &active)?;
+        Ok(((), serde_json::json!({ "stage": "diagnostic-complete" })))
     })?;
     diagnostic_stage(diagnostic, "diagnostic.complete", || {
         Ok((

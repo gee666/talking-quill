@@ -91,6 +91,27 @@ describe('packaged stale schema-2 diagnosis', () => {
     }
   });
 
+  it('publishes audit completion only after final image stability', () => {
+    const diagnostic = source.slice(
+      source.indexOf('fn run_direct_stale_schema2_diagnostic_inner('),
+      source.indexOf('fn force_stale_cleanup_rejection('),
+    );
+    const stability = [...diagnostic.matchAll(/"image\.stability"/gu)].map((match) => match.index);
+    const auditCompletion = [...diagnostic.matchAll(/audit\.record\("diagnostic-complete"/gu)].map(
+      (match) => match.index,
+    );
+    const terminal = [...diagnostic.matchAll(/"diagnostic\.complete"/gu)].map(
+      (match) => match.index,
+    );
+    expect(stability).toHaveLength(2);
+    expect(auditCompletion).toHaveLength(2);
+    expect(terminal).toHaveLength(2);
+    for (let index = 0; index < 2; index += 1) {
+      expect(stability[index]).toBeLessThan(auditCompletion[index] ?? -1);
+      expect(auditCompletion[index]).toBeLessThan(terminal[index] ?? -1);
+    }
+  });
+
   it('keeps diagnosis out of mutation APIs', () => {
     const diagnostic = source.slice(
       source.indexOf('fn run_direct_stale_schema2_diagnostic('),
@@ -117,7 +138,14 @@ describe('packaged stale schema-2 diagnosis', () => {
     expect(rustPackage).toContain('cfg!(feature = "stale-schema2-cleanup")');
   });
 
-  it('runs the final TQPKG2 diagnostic with exact dispatch and immutable snapshots', () => {
+  it('rebuilds and runs current-source TQPKG2 diagnostics with immutable snapshots', () => {
+    expect(e2e).toContain("git(['rev-parse', 'HEAD'])");
+    expect(e2e).toContain("git(['rev-parse', 'HEAD^{tree}'])");
+    expect(e2e).toContain("git(['status', '--porcelain', '--untracked-files=no'])");
+    expect(e2e).toContain('await rebuildCurrentArtifacts();');
+    expect(e2e).toContain('rm(cleanupTarget, { recursive: true, force: true })');
+    expect(e2e).toContain('canonicalPackage.manifest.sourceCommit !== sourceCommit');
+    expect(e2e).toContain('diagnosticPackage.manifest.sourceTree !== sourceTree');
     expect(e2e).toContain('parseTqpkg2(await readFile(canonical)');
     expect(e2e).toContain('allowStaleSchema2Cleanup: true');
     expect(e2e).toContain('canonicalResult.status !== 64');
