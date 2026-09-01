@@ -154,6 +154,8 @@ export class TalkingQuillApplication {
   #updateInstallRequested = false;
   #showMainWhenReady = false;
   #applicationActivationSequence = 0;
+  readonly #pendingWindowsUpdateRelaunchGenerations = new Set<string>();
+  readonly #inFlightWindowsUpdateRelaunchGenerations = new Set<string>();
   readonly #testQuitRequest = () => this.quit();
 
   constructor(options: TalkingQuillApplicationOptions = {}) {
@@ -174,6 +176,31 @@ export class TalkingQuillApplication {
   stop(): Promise<void> {
     this.quit();
     return this.#quitPromise ?? Promise.resolve();
+  }
+
+  handleWindowsUpdateRelaunchGeneration(generation: string): void {
+    if (!/^[0-9a-f]{32}$/.test(generation)) return;
+    this.#pendingWindowsUpdateRelaunchGenerations.add(generation);
+    if (this.#lifecycle === 'running') this.#acknowledgePendingWindowsUpdateRelaunches();
+  }
+
+  #acknowledgePendingWindowsUpdateRelaunches(): void {
+    if (process.platform !== 'win32' || !app.isPackaged) return;
+    const readyHelper = this.#helperExecutablePath();
+    if (readyHelper === null) return;
+    for (const generation of this.#pendingWindowsUpdateRelaunchGenerations) {
+      if (this.#inFlightWindowsUpdateRelaunchGenerations.has(generation)) continue;
+      this.#inFlightWindowsUpdateRelaunchGenerations.add(generation);
+      void acknowledgeWindowsUpdateAppReady(
+        readyHelper,
+        app.getVersion(),
+        generation,
+        launchWindowsUpdateReadyHelper,
+      )
+        .then(() => this.#pendingWindowsUpdateRelaunchGenerations.delete(generation))
+        .catch(() => undefined)
+        .finally(() => this.#inFlightWindowsUpdateRelaunchGenerations.delete(generation));
+    }
   }
 
   async #startInternal(): Promise<void> {
@@ -731,17 +758,7 @@ export class TalkingQuillApplication {
       }
       this.#assertStartupActive();
       this.#lifecycle = 'running';
-      if (process.platform === 'win32' && app.isPackaged) {
-        const readyHelper = this.#helperExecutablePath();
-        if (readyHelper !== null) {
-          void acknowledgeWindowsUpdateAppReady(
-            app.getPath('userData'),
-            readyHelper,
-            app.getVersion(),
-            launchWindowsUpdateReadyHelper,
-          ).catch(() => undefined);
-        }
-      }
+      this.#acknowledgePendingWindowsUpdateRelaunches();
       if (process.env.NODE_ENV === 'test') {
         Reflect.set(globalThis, '__talkingQuillRequestQuit', this.#testQuitRequest);
       }

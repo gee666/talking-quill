@@ -15,6 +15,7 @@ import { consumeUninstallResetChallenge } from './data/uninstall-reset-challenge
 import { validateUninstallResetTarget } from './app/runtime-path-policy';
 import { resolveOwnedTreeRemovalExecutable } from './helper';
 import { createNativeOwnedTreeRemoval } from './data/native-owned-tree-removal';
+import { readWindowsUpdateRelaunchGeneration } from './info/windows-update-relaunch-intent';
 const BOOTSTRAP_QUIT_TIMEOUT_MS = 15_000;
 
 export interface MainBootstrapOptions {
@@ -78,6 +79,11 @@ export function startMain(options: MainBootstrapOptions = {}): void {
   const hasLock = options.isolatedInstance === true || app.requestSingleInstanceLock();
   let application: TalkingQuillApplication | null = null;
   let restoreRequested: 'second_instance' | 'os_activate' | null = null;
+  const pendingWindowsUpdateRelaunchGenerations = new Set<string>();
+  const initialRelaunchGeneration = readWindowsUpdateRelaunchGeneration(process.argv);
+  if (initialRelaunchGeneration !== null) {
+    pendingWindowsUpdateRelaunchGenerations.add(initialRelaunchGeneration);
+  }
   let machineQuitRequested = process.argv.includes('--talking-quill-request-machine-quit');
   let machineQuitDeadline = machineQuitRequested ? Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS : null;
   let bootstrapQuit: BoundedElectronQuit | null = null;
@@ -112,6 +118,12 @@ export function startMain(options: MainBootstrapOptions = {}): void {
         machineQuitDeadline ??= Date.now() + BOOTSTRAP_QUIT_TIMEOUT_MS;
         if (application === null) requestBootstrapQuit(machineQuitDeadline);
         else application.quit(machineQuitDeadline);
+        return;
+      }
+      const relaunchGeneration = readWindowsUpdateRelaunchGeneration(commandLine);
+      if (relaunchGeneration !== null) {
+        if (application === null) pendingWindowsUpdateRelaunchGenerations.add(relaunchGeneration);
+        else application.handleWindowsUpdateRelaunchGeneration(relaunchGeneration);
         return;
       }
       requestRestore('second_instance');
@@ -189,6 +201,9 @@ export function startMain(options: MainBootstrapOptions = {}): void {
           windowsLoginStart,
         });
         await application.start();
+        for (const generation of pendingWindowsUpdateRelaunchGenerations) {
+          application.handleWindowsUpdateRelaunchGeneration(generation);
+        }
         if (restoreRequested !== null) application.handleApplicationActivation(restoreRequested);
       })
       .catch((error: unknown) => {

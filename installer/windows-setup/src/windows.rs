@@ -864,24 +864,32 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             {
                 return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
             }
+            if record.phase == "armed" {
+                retire_terminal_machine_state(
+                    &paths,
+                    &WindowsNativeSystem,
+                    &current,
+                    &record.generation,
+                )?;
+            }
             let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
             retire_machine_lock_publication(&paths)?;
-            finish_terminal_uninstall(&paths)?;
             drop(machine_lock.take());
+            remove_machine_lock_residue(&paths)?;
+            finish_terminal_uninstall(&paths)?;
             drop(legacy);
-            let _ = remove_machine_lock_residue(&paths);
             return Ok(0);
         }
         system.unregister_app_path()?;
         system.unregister_uninstall()?;
         clear_update_recovery(&paths)?;
         clear_legacy_profile_relaunch_owners(&paths)?;
-        clear_machine_relaunch_owner(&paths)?;
         remove_update_recovery_launcher_residue(&paths)?;
         remove_uninstall_finalizer_residue(&paths)?;
         let legacy = retire_and_remove_machine_lock(&paths, &mut machine_lock)?;
-        drop(legacy);
         arm_mapped_image_deletion(&current)?;
+        drop(legacy);
+        clear_machine_relaunch_owner(&paths)?;
         return Ok(0);
     }
     if let Some((Action::Uninstall, server, _, lifecycle_parent)) =
@@ -3633,9 +3641,6 @@ fn complete_terminal_uninstall(
     if !status.success() {
         return Err(fail(EXIT_FAILURE, "Terminal uninstall recovery failed."));
     }
-    // The current worker already has verified reboot deletion ownership. Immediate POSIX
-    // deletion is best-effort and cannot re-open a terminal recovery gap.
-    let _ = arm_mapped_image_deletion(current);
     Ok(())
 }
 
@@ -3645,6 +3650,35 @@ fn finalize_uninstall(
     current: &Path,
 ) -> Result<std::process::Child> {
     require_uninstall_cleanup_complete(paths)?;
+    // Publish the stable owner before retiring any machine registration. An armed owner with
+    // a surviving journal re-enters the full setup recovery path.
+    register_uninstall_executable(&paths.maintenance_uninstaller)?;
+    let terminal_generation = publish_terminal_uninstall_record(paths)?;
+    retire_terminal_machine_state(paths, system, current, &terminal_generation)?;
+    launch_terminal_uninstall_owner(paths, &terminal_generation)
+}
+
+fn retire_terminal_machine_state(
+    paths: &Paths,
+    system: &dyn NativeSystemAdapter,
+    current: &Path,
+    generation: &str,
+) -> Result<()> {
+    let record = read_terminal_uninstall_record(paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
+    if record.generation != generation {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall generation is invalid.",
+        ));
+    }
+    if record.phase == "machine-retired" {
+        return Ok(());
+    }
+    if path_present(&paths.transaction)? {
+        recover_with_adapter(paths, system)?;
+        require_uninstall_cleanup_complete(paths)?;
+    }
     write_transaction(
         paths,
         "uninstall-app-path-retiring",
@@ -3653,10 +3687,7 @@ fn finalize_uninstall(
     )?;
     system.unregister_app_path()?;
     write_transaction(paths, "uninstall-app-path-retired", Action::Uninstall, true)?;
-    // Move callable recovery authority to the maintenance image, then publish the stable
-    // machine launcher record before any journal or registration authority is retired.
     register_uninstall_executable(&paths.maintenance_uninstaller)?;
-    let terminal_generation = publish_terminal_uninstall_record(paths)?;
     establish_finalizer_deletion_ownership(paths, current)?;
     write_transaction(
         paths,
@@ -3670,14 +3701,10 @@ fn finalize_uninstall(
         Action::Uninstall,
         true,
     )?;
-    // Commit the journal while the finalizer remains registered and callable.
-    // Removing that registration is then the terminal commit: no crash can
-    // leave an authoritative journal without a registered owner.
     remove_transaction(paths)?;
     system.unregister_uninstall()?;
     remove_uninstall_finalizer_residue(paths)?;
-    write_terminal_uninstall_phase(paths, &terminal_generation, "machine-retired")?;
-    launch_terminal_uninstall_owner(paths, &terminal_generation)
+    write_terminal_uninstall_phase(paths, generation, "machine-retired")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3850,8 +3877,10 @@ fn recover_with_adapter(paths: &Paths, system: &dyn NativeSystemAdapter) -> Resu
             remove_plain_tree(&paths.install)?;
             remove_plain_tree(&paths.staging)?;
             remove_maintenance_uninstaller(paths)?;
-            clear_machine_relaunch_owner(paths)?;
             remove_update_recovery_launcher_residue(paths)?;
+            remove_transaction(paths)?;
+            clear_machine_relaunch_owner(paths)?;
+            return Ok(());
         }
         RecoveryPlan::FinishCommit => {
             if value.action == "repair" && path_present(&paths.backup)? {
@@ -4717,6 +4746,30 @@ fn launch_terminal_uninstall_owner(paths: &Paths, generation: &str) -> Result<st
         .map_err(io_failure)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalUninstallRecoveryStep {
+    RetireMachine,
+    FinishCleanup,
+}
+
+fn terminal_uninstall_recovery_step(
+    phase: &str,
+    journal_present: bool,
+) -> Result<TerminalUninstallRecoveryStep> {
+    match (phase, journal_present) {
+        ("armed", _) => Ok(TerminalUninstallRecoveryStep::RetireMachine),
+        ("machine-retired", false) => Ok(TerminalUninstallRecoveryStep::FinishCleanup),
+        ("machine-retired", true) => Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall retirement retained a setup journal.",
+        )),
+        _ => Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall recovery phase is invalid.",
+        )),
+    }
+}
+
 fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
     let paths = paths()?;
     let mut machine_lock = Some(MachineLock::acquire(
@@ -4724,20 +4777,36 @@ fn run_terminal_uninstall_recovery(generation: &str) -> Result<i32> {
         120_000,
         installed_recovery_policy_epoch(&paths)?,
     )?);
+    let current = std::env::current_exe().map_err(io_failure)?;
     let record = read_terminal_uninstall_record(&paths)?
         .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
     if record.generation != generation
-        || hex_hash(&file_hash(&std::env::current_exe().map_err(io_failure)?)?)
-            != record.maintenance_sha256
+        || hex_hash(&file_hash(&current)?) != record.maintenance_sha256
     {
         return Err(fail(EXIT_REJECTED, "Terminal uninstall owner is invalid."));
     }
+    if terminal_uninstall_recovery_step(&record.phase, path_present(&paths.transaction)?)?
+        == TerminalUninstallRecoveryStep::RetireMachine
+    {
+        retire_terminal_machine_state(&paths, &WindowsNativeSystem, &current, generation)?;
+    }
+    let retired = read_terminal_uninstall_record(&paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
+    if retired.generation != generation
+        || terminal_uninstall_recovery_step(&retired.phase, path_present(&paths.transaction)?)?
+            != TerminalUninstallRecoveryStep::FinishCleanup
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall machine state is not retired.",
+        ));
+    }
     let legacy = machine_lock.as_mut().and_then(MachineLock::take_legacy);
     retire_machine_lock_publication(&paths)?;
-    finish_terminal_uninstall(&paths)?;
     drop(machine_lock.take());
+    remove_machine_lock_residue(&paths)?;
+    finish_terminal_uninstall(&paths)?;
     drop(legacy);
-    let _ = remove_machine_lock_residue(&paths);
     Ok(0)
 }
 
@@ -4788,7 +4857,7 @@ fn clear_legacy_relaunch_values_in_hive(hive: *mut c_void, paths: &Paths) -> Res
         return Ok(());
     }
     if opened != 0 {
-        return Err(fail(EXIT_FAILURE, "Cannot open a profile Run key."));
+        return Ok(());
     }
     let launcher =
         terminal_uninstall_root(paths).join("talking-quill-update-recovery-launcher.exe");
@@ -4812,8 +4881,7 @@ fn clear_legacy_relaunch_values_in_hive(hive: *mut c_void, paths: &Paths) -> Res
             break;
         }
         if status != 0 {
-            unsafe { RegCloseKey(run) };
-            return Err(fail(EXIT_FAILURE, "Cannot enumerate a profile Run key."));
+            break;
         }
         let value_name = String::from_utf16_lossy(&name[..length as usize]);
         let Some(generation) = value_name.strip_prefix(PREFIX) else {
@@ -4828,22 +4896,22 @@ fn clear_legacy_relaunch_values_in_hive(hive: *mut c_void, paths: &Paths) -> Res
             "\"{}\" --windows-update-relaunch-v1={generation}",
             launcher.display()
         );
-        if read_registry_value(run, &value_name, 2048)?.as_deref() != Some(expected.as_str()) {
-            unsafe { RegCloseKey(run) };
-            return Err(fail(EXIT_REJECTED, "A legacy relaunch value was replaced."));
+        if read_registry_value(run, &value_name, 2048)
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(expected.as_str())
+        {
+            index += 1;
+            continue;
         }
         if unsafe { RegDeleteValueW(run, wide(OsStr::new(&value_name)).as_ptr()) } != 0 {
-            unsafe { RegCloseKey(run) };
-            return Err(fail(EXIT_FAILURE, "Cannot remove a legacy relaunch value."));
+            index += 1;
         }
     }
-    let flushed = unsafe { RegFlushKey(run) } == 0;
+    let _ = unsafe { RegFlushKey(run) };
     unsafe { RegCloseKey(run) };
-    if flushed {
-        Ok(())
-    } else {
-        Err(fail(EXIT_FAILURE, "Cannot flush profile relaunch cleanup."))
-    }
+    Ok(())
 }
 
 fn read_profile_image_path(key: *mut c_void) -> Result<Option<PathBuf>> {
@@ -4914,45 +4982,58 @@ fn read_profile_image_path(key: *mut c_void) -> Result<Option<PathBuf>> {
 }
 
 fn remove_legacy_profile_relaunch_records(root: &Path) -> Result<()> {
-    if !path_present(root)? {
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return Ok(());
+    };
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Ok(());
     }
-    assert_plain_directory(root)?;
-    for entry in fs::read_dir(root).map_err(io_failure)? {
-        let entry = entry.map_err(io_failure)?;
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
         let generation = entry.file_name().to_string_lossy().into_owned();
         if validate_machine_lock_suffix(&generation).is_err() {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Legacy relaunch record name is invalid.",
-            ));
+            continue;
         }
         let directory = entry.path();
-        assert_plain_directory(&directory)?;
+        let Ok(metadata) = fs::symlink_metadata(&directory) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            continue;
+        }
         let record_path = directory.join("relaunch-record-v1.json");
-        assert_plain_file(&record_path)?;
-        let bytes = fs::read(&record_path).map_err(io_failure)?;
+        let Ok(bytes) = fs::read(&record_path) else {
+            continue;
+        };
         if bytes.is_empty() || bytes.len() > 64 * 1024 {
-            return Err(fail(EXIT_REJECTED, "Legacy relaunch record is invalid."));
+            continue;
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| fail(EXIT_REJECTED, "Legacy relaunch record is invalid."))?;
-        if value.get("schemaVersion").and_then(|value| value.as_u64()) != Some(1)
-            || value.get("generation").and_then(|value| value.as_str()) != Some(generation.as_str())
-            || !value
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let exact = matches!(
+            value
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_u64),
+            Some(1 | 2)
+        ) && value.get("generation").and_then(serde_json::Value::as_str)
+            == Some(generation.as_str())
+            && value
                 .get("request")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| value.starts_with("--windows-update-bootstrap-v2="))
-        {
-            return Err(fail(EXIT_REJECTED, "Legacy relaunch record is invalid."));
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|request| request.starts_with("--windows-update-bootstrap-v2="));
+        if exact {
+            let _ = remove_plain_tree(&directory);
         }
-        remove_plain_tree(&directory)?;
     }
-    fs::remove_dir(root).map_err(io_failure)
+    let _ = fs::remove_dir(root);
+    Ok(())
 }
 
 fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
-    let loaded = enumerate_registry_subkeys(HKEY_USERS)?;
+    let loaded = enumerate_registry_subkeys(HKEY_USERS).unwrap_or_default();
     for sid in loaded
         .iter()
         .filter(|sid| sid.starts_with("S-1-5-") && !sid.ends_with("_Classes"))
@@ -4968,11 +5049,10 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
             )
         } != 0
         {
-            return Err(fail(EXIT_FAILURE, "Cannot open a loaded user hive."));
+            continue;
         }
-        let result = clear_legacy_relaunch_values_in_hive(hive, paths);
+        let _ = clear_legacy_relaunch_values_in_hive(hive, paths);
         unsafe { RegCloseKey(hive) };
-        result?;
     }
     const PROFILE_LIST: &str = r"Software\Microsoft\Windows NT\CurrentVersion\ProfileList";
     let mut profiles = ptr::null_mut();
@@ -4988,7 +5068,7 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
     {
         return Err(fail(EXIT_FAILURE, "Cannot open the profile inventory."));
     }
-    for sid in enumerate_registry_subkeys(profiles)? {
+    for sid in enumerate_registry_subkeys(profiles).unwrap_or_default() {
         if !sid.starts_with("S-1-5-") {
             continue;
         }
@@ -5003,10 +5083,9 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
             )
         } != 0
         {
-            unsafe { RegCloseKey(profiles) };
-            return Err(fail(EXIT_FAILURE, "Cannot open a profile record."));
+            continue;
         }
-        let profile_path = read_profile_image_path(profile)?;
+        let profile_path = read_profile_image_path(profile).ok().flatten();
         unsafe { RegCloseKey(profile) };
         let Some(profile_path) = profile_path else {
             continue;
@@ -5018,7 +5097,7 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
             continue;
         }
         let ntuser = profile_path.join("NTUSER.DAT");
-        if !path_present(&ntuser)? {
+        if fs::symlink_metadata(&ntuser).is_err() {
             continue;
         }
         let mut offline = ptr::null_mut();
@@ -5032,50 +5111,78 @@ fn clear_legacy_profile_relaunch_owners(paths: &Paths) -> Result<()> {
             )
         } != 0
         {
-            unsafe { RegCloseKey(profiles) };
-            return Err(fail(EXIT_FAILURE, "Cannot load an offline user hive."));
+            continue;
         }
-        let result = clear_legacy_relaunch_values_in_hive(offline, paths);
-        let flushed = unsafe { RegFlushKey(offline) } == 0;
+        let _ = clear_legacy_relaunch_values_in_hive(offline, paths);
+        let _ = unsafe { RegFlushKey(offline) };
         unsafe { RegCloseKey(offline) };
-        result?;
-        if !flushed {
-            unsafe { RegCloseKey(profiles) };
-            return Err(fail(EXIT_FAILURE, "Cannot flush an offline user hive."));
-        }
     }
     unsafe { RegCloseKey(profiles) };
     Ok(())
 }
 
 fn finish_terminal_uninstall(paths: &Paths) -> Result<()> {
+    let record = read_terminal_uninstall_record(paths)?
+        .ok_or_else(|| fail(EXIT_REJECTED, "Terminal uninstall owner is missing."))?;
+    if record.phase != "machine-retired" {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Terminal uninstall machine state is not retired.",
+        ));
+    }
     clear_update_recovery(paths)?;
     clear_legacy_profile_relaunch_owners(paths)?;
-    let relaunch_records = terminal_uninstall_root(paths).join("Relaunch Records");
-    remove_plain_tree(&relaunch_records)?;
+    let root = terminal_uninstall_root(paths);
+    remove_plain_tree(&root.join("Relaunch Records"))?;
     remove_uninstall_finalizer_residue(paths)?;
     remove_plain_tree(&paths.install)?;
     remove_plain_tree(&paths.backup)?;
     remove_plain_tree(&paths.staging)?;
-    clear_machine_relaunch_owner(paths)?;
-    let root = terminal_uninstall_root(paths);
+
+    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
+    let current = std::env::current_exe().map_err(io_failure)?;
+    let mut scheduled = Vec::new();
+    for path in [&launcher, &current] {
+        if !path_present(path)? {
+            continue;
+        }
+        assert_plain_file(path)?;
+        if unsafe {
+            MoveFileExW(
+                wide(path.as_os_str()).as_ptr(),
+                ptr::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        } == 0
+        {
+            return Err(fail(
+                EXIT_FAILURE,
+                "Windows could not take terminal recovery deletion ownership.",
+            ));
+        }
+        scheduled.push(path.to_path_buf());
+    }
+    verify_pending_finalizer_deletions(&scheduled)?;
+    if path_present(&launcher)? {
+        arm_mapped_image_deletion(&launcher)?;
+    }
+    if path_present(&current)? {
+        arm_mapped_image_deletion(&current)?;
+    }
     for name in [
         TERMINAL_UNINSTALL_MARKER_NAME,
         TERMINAL_UNINSTALL_RECORD_NAME,
+        "launcher-tree-identity-v1",
     ] {
         let path = root.join(name);
         if path_present(&path)? {
             fs::remove_file(path).map_err(io_failure)?;
         }
     }
-    let launcher = root.join("talking-quill-update-recovery-launcher.exe");
-    if path_present(&launcher)? {
-        arm_mapped_image_deletion(&launcher)?;
-    }
-    let _ = fs::remove_file(root.join("launcher-tree-identity-v1"));
-    let _ = fs::remove_dir(&root);
-    let current = std::env::current_exe().map_err(io_failure)?;
-    arm_mapped_image_deletion(&current)
+    flush_setup_directory(&root)?;
+    fs::remove_dir(&root).map_err(io_failure)?;
+    // This registry flush is the final durable and fallible mutation. No cleanup follows it.
+    clear_machine_relaunch_owner(paths)
 }
 
 fn clear_machine_relaunch_owner(paths: &Paths) -> Result<()> {
@@ -5881,6 +5988,24 @@ mod tests {
     }
 
     #[test]
+    fn terminal_uninstall_crash_transitions_recover_only_in_order() {
+        assert_eq!(
+            terminal_uninstall_recovery_step("armed", true).unwrap(),
+            TerminalUninstallRecoveryStep::RetireMachine
+        );
+        assert_eq!(
+            terminal_uninstall_recovery_step("armed", false).unwrap(),
+            TerminalUninstallRecoveryStep::RetireMachine
+        );
+        assert_eq!(
+            terminal_uninstall_recovery_step("machine-retired", false).unwrap(),
+            TerminalUninstallRecoveryStep::FinishCleanup
+        );
+        assert!(terminal_uninstall_recovery_step("machine-retired", true).is_err());
+        assert!(terminal_uninstall_recovery_step("cleanup-complete", false).is_err());
+    }
+
+    #[test]
     fn terminal_uninstall_record_schema_is_strict() {
         let valid = br#"{"schemaVersion":1,"generation":"11111111111111111111111111111111","phase":"armed","maintenanceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
         let record: TerminalUninstallRecord = serde_json::from_slice(valid).unwrap();
@@ -5908,8 +6033,15 @@ mod tests {
         assert!(!root.exists());
 
         fs::create_dir_all(root.join("not-owned")).unwrap();
-        assert!(remove_legacy_profile_relaunch_records(&root).is_err());
+        fs::create_dir_all(root.join("33".repeat(16))).unwrap();
+        fs::write(
+            root.join("33".repeat(16)).join("relaunch-record-v1.json"),
+            b"malformed user data",
+        )
+        .unwrap();
+        remove_legacy_profile_relaunch_records(&root).unwrap();
         assert!(root.join("not-owned").exists());
+        assert!(root.join("33".repeat(16)).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

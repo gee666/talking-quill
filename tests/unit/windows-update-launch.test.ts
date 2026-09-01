@@ -5,7 +5,10 @@ import {
   buildWindowsElevationLaunch,
   settleWindowsElevation,
 } from '../../app/src/main/info/windows-update-launch';
-import { wrapWindowsUpdateRelaunchRequest } from '../../app/src/main/info/windows-update-relaunch-intent';
+import {
+  readWindowsUpdateRelaunchGeneration,
+  wrapWindowsUpdateRelaunchRequest,
+} from '../../app/src/main/info/windows-update-relaunch-intent';
 
 const candidate = {
   version: '0.0.69',
@@ -50,6 +53,20 @@ const candidate = {
 };
 
 describe('Windows elevated updater launch', () => {
+  it('accepts one exact relaunch generation and rejects ambiguous command lines', () => {
+    const argument = `--windows-update-relaunch-generation-v1=${'ab'.repeat(16)}`;
+    expect(readWindowsUpdateRelaunchGeneration(['Talking Quill.exe', argument])).toBe(
+      'ab'.repeat(16),
+    );
+    expect(readWindowsUpdateRelaunchGeneration(['Talking Quill.exe'])).toBeNull();
+    expect(readWindowsUpdateRelaunchGeneration([argument, argument])).toBeNull();
+    expect(
+      readWindowsUpdateRelaunchGeneration([
+        '--windows-update-relaunch-generation-v1=not-a-generation',
+      ]),
+    ).toBeNull();
+  });
+
   it('takes verified legacy migration locks in fixed order before the protected file lock', async () => {
     const [helper, setup] = await Promise.all([
       readFile('helper/src/windows_update.rs', 'utf8'),
@@ -108,13 +125,30 @@ describe('Windows elevated updater launch', () => {
     expect(finalize.indexOf('publish_terminal_uninstall_record(paths)?')).toBeLessThan(
       finalize.indexOf('remove_transaction(paths)?'),
     );
-    const terminalCleanup = setup.slice(setup.indexOf('fn finish_terminal_uninstall'));
+    const retirement = setup.slice(
+      setup.indexOf('fn retire_terminal_machine_state'),
+      setup.indexOf('enum RecoveryPlan'),
+    );
+    expect(retirement.indexOf('recover_with_adapter(paths, system)?')).toBeLessThan(
+      retirement.indexOf('system.unregister_app_path()?'),
+    );
+    expect(retirement.indexOf('remove_transaction(paths)?')).toBeLessThan(
+      retirement.indexOf('system.unregister_uninstall()?'),
+    );
+    expect(retirement.indexOf('system.unregister_uninstall()?')).toBeLessThan(
+      retirement.indexOf('write_terminal_uninstall_phase(paths, generation, "machine-retired")'),
+    );
+    const terminalCleanup = setup.slice(
+      setup.indexOf('fn finish_terminal_uninstall'),
+      setup.indexOf('fn clear_machine_relaunch_owner'),
+    );
     expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
-      terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?'),
+      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
-    expect(terminalCleanup.indexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
-      terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?'),
+    expect(terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?')).toBeLessThan(
+      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
+    expect(terminalCleanup.trimEnd()).toMatch(/clear_machine_relaunch_owner\(paths\)\n\}\s*$/u);
     const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
     expect(residue).toContain('read_terminal_uninstall_record(&paths)?');
   });
@@ -149,13 +183,18 @@ describe('Windows elevated updater launch', () => {
     expect(helper).toContain('verified_surviving_version');
     expect(helper).not.toContain('for recovery_generation in owned_recovery_generations()?');
     expect(helper).toContain('record.recovery_generation');
+    expect(helper).toContain('schema_version: 3');
+    expect(helper).toContain('record.schema_version != 3');
+    expect(helper).toContain('RELEASED_NO_RECORD_PREDECESSOR: &str = "0.0.67"');
+    expect(helper).not.toContain('migrate_legacy_relaunch');
     expect(helper).toContain('validate_acquired_machine_lock_state(&path)?');
     expect(helper).toContain('terminal_uninstall_record()?');
     expect(setup).toContain('RegLoadAppKeyW');
     expect(setup).toContain('clear_legacy_relaunch_values_in_hive');
     expect(helper).toContain('verify_app_ready_parent');
-    expect(application.indexOf("this.#lifecycle = 'running'")).toBeLessThan(
-      application.lastIndexOf('acknowledgeWindowsUpdateAppReady('),
+    const running = application.indexOf("this.#lifecycle = 'running'");
+    expect(running).toBeLessThan(
+      application.indexOf('this.#acknowledgePendingWindowsUpdateRelaunches();', running),
     );
     const request = '--windows-update-bootstrap-v2=YWJjZA==';
     const wrapped = wrapWindowsUpdateRelaunchRequest(

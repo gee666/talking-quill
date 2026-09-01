@@ -99,4 +99,47 @@ describe('bootstrap machine quit', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(harness.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
+
+  it('queues a second-instance recovery generation until authenticated startup is ready', async () => {
+    process.argv = originalArgv.filter(
+      (argument) => argument !== '--talking-quill-request-machine-quit',
+    );
+    let releaseReady: (() => void) | undefined;
+    harness.app.whenReady.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseReady = resolve;
+      }),
+    );
+    const application = {
+      start: vi.fn(() => Promise.resolve()),
+      handleWindowsUpdateRelaunchGeneration: vi.fn(),
+      handleApplicationActivation: vi.fn(),
+      handleBeforeQuit: vi.fn(),
+      quit: vi.fn(),
+    };
+    harness.application.mockImplementation(function createApplication() {
+      return application;
+    });
+
+    startMain();
+    const secondInstance = harness.app.on.mock.calls.find(
+      ([event]) => event === 'second-instance',
+    )?.[1] as ((event: unknown, commandLine: string[]) => void) | undefined;
+    expect(secondInstance).toBeTypeOf('function');
+    const generation = 'cd'.repeat(16);
+    secondInstance?.(undefined, [
+      'Talking Quill.exe',
+      `--windows-update-relaunch-generation-v1=${generation}`,
+    ]);
+    expect(application.handleWindowsUpdateRelaunchGeneration).not.toHaveBeenCalled();
+
+    releaseReady?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(application.start).toHaveBeenCalledOnce();
+    expect(application.handleWindowsUpdateRelaunchGeneration).toHaveBeenCalledExactlyOnceWith(
+      generation,
+    );
+    expect(application.handleApplicationActivation).not.toHaveBeenCalled();
+  });
 });

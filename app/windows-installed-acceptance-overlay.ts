@@ -154,8 +154,14 @@ import type { InstalledObservationRequest } from './acceptance/installed-observa
   output = replaceExact(
     output,
     `        await application.start();
+        for (const generation of pendingWindowsUpdateRelaunchGenerations) {
+          application.handleWindowsUpdateRelaunchGeneration(generation);
+        }
         if (restoreRequested !== null) application.handleApplicationActivation(restoreRequested);`,
     `        await application.start();
+        for (const generation of pendingWindowsUpdateRelaunchGenerations) {
+          application.handleWindowsUpdateRelaunchGeneration(generation);
+        }
         if (options.installedObservation !== undefined) {
           try {
             await application.runInstalledAcceptance(options.installedObservation);

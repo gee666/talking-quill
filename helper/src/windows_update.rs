@@ -93,6 +93,7 @@ const EXIT_IDENTITY_MISMATCH: i32 = 78;
 const EXIT_LAUNCH_FAILED: i32 = 79;
 const EXIT_INSTALLER_STILL_RUNNING: i32 = 80;
 const INSTALLER_SUPERVISION_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
+const RELEASED_NO_RECORD_PREDECESSOR: &str = "0.0.67";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -144,19 +145,6 @@ struct PersistedRelaunchRecord {
     completed_version: Option<String>,
     recovery_generation: String,
     predecessor: InstalledManifest,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct LegacyPersistedRelaunchRecord {
-    schema_version: u8,
-    generation: String,
-    request: String,
-    nonce: String,
-    source_version: String,
-    target_version: String,
-    phase: String,
-    completed_version: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -343,6 +331,9 @@ pub fn run_recovery_launcher_argument(argument: &std::ffi::OsStr) -> i32 {
 
 fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if argument.starts_with("--windows-update-bootstrap-v2=") {
+        authorize_released_no_record_bootstrap(argument)?;
+    }
     if let Some(generation) = argument.strip_prefix("--windows-terminal-uninstall-v1=") {
         validate_generation(generation)?;
         return resume_terminal_uninstall(generation);
@@ -352,7 +343,7 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
             return Err(EXIT_INVALID_REQUEST);
         }
         validate_generation(generation)?;
-        return migrate_legacy_relaunch(generation);
+        return retire_stale_legacy_relaunch(generation);
     }
     if argument == "--windows-update-relaunch-owner-v1" {
         if is_elevated() {
@@ -387,7 +378,7 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
         }
         launch_elevated_bootstrap(argument)?;
         if cleanup_binding.is_none() {
-            launch_program_files_application()?;
+            launch_program_files_application_for_generation(generation)?;
         }
         return Ok(0);
     }
@@ -432,12 +423,15 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
 
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
+    if argument.starts_with("--windows-update-bootstrap-v2=") {
+        authorize_released_no_record_bootstrap(argument)?;
+    }
     if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
         if is_elevated() {
             return Err(EXIT_INVALID_REQUEST);
         }
         validate_generation(generation)?;
-        return migrate_legacy_relaunch(generation);
+        return retire_stale_legacy_relaunch(generation);
     }
     if argument == "--windows-update-relaunch-owner-install-v1" {
         if !is_elevated() {
@@ -587,7 +581,7 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     }
     let generation = new_recovery_generation()?;
     let record = PersistedRelaunchRecord {
-        schema_version: 2,
+        schema_version: 3,
         generation: generation.clone(),
         user_sid: identity.user_sid,
         logon_sid: identity.logon_sid,
@@ -610,112 +604,47 @@ fn run_relaunch_wrapper(encoded: &str) -> Result<u32, i32> {
     result
 }
 
-fn migrate_legacy_relaunch(generation: &str) -> Result<u32, i32> {
+fn retire_stale_legacy_relaunch(generation: &str) -> Result<u32, i32> {
     let legacy_root =
         known_folder(&FOLDERID_LocalAppData)?.join("Talking Quill/Windows Update Recovery");
     let legacy_directory = legacy_root.join(generation);
-    let legacy_metadata =
-        std::fs::symlink_metadata(&legacy_directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if !legacy_metadata.is_dir()
-        || legacy_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let bytes = std::fs::read(legacy_directory.join(RELAUNCH_RECORD_NAME))
-        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    let legacy: LegacyPersistedRelaunchRecord =
-        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if legacy.schema_version != 1
-        || legacy.generation != generation
-        || !valid_nonce(&legacy.nonce)
-        || !valid_version(&legacy.source_version)
-        || !valid_version(&legacy.target_version)
-        || !matches!(
-            legacy.phase.as_str(),
-            "armed" | "setup-started" | "setup-complete" | "launch-started" | "app-ready"
-        )
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let suffix = legacy
-        .request
-        .strip_prefix("--windows-update-bootstrap-v2=")
-        .ok_or(EXIT_INVALID_REQUEST)?;
-    let request = parse_request_envelope(suffix)?;
-    verify_update_authorization(&request.candidate)?;
-    if request.candidate.package_sha256 != request.sha256
-        || canonical_candidate_layout(&request.candidate)?
-            != request.candidate.package_layout_digest
-        || legacy.source_version != request.candidate.predecessor.version
-        || legacy.target_version != request.candidate.version
-    {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    let installed = installed_manifest()?;
-    let predecessor = if installed.version == request.candidate.predecessor.version {
-        installed
-    } else {
-        InstalledManifest {
-            version: request.candidate.predecessor.version.clone(),
-            platform: request.candidate.predecessor.platform.clone(),
-            architecture: request.candidate.predecessor.architecture.clone(),
-            source_commit: String::new(),
-            source_tree: String::new(),
-            release_build_digest: request.candidate.predecessor.release_build_digest.clone(),
-            roles: vec![
-                UpdateRole {
-                    role: "gateway".into(),
-                    path: "resources/helper/talking-quill-helper.exe".into(),
-                    sha256: request.candidate.predecessor.gateway_sha256.clone(),
-                    suppression_capable: false,
-                },
-                UpdateRole {
-                    role: "owner".into(),
-                    path: "resources/helper/talking-quill-keyboard-owner.exe".into(),
-                    sha256: request.candidate.predecessor.owner_sha256.clone(),
-                    suppression_capable: true,
-                },
-            ],
-        }
-    };
-    launch_elevated_installed_helper("--windows-update-relaunch-owner-install-v1")?;
-    verify_machine_relaunch_owner()?;
-    let identity = current_relaunch_identity()?;
-    let record = PersistedRelaunchRecord {
-        schema_version: 2,
-        generation: generation.to_owned(),
-        user_sid: identity.user_sid,
-        logon_sid: identity.logon_sid,
-        request: legacy.request,
-        nonce: legacy.nonce,
-        source_version: legacy.source_version,
-        target_version: legacy.target_version,
-        phase: legacy.phase,
-        completed_version: legacy.completed_version,
-        recovery_generation: generation.to_owned(),
-        predecessor,
-    };
-    let machine_directory = relaunch_generation_directory(generation)?;
-    if machine_directory.exists() {
-        let existing = read_persisted_relaunch_record(generation)?;
-        if existing.request != record.request
-            || existing.nonce != record.nonce
-            || existing.source_version != record.source_version
-            || existing.target_version != record.target_version
-        {
-            return Err(EXIT_IDENTITY_MISMATCH);
-        }
-    } else {
-        publish_relaunch_record(&record)?;
-    }
     clear_legacy_relaunch_owner(generation)?;
-    remove_relaunch_record_directory(&legacy_directory)?;
-    run_persisted_relaunch(generation)
+    if let Ok(metadata) = std::fs::symlink_metadata(&legacy_directory)
+        && metadata.is_dir()
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && stale_local_relaunch_record_is_exact(&legacy_directory, generation)
+    {
+        let _ = remove_relaunch_record_directory(&legacy_directory);
+        let _ = std::fs::remove_dir(&legacy_root);
+    }
+    Ok(0)
+}
+
+fn stale_local_relaunch_record_is_exact(directory: &Path, generation: &str) -> bool {
+    let Ok(bytes) = std::fs::read(directory.join(RELAUNCH_RECORD_NAME)) else {
+        return false;
+    };
+    if bytes.is_empty() || bytes.len() > 64 * 1024 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    matches!(
+        value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64),
+        Some(1 | 2)
+    ) && value.get("generation").and_then(serde_json::Value::as_str) == Some(generation)
+        && value
+            .get("request")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|request| request.starts_with("--windows-update-bootstrap-v2="))
 }
 
 fn clear_legacy_relaunch_owner(generation: &str) -> Result<(), i32> {
     let mut key = std::ptr::null_mut();
-    if unsafe {
+    let opened = unsafe {
         RegOpenKeyExW(
             HKEY_CURRENT_USER,
             wide_nul(Path::new(RELAUNCH_RUN_KEY))?.as_ptr(),
@@ -723,32 +652,33 @@ fn clear_legacy_relaunch_owner(generation: &str) -> Result<(), i32> {
             KEY_READ | KEY_WRITE,
             &mut key,
         )
-    } != 0
-    {
-        return Err(EXIT_LAUNCH_FAILED);
+    };
+    if opened != 0 {
+        return Ok(());
     }
     let name = format!("Talking Quill Update Relaunch {generation}");
+    let Ok(launcher) = medium_launcher_path() else {
+        unsafe { RegCloseKey(key) };
+        return Ok(());
+    };
     let expected = format!(
         "\"{}\" --windows-update-relaunch-v1={generation}",
-        medium_launcher_path()?.display()
+        launcher.display()
     );
-    let actual = read_registry_string(key, &name)?;
+    let Ok(actual) = read_registry_string(key, &name) else {
+        unsafe { RegCloseKey(key) };
+        return Ok(());
+    };
     if actual.as_deref().is_some_and(|value| value != expected) {
         unsafe { RegCloseKey(key) };
-        return Err(EXIT_IDENTITY_MISMATCH);
+        return Ok(());
     }
-    let status = if actual.is_some() {
-        unsafe { RegDeleteValueW(key, wide_nul(Path::new(&name))?.as_ptr()) }
-    } else {
-        0
-    };
-    let flushed = status == 0 && unsafe { RegFlushKey(key) } == 0;
+    if actual.is_some() {
+        let _ = unsafe { RegDeleteValueW(key, wide_nul(Path::new(&name))?.as_ptr()) };
+        let _ = unsafe { RegFlushKey(key) };
+    }
     unsafe { RegCloseKey(key) };
-    if flushed {
-        Ok(())
-    } else {
-        Err(EXIT_LAUNCH_FAILED)
-    }
+    Ok(())
 }
 
 fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
@@ -815,6 +745,7 @@ fn run_machine_relaunch_owner() -> Result<u32, i32> {
     drop(machine_lifecycle);
     for generation in generations {
         let Ok(record) = read_persisted_relaunch_record(&generation) else {
+            let _ = retire_stale_schema2_relaunch_record(&generation);
             continue;
         };
         if record.user_sid == identity.user_sid && record.logon_sid == identity.logon_sid {
@@ -862,11 +793,22 @@ fn run_persisted_relaunch(generation: &str) -> Result<u32, i32> {
         return Ok(0);
     }
     let target_committed = verify_post_install_request(&request).is_ok();
-    let recovering_setup = record.phase == "setup-started";
+    let recovering_setup = matches!(record.phase.as_str(), "armed" | "setup-started");
     if recovering_setup
+        && native_setup_transaction_present()?
         && verified_surviving_version(&request.candidate, &record.predecessor).is_err()
-        && owned_recovery_generations()?.contains(&record.recovery_generation)
     {
+        let recovery_directory = medium_recovery_directory(&record.recovery_generation)?;
+        if !recovery_directory.exists()
+            || read_active_generation(&recovery_directory)? != record.recovery_generation
+            || !recovery_command_present(&record.recovery_generation)?
+        {
+            return Err(EXIT_IDENTITY_MISMATCH);
+        }
+        if record.phase == "armed" {
+            record.phase = "setup-started".into();
+            write_persisted_relaunch_record(&directory, &record)?;
+        }
         let resume = format!("--windows-update-resume-v2={}", record.recovery_generation);
         drop(_lock);
         drop(machine_lifecycle);
@@ -1062,7 +1004,7 @@ fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchR
     verify_protected_relaunch_file(&path, &bytes)?;
     let record: PersistedRelaunchRecord =
         serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if record.schema_version != 2
+    if record.schema_version != 3
         || record.generation != generation
         || record.user_sid != identity.user_sid
         || validate_generation(&record.recovery_generation).is_err()
@@ -1080,6 +1022,34 @@ fn read_persisted_relaunch_record(generation: &str) -> Result<PersistedRelaunchR
     let marker = directory.join(RELAUNCH_MARKER_NAME);
     verify_protected_relaunch_file(&marker, relaunch_marker_value(&record).as_bytes())?;
     Ok(record)
+}
+
+fn retire_stale_schema2_relaunch_record(generation: &str) -> Result<(), i32> {
+    let _machine_lifecycle = RecoveryStateLock::acquire()?;
+    let directory = relaunch_generation_directory(generation)?;
+    let _lock = acquire_relaunch_record_lock(&directory)?;
+    let identity = current_relaunch_identity()?;
+    if !has_relaunch_dacl(&directory, &identity)? {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    let path = directory.join(RELAUNCH_RECORD_NAME);
+    let bytes = std::fs::read(&path).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    verify_protected_relaunch_file(&path, &bytes)?;
+    let record: PersistedRelaunchRecord =
+        serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    if record.schema_version != 2
+        || record.generation != generation
+        || record.user_sid != identity.user_sid
+        || record.logon_sid != identity.logon_sid
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    verify_protected_relaunch_file(
+        &directory.join(RELAUNCH_MARKER_NAME),
+        relaunch_marker_value(&record).as_bytes(),
+    )?;
+    drop(_lock);
+    remove_relaunch_record_directory(&directory)
 }
 
 fn acquire_relaunch_record_lock(directory: &Path) -> Result<std::fs::File, i32> {
@@ -1253,6 +1223,31 @@ fn verify_installed_application_process(process_id: u32) -> Result<(), i32> {
     } else {
         Err(EXIT_IDENTITY_MISMATCH)
     }
+}
+
+fn native_setup_transaction_present() -> Result<bool, i32> {
+    let path =
+        known_folder(&FOLDERID_ProgramFiles)?.join(".Talking Quill.native-transaction-v2.json");
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(
+            metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(EXIT_IDENTITY_MISMATCH),
+    }
+}
+
+fn authorize_released_no_record_bootstrap(argument: &str) -> Result<(), i32> {
+    let encoded = argument
+        .strip_prefix("--windows-update-bootstrap-v2=")
+        .ok_or(EXIT_INVALID_REQUEST)?;
+    let request = parse_and_authorize_request(encoded)?;
+    if request.candidate.predecessor.version != RELEASED_NO_RECORD_PREDECESSOR
+        || installed_manifest_version()? != RELEASED_NO_RECORD_PREDECESSOR
+    {
+        return Err(EXIT_IDENTITY_MISMATCH);
+    }
+    Ok(())
 }
 
 fn valid_version(value: &str) -> bool {
@@ -1473,12 +1468,6 @@ fn set_machine_relaunch_run_value(command: &str) -> Result<(), i32> {
     }
 }
 
-fn launch_program_files_application() -> Result<(), i32> {
-    launch_application(
-        known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill/Talking Quill.exe"),
-    )
-}
-
 fn launch_program_files_application_for_generation(generation: &str) -> Result<(), i32> {
     validate_generation(generation)?;
     let application = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill/Talking Quill.exe");
@@ -1490,17 +1479,6 @@ fn launch_program_files_application_for_generation(generation: &str) -> Result<(
         .arg(format!(
             "--windows-update-relaunch-generation-v1={generation}"
         ))
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| EXIT_LAUNCH_FAILED)
-}
-
-fn launch_application(application: PathBuf) -> Result<(), i32> {
-    let metadata = std::fs::symlink_metadata(&application).map_err(|_| EXIT_LAUNCH_FAILED)?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(EXIT_IDENTITY_MISMATCH);
-    }
-    std::process::Command::new(application)
         .spawn()
         .map(|_| ())
         .map_err(|_| EXIT_LAUNCH_FAILED)
@@ -4204,7 +4182,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         *super::TEST_RELAUNCH_ROOT.lock().unwrap() = Some(root.clone());
         let mut record = PersistedRelaunchRecord {
-            schema_version: 2,
+            schema_version: 3,
             generation: generation.clone(),
             user_sid: identity.user_sid,
             logon_sid: identity.logon_sid,
@@ -4246,6 +4224,19 @@ mod tests {
                 phase
             );
         }
+        record.schema_version = 2;
+        write_persisted_relaunch_record(
+            &super::relaunch_generation_directory(&generation).unwrap(),
+            &record,
+        )
+        .unwrap();
+        assert!(read_persisted_relaunch_record(&generation).is_err());
+        record.schema_version = 3;
+        write_persisted_relaunch_record(
+            &super::relaunch_generation_directory(&generation).unwrap(),
+            &record,
+        )
+        .unwrap();
         remove_relaunch_record_directory(
             &super::relaunch_generation_directory(&generation).unwrap(),
         )

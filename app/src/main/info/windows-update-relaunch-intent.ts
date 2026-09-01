@@ -33,17 +33,24 @@ export async function createWindowsUpdateRelaunchIntent(
   return { path, intent };
 }
 
+const RELAUNCH_GENERATION_PREFIX = '--windows-update-relaunch-generation-v1=';
+
+export function readWindowsUpdateRelaunchGeneration(commandLine: readonly string[]): string | null {
+  const matches = commandLine
+    .filter((argument) => argument.startsWith(RELAUNCH_GENERATION_PREFIX))
+    .map((argument) => argument.slice(RELAUNCH_GENERATION_PREFIX.length));
+  return matches.length === 1 && /^[0-9a-f]{32}$/.test(matches[0] ?? '')
+    ? (matches[0] ?? null)
+    : null;
+}
+
 export async function acknowledgeWindowsUpdateAppReady(
-  _userDataRoot: string,
   helperExecutable: string,
   currentVersion: string,
+  generation: string,
   launch: (executable: string, argument: string) => Promise<void>,
 ): Promise<void> {
-  const prefix = '--windows-update-relaunch-generation-v1=';
-  const generation = process.argv
-    .find((argument) => argument.startsWith(prefix))
-    ?.slice(prefix.length);
-  if (generation === undefined || !/^[0-9a-f]{32}$/.test(generation)) return;
+  if (!/^[0-9a-f]{32}$/.test(generation)) return;
   const argument = `--windows-update-app-ready-v1=${Buffer.from(
     JSON.stringify({ generation, version: currentVersion }),
     'utf8',
