@@ -1,0 +1,47 @@
+name: Preserve authenticated local 0.0.67 Windows migration baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        required: true
+        type: choice
+        options: [x64, arm64]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-local-0067-baseline-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  preserve-local-baseline:
+    runs-on:
+      - self-hosted
+      - Windows
+      - talking-quill-local-baseline
+      - ${{ inputs.architecture }}
+    environment: windows-local-migration-trust
+    steps:
+      - name: Preserve the protected local baseline without network-supplied binaries
+        shell: pwsh
+        env:
+          EXPECTED_INSTALLER_SHA256: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_INSTALLER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_INSTALLER_SHA256 }}
+          EXPECTED_MANIFEST_SHA256: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_MANIFEST_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_MANIFEST_SHA256 }}
+          EXPECTED_GATEWAY_SHA256: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_GATEWAY_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_GATEWAY_SHA256 }}
+          EXPECTED_OWNER_SHA256: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_OWNER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_OWNER_SHA256 }}
+          EXPECTED_RELEASE_BUILD_DIGEST: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_RELEASE_BUILD_DIGEST || vars.TALKING_QUILL_LOCAL_0067_ARM64_RELEASE_BUILD_DIGEST }}
+        run: |
+          $source = "C:\ProgramData\TalkingQuillMigrationBaseline\local-0.0.67-${{ inputs.architecture }}.exe"
+          if (@($env:EXPECTED_INSTALLER_SHA256,$env:EXPECTED_MANIFEST_SHA256,$env:EXPECTED_GATEWAY_SHA256,$env:EXPECTED_OWNER_SHA256,$env:EXPECTED_RELEASE_BUILD_DIGEST | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -ne 0) { throw 'Protected local baseline identity is invalid.' }
+          if (-not (Test-Path -LiteralPath $source) -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_INSTALLER_SHA256) { throw 'Protected local baseline installer identity is invalid.' }
+          New-Item -ItemType Directory -Force tmp/local-baseline | Out-Null
+          Copy-Item -LiteralPath $source -Destination "tmp/local-baseline/local-0.0.67-${{ inputs.architecture }}.exe"
+          [ordered]@{ schemaVersion=1; version='0.0.67'; provenance='local-non-public'; architecture='${{ inputs.architecture }}'; installerSha256=$env:EXPECTED_INSTALLER_SHA256; installedManifestSha256=$env:EXPECTED_MANIFEST_SHA256; gatewaySha256=$env:EXPECTED_GATEWAY_SHA256; ownerSha256=$env:EXPECTED_OWNER_SHA256; releaseBuildDigest=$env:EXPECTED_RELEASE_BUILD_DIGEST } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 tmp/local-baseline/baseline-authorization.json
+      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-local-0.0.67-${{ inputs.architecture }}-migration-baseline
+          path: tmp/local-baseline/*
+          if-no-files-found: error
+          retention-days: 30

@@ -82,6 +82,44 @@ jobs:
           Invoke-WebRequest -Uri $env:RECOVERY_FRESH_URL -OutFile $freshSetup
           if ((Get-FileHash $faultSetup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:TERMINAL_FAULT_SHA256) { throw 'Terminal fault setup hash mismatch.' }
           if ((Get-FileHash $freshSetup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RECOVERY_FRESH_SHA256) { throw 'Recovery fresh setup hash mismatch.' }
+          $watchdogRoot = 'C:\ProgramData\TalkingQuillAcceptance\cleanup-watchdog'
+          New-Item -ItemType Directory -Force $watchdogRoot | Out-Null
+          & (Join-Path $env:SystemRoot 'System32\icacls.exe') $watchdogRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot protect the acceptance cleanup watchdog.' }
+          $watchdogFresh = Join-Path $watchdogRoot 'production-fresh.exe'
+          Copy-Item -LiteralPath $freshSetup -Destination $watchdogFresh -Force
+          $watchdogScript = Join-Path $watchdogRoot 'cleanup.ps1'
+          @'
+          $ErrorActionPreference='Stop'
+          $Fresh=Join-Path $PSScriptRoot 'production-fresh.exe';$Task=Get-Content -Raw (Join-Path $PSScriptRoot 'task-name.txt')
+          for($attempt=0;$attempt -lt 5;$attempt++){
+            $quiet=Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString -ErrorAction SilentlyContinue
+            if($null -ne $quiet){$match=[regex]::Match($quiet,'^"(.+Talking Quill Maintenance(?:-[0-9a-f]{32})?\.exe)" /S$');if(-not $match.Success){throw 'Invalid cleanup registration'};$process=Start-Process $match.Groups[1].Value -ArgumentList '/S' -Wait -PassThru;if($process.ExitCode -ne 0){throw 'Cleanup failed'};continue}
+            $protected=@("$env:ProgramFiles\.Talking Quill.native-staging","$env:ProgramFiles\.Talking Quill.native-backup")|Where-Object{Test-Path $_};$protected+=@(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue|Where-Object{$_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*'})
+            $registryResidue=(Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill') -or (Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') -or $null -ne (Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)
+            $partial=(Test-Path "$env:ProgramFiles\Talking Quill") -or (Test-Path "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") -or (Test-Path "$env:ProgramData\Talking Quill Update Recovery") -or $protected.Count -ne 0 -or $registryResidue -or $null -ne (Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue)
+            if(-not $partial){break};$process=Start-Process $Fresh -ArgumentList '/S' -Wait -PassThru;if($process.ExitCode -notin @(0,78)){throw 'Recovery failed'}
+          }
+          $remaining=@("$env:ProgramFiles\Talking Quill","$env:ProgramFiles\.Talking Quill.native-staging","$env:ProgramFiles\.Talking Quill.native-backup","$env:ProgramFiles\.Talking Quill.native-transaction-v2.json","$env:ProgramData\Talking Quill Update Recovery",'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill','HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe')|Where-Object{Test-Path $_};$remaining+=@(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue|Where-Object{$_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*'});$remaining+=@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue);if($null -ne (Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)){$remaining+='HKLM Run owner'};if($remaining.Count -ne 0){throw 'Watchdog retained protected residue'}
+          & "$env:SystemRoot\System32\schtasks.exe" /Delete /TN $Task /F *> $null
+          if($LASTEXITCODE -ne 0){throw 'Watchdog task retirement failed'}
+          Remove-Item -LiteralPath $Fresh,$PSCommandPath,(Join-Path $PSScriptRoot 'task-name.txt'),(Join-Path $PSScriptRoot 'task.xml') -Force -ErrorAction SilentlyContinue
+          '@ | Set-Content -NoNewline -Encoding utf8 $watchdogScript
+          $taskName = "TalkingQuillRealRebootAcceptance-${{ inputs.architecture }}"
+          [IO.File]::WriteAllText((Join-Path $watchdogRoot 'task-name.txt'),$taskName,[Text.UTF8Encoding]::new($false))
+          $startBoundary = (Get-Date).AddMinutes(75).ToString('yyyy-MM-ddTHH:mm:ss')
+          $taskXmlPath = Join-Path $watchdogRoot 'task.xml'
+          @"
+          <?xml version="1.0" encoding="UTF-16"?>
+          <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+            <Triggers><TimeTrigger><Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$startBoundary</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+            <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+            <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit><Priority>7</Priority></Settings>
+            <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>-NoProfile -NonInteractive -File "$watchdogScript"</Arguments></Exec></Actions>
+          </Task>
+          "@ | Set-Content -Encoding Unicode $taskXmlPath
+          & (Join-Path $env:SystemRoot 'System32\schtasks.exe') /Create /F /TN $taskName /XML $taskXmlPath *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'Windows rejected the native cleanup watchdog task.' }
           $install = Start-Process $freshSetup -ArgumentList '/S' -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Production fresh install failed: $($install.ExitCode)" }
           $faultRepair = Start-Process $faultSetup -ArgumentList '/S' -Wait -PassThru
@@ -117,6 +155,7 @@ jobs:
             runnerLabel = $env:RUNNER_LABEL; runnerName = $env:RUNNER_NAME; machineIdentity = $machineIdentity
             preBootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
             generationBefore = $match.Groups[2].Value; terminalGeneration = $terminalGeneration; serviceImage = $terminalRecord.serviceImage; pendingDeleteSources = @($ownedSources)
+            rebootRequestMethod = 'shutdown.exe'; rebootRequestDelaySeconds = 30
           }
           $checkpoint | ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 $env:CHECKPOINT
           Copy-Item $env:CHECKPOINT tmp/windows-real-reboot/pre-reboot-checkpoint.json
@@ -131,19 +170,49 @@ jobs:
           $checkpoint = Get-Content -Raw $env:CHECKPOINT | ConvertFrom-Json
           $ownedPaths = @($checkpoint.pendingDeleteSources | ForEach-Object { ([string]$_) -replace '^\\\?\?\\','' })
           if ($ownedPaths.Count -eq 0 -or $checkpoint.serviceImage -cnotin $ownedPaths) { throw 'Checkpoint does not bind the terminal service image to its pending deletion pair.' }
-          foreach ($path in $ownedPaths) { if (-not (Test-Path -LiteralPath $path)) { throw "Reboot deletion source disappeared before Restart-Computer: $path" } }
-          $checkpointPath = $env:CHECKPOINT.Replace("'", "''")
-          $rebootScript = @"
-          Start-Sleep -Seconds 30
-          `$checkpoint = Get-Content -Raw '$checkpointPath' | ConvertFrom-Json
-          foreach (`$source in @(`$checkpoint.pendingDeleteSources)) {
-            `$path = ([string]`$source) -replace '^\\\?\?\\',''
-            if (-not (Test-Path -LiteralPath `$path)) { throw "Pending deletion source disappeared immediately before Restart-Computer: `$path" }
+          foreach ($path in $ownedPaths) { if (-not (Test-Path -LiteralPath $path)) { throw "Reboot deletion source disappeared before shutdown.exe: $path" } }
+          foreach ($path in $ownedPaths) { if (-not (Test-Path -LiteralPath $path)) { throw "Pending deletion source disappeared immediately before shutdown.exe: $path" } }
+          $acceptedAt = [DateTime]::UtcNow.ToString('O')
+          $shutdown = Join-Path $env:SystemRoot 'System32\shutdown.exe'
+          & $shutdown /r /t 30 /d p:4:1 /c 'Talking Quill real reboot acceptance'
+          $shutdownExit = $LASTEXITCODE
+          if ($shutdownExit -ne 0) { throw "Windows rejected the reboot request: $shutdownExit" }
+          [ordered]@{ schemaVersion=1; method='shutdown.exe'; delaySeconds=30; acceptedAt=$acceptedAt; exitCode=$shutdownExit; workflowRunId=$env:GITHUB_RUN_ID; workflowRunAttempt=[int]$env:GITHUB_RUN_ATTEMPT } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 "$env:CHECKPOINT.reboot-request.json"
+      - name: Clean failed pre-reboot acceptance state
+        if: failure()
+        shell: pwsh
+        env:
+          RECOVERY_FRESH_SHA256: ${{ inputs.recovery_fresh_candidate_sha256 }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & (Join-Path $env:SystemRoot 'System32\shutdown.exe') /a *> $null
+          for ($attempt = 0; $attempt -lt 4; $attempt++) {
+            $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString -ErrorAction SilentlyContinue
+            if ($null -ne $quiet) {
+              $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance(?:-[0-9a-f]{32})?\.exe)" /S$')
+              if (-not $match.Success -or -not (Test-Path -LiteralPath $match.Groups[1].Value)) { throw 'Failed acceptance retained an unauthenticated uninstall registration.' }
+              $cleanup = Start-Process $match.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+              if ($cleanup.ExitCode -ne 0) { throw "Failed acceptance cleanup failed: $($cleanup.ExitCode)" }
+              continue
+            }
+            $protectedResidue = @("$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup") | Where-Object { Test-Path $_ }
+            $protectedResidue += @(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*' })
+            $partial = (Test-Path "$env:ProgramFiles\Talking Quill") -or (Test-Path "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") -or (Test-Path "$env:ProgramData\Talking Quill Update Recovery") -or $protectedResidue.Count -ne 0
+            if (-not $partial) { break }
+            $fresh = 'tmp/windows-real-reboot/production-fresh.exe'
+            if (-not (Test-Path $fresh) -or (Get-FileHash $fresh -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RECOVERY_FRESH_SHA256) { throw 'Failed acceptance lacks its exact recovery-fresh artifact.' }
+            $recovery = Start-Process $fresh -ArgumentList '/S' -Wait -PassThru
+            if ($recovery.ExitCode -notin @(0,78)) { throw "Failed acceptance recovery failed: $($recovery.ExitCode)" }
           }
-          Restart-Computer -Force
-          "@
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rebootScript))
-          Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand',$encoded
+          $residue = @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramData\Talking Quill Update Recovery", 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
+          $residue += @(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*' } | ForEach-Object FullName)
+          $residue += @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue | ForEach-Object Name)
+          if ($null -ne (Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)) { $residue += 'HKLM Run::Talking Quill Update Relaunch' }
+          if ($residue.Count -ne 0) { throw "Failed acceptance cleanup retained machine state: $($residue -join ',')" }
+          & (Join-Path $env:SystemRoot 'System32\schtasks.exe') /Delete /TN "TalkingQuillRealRebootAcceptance-${{ inputs.architecture }}" /F *> $null
+          if ($LASTEXITCODE -notin @(0,1)) { throw "Cannot retire failed acceptance watchdog: $LASTEXITCODE" }
+          Remove-Item -LiteralPath $env:CHECKPOINT,"$env:CHECKPOINT.reboot-request.json" -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath tmp/windows-real-reboot,'C:\ProgramData\TalkingQuillAcceptance\cleanup-watchdog' -Recurse -Force -ErrorAction SilentlyContinue
 
   reboot-coordinator:
     needs: prepare-reboot
@@ -192,8 +261,10 @@ jobs:
           $trustedCheckpoint = (Resolve-Path trusted-checkpoint/pre-reboot-checkpoint.json).Path
           if ((Get-FileHash $trustedCheckpoint -Algorithm SHA256).Hash -cne (Get-FileHash $env:CHECKPOINT -Algorithm SHA256).Hash) { throw 'Durable checkpoint differs from the uploaded pre-reboot checkpoint.' }
           $before = Get-Content -Raw $trustedCheckpoint | ConvertFrom-Json
+          $requestReceiptPath = "$env:CHECKPOINT.reboot-request.json"
+          $requestReceipt = Get-Content -Raw -LiteralPath $requestReceiptPath | ConvertFrom-Json
           $machineIdentity = (Get-CimInstance Win32_ComputerSystemProduct).UUID
-          if ($before.workflowRunId -cne $env:WORKFLOW_RUN_ID -or [int]$before.workflowRunAttempt -ne [int]$env:WORKFLOW_RUN_ATTEMPT -or $before.terminalFaultCandidateSha256 -cne $env:TERMINAL_FAULT_SHA256 -or $before.recoveryFreshCandidateSha256 -cne $env:RECOVERY_FRESH_SHA256 -or $before.sourceRevision -cne $env:SOURCE_REVISION -or $before.sourceTree -cne $env:SOURCE_TREE -or $before.architecture -cne $env:ARCHITECTURE -or $before.runnerLabel -cne $env:RUNNER_LABEL -or $before.runnerName -cne $env:RUNNER_NAME -or $before.machineIdentity -cne $env:EXPECTED_MACHINE_ID -or $machineIdentity -cne $env:EXPECTED_MACHINE_ID) { throw 'Post-reboot checkpoint binding is invalid.' }
+          if ($before.workflowRunId -cne $env:WORKFLOW_RUN_ID -or [int]$before.workflowRunAttempt -ne [int]$env:WORKFLOW_RUN_ATTEMPT -or $before.terminalFaultCandidateSha256 -cne $env:TERMINAL_FAULT_SHA256 -or $before.recoveryFreshCandidateSha256 -cne $env:RECOVERY_FRESH_SHA256 -or $before.sourceRevision -cne $env:SOURCE_REVISION -or $before.sourceTree -cne $env:SOURCE_TREE -or $before.architecture -cne $env:ARCHITECTURE -or $before.runnerLabel -cne $env:RUNNER_LABEL -or $before.runnerName -cne $env:RUNNER_NAME -or $before.machineIdentity -cne $env:EXPECTED_MACHINE_ID -or $machineIdentity -cne $env:EXPECTED_MACHINE_ID -or $before.rebootRequestMethod -cne 'shutdown.exe' -or [int]$before.rebootRequestDelaySeconds -ne 30 -or $requestReceipt.method -cne $before.rebootRequestMethod -or [int]$requestReceipt.delaySeconds -ne [int]$before.rebootRequestDelaySeconds -or [int]$requestReceipt.exitCode -ne 0 -or $requestReceipt.workflowRunId -cne $env:WORKFLOW_RUN_ID -or [int]$requestReceipt.workflowRunAttempt -ne [int]$env:WORKFLOW_RUN_ATTEMPT) { throw 'Post-reboot checkpoint or OS reboot-request binding is invalid.' }
           $postBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
           if ([datetime]$postBoot -le [datetime]$before.preBootIdentity) { throw 'A genuine later boot was not observed.' }
           $pendingAfter = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
@@ -211,7 +282,48 @@ jobs:
           $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
           if (-not $match.Success -or $match.Groups[2].Value -ceq $before.generationBefore -or -not (Test-Path $match.Groups[1].Value)) { throw 'Production fresh recovery did not publish a distinct callable generation.' }
           $checkpointSha256 = (Get-FileHash -LiteralPath $trustedCheckpoint -Algorithm SHA256).Hash.ToLowerInvariant()
-          [ordered]@{ schemaVersion=1; architecture=$before.architecture; terminalFaultCandidateSha256=$before.terminalFaultCandidateSha256; recoveryFreshCandidateSha256=$before.recoveryFreshCandidateSha256; sourceRevision=$before.sourceRevision; sourceTree=$before.sourceTree; workflowRunId=$before.workflowRunId; workflowRunAttempt=[int]$before.workflowRunAttempt; checkpointSha256=$checkpointSha256; runnerLabel=$before.runnerLabel; runnerName=$before.runnerName; machineIdentity=$before.machineIdentity; preBootIdentity=$before.preBootIdentity; postBootIdentity=$postBoot; generationBefore=$before.generationBefore; generationAfter=$match.Groups[2].Value; terminalGeneration=$before.terminalGeneration; serviceImage=$before.serviceImage; pendingDeleteSources=@($before.pendingDeleteSources); windowsConsumedPendingDeletes=$true } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 reboot-evidence-input.json
+          [ordered]@{ schemaVersion=1; architecture=$before.architecture; terminalFaultCandidateSha256=$before.terminalFaultCandidateSha256; recoveryFreshCandidateSha256=$before.recoveryFreshCandidateSha256; sourceRevision=$before.sourceRevision; sourceTree=$before.sourceTree; workflowRunId=$before.workflowRunId; workflowRunAttempt=[int]$before.workflowRunAttempt; checkpointSha256=$checkpointSha256; runnerLabel=$before.runnerLabel; runnerName=$before.runnerName; machineIdentity=$before.machineIdentity; preBootIdentity=$before.preBootIdentity; postBootIdentity=$postBoot; generationBefore=$before.generationBefore; generationAfter=$match.Groups[2].Value; terminalGeneration=$before.terminalGeneration; serviceImage=$before.serviceImage; pendingDeleteSources=@($before.pendingDeleteSources); rebootRequestMethod=$before.rebootRequestMethod; rebootRequestDelaySeconds=[int]$before.rebootRequestDelaySeconds; rebootRequestAcceptedAt=$requestReceipt.acceptedAt; rebootRequestExitCode=[int]$requestReceipt.exitCode; windowsConsumedPendingDeletes=$true } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 reboot-evidence-input.json
+          $cleanup = Start-Process -FilePath $match.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+          if ($cleanup.ExitCode -ne 0) { throw "Post-reboot candidate cleanup failed: $($cleanup.ExitCode)" }
+      - name: Retire candidate, reboot request state, and durable checkpoint
+        if: always()
+        shell: pwsh
+        env:
+          RECOVERY_FRESH_SHA256: ${{ inputs.recovery_fresh_candidate_sha256 }}
+        run: |
+          for ($attempt = 0; $attempt -lt 4; $attempt++) {
+            $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString -ErrorAction SilentlyContinue
+            if ($null -ne $quiet) {
+              $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance(?:-[0-9a-f]{32})?\.exe)" /S$')
+              if (-not $match.Success -or -not (Test-Path -LiteralPath $match.Groups[1].Value)) { throw 'Post-reboot acceptance retained an unauthenticated uninstall registration.' }
+              $cleanup = Start-Process $match.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+              if ($cleanup.ExitCode -ne 0) { throw "Post-reboot acceptance cleanup failed: $($cleanup.ExitCode)" }
+              continue
+            }
+            $protectedResidue = @("$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup") | Where-Object { Test-Path $_ }
+            $protectedResidue += @(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*' })
+            $partial = (Test-Path "$env:ProgramFiles\Talking Quill") -or (Test-Path "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") -or (Test-Path "$env:ProgramData\Talking Quill Update Recovery") -or $protectedResidue.Count -ne 0
+            if (-not $partial) { break }
+            $fresh = @('tmp/windows-real-reboot-post/production-fresh.exe','tmp/windows-real-reboot/production-fresh.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($null -eq $fresh -or (Get-FileHash $fresh -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RECOVERY_FRESH_SHA256) { throw 'Post-reboot acceptance lacks its exact recovery-fresh artifact.' }
+            $recovery = Start-Process $fresh -ArgumentList '/S' -Wait -PassThru
+            if ($recovery.ExitCode -notin @(0,78)) { throw "Post-reboot acceptance recovery failed: $($recovery.ExitCode)" }
+          }
+          $residue = @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramData\Talking Quill Update Recovery", 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
+          $residue += @(Get-ChildItem $env:ProgramData -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.machine-lock-*' } | ForEach-Object FullName)
+          $residue += @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue | ForEach-Object Name)
+          if ($null -ne (Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)) { $residue += 'HKLM Run::Talking Quill Update Relaunch' }
+          if ($residue.Count -ne 0) { throw "Post-reboot acceptance cleanup retained machine state: $($residue -join ',')" }
+          $nativePreference = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
+          & (Join-Path $env:SystemRoot 'System32\shutdown.exe') /a *> $null
+          $abortExit = $LASTEXITCODE
+          & (Join-Path $env:SystemRoot 'System32\schtasks.exe') /Delete /TN "TalkingQuillRealRebootAcceptance-${{ inputs.architecture }}" /F *> $null
+          $taskExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $nativePreference
+          if ($abortExit -notin @(0,1116) -or $taskExit -notin @(0,1)) { throw "Cannot retire reboot request state: shutdown=$abortExit task=$taskExit" }
+          Remove-Item -LiteralPath $env:CHECKPOINT,"$env:CHECKPOINT.reboot-request.json" -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath tmp/windows-real-reboot-post,tmp/windows-real-reboot,'C:\ProgramData\TalkingQuillAcceptance\cleanup-watchdog' -Recurse -Force -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ inputs.architecture }}-unsigned-real-reboot-evidence

@@ -19,9 +19,11 @@ export function verifyWindowsRecoveryLineage(lineage) {
   if (
     lineage === null ||
     typeof lineage !== 'object' ||
-    lineage.schemaVersion !== 1 ||
+    lineage.schemaVersion !== 2 ||
     lineage.currentRelaunchRecordSchema !== 3 ||
+    lineage.trustRootVersion !== '0.0.69' ||
     !Array.isArray(lineage.unsupportedUnpublishedRelaunchRecordSchemas) ||
+    !Array.isArray(lineage.localMigrations) ||
     !Array.isArray(lineage.publishedArtifacts)
   ) {
     throw new Error('Windows recovery lineage is invalid');
@@ -30,8 +32,17 @@ export function verifyWindowsRecoveryLineage(lineage) {
   if (unsupported.size !== 2 || !unsupported.has(1) || !unsupported.has(2)) {
     throw new Error('Windows recovery unpublished schema set is invalid');
   }
-  if (unsupported.has(lineage.currentRelaunchRecordSchema)) {
-    throw new Error('Current Windows recovery schema is marked unpublished');
+  if (
+    lineage.localMigrations.length !== 1 ||
+    JSON.stringify(lineage.localMigrations[0]) !==
+      JSON.stringify({
+        sourceVersion: '0.0.67',
+        provenance: 'local-non-public',
+        mode: 'local-uninstall-preserve-fresh',
+        targetVersion: '0.0.69',
+      })
+  ) {
+    throw new Error('Windows local migration policy is invalid');
   }
   let previous = [-1, -1, -1];
   const versions = new Set();
@@ -40,9 +51,13 @@ export function verifyWindowsRecoveryLineage(lineage) {
       artifact === null ||
       typeof artifact !== 'object' ||
       typeof artifact.version !== 'string' ||
-      !('relaunchRecordSchema' in artifact)
+      !Object.hasOwn(artifact, 'predecessorVersion') ||
+      !Object.hasOwn(artifact, 'relaunchRecordSchema')
     ) {
       throw new Error('Published Windows recovery artifact is invalid');
+    }
+    if (artifact.version === '0.0.67') {
+      throw new Error('Local 0.0.67 must never be claimed as a public artifact');
     }
     const version = versionParts(artifact.version);
     if (versions.has(artifact.version) || compareVersions(version, previous) <= 0) {
@@ -50,30 +65,31 @@ export function verifyWindowsRecoveryLineage(lineage) {
     }
     versions.add(artifact.version);
     previous = version;
-    const schema = artifact.relaunchRecordSchema;
-    if (schema !== null && (!Number.isSafeInteger(schema) || schema <= 0)) {
-      throw new Error('Published Windows recovery artifact schema is invalid');
-    }
-    if (schema !== null && unsupported.has(schema)) {
-      throw new Error('Published artifact uses an unpublished Windows recovery schema');
+    if (
+      artifact.relaunchRecordSchema !== lineage.currentRelaunchRecordSchema ||
+      unsupported.has(artifact.relaunchRecordSchema)
+    ) {
+      throw new Error('Published artifact uses an invalid Windows recovery schema');
     }
   }
-  const baseline = lineage.publishedArtifacts[0];
-  const current = lineage.publishedArtifacts[1];
-  if (baseline?.version !== '0.0.67' || baseline.relaunchRecordSchema !== null) {
-    throw new Error('Windows recovery no-record baseline must be public 0.0.67');
-  }
+  const root = lineage.publishedArtifacts[0];
   if (
-    current?.version !== '0.0.69' ||
-    current.relaunchRecordSchema !== lineage.currentRelaunchRecordSchema ||
-    lineage.publishedArtifacts
-      .slice(1)
-      .some((artifact) => artifact.relaunchRecordSchema !== lineage.currentRelaunchRecordSchema)
+    root?.version !== lineage.trustRootVersion ||
+    root.predecessorVersion !== null ||
+    root.relaunchRecordSchema !== 3
   ) {
-    throw new Error('Windows recovery schema 3 lineage must begin at 0.0.69');
+    throw new Error('Windows 0.0.69 must be the fresh public trust-lineage root');
+  }
+  for (let index = 1; index < lineage.publishedArtifacts.length; index += 1) {
+    const artifact = lineage.publishedArtifacts[index];
+    const predecessor = lineage.publishedArtifacts[index - 1];
+    if (artifact.predecessorVersion !== predecessor.version) {
+      throw new Error('Published Windows update predecessor is not the prior public release');
+    }
   }
   return {
-    baselineVersion: baseline.version,
+    trustRootVersion: root.version,
+    localMigrationSourceVersion: lineage.localMigrations[0].sourceVersion,
     schemaVersion: lineage.currentRelaunchRecordSchema,
     publishedArtifacts: lineage.publishedArtifacts.length,
   };

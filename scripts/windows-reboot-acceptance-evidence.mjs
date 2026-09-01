@@ -19,7 +19,7 @@ function validate(payload) {
   const keys = Object.keys(payload).sort().join(',');
   if (
     keys !==
-      'architecture,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
+      'architecture,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,rebootRequestAcceptedAt,rebootRequestDelaySeconds,rebootRequestExitCode,rebootRequestMethod,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
     payload.schemaVersion !== 1 ||
     !ARCHITECTURES.has(payload.architecture) ||
     !SHA256.test(payload.terminalFaultCandidateSha256) ||
@@ -28,6 +28,11 @@ function validate(payload) {
     !/^[0-9a-f]{40}$/u.test(payload.sourceRevision) ||
     !/^[0-9a-f]{40}$/u.test(payload.sourceTree) ||
     !/^tq-reboot-(x64|arm64)-[a-z0-9-]+$/u.test(payload.runnerLabel) ||
+    payload.rebootRequestMethod !== 'shutdown.exe' ||
+    payload.rebootRequestDelaySeconds !== 30 ||
+    payload.rebootRequestExitCode !== 0 ||
+    typeof payload.rebootRequestAcceptedAt !== 'string' ||
+    !Number.isFinite(Date.parse(payload.rebootRequestAcceptedAt)) ||
     typeof payload.runnerName !== 'string' ||
     payload.runnerName.length === 0 ||
     typeof payload.serviceImage !== 'string' ||
@@ -74,7 +79,7 @@ async function validateCheckpoint(payload, checkpointPath) {
   const checkpoint = JSON.parse(bytes);
   if (
     Object.keys(checkpoint).sort().join(',') !==
-      'architecture,generationBefore,machineIdentity,pendingDeleteSources,preBootIdentity,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,workflowRunAttempt,workflowRunId' ||
+      'architecture,generationBefore,machineIdentity,pendingDeleteSources,preBootIdentity,rebootRequestDelaySeconds,rebootRequestMethod,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,workflowRunAttempt,workflowRunId' ||
     payload.checkpointSha256 !== createHash('sha256').update(bytes).digest('hex')
   )
     throw new Error('Real reboot checkpoint is invalid');
@@ -85,6 +90,8 @@ async function validateCheckpoint(payload, checkpointPath) {
     'generationBefore',
     'machineIdentity',
     'preBootIdentity',
+    'rebootRequestMethod',
+    'rebootRequestDelaySeconds',
     'runnerLabel',
     'runnerName',
     'sourceRevision',

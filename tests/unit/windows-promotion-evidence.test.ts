@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -233,6 +233,73 @@ async function fixture() {
       join(directory, `windows-installer-fault-recovery-${architecture}.json`),
       JSON.stringify(fault(architecture)),
     );
+    const profileInventory = [{ path: 'migration-sentinel.json', sha256: sha('1') }];
+    const modelInventory = [{ path: 'migration-model.sentinel', sha256: sha('2') }];
+    const localManifest = {
+      version: '0.0.67',
+      platform: 'win',
+      architecture,
+      releaseBuildDigest: sha('5'),
+      roles: [
+        { role: 'gateway', sha256: sha('6') },
+        { role: 'owner', sha256: sha('7') },
+      ],
+    };
+    const localManifestBytes = Buffer.from(JSON.stringify(localManifest));
+    await writeFile(
+      join(directory, `windows-local-migration-${architecture}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: 'local-uninstall-preserve-fresh',
+        provenance: 'local-non-public',
+        architecture,
+        sourceVersion: '0.0.67',
+        targetVersion: '0.0.69',
+        sourceCommit: source('b'),
+        sourceTree: source('c'),
+        baselineWorkflowRunId: architecture === 'x64' ? '9001' : '9002',
+        baselineArtifactDigest: `sha256:${sha('9')}`,
+        localInstallerSha256: sha('3'),
+        installedManifestSha256: createHash('sha256').update(localManifestBytes).digest('hex'),
+        installedManifestUtf8Base64: localManifestBytes.toString('base64'),
+        installedManifest: localManifest,
+        installedReleaseBuildDigest: sha('5'),
+        installedGatewaySha256: sha('6'),
+        installedOwnerSha256: sha('7'),
+        updaterMarkerPresent: false,
+        profileInventoryBefore: profileInventory,
+        profileInventoryAfterUninstall: profileInventory,
+        profileInventoryAfterFresh: profileInventory,
+        modelInventoryBefore: modelInventory,
+        modelInventoryAfterUninstall: modelInventory,
+        modelInventoryAfterFresh: modelInventory,
+        sentinelInventoryBefore: [...profileInventory, ...modelInventory],
+        sentinelInventoryAfterUninstall: [...profileInventory, ...modelInventory],
+        sentinelInventoryAfterFresh: [...profileInventory, ...modelInventory],
+        machineQuitObserved: true,
+        singletonReleased: true,
+        uninstallExitCode: 0,
+        uninstallResidue: [],
+        freshInstallExitCode: 0,
+        targetInstallerSha256: sha('a'),
+        targetReleaseBuildDigest: sha('d'),
+        targetGatewaySha256: sha('e'),
+        targetOwnerSha256: sha('f'),
+        targetMaintenanceGeneration: '8'.repeat(32),
+        passed: true,
+      }),
+    );
+    await writeFile(
+      join(directory, `windows-terminal-fault-candidate-${architecture}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        architecture,
+        classification: 'nonpromotable-acceptance-fault',
+        sha256: 'ef'.repeat(32),
+        sourceCommit: source('b'),
+        sourceTree: source('c'),
+      }),
+    );
   }
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const jwk = publicKey.export({ format: 'jwk' });
@@ -269,6 +336,10 @@ async function fixture() {
       machineIdentity: `machine-${architecture}`,
       preBootIdentity: 'boot-before',
       postBootIdentity: 'boot-after',
+      rebootRequestMethod: 'shutdown.exe',
+      rebootRequestDelaySeconds: 30,
+      rebootRequestAcceptedAt: '2026-01-01T00:00:00.000Z',
+      rebootRequestExitCode: 0,
       generationBefore: '1'.repeat(32),
       generationAfter: '2'.repeat(32),
       terminalGeneration: '3'.repeat(32),
@@ -332,29 +403,16 @@ describe('Windows promotion lifecycle evidence', () => {
       privateKeyPkcs8Base64: value.privateKey,
     });
     const records = created.payload.records as {
-      claims: {
-        kind: string;
-        action: string;
-        terminalCleanup?: {
-          acceptanceSetupSha256: string;
-          inspected: boolean;
-          scenarios: unknown[];
-          residue: unknown[];
-          registry: unknown[];
-        };
-      };
+      claims: { kind: string; localProvenance?: string };
     }[];
-    expect(
-      records
-        .filter(({ claims }) => claims.kind === 'fault')
-        .every(({ claims }) => claims.action === 'fault'),
-    ).toBe(true);
-    expect(records.find(({ claims }) => claims.kind === 'fault')?.claims.terminalCleanup).toEqual(
+    expect(records.find(({ claims }) => claims.kind === 'local-migration')?.claims).toEqual(
+      expect.objectContaining({ localProvenance: 'local-non-public' }),
+    );
+    expect(created.payload.releasePolicy).toEqual(
       expect.objectContaining({
-        acceptanceSetupSha256: 'ef'.repeat(32),
-        inspected: true,
-        residue: [],
-        registry: [],
+        version: '0.0.69',
+        mode: 'fresh-trust-root',
+        trustRootVersion: '0.0.69',
       }),
     );
     await expect(
@@ -367,8 +425,10 @@ describe('Windows promotion lifecycle evidence', () => {
       }),
     ).resolves.toMatchObject({ payload: { promotionClass: 'protected-release-acceptance' } });
 
-    const path = join(value.directory, 'windows-installer-success-x64.json');
-    await writeFile(path, JSON.stringify({ ...success('x64', 'repair'), exitCode: 1 }));
+    const path = join(value.directory, 'windows-local-migration-x64.json');
+    const migration = JSON.parse(await readFile(path, 'utf8')) as { targetInstallerSha256: string };
+    migration.targetInstallerSha256 = sha('9');
+    await writeFile(path, JSON.stringify(migration));
     await expect(
       verifyWindowsPromotionEvidence({
         path: value.output,
@@ -378,15 +438,18 @@ describe('Windows promotion lifecycle evidence', () => {
         publicKeyPath: value.publicKeyPath,
         rebootRunIds: value.rebootRunIds,
       }),
-    ).rejects.toThrow(/did not pass exact lifecycle policy/u);
+    ).rejects.toThrow(/local-uninstall-preserve-fresh evidence is invalid/u);
   });
 
-  it('rejects malformed terminal cleanup and fault topology before signing', async () => {
+  it('rejects malformed local preservation topology before signing', async () => {
     const value = await fixture();
-    const path = join(value.directory, 'windows-installer-fault-recovery-x64.json');
-    const invalidCleanup = fault('x64');
-    invalidCleanup.terminalCleanup.residue.push('leftover.exe');
-    await writeFile(path, JSON.stringify(invalidCleanup));
+    const path = join(value.directory, 'windows-local-migration-x64.json');
+    const migration = JSON.parse(await readFile(path, 'utf8')) as {
+      provenance: string;
+      profileInventoryAfterFresh: unknown[];
+    };
+    migration.provenance = 'public';
+    await writeFile(path, JSON.stringify(migration));
     await expect(
       createWindowsPromotionEvidence({
         ...value,
@@ -394,40 +457,23 @@ describe('Windows promotion lifecycle evidence', () => {
         workflowRunId: '123',
         privateKeyPkcs8Base64: value.privateKey,
       }),
-    ).rejects.toThrow(/terminal cleanup evidence is invalid/u);
-
-    const invalidFault = fault('x64');
-    delete (invalidFault.faults[0] as Partial<(typeof invalidFault.faults)[number]>).appPathExact;
-    await writeFile(path, JSON.stringify(invalidFault));
-    await expect(
-      createWindowsPromotionEvidence({
-        ...value,
-        repository: 'owner/repository',
-        workflowRunId: '123',
-        privateKeyPkcs8Base64: value.privateKey,
-      }),
-    ).rejects.toThrow(/unexpected schema/u);
-
-    const duplicateFault = fault('x64');
-    const [firstFault, secondFault] = duplicateFault.faults;
-    if (firstFault === undefined || secondFault === undefined)
-      throw new Error('Missing fault fixture');
-    firstFault.fault = secondFault.fault;
-    await writeFile(path, JSON.stringify(duplicateFault));
-    await expect(
-      createWindowsPromotionEvidence({
-        ...value,
-        repository: 'owner/repository',
-        workflowRunId: '123',
-        privateKeyPkcs8Base64: value.privateKey,
-      }),
-    ).rejects.toThrow(/fault phase inventory is invalid/u);
+    ).rejects.toThrow(/local-uninstall-preserve-fresh evidence is invalid/u);
   });
 
-  it('binds terminal cleanup and package identity into the signed architecture generation', async () => {
+  it('binds the exact nonpromotable fault hash into reboot evidence', async () => {
     const value = await fixture();
-    const path = join(value.directory, 'windows-installer-fault-recovery-x64.json');
-    await writeFile(path, JSON.stringify({ ...fault('x64'), candidateSha256: sha('9') }));
+    const path = join(value.directory, 'windows-terminal-fault-candidate-x64.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        architecture: 'x64',
+        classification: 'nonpromotable-acceptance-fault',
+        sha256: sha('9'),
+        sourceCommit: source('b'),
+        sourceTree: source('c'),
+      }),
+    );
     await expect(
       createWindowsPromotionEvidence({
         ...value,
@@ -435,17 +481,17 @@ describe('Windows promotion lifecycle evidence', () => {
         workflowRunId: '123',
         privateKeyPkcs8Base64: value.privateKey,
       }),
-    ).rejects.toThrow(/generation binding is invalid/u);
+    ).rejects.toThrow(/real reboot acceptance evidence is invalid/u);
   });
 
   it('rejects a signed receipt whose authenticated action differs from its lifecycle claim', async () => {
     const value = await fixture();
-    const path = join(value.directory, 'windows-installer-success-x64.json');
+    const path = join(value.directory, 'windows-installer-success-fresh-x64.json');
     await writeFile(
       path,
       JSON.stringify({
-        ...success('x64', 'repair'),
-        nativeAuthenticationReceipt: authenticationReceipt('install'),
+        ...success('x64', 'fresh'),
+        nativeAuthenticationReceipt: authenticationReceipt('repair'),
       }),
     );
     await expect(

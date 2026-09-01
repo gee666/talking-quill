@@ -94,7 +94,7 @@ const EXIT_IDENTITY_MISMATCH: i32 = 78;
 const EXIT_LAUNCH_FAILED: i32 = 79;
 const EXIT_INSTALLER_STILL_RUNNING: i32 = 80;
 const INSTALLER_SUPERVISION_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
-const RELEASED_NO_RECORD_PREDECESSOR: &str = "0.0.67";
+const PUBLIC_UPDATE_TRUST_ROOT: &str = "0.0.69";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -349,7 +349,7 @@ pub fn run_recovery_launcher_argument(argument: &std::ffi::OsStr) -> i32 {
 fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
     if argument.starts_with("--windows-update-bootstrap-v2=") {
-        authorize_released_no_record_bootstrap(argument)?;
+        authorize_public_update_bootstrap(argument)?;
     }
     if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
         if is_elevated() {
@@ -443,7 +443,7 @@ fn run_recovery_launcher_argument_inner(argument: &std::ffi::OsStr) -> Result<u3
 fn run_from_argument_inner(argument: &std::ffi::OsStr) -> Result<u32, i32> {
     let argument = argument.to_str().ok_or(EXIT_INVALID_REQUEST)?;
     if argument.starts_with("--windows-update-bootstrap-v2=") {
-        authorize_released_no_record_bootstrap(argument)?;
+        authorize_public_update_bootstrap(argument)?;
     }
     if let Some(generation) = argument.strip_prefix("--windows-update-relaunch-v1=") {
         if is_elevated() {
@@ -1363,17 +1363,29 @@ fn native_setup_transaction_present() -> Result<bool, i32> {
     }
 }
 
-fn authorize_released_no_record_bootstrap(argument: &str) -> Result<(), i32> {
+fn authorize_public_update_bootstrap(argument: &str) -> Result<(), i32> {
     let encoded = argument
         .strip_prefix("--windows-update-bootstrap-v2=")
         .ok_or(EXIT_INVALID_REQUEST)?;
     let request = parse_and_authorize_request(encoded)?;
-    if request.candidate.predecessor.version != RELEASED_NO_RECORD_PREDECESSOR
-        || installed_manifest_version()? != RELEASED_NO_RECORD_PREDECESSOR
+    let installed = installed_manifest_version()?;
+    if request.candidate.predecessor.version != installed
+        || !version_at_least(&installed, PUBLIC_UPDATE_TRUST_ROOT)
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     Ok(())
+}
+
+fn version_at_least(value: &str, minimum: &str) -> bool {
+    let parse = |version: &str| -> Option<(u64, u64, u64)> {
+        let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
+        let result = (parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(result)
+    };
+    parse(value)
+        .zip(parse(minimum))
+        .is_some_and(|(value, minimum)| value >= minimum)
 }
 
 fn valid_version(value: &str) -> bool {

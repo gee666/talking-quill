@@ -19,8 +19,18 @@ export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionE
 
 export interface WindowsPromotionEvidenceEnvelope {
   readonly payload: {
-    readonly schemaVersion: 2;
+    readonly schemaVersion: 3;
     readonly promotionClass: 'protected-release-acceptance';
+    readonly releasePolicy: {
+      readonly version: '0.0.69';
+      readonly mode: 'fresh-trust-root';
+      readonly trustRootVersion: '0.0.69';
+      readonly localMigration: {
+        readonly sourceVersion: '0.0.67';
+        readonly provenance: 'local-non-public';
+        readonly mode: 'local-uninstall-preserve-fresh';
+      };
+    };
     readonly repository: string;
     readonly workflowRunId: string;
     readonly sourceCommit: string;

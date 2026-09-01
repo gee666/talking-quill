@@ -167,11 +167,10 @@ describe('Windows elevated updater launch', () => {
     expect(setup).not.toContain('retire_fixed_reinstall_deletion_ownership');
     expect(setup).not.toContain('retain_nonfixed_pending_pairs');
     expect(setup).toContain('Talking Quill Maintenance-{maintenance_generation}.exe');
-    expect(setup).toContain('LEGACY_FIXED_MAINTENANCE_VERSION: &str = "0.0.67"');
-    expect(setup).toContain('.join("Talking Quill Maintenance.exe")');
-    expect(setup).toContain('authenticate_legacy_fixed_maintenance(&package, &paths)?');
-    expect(setup).toContain('Legacy fixed maintenance image identity is invalid.');
-    expect(setup).toContain('retire_legacy_fixed_maintenance(&paths)?');
+    expect(setup).not.toContain('LEGACY_FIXED_MAINTENANCE_VERSION');
+    expect(setup).not.toContain('authenticate_legacy_fixed_maintenance');
+    expect(setup).not.toContain('retire_legacy_fixed_maintenance');
+    expect(setup).not.toContain('Legacy fixed maintenance predecessor policy');
     expect(setup).toContain('talking-quill-update-recovery-launcher-{maintenance_generation}.exe');
     const maintenanceRetirement = setup.slice(
       setup.indexOf('fn wait_for_terminal_service_retirement'),
@@ -241,7 +240,10 @@ describe('Windows elevated updater launch', () => {
     expect(helper).toContain('record.recovery_generation');
     expect(helper).toContain('schema_version: 3');
     expect(helper).toContain('record.schema_version != 3');
-    expect(helper).toContain('RELEASED_NO_RECORD_PREDECESSOR: &str = "0.0.67"');
+    expect(helper).toContain('PUBLIC_UPDATE_TRUST_ROOT: &str = "0.0.69"');
+    expect(helper).toContain('authorize_public_update_bootstrap');
+    expect(helper).toContain('version_at_least(&installed, PUBLIC_UPDATE_TRUST_ROOT)');
+    expect(helper).not.toContain('RELEASED_NO_RECORD_PREDECESSOR');
     expect(helper).not.toContain('migrate_legacy_relaunch');
     expect(helper).toContain('validate_acquired_machine_lock_state(&path)?');
     expect(helper).toContain('terminal_uninstall_record()?');

@@ -141,8 +141,8 @@ describe('Windows gateway and owner lifecycle contract', () => {
     expect(updater).toContain(
       'Automatic update prompts are paused and the recovery generation is retained.',
     );
-    expect(workflow).toContain('Persistent visible recovery command is missing or mismatched.');
-    expect(workflow).toContain('Successful recovery retained its persistent retry command.');
+    expect(workflow).not.toContain('--windows-update-bootstrap-v2=');
+    expect(workflow).toContain('TALKING_QUILL_PACKAGE_MODE: fresh');
     expect(workflow).toContain(
       'Installed maintenance recovery entry did not survive interrupted uninstall.',
     );

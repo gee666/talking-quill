@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -422,12 +422,9 @@ fn run_inner() -> Result<i32> {
         let action = if relocated {
             let original = process_image(parent_process_id()?)?;
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
-            let legacy_maintenance = legacy_fixed_maintenance_path(&controller_paths)?;
             let expected =
                 if canonical(&original)? == canonical(&controller_paths.maintenance_uninstaller)? {
                     controller_paths.maintenance_uninstaller.clone()
-                } else if canonical(&original).ok() == canonical(&legacy_maintenance).ok() {
-                    legacy_maintenance
                 } else if canonical(&original)? == canonical(&installed)? {
                     installed
                 } else if is_uninstall_finalizer(&original)? {
@@ -439,17 +436,11 @@ fn run_inner() -> Result<i32> {
                         "Relocated uninstall source is not an authenticated maintenance image.",
                     ));
                 };
-            let maintenance_authority =
-                if expected == legacy_fixed_maintenance_path(&controller_paths)? {
-                    &expected
-                } else {
-                    &controller_paths.maintenance_uninstaller
-                };
             relocated_identity_guard = Some(validate_relocated_uninstall_image(
                 &current,
                 &original,
                 &expected,
-                maintenance_authority,
+                &controller_paths.maintenance_uninstaller,
             )?);
             let (action, server, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(&expected))?;
@@ -1031,9 +1022,6 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         false
     };
     let system = WindowsNativeSystem;
-    if !finishing_existing_uninstall && authenticate_legacy_fixed_maintenance(&package, &paths)? {
-        retire_legacy_fixed_maintenance(&paths)?;
-    }
     // A relocated controller must stop mapping the installed image before finish-uninstall
     // recovery can delete it. The existing protected journal is sufficient durable authority.
     if finishing_existing_uninstall
@@ -1052,12 +1040,6 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     recover_terminal_recovery_tombstones(&paths)?;
     if finishing_existing_uninstall {
         complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;
-        if path_present(&legacy_fixed_maintenance_path(&paths)?)? {
-            return Err(fail(
-                EXIT_REJECTED,
-                "Legacy fixed maintenance collision survived terminal recovery.",
-            ));
-        }
         if requested_action == Some(Action::Uninstall) {
             return Ok(0);
         }
@@ -3378,13 +3360,8 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         .ok()
         .zip(canonical(&paths.maintenance_uninstaller).ok())
         .is_some_and(|(current, maintenance)| current == maintenance);
-    let legacy_maintenance = canonical(current)
-        .ok()
-        .zip(canonical(&legacy_fixed_maintenance_path(paths)?).ok())
-        .is_some_and(|(current, legacy)| current == legacy);
     let finalizer = is_uninstall_finalizer(current)?;
     if maintenance
-        || legacy_maintenance
         || finalizer
         || current
             .file_name()
@@ -3393,11 +3370,7 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         let parent = current
             .parent()
             .ok_or_else(|| fail(EXIT_REJECTED, "Invalid installed setup path."))?;
-        if !maintenance
-            && !legacy_maintenance
-            && !finalizer
-            && canonical(parent)? != canonical(&paths.install)?
-        {
+        if !maintenance && !finalizer && canonical(parent)? != canonical(&paths.install)? {
             return Err(fail(
                 EXIT_REJECTED,
                 "Uninstall image is outside the installed tree.",
@@ -4163,172 +4136,6 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
     } else {
         recover_with_adapter(paths, &InjectedNativeSystem)
     }
-}
-
-const LEGACY_FIXED_MAINTENANCE_VERSION: &str = "0.0.67";
-
-fn legacy_fixed_maintenance_path(paths: &Paths) -> Result<PathBuf> {
-    Ok(paths
-        .maintenance_uninstaller
-        .parent()
-        .ok_or_else(|| fail(EXIT_REJECTED, "Maintenance path has no parent."))?
-        .join("Talking Quill Maintenance.exe"))
-}
-
-fn plain_pe_image(path: &Path) -> Result<bool> {
-    let mut file = File::open(path).map_err(io_failure)?;
-    let mut dos = [0_u8; 64];
-    file.read_exact(&mut dos).map_err(io_failure)?;
-    if &dos[..2] != b"MZ" {
-        return Ok(false);
-    }
-    let offset = u32::from_le_bytes(dos[60..64].try_into().unwrap()) as u64;
-    if !(64..=16 * 1024 * 1024).contains(&offset) {
-        return Ok(false);
-    }
-    file.seek(SeekFrom::Start(offset)).map_err(io_failure)?;
-    let mut signature = [0_u8; 4];
-    file.read_exact(&mut signature).map_err(io_failure)?;
-    Ok(signature == *b"PE\0\0")
-}
-
-fn authenticate_legacy_fixed_maintenance(package: &ParsedPackage, paths: &Paths) -> Result<bool> {
-    let legacy = legacy_fixed_maintenance_path(paths)?;
-    if !path_present(&legacy)? {
-        return Ok(false);
-    }
-    assert_plain_file(&legacy)?;
-    let installed_setup = paths.install.join("Uninstall Talking Quill.exe");
-    let installed_manifest = paths
-        .install
-        .join("resources/keyboard-owner-release-v1.json");
-    assert_plain_file(&installed_setup)?;
-    assert_plain_file(&installed_manifest)?;
-    if !plain_pe_image(&legacy)? || file_hash(&legacy)? != file_hash(&installed_setup)? {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy fixed maintenance image identity is invalid.",
-        ));
-    }
-    let installed: serde_json::Value =
-        serde_json::from_slice(&fs::read(&installed_manifest).map_err(io_failure)?)
-            .map_err(|_| fail(EXIT_REJECTED, "Legacy installed identity is invalid."))?;
-    let expected = if package.manifest.version == LEGACY_FIXED_MAINTENANCE_VERSION {
-        Some((
-            package.manifest.target.release_build_digest.as_str(),
-            package.manifest.target.gateway_sha256.as_str(),
-            package.manifest.target.owner_sha256.as_str(),
-        ))
-    } else {
-        package
-            .manifest
-            .predecessor
-            .as_ref()
-            .filter(|value| value.version == LEGACY_FIXED_MAINTENANCE_VERSION)
-            .map(|value| {
-                (
-                    value.release_build_digest.as_str(),
-                    value.gateway_sha256.as_str(),
-                    value.owner_sha256.as_str(),
-                )
-            })
-    };
-    let role = |name: &str| {
-        installed
-            .get("roles")
-            .and_then(|value| value.as_array())
-            .and_then(|roles| {
-                roles
-                    .iter()
-                    .find(|role| role.get("role").and_then(|value| value.as_str()) == Some(name))
-            })
-            .and_then(|role| role.get("sha256"))
-            .and_then(|value| value.as_str())
-    };
-    let Some((release_digest, gateway, owner)) = expected else {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy fixed maintenance predecessor policy is invalid.",
-        ));
-    };
-    if installed.get("version").and_then(|value| value.as_str())
-        != Some(LEGACY_FIXED_MAINTENANCE_VERSION)
-        || installed
-            .get("architecture")
-            .and_then(|value| value.as_str())
-            != Some(package.manifest.architecture.as_str())
-        || installed
-            .get("releaseBuildDigest")
-            .and_then(|value| value.as_str())
-            != Some(release_digest)
-        || role("gateway") != Some(gateway)
-        || role("owner") != Some(owner)
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy fixed maintenance product identity is invalid.",
-        ));
-    }
-    let registered = registered_uninstall_executable()?.ok_or_else(|| {
-        fail(
-            EXIT_REJECTED,
-            "Legacy fixed maintenance registration is missing.",
-        )
-    })?;
-    let registered_canonical = canonical(&registered)?;
-    let registration_is_legacy = registered_canonical == canonical(&legacy)?;
-    let registration_is_generated = path_present(&paths.maintenance_uninstaller)?
-        && registered_canonical == canonical(&paths.maintenance_uninstaller)?
-        && file_hash(&paths.maintenance_uninstaller)? == file_hash(&installed_setup)?;
-    if !registration_is_legacy && !registration_is_generated {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy fixed maintenance registration is invalid.",
-        ));
-    }
-    let mut key = ptr::null_mut();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(UNINSTALL_KEY)).as_ptr(),
-            0,
-            KEY_READ,
-            &mut key,
-        )
-    } != 0
-    {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy uninstall registration is missing.",
-        ));
-    }
-    let quiet = read_registry_value(key, "QuietUninstallString", 4096)?;
-    unsafe { RegCloseKey(key) };
-    if quiet.as_deref() != Some(format!("\"{}\" /S", registered.display()).as_str()) {
-        return Err(fail(
-            EXIT_REJECTED,
-            "Legacy quiet uninstall registration is invalid.",
-        ));
-    }
-    Ok(true)
-}
-
-fn retire_legacy_fixed_maintenance(paths: &Paths) -> Result<()> {
-    let legacy = legacy_fixed_maintenance_path(paths)?;
-    ensure_maintenance_uninstaller(paths)?;
-    register_uninstall_executable(&paths.maintenance_uninstaller)?;
-    fs::remove_file(&legacy).map_err(io_failure)?;
-    if path_present(&legacy)? {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Legacy fixed maintenance image retirement did not commit.",
-        ));
-    }
-    flush_setup_directory(
-        legacy
-            .parent()
-            .ok_or_else(|| fail(EXIT_REJECTED, "Legacy maintenance path has no parent."))?,
-    )
 }
 
 fn maintenance_generation_from_name(name: &str) -> Option<&str> {

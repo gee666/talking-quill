@@ -4,12 +4,20 @@
   "productName": "Talking Quill",
   "artifactPrefix": "Talking-Quill",
   "windowsRecoveryLineage": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "currentRelaunchRecordSchema": 3,
     "unsupportedUnpublishedRelaunchRecordSchemas": [1, 2],
+    "trustRootVersion": "0.0.69",
+    "localMigrations": [
+      {
+        "sourceVersion": "0.0.67",
+        "provenance": "local-non-public",
+        "mode": "local-uninstall-preserve-fresh",
+        "targetVersion": "0.0.69"
+      }
+    ],
     "publishedArtifacts": [
-      { "version": "0.0.67", "relaunchRecordSchema": null },
-      { "version": "0.0.69", "relaunchRecordSchema": 3 }
+      { "version": "0.0.69", "predecessorVersion": null, "relaunchRecordSchema": 3 }
     ]
   },
   "releaseTagSignerFingerprints": [],

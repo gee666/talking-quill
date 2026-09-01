@@ -1,23 +1,35 @@
 export interface WindowsRecoveryArtifact {
   version: string;
-  relaunchRecordSchema: number | null;
+  predecessorVersion: string | null;
+  relaunchRecordSchema: number;
+}
+
+export interface WindowsLocalMigrationPolicy {
+  sourceVersion: string;
+  provenance: string;
+  mode: string;
+  targetVersion: string;
 }
 
 export interface WindowsRecoveryLineage {
   schemaVersion: number;
   currentRelaunchRecordSchema: number;
   unsupportedUnpublishedRelaunchRecordSchemas: number[];
+  trustRootVersion: string;
+  localMigrations: WindowsLocalMigrationPolicy[];
   publishedArtifacts: WindowsRecoveryArtifact[];
 }
 
-export function verifyWindowsRecoveryLineage(lineage: WindowsRecoveryLineage): {
-  baselineVersion: string;
+export interface VerifiedWindowsRecoveryLineage {
+  trustRootVersion: string;
+  localMigrationSourceVersion: string;
   schemaVersion: number;
   publishedArtifacts: number;
-};
+}
 
-export function verifyWindowsRecoveryLineageFile(configPath: string): Promise<{
-  baselineVersion: string;
-  schemaVersion: number;
-  publishedArtifacts: number;
-}>;
+export function verifyWindowsRecoveryLineage(
+  lineage: WindowsRecoveryLineage,
+): VerifiedWindowsRecoveryLineage;
+export function verifyWindowsRecoveryLineageFile(
+  configPath: string,
+): Promise<VerifiedWindowsRecoveryLineage>;

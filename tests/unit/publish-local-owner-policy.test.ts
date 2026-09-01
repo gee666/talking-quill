@@ -10,14 +10,15 @@ describe('Windows native publication policy', () => {
     expect(workflow).toContain('windows-native-release-candidates');
     expect(workflow).toContain('sha256sum --check SHA256SUMS.txt');
     expect(workflow).toContain('Talking-Quill-$version-win-$arch-setup.exe');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe');
+    expect(workflow).not.toContain('Talking-Quill-$version-win-$arch-update.exe');
     expect(workflow).toContain('for arch in x64 arm64');
     expect(workflow).not.toContain('mac-x64');
-    expect(workflow).toContain('release-identity-win-${arch}.json');
     expect(workflow).toContain('provenance-win-$arch-setup.json');
-    expect(workflow).toContain('provenance-win-$arch-update.json');
-    expect(workflow).toContain('talkingQuillRelease:');
-    expect(workflow).toContain('gateway,owner');
+    expect(workflow).toContain('windows-local-migration-$arch.json');
+    expect(workflow).toContain('windows-terminal-fault-candidate-$arch.json');
+    expect(workflow).toContain(
+      'Fresh trust-root publication contains forbidden updater lineage assets.',
+    );
     expect(workflow).toContain('--draft');
     expect(draftVerifier).toContain('manifest.promotable !== true');
     expect(workflow).not.toMatch(/^\s+--prerelease\s*$/mu);
@@ -79,10 +80,8 @@ describe('Windows native publication policy', () => {
     expect(producer).toContain('for arch in x64 arm64');
     expect(workflow).toContain('for arch in x64 arm64');
     for (const name of [
-      'latest-$arch.yml',
-      'release-identity-win-$arch.json',
       'provenance-win-$arch-setup.json',
-      'provenance-win-$arch-update.json',
+      'windows-local-migration-$arch.json',
       'THIRD_PARTY_NOTICES.txt',
       'release-manifest.json',
       'SHA256SUMS.txt',
@@ -93,8 +92,8 @@ describe('Windows native publication policy', () => {
     }
     expect(draftVerifier).toContain('...manifest.assets.map((asset) => asset.name)');
     expect(workflow).toContain('Talking-Quill-$version-win-$arch-setup.exe');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe');
-    expect(workflow).toContain('Talking-Quill-$version-win-$arch-update.exe.blockmap');
+    expect(workflow).not.toContain('Talking-Quill-$version-win-$arch-update.exe');
+    expect(workflow).not.toContain('Talking-Quill-$version-win-$arch-update.exe.blockmap');
     expect(workflow).toContain('SHA256SUMS.txt');
     expect(draftVerifier).toContain('SHA256SUMS.txt');
   });

@@ -97,23 +97,17 @@ jobs:
           node scripts/windows-promotion-evidence.mjs --evidence release-artifacts/windows-promotion-lifecycle-evidence-v1.json --directory release-artifacts --repository "$REPOSITORY" --run-id "$RUN_ID" --public-key build/windows-promotion-public-key.sec1
           for arch in x64 arm64; do
             test -f "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe"
-            test -f "release-artifacts/Talking-Quill-$version-win-$arch-update.exe"
-            test -f "release-artifacts/Talking-Quill-$version-win-$arch-update.exe.blockmap"
-            test -f "release-artifacts/latest-$arch.yml"
-            test -f "release-artifacts/release-identity-win-$arch.json"
             test -f "release-artifacts/provenance-win-$arch-setup.json"
-            test -f "release-artifacts/provenance-win-$arch-update.json"
             test -f "release-artifacts/windows-installer-ui-smoke-$arch.json"
             test -f "release-artifacts/windows-installer-success-fresh-$arch.json"
-            test -f "release-artifacts/windows-installer-success-$arch.json"
-            test -f "release-artifacts/windows-installer-fault-recovery-$arch.json"
+            test -f "release-artifacts/windows-local-migration-$arch.json"
+            test -f "release-artifacts/windows-terminal-fault-candidate-$arch.json"
+            test -f "release-artifacts/windows-reboot-acceptance-$arch.json"
             node scripts/windows-installer-success-evidence.mjs --evidence "release-artifacts/windows-installer-success-fresh-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch" --operation fresh
-            node scripts/windows-installer-success-evidence.mjs --evidence "release-artifacts/windows-installer-success-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-update.exe" --provenance "release-artifacts/provenance-win-$arch-update.json" --arch "$arch" --operation repair
             ARCH=$arch node -e 'const arch=process.env.ARCH,value=require(`./release-artifacts/windows-installer-success-fresh-${arch}.json`); if (!value.productionInterruptions?.fresh || !value.productionInterruptions?.removeFreshRecovery || !value.productionInterruptions?.uninstall || !value.productionInterruptions?.finishUninstallRecovery) process.exit(1)'
-            ARCH=$arch node -e 'const arch=process.env.ARCH, success=require(`./release-artifacts/windows-installer-success-${arch}.json`), fault=require(`./release-artifacts/windows-installer-fault-recovery-${arch}.json`); if (!success.passed || !fault.productionUpdateInterrupted || fault.terminalCleanup?.inspected !== true || fault.terminalCleanup.residue?.length !== 0 || fault.terminalCleanup.registry?.length !== 0 || fault.candidateSha256 !== success.installerSha256 || fault.sourceCommit !== success.sourceCommit || fault.sourceTree !== success.sourceTree || fault.releaseBuildDigest !== success.targetReleaseBuildDigest || success.operation !== "repair" || success.packageMode !== "update" || success.architecture !== arch || !fault.passed || fault.architecture !== arch || !Array.isArray(fault.faults) || [...new Set(fault.faults.map(x => x.fault.replace(/^.*repair-|\.exe$/g, "")))].sort().join(",") !== ["committed","legacyRetired","legacyRetiring","predecessorMoved","prepared","published","publishedBeforePersist","publishing","registered","staged"].sort().join(",") || fault.faults.some(x => !x.inspectedBeforeRepair || !x.productionRecoveryInterrupted || !x.appPathExact || !x.quietUninstallExact || !x.legacyServiceAbsent || !x.legacyTaskAbsent || x.crashExitCode !== 197 || x.recoveryExitCode !== 78 || x.recoveredReleaseBuildDigest !== fault.releaseBuildDigest)) process.exit(1)'
+            ARCH=$arch node -e 'const arch=process.env.ARCH,m=require(`./release-artifacts/windows-local-migration-${arch}.json`),f=require(`./release-artifacts/windows-terminal-fault-candidate-${arch}.json`); if(m.mode!=="local-uninstall-preserve-fresh"||m.provenance!=="local-non-public"||m.sourceVersion!=="0.0.67"||m.targetVersion!=="0.0.69"||!m.passed||f.classification!=="nonpromotable-acceptance-fault")process.exit(1)'
             node scripts/windows-installer-ui-evidence.mjs --evidence "release-artifacts/windows-installer-ui-smoke-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch"
-            grep -q 'talkingQuillRelease:' "release-artifacts/latest-$arch.yml"
-            ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
+            if find release-artifacts -maxdepth 1 -type f \( -name '*-update.exe' -o -name 'latest-*.yml' -o -name 'release-identity-win-*.json' \) | grep -q .; then echo 'Fresh trust-root publication contains forbidden updater lineage assets.' >&2; exit 1; fi
           done
           test -f release-artifacts/THIRD_PARTY_NOTICES.txt
           test -f release-artifacts/release-publication-manifest-v1.json

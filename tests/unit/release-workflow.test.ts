@@ -8,16 +8,8 @@ const realRebootWorkflow = readFileSync(
   'utf8',
 );
 const stageScript = readFileSync('scripts/stage-unsigned-release.mjs', 'utf8');
-const approvedActions = new Set([
-  'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
-  'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
-  'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f',
-  'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
-  'actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be',
-  'pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320',
-  'dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b',
-  'taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed',
-]);
+const assembleScript = readFileSync('scripts/assemble-release.mjs', 'utf8');
+const promotionScript = readFileSync('scripts/windows-promotion-evidence.mjs', 'utf8');
 
 function section(start: string, end?: string): string {
   const startIndex = workflow.indexOf(`\n  ${start}:`);
@@ -28,237 +20,102 @@ function section(start: string, end?: string): string {
 }
 
 describe('Windows native release workflow', () => {
-  it('runs the complete validation, audit, formatting, clippy, security, and source-independence gates', () => {
+  it('runs validation and builds only the 0.0.69 fresh trust-root package', () => {
     const validate = section('validate', 'package');
-    expect(validate).toContain('fetch-depth: 0');
-    expect(validate).toContain('release-source-preflight.mjs');
-    expect(validate).toContain('pnpm rust:fetch-targets');
-    expect(validate).toContain('pnpm validate:unsigned-release');
-    expect(validate).toContain('cargo-audit@0.22.2');
-    expect(validate).toContain('pnpm security:gate');
-  });
-  it('builds architecture-specific x64 and ARM64 native setup candidates', () => {
     const packageJob = section('package', 'smoke');
+    expect(validate).toContain('pnpm validate:unsigned-release');
+    expect(validate).toContain('pnpm security:gate');
     expect(packageJob).toContain('package_script: package:win');
     expect(packageJob).toContain('package_script: package:win:arm64');
-    expect(packageJob).toContain('TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}');
-    expect(workflow).not.toContain('predecessor_manifest');
-    const smokeJob = section('smoke', 'lifecycle');
-    expect(smokeJob).toContain('runner: windows-latest');
-    expect(smokeJob).toContain('runner: windows-11-arm');
-    expect(workflow).toContain('predecessor_x64_gateway_sha256');
-    expect(workflow).toContain('predecessor_arm64_gateway_sha256');
-    expect(workflow).toContain('predecessor_x64_update_public_key_sha256');
-    expect(workflow).toContain('predecessor_arm64_update_public_key_sha256');
-    expect(workflow).toContain('TALKING_QUILL_PREDECESSOR_UPDATE_PUBLIC_KEY_SHA256');
-    expect(workflow).toContain('environment: release-signing');
-    const signingSecret = 'TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64';
-    expect(
-      packageJob.match(/secrets\.TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64/gu),
-    ).toHaveLength(1);
-    const signingStep = packageJob.indexOf(
-      'name: Authorize updater metadata and stage exact payload',
-    );
-    expect(signingStep).toBeGreaterThan(packageJob.indexOf('${{ matrix.package_script }}'));
-    expect(packageJob.indexOf(signingSecret, signingStep)).toBeGreaterThan(signingStep);
-    const jobEnvironment = packageJob.slice(
-      packageJob.indexOf('    env:'),
-      packageJob.indexOf('    steps:'),
-    );
-    expect(jobEnvironment).not.toContain(signingSecret);
-    expect(workflow).not.toContain('secrets.TALKING_QUILL_WINDOWS_UPDATE_PUBLIC_KEY_SEC1');
-    expect(workflow).not.toContain('TALKING_QUILL_WINDOWS_UPDATE_BRIDGE_PUBLIC_KEY_SEC1');
-    expect(workflow).not.toContain('New-Service');
-    expect(workflow).not.toContain('sc.exe create');
-    expect(workflow).not.toMatch(/gh release (?:create|edit|upload)/u);
-    expect(stageScript).not.toContain("platform === 'win' && arch !== 'x64'");
-    expect(stageScript).toContain("!['x64', 'arm64'].includes(arch)");
+    expect(packageJob).toContain('TALKING_QUILL_PACKAGE_MODE: fresh');
+    expect(packageJob).toContain("TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1'");
+    expect(packageJob).not.toContain('Build explicit predecessor-bound update');
+    expect(workflow).not.toContain('predecessor_x64_');
+    expect(workflow).not.toContain('predecessor_arm64_');
+    expect(workflow).not.toContain('PREDECESSOR_INSTALLER_URL');
+    expect(stageScript).toContain('windowsFreshTrustRoot');
+    expect(assembleScript).toContain('freshTrustRoot');
+    expect(assembleScript).toContain('fresh trust-root provenance identity mismatch');
+    expect(packageJob).not.toContain('latest-${{ matrix.arch }}.yml');
+    expect(packageJob).not.toContain('release-identity-win-${{ matrix.arch }}.json');
   });
 
-  it('stages and uploads the bound installer before lifecycle and assembly', () => {
-    const packageJob = section('package', 'smoke');
-    const smokeJob = section('smoke', 'lifecycle');
-    const cleanTree = packageJob.indexOf('git status --porcelain --untracked-files=normal');
-    const dependencyInstall = packageJob.indexOf('pnpm install --frozen-lockfile');
-    expect(cleanTree).toBeGreaterThan(-1);
-    expect(dependencyInstall).toBeGreaterThan(cleanTree);
-    const packageCommand = packageJob.indexOf('package:win');
-    const smokeCommand = smokeJob.indexOf('run-windows-installer-ui-smoke.mjs');
-    const stageCommand = packageJob.indexOf('stage-unsigned-release.mjs win ${{ matrix.arch }}');
-    const assembleCommand = packageJob.indexOf('node scripts/assemble-release.mjs');
-    const immediateUpload = packageJob.indexOf(
-      'name: Upload provenance-bound exact native setup smoke input',
+  it('uses an actual same-repository local baseline artifact and proves preservation', () => {
+    const migration = section('migration-lifecycle', 'fresh-lifecycle');
+    expect(migration).toContain('environment: windows-local-migration-trust');
+    expect(migration).toContain('TALKING_QUILL_LOCAL_0067_X64_BASELINE_RUN_ID');
+    expect(migration).toContain('TALKING_QUILL_LOCAL_0067_ARM64_BASELINE_RUN_ID');
+    expect(migration).toContain(
+      "gh run download $env:BASELINE_RUN_ID --repo '${{ github.repository }}'",
     );
-    expect(packageCommand).toBeGreaterThan(-1);
-    expect(packageJob).not.toContain('run-windows-installer-ui-smoke.mjs');
-    expect(stageCommand).toBeGreaterThan(packageCommand);
-    expect(assembleCommand).toBeGreaterThan(stageCommand);
-    expect(smokeCommand).toBeGreaterThan(-1);
-    expect(immediateUpload).toBeGreaterThan(assembleCommand);
-    expect(packageJob).toContain('tmp/release-upload/latest-${{ matrix.arch }}.yml');
-    expect(packageJob).toContain('tmp/release-upload/release-identity-win-${{ matrix.arch }}.json');
-    expect(packageJob).toContain('tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json');
-    expect(packageJob).toContain(
-      'tmp/release-upload/provenance-win-${{ matrix.arch }}-update.json',
+    expect(migration).toContain(
+      "$run.path -cne '.github/workflows/windows-local-0067-baseline.yml'",
     );
-    expect(packageJob).toContain('TALKING_QUILL_PACKAGE_MODE=fresh');
-    expect(packageJob).toContain('Build explicit predecessor-bound update');
-    for (const phase of [
-      'staged',
-      'prepared',
-      'predecessorMoved',
-      'publishing',
-      'publishedBeforePersist',
-      'published',
-      'registered',
-      'committed',
-      'legacyRetiring',
-      'legacyRetired',
-    ])
-      expect(packageJob).toContain(phase);
-    expect(packageJob).toContain('tmp/release-upload/release-manifest.json');
-    expect(readFileSync('scripts/assemble-release.mjs', 'utf8')).toContain('promotable: true');
-    expect(stageScript).toContain("resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt')");
-    expect(packageJob).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
-    expect(packageJob).not.toContain('tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json');
-    expect(smokeJob).toContain('needs: [validate, package]');
-    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
-    expect(smokeJob).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
-    expect(smokeJob).toContain('windows-installer-ui-evidence.mjs');
-    expect(smokeJob.indexOf('actions/download-artifact')).toBeLessThan(smokeCommand);
-    expect(smokeCommand).toBeLessThan(smokeJob.indexOf('actions/upload-artifact'));
-    const lifecycle = section('lifecycle', 'assemble');
-    expect(lifecycle).toContain(
-      'windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked',
-    );
-    expect(lifecycle).toContain('needs: [validate, package, smoke]');
-    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-exact-native-setup-input');
-    expect(lifecycle).toContain('name: windows-${{ matrix.arch }}-native-ui-smoke-evidence');
-    const evidenceValidation = lifecycle.indexOf('windows-installer-ui-evidence.mjs');
-    const predecessorInstall = lifecycle.indexOf('Start-Process -FilePath $predecessor');
-    expect(evidenceValidation).toBeGreaterThan(-1);
-    expect(predecessorInstall).toBeGreaterThan(evidenceValidation);
-    expect(lifecycle).toContain('Start-Process -FilePath $predecessor');
-    expect(lifecycle).toContain('PREDECESSOR_INSTALLER_SHA256');
-    expect(lifecycle).toContain('--windows-update-bootstrap-v2=');
-    expect(lifecycle).toContain('Start-Process -FilePath $helper');
-    expect(lifecycle).toContain('--mode installed --root');
-    expect(lifecycle).toContain('Talking Quill Maintenance');
-    expect(lifecycle).toContain('QuietUninstallString');
-    expect(lifecycle).toContain('Synchronous native setup uninstall failed');
-    expect(lifecycle).toContain('Recovery was not terminal before repair');
-    expect(lifecycle).toContain('Set-StrictMode -Version Latest');
-    expect(lifecycle.match(/Set-StrictMode -Version Latest/gu)).toHaveLength(2);
-    expect(lifecycle.match(/\$ErrorActionPreference = 'Stop'/gu)).toHaveLength(2);
-    expect(lifecycle.match(/\$PSNativeCommandUseErrorActionPreference = \$true/gu)).toHaveLength(2);
-    expect(lifecycle).toContain(
-      'Get-CimInstance Win32_Service -Filter "Name=\'TalkingQuillTerminalCleanup-$terminalGeneration\'"',
-    );
-    expect(lifecycle).toContain("Get-Service -Name 'TalkingQuillTerminalCleanup-*'");
-    expect(lifecycle).not.toContain('!Talking Quill Terminal Cleanup');
-    expect(lifecycle).toContain('$PSNativeCommandUseErrorActionPreference = $false');
-    expect(lifecycle).toContain('$taskQueryExit -notin @(0, 1)');
-    for (const terminalFault of [
-      'pre-CreateService',
-      'post-service-pre-record',
-      'post-record-pre-start',
-      'failure-action-restart',
-      'service-stopped-pre-DeleteService',
-      'post-delete-pre-image-removal',
-      'pre-maintenance-deletion-ownership',
-      'post-maintenance-deletion-ownership',
-      'post-final-launcher-ownership',
-      'post-uninstall-unregister',
-      'post-journal-removal',
-      'post-root-tombstone-rename',
-      'post-tombstone-content-removal',
-      'post-tombstone-record-removal',
-      'post-tombstone-marker-removal',
-      'post-tombstone-removal',
-      'post-maintenance-posix-delete',
-      'post-final-deletion-ownership',
-      'post-final-launcher-posix-delete',
-      'pre-machine-relaunch-owner-clear',
-      'post-machine-relaunch-owner-clear',
-      'post-owner-clear-posix-cleanup',
-    ]) {
-      expect(lifecycle).toContain(`'${terminalFault}'`);
-    }
-    expect(lifecycle).toContain('PendingFileRenameOperations');
-    expect(lifecycle).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
-    expect(realRebootWorkflow).toContain('Restart-Computer -Force');
-    expect(realRebootWorkflow).toContain('terminal_fault_candidate_url');
-    expect(realRebootWorkflow).toContain('recovery_fresh_candidate_url');
-    expect(realRebootWorkflow).toContain('terminalFaultCandidateSha256');
-    expect(realRebootWorkflow).toContain('recoveryFreshCandidateSha256');
+    expect(migration).toContain('BASELINE_ARTIFACT_DIGEST');
+    expect(migration).toContain('BASELINE_MANIFEST_SHA256');
+    expect(migration).not.toContain('Invoke-WebRequest');
+    expect(migration).toContain("mode='local-uninstall-preserve-fresh'");
+    expect(migration).toContain("provenance='local-non-public'");
+    expect(migration).toContain('installedManifestUtf8Base64');
+    expect(migration).toContain('installedManifest=$installedManifest');
+    expect(migration).toContain('installedReleaseBuildDigest');
+    expect(migration).toContain('installedGatewaySha256');
+    expect(migration).toContain('installedOwnerSha256');
+    expect(migration).toContain('updaterMarkerPresent=$false');
+    expect(migration).toContain('profileInventoryAfterUninstall');
+    expect(migration).toContain('modelInventoryAfterFresh');
+    expect(migration).toContain('sentinelInventoryAfterUninstall');
+    expect(migration).toContain('sentinelInventoryAfterFresh');
+    expect(migration).toContain('machineQuitObserved');
+    expect(migration).toContain('singletonReleased');
+    expect(migration).toContain('uninstallResidue=@($machineResidue)');
+    expect(migration).toContain('windows-${{ matrix.arch }}-local-migration-evidence');
+  });
+
+  it('hands the reboot to Windows and binds accepted shutdown evidence', () => {
+    expect(realRebootWorkflow).toContain("Join-Path $env:SystemRoot 'System32\\shutdown.exe'");
+    expect(realRebootWorkflow).toContain('& $shutdown /r /t 30');
+    expect(realRebootWorkflow).toContain('if ($shutdownExit -ne 0)');
+    expect(realRebootWorkflow).toContain("rebootRequestMethod = 'shutdown.exe'");
+    expect(realRebootWorkflow).toContain('rebootRequestAcceptedAt');
     expect(realRebootWorkflow).toContain(
-      'Installed uninstaller is not the exact acceptance-fault artifact.',
+      'Pending deletion source disappeared immediately before shutdown.exe',
+    );
+    expect(realRebootWorkflow).not.toContain('Start-Sleep -Seconds 30');
+    expect(realRebootWorkflow).not.toContain('Restart-Computer');
+    expect(realRebootWorkflow).not.toContain('RUNNER_TRACKING_ID');
+    expect(realRebootWorkflow).toContain("shutdown.exe') /a");
+    expect(realRebootWorkflow).toContain('if: failure()');
+    expect(realRebootWorkflow).toContain('if: always()');
+    expect(realRebootWorkflow).toContain('Post-reboot acceptance cleanup failed');
+    expect(realRebootWorkflow).toContain('<Interval>PT15M</Interval>');
+    expect(realRebootWorkflow).toContain('/Create /F /TN $taskName /XML $taskXmlPath');
+    expect(realRebootWorkflow).toContain('Watchdog retained protected residue');
+    expect(realRebootWorkflow).toContain(
+      'TalkingQuillRealRebootAcceptance-${{ inputs.architecture }}',
     );
     expect(realRebootWorkflow).toContain(
-      'Reboot deletion source disappeared before Restart-Computer',
+      'Remove-Item -LiteralPath $env:CHECKPOINT,"$env:CHECKPOINT.reboot-request.json"',
     );
-    expect(realRebootWorkflow).toContain(
-      'Pending deletion source disappeared immediately before Restart-Computer',
-    );
-    expect(realRebootWorkflow).toContain(
-      'Windows did not delete the exact checkpointed terminal service image.',
-    );
-    expect(realRebootWorkflow).not.toContain('inputs.runner_label');
-    expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_X64_RUNNER_LABEL');
-    expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_ARM64_MACHINE_ID');
-    expect(realRebootWorkflow).toContain('EXPECTED_MACHINE_ID');
-    expect(realRebootWorkflow).toContain('sourceTree');
-    expect(realRebootWorkflow).toContain('workflowRunAttempt');
-    expect(realRebootWorkflow).toContain('trusted-checkpoint/pre-reboot-checkpoint.json');
-    expect(realRebootWorkflow).toContain('Production fresh recovery/install failed');
-    expect(realRebootWorkflow).toContain('reboot-coordinator');
-    expect(realRebootWorkflow).toContain('preBootIdentity');
-    expect(realRebootWorkflow).toContain('postBootIdentity');
-    expect(realRebootWorkflow).toContain('generationBefore');
-    expect(realRebootWorkflow).toContain('generationAfter');
-    expect(realRebootWorkflow).toContain('windows-reboot-acceptance-evidence.mjs sign');
-    expect(realRebootWorkflow).toContain(
-      'windows-reboot-acceptance-${{ inputs.architecture }}.json trusted-checkpoint/pre-reboot-checkpoint.json "$EXPECTED_RUNNER_LABEL" "$EXPECTED_MACHINE_ID"',
-    );
-    expect(realRebootWorkflow).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
-    expect(workflow).toContain('build-windows-acceptance-fault-setup.mjs');
-    expect(workflow).toContain('repair-terminalAcceptance.exe');
-    expect(workflow).toContain('Nonpromotable terminal acceptance setup entered release assembly.');
-    expect(lifecycle).toContain('$terminalAcceptanceHash');
-    expect(lifecycle).toContain('Installed terminal acceptance uninstaller hash mismatch');
-    expect(lifecycle).not.toContain('$legacyGeneration');
-    expect(lifecycle).not.toContain('$legacyRoot');
-    expect(lifecycle).toContain(
-      "foreach ($staleGeneration in @('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'))",
-    );
+  });
+
+  it('signs and publishes migration evidence while excluding updater and fault binaries', () => {
     const assemble = section('assemble');
-    expect(assemble).toContain('needs: [validate, package, smoke, lifecycle, fresh-lifecycle]');
-    expect(assemble).toContain('windows-x64-exact-native-setup-input');
-    expect(assemble).toContain('windows-arm64-exact-native-setup-input');
-    expect(assemble).toContain('windows-x64-native-ui-smoke-evidence');
-    expect(assemble).toContain('windows-arm64-native-ui-smoke-evidence');
-    expect(assemble.match(/windows-installer-ui-evidence\.mjs/gu)).toHaveLength(1);
-    expect(assemble).toContain('cp installed-evidence/*.json release-artifacts/');
-    expect(assemble).toContain('windows-installer-ui-smoke-$arch.json release-artifacts/');
-    expect(publishWorkflow).toContain('windows-installer-ui-evidence.mjs');
-    expect(publishWorkflow.indexOf('windows-installer-ui-evidence.mjs')).toBeLessThan(
-      publishWorkflow.indexOf('gh release create'),
+    expect(assemble).toContain(
+      'needs: [validate, package, smoke, migration-lifecycle, fresh-lifecycle]',
     );
-    expect(assemble).toContain('windows-native-release-candidates');
-    expect(assemble).toContain('join(",") !== "gateway,owner"');
-    expect(assemble).toContain('value.predecessor === null');
-    expect(assemble).toContain('cp preserved/x64/tmp/release-upload/release-manifest.json');
-    expect(assemble).toContain('validateArtifactProvenanceManifest(value)');
-    expect(assemble).toContain('value.sourceCommit !== manifest.sourceCommit');
-    expect(assemble).toContain('Architecture provenance source-tree hashes disagree');
-  });
-
-  it('pins every workflow action to its reviewed commit', () => {
-    const actions = [...workflow.matchAll(/\buses:\s*([^\s#]+)/gu)].map((match) => match[1]);
-    expect(actions.length).toBeGreaterThan(0);
-    for (const action of actions) {
-      expect(action).toMatch(/^[^@\s]+@[a-f0-9]{40}$/u);
-      expect(approvedActions).toContain(action);
-    }
+    expect(assemble).toContain('windows-*-local-migration-evidence');
+    expect(assemble).toContain('windows-terminal-fault-candidate-${process.env.ARCH}.json');
+    expect(assemble).not.toContain('cp installed-evidence/*.json');
+    expect(assemble).not.toContain('Talking-Quill-*-win-$arch-update.exe');
+    expect(promotionScript).toContain("mode: 'fresh-trust-root'");
+    expect(promotionScript).toContain("provenance: 'local-non-public'");
+    expect(promotionScript).toContain("operation === 'local-uninstall-preserve-fresh'");
+    expect(publishWorkflow).toContain('windows-local-migration-$arch.json');
+    expect(publishWorkflow).toContain(
+      'Fresh trust-root publication contains forbidden updater lineage assets.',
+    );
+    expect(workflow).toContain('Nonpromotable terminal acceptance setup entered release assembly.');
+    expect(workflow).not.toMatch(/cp .*terminalAcceptance.* release-artifacts/u);
   });
 });

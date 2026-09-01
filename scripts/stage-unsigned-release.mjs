@@ -29,9 +29,13 @@ async function main() {
     throw new Error('Application version must be strict three-part semver.');
   }
   const stem = `Talking-Quill-${version}-${platform}-${arch}`;
+  const windowsFreshTrustRoot =
+    platform === 'win' && process.env.TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT === '1';
   const finalNames =
     platform === 'win'
-      ? [`${stem}-setup.exe`, `${stem}-update.exe`]
+      ? windowsFreshTrustRoot
+        ? [`${stem}-setup.exe`]
+        : [`${stem}-setup.exe`, `${stem}-update.exe`]
       : [`${stem}.dmg`, `${stem}.zip`];
   const updateName = platform === 'win' ? `${stem}-update.exe` : `${stem}.zip`;
   const blockmapName = `${updateName}.blockmap`;
@@ -68,12 +72,43 @@ async function main() {
     packageMetadata.version !== version ||
     packageMetadata.platform !== platform ||
     packageMetadata.architecture !== arch ||
+    (windowsFreshTrustRoot &&
+      (packageMetadata.packageMode !== 'fresh' || packageMetadata.predecessor !== null)) ||
     (platform === 'mac' &&
       (packageMetadata.predecessor === null ||
         packageMetadata.outerIdentity?.mode !== 'certificate'))
   ) {
     throw new Error('Serialized package metadata does not match the updater target.');
   }
+  if (windowsFreshTrustRoot) {
+    const setupName = finalNames[0];
+    await requireFile(resolve(release, setupName));
+    await rm(pendingOutput, { recursive: true, force: true });
+    await mkdir(pendingOutput, { recursive: true });
+    await copyFile(resolve(release, setupName), resolve(pendingOutput, setupName));
+    await writeFile(
+      resolve(pendingOutput, `provenance-${platform}-${arch}-setup.json`),
+      `${JSON.stringify(provenance, null, 2)}\n`,
+      'utf8',
+    );
+    await copyFile(
+      resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt'),
+      resolve(pendingOutput, 'THIRD_PARTY_NOTICES.txt'),
+    );
+    const finalEntries = provenance.entries.filter(({ role }) => role === 'final-artifact');
+    if (
+      finalEntries.length !== 1 ||
+      basename(finalEntries[0].path) !== setupName ||
+      (await fileEvidence(resolve(pendingOutput, setupName))).sha256 !== finalEntries[0].sha256
+    ) {
+      throw new Error('Fresh trust-root provenance does not match the setup artifact.');
+    }
+    await rm(output, { recursive: true, force: true });
+    await rename(pendingOutput, output);
+    console.log(`Staged unsigned ${platform}/${arch} fresh trust-root setup and provenance.`);
+    return;
+  }
+
   const updateEvidence = await fileEvidence(resolve(release, updateName));
   const unsignedBinding = createUpdaterReleaseBinding(packageMetadata, updateEvidence.sha256);
   const releaseBinding =

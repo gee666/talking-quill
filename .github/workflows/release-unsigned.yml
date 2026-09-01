@@ -11,78 +11,6 @@ on:
         description: GitHub run ID that produced signed real-reboot ARM64 evidence
         required: true
         type: string
-      predecessor_x64_version:
-        description: Exact installed x64 predecessor version
-        required: true
-        type: string
-      predecessor_x64_release_build:
-        description: Exact x64 predecessor release-build SHA-256
-        required: true
-        type: string
-      predecessor_x64_installer_url:
-        description: HTTPS URL for the exact published x64 predecessor native setup installer
-        required: true
-        type: string
-      predecessor_x64_installer_sha256:
-        description: Exact published x64 predecessor native setup SHA-256
-        required: true
-        type: string
-      predecessor_x64_gateway_sha256:
-        description: Exact x64 predecessor gateway SHA-256
-        required: true
-        type: string
-      predecessor_x64_owner_sha256:
-        description: Exact x64 predecessor owner SHA-256
-        required: true
-        type: string
-      predecessor_x64_gateway_url:
-        description: HTTPS URL for the exact published x64 predecessor gateway artifact
-        required: true
-        type: string
-      predecessor_x64_owner_url:
-        description: HTTPS URL for the exact published x64 predecessor owner artifact
-        required: true
-        type: string
-      predecessor_x64_update_public_key_sha256:
-        description: Secondary assertion for the key inspected from the x64 predecessor gateway
-        required: true
-        type: string
-      predecessor_arm64_version:
-        description: Exact installed ARM64 predecessor version
-        required: true
-        type: string
-      predecessor_arm64_release_build:
-        description: Exact ARM64 predecessor release-build SHA-256
-        required: true
-        type: string
-      predecessor_arm64_installer_url:
-        description: HTTPS URL for the exact published ARM64 predecessor native setup installer
-        required: true
-        type: string
-      predecessor_arm64_installer_sha256:
-        description: Exact published ARM64 predecessor native setup SHA-256
-        required: true
-        type: string
-      predecessor_arm64_gateway_sha256:
-        description: Exact ARM64 predecessor gateway SHA-256
-        required: true
-        type: string
-      predecessor_arm64_owner_sha256:
-        description: Exact ARM64 predecessor owner SHA-256
-        required: true
-        type: string
-      predecessor_arm64_gateway_url:
-        description: HTTPS URL for the exact published ARM64 predecessor gateway artifact
-        required: true
-        type: string
-      predecessor_arm64_owner_url:
-        description: HTTPS URL for the exact published ARM64 predecessor owner artifact
-        required: true
-        type: string
-      predecessor_arm64_update_public_key_sha256:
-        description: Secondary assertion for the key inspected from the ARM64 predecessor gateway
-        required: true
-        type: string
 
 permissions:
   actions: read
@@ -182,14 +110,8 @@ jobs:
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: native-setup
       TALKING_QUILL_PACKAGE_TARGET: win
       TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
-      TALKING_QUILL_PACKAGE_MODE: update
-      TALKING_QUILL_PREDECESSOR_VERSION: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_version || inputs.predecessor_arm64_version }}
-      TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_release_build || inputs.predecessor_arm64_release_build }}
-      TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_gateway_sha256 || inputs.predecessor_arm64_gateway_sha256 }}
-      TALKING_QUILL_PREDECESSOR_OWNER_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_owner_sha256 || inputs.predecessor_arm64_owner_sha256 }}
-      TALKING_QUILL_PREDECESSOR_GATEWAY_URL: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_gateway_url || inputs.predecessor_arm64_gateway_url }}
-      TALKING_QUILL_PREDECESSOR_OWNER_URL: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_owner_url || inputs.predecessor_arm64_owner_url }}
-      TALKING_QUILL_PREDECESSOR_UPDATE_PUBLIC_KEY_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_update_public_key_sha256 || inputs.predecessor_arm64_update_public_key_sha256 }}
+      TALKING_QUILL_PACKAGE_MODE: fresh
+      TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -213,34 +135,14 @@ jobs:
         shell: pwsh
         run: if ((git status --porcelain --untracked-files=normal).Length -ne 0) { throw 'Package source is not clean.' }
       - run: pnpm install --frozen-lockfile
-      - name: Inspect exact predecessor roles
-        shell: pwsh
-        run: |
-          if (-not $env:TALKING_QUILL_PREDECESSOR_GATEWAY_URL.StartsWith('https://') -or -not $env:TALKING_QUILL_PREDECESSOR_OWNER_URL.StartsWith('https://')) { throw 'Predecessor role URLs must use HTTPS.' }
-          New-Item -ItemType Directory -Force tmp | Out-Null
-          $gateway = (Resolve-Path tmp).Path + '\predecessor-gateway-${{ matrix.arch }}.exe'
-          $owner = (Resolve-Path tmp).Path + '\predecessor-owner-${{ matrix.arch }}.exe'
-          Invoke-WebRequest -Uri $env:TALKING_QUILL_PREDECESSOR_GATEWAY_URL -OutFile $gateway
-          Invoke-WebRequest -Uri $env:TALKING_QUILL_PREDECESSOR_OWNER_URL -OutFile $owner
-          $env:TALKING_QUILL_PREDECESSOR_GATEWAY_PATH = $gateway
-          $env:TALKING_QUILL_PREDECESSOR_OWNER_PATH = $owner
-          node -e "import('./scripts/release-package-metadata.mjs').then(({readPackagePredecessor})=>{const fs=require('fs');readPackagePredecessor(process.env,'win','${{ matrix.arch }}');fs.appendFileSync(process.env.GITHUB_ENV,'TALKING_QUILL_PREDECESSOR_GATEWAY_PATH='+process.env.TALKING_QUILL_PREDECESSOR_GATEWAY_PATH+'\nTALKING_QUILL_PREDECESSOR_OWNER_PATH='+process.env.TALKING_QUILL_PREDECESSOR_OWNER_PATH+'\n')})"
       - run: node scripts/prepare-seven-zip.mjs x64
       # Invoke the app package command directly. It builds and inspects the native setup
       # before any source-test ABI restoration or installed lifecycle work.
-      - name: Build explicit public fresh setup
-        shell: bash
-        run: |
-          TALKING_QUILL_PACKAGE_MODE=fresh pnpm --filter @talking-quill/app ${{ matrix.package_script }}
-          cp artifact-provenance.json tmp/fresh-provenance-${{ matrix.arch }}.json
-      - name: Build explicit predecessor-bound update
+      - name: Build explicit public fresh trust-root setup
         run: pnpm --filter @talking-quill/app ${{ matrix.package_script }}
       # Canonical staging binds the exact installer bytes to the two-role
       # talkingQuillRelease identity and copies the matching provenance.
-      - name: Authorize updater metadata and stage exact payload
-        env:
-          TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64 }}
-          TALKING_QUILL_FRESH_PROVENANCE_PATH: tmp/fresh-provenance-${{ matrix.arch }}.json
+      - name: Stage exact fresh trust-root payload
         run: node scripts/stage-unsigned-release.mjs win ${{ matrix.arch }}
       # Validate the exact staged producer inventory and create the manifest
       # consumed by publication before any artifact upload or checksum pass.
@@ -255,11 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-acceptance-fault-setup.mjs ${{ matrix.arch }}
-          mkdir -p tmp/windows-fault-artifacts/${{ matrix.arch }} tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}
-          for phase in staged prepared predecessorMoved publishing publishedBeforePersist published registered committed legacyRetiring legacyRetired; do
-            TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE="$phase" node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
-            mv release/Talking-Quill-*-repair-"$phase".exe tmp/windows-fault-artifacts/${{ matrix.arch }}/
-          done
+          mkdir -p tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}
           TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE=terminalAcceptance node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
           mv release/Talking-Quill-*-repair-terminalAcceptance.exe tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/
           # Fault-bearing packages are diagnostics only; successful repair is exercised with
@@ -272,16 +170,10 @@ jobs:
           name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: |
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe
-            tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-update.exe
-            tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-update.exe.blockmap
-            tmp/release-upload/latest-${{ matrix.arch }}.yml
-            tmp/release-upload/release-identity-win-${{ matrix.arch }}.json
             tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json
-            tmp/release-upload/provenance-win-${{ matrix.arch }}-update.json
             tmp/release-upload/THIRD_PARTY_NOTICES.txt
             tmp/release-upload/release-manifest.json
             release/${{ matrix.unpacked }}/**
-            tmp/windows-fault-artifacts/${{ matrix.arch }}/*.exe
             tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/*.exe
           if-no-files-found: error
           retention-days: 14
@@ -332,332 +224,122 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  lifecycle:
-    name: Verify preserved Windows ${{ matrix.arch }} lifecycle
+  migration-lifecycle:
+    name: Prove local 0.0.67 uninstall-preserve-fresh migration on Windows ${{ matrix.arch }}
     needs: [validate, package, smoke]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    environment: windows-local-migration-trust
+    timeout-minutes: 30
+    env:
+      BASELINE_RUN_ID: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_BASELINE_RUN_ID || vars.TALKING_QUILL_LOCAL_0067_ARM64_BASELINE_RUN_ID }}
+      BASELINE_ARTIFACT_DIGEST: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_ARTIFACT_DIGEST || vars.TALKING_QUILL_LOCAL_0067_ARM64_ARTIFACT_DIGEST }}
+      BASELINE_INSTALLER_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_INSTALLER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_INSTALLER_SHA256 }}
+      BASELINE_MANIFEST_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_MANIFEST_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_MANIFEST_SHA256 }}
+      BASELINE_GATEWAY_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_GATEWAY_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_GATEWAY_SHA256 }}
+      BASELINE_OWNER_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_OWNER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_OWNER_SHA256 }}
+      BASELINE_RELEASE_BUILD_DIGEST: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_RELEASE_BUILD_DIGEST || vars.TALKING_QUILL_LOCAL_0067_ARM64_RELEASE_BUILD_DIGEST }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             runner: windows-latest
-            unpacked: win-unpacked
           - arch: arm64
             runner: windows-11-arm
-            unpacked: win-arm64-unpacked
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.validate.outputs.release_commit }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Verify immutable source checkout
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD^{commit})" = "${{ needs.validate.outputs.release_commit }}"
-          test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: preserved
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-${{ matrix.arch }}-native-ui-smoke-evidence
-          path: smoke-evidence
-      - name: Revalidate mandatory installer GUI smoke evidence before installation
-        shell: pwsh
-        run: |
-          $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
-          if ($installers.Count -ne 1) { throw 'Expected one exact fresh installer for GUI smoke validation.' }
-          node scripts/windows-installer-ui-evidence.mjs --evidence smoke-evidence/windows-installer-ui-smoke-${{ matrix.arch }}.json --installer $installers[0].FullName --provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json --arch ${{ matrix.arch }}
-      - run: node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode unpacked --root preserved/release/${{ matrix.unpacked }}
-      - name: Install exact authenticated predecessor, then update candidate
+      - name: Retrieve repository-controlled local migration baseline without caller URLs
         shell: pwsh
         env:
-          PREDECESSOR_INSTALLER_URL: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_installer_url || inputs.predecessor_arm64_installer_url }}
-          PREDECESSOR_INSTALLER_SHA256: ${{ matrix.arch == 'x64' && inputs.predecessor_x64_installer_sha256 || inputs.predecessor_arm64_installer_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:BASELINE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:BASELINE_ARTIFACT_DIGEST -cnotmatch '^sha256:[0-9a-f]{64}$' -or @($env:BASELINE_INSTALLER_SHA256,$env:BASELINE_MANIFEST_SHA256,$env:BASELINE_GATEWAY_SHA256,$env:BASELINE_OWNER_SHA256,$env:BASELINE_RELEASE_BUILD_DIGEST | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -ne 0) { throw 'Protected local baseline policy is invalid.' }
+          $run = gh api "repos/${{ github.repository }}/actions/runs/$env:BASELINE_RUN_ID" | ConvertFrom-Json
+          if ($run.repository.full_name -cne '${{ github.repository }}' -or $run.conclusion -cne 'success' -or $run.event -cne 'workflow_dispatch' -or $run.path -cne '.github/workflows/windows-local-0067-baseline.yml') { throw 'Local baseline run is not an authenticated successful baseline-workflow run.' }
+          $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$env:BASELINE_RUN_ID/artifacts" | ConvertFrom-Json
+          $artifacts = @($artifactResponse.artifacts | Where-Object name -CEQ 'windows-local-0.0.67-${{ matrix.arch }}-migration-baseline')
+          if ($artifacts.Count -ne 1 -or $artifacts[0].expired -or $artifacts[0].digest -cne $env:BASELINE_ARTIFACT_DIGEST) { throw 'Local baseline artifact digest is not the protected approved digest.' }
+          New-Item -ItemType Directory -Force tmp/local-baseline | Out-Null
+          gh run download $env:BASELINE_RUN_ID --repo '${{ github.repository }}' --name 'windows-local-0.0.67-${{ matrix.arch }}-migration-baseline' --dir tmp/local-baseline
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot retrieve the exact local migration baseline artifact.' }
+      - name: Execute local-uninstall-preserve-fresh and record exact inventories
+        shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          if (-not $env:PREDECESSOR_INSTALLER_URL.StartsWith('https://') -or $env:PREDECESSOR_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Predecessor installer identity is invalid.' }
-          $predecessor = Join-Path $env:RUNNER_TEMP 'talking-quill-exact-predecessor.exe'
-          Invoke-WebRequest -Uri $env:PREDECESSOR_INSTALLER_URL -OutFile $predecessor
-          $actual = (Get-FileHash -LiteralPath $predecessor -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -cne $env:PREDECESSOR_INSTALLER_SHA256) { throw 'Predecessor installer SHA-256 mismatch.' }
-          $previous = Start-Process -FilePath $predecessor -ArgumentList '/S' -Wait -PassThru
-          if ($previous.ExitCode -ne 0) { throw "Predecessor native setup install failed: $($previous.ExitCode)" }
-          $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-update.exe)
-          if ($installers.Count -ne 1) { throw "Expected one preserved ${{ matrix.arch }} update installer, found $($installers.Count)" }
-          $identity = Get-Content -LiteralPath preserved/tmp/release-upload/release-identity-win-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
-          $candidateHash = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $request = @{ version = 2; installerPath = $installers[0].FullName; sha256 = $candidateHash; candidate = $identity } | ConvertTo-Json -Depth 20 -Compress
-          $bootstrap = '--windows-update-bootstrap-v2=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
-          $helper = "$env:ProgramFiles\Talking Quill\resources\helper\talking-quill-helper.exe"
-          $candidate = Start-Process -FilePath $helper -ArgumentList $bootstrap -PassThru
-          $updateInterrupted = $false
-          $killDeadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $killDeadline) {
-            $transactionPath = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
-            if (Test-Path -LiteralPath $transactionPath) {
-              $state = Get-Content -LiteralPath $transactionPath -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'staging') {
-                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.Talking Quill.update-bootstrap-*\verified-update-installer.exe' } | Sort-Object CreationDate -Descending | Select-Object -First 1)
-                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $updateInterrupted = $true; break }
-              }
-            }
-            Start-Sleep -Milliseconds 2
+          $baseline = @(Get-ChildItem tmp/local-baseline -Filter '*.exe' -File -Recurse)
+          $fresh = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe -File)
+          if ($baseline.Count -ne 1 -or $fresh.Count -ne 1) { throw 'Migration requires one exact local baseline and one exact fresh candidate.' }
+          function Inventory([string]$root) {
+            if (-not (Test-Path -LiteralPath $root)) { return @() }
+            return @(Get-ChildItem -LiteralPath $root -File -Recurse | Sort-Object FullName | ForEach-Object { @{ path = [IO.Path]::GetRelativePath($root,$_.FullName).Replace('\','/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
           }
-          $candidate.WaitForExit()
-          if (-not $updateInterrupted) { throw 'Production update mutation was not interrupted.' }
-          $resume = @(Get-ChildItem "$env:ProgramData\.Talking Quill.update-bootstrap-*\talking-quill-update-bootstrap.exe")
-          if ($resume.Count -ne 1) { throw 'Protected staged predecessor recovery owner is not exact.' }
-          $generation = Get-Content -LiteralPath (Join-Path $resume[0].DirectoryName 'active-recovery-generation-v1') -Raw
-          if ($generation -notmatch '^[0-9a-f]{32}$') { throw 'Protected update recovery generation is invalid.' }
-          $retryName = "Talking Quill Update Recovery $generation"
-          $retry = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName
-          if ($retry -notlike "*--windows-update-resume-v2=$generation*") { throw 'Persistent visible recovery command is missing or mismatched.' }
-          $installedHelper = "$env:ProgramFiles\Talking Quill\resources\helper\talking-quill-helper.exe"
-          $ownerInstall = Start-Process -FilePath $installedHelper -ArgumentList '--windows-update-relaunch-owner-install-v1' -Wait -PassThru
-          if ($ownerInstall.ExitCode -ne 0) { throw "Machine login recovery owner installation failed: $($ownerInstall.ExitCode)" }
-          $machineRelaunch = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch'
-          $recoveryMatch = [regex]::Match($machineRelaunch, '^"(.+\\talking-quill-update-recovery-launcher-[0-9a-f]{32}\.exe)" --windows-update-relaunch-owner-v1$')
-          if (-not $recoveryMatch.Success) { throw 'Generation-specific machine login recovery owner is not exact.' }
-          $recoveryLauncher = $recoveryMatch.Groups[1].Value
-          if (-not (Test-Path -LiteralPath $recoveryLauncher)) { throw 'Medium-integrity recovery launcher is missing.' }
-          $loginRecovery = Start-Process -FilePath $recoveryLauncher -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
-          if ($loginRecovery.ExitCode -ne 0) { throw "Actual launcher login recovery failed: $($loginRecovery.ExitCode)" }
-          $resumed = Start-Process -FilePath $recoveryLauncher -ArgumentList "--windows-update-resume-v2=$generation" -Wait -PassThru
-          if ($resumed.ExitCode -ne 0) { throw "Authenticated predecessor snapshot resume failed: $($resumed.ExitCode)" }
-          if ($null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $retryName -ErrorAction SilentlyContinue)) { throw 'Successful recovery retained its persistent retry command.' }
-          $expectedDigest = $identity.releaseBuildDigest
-          $deadline = (Get-Date).AddMinutes(3)
-          do {
-            $installedIdentityPath = "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json"
-            $installedDigest = if (Test-Path -LiteralPath $installedIdentityPath) { (Get-Content -LiteralPath $installedIdentityPath -Raw | ConvertFrom-Json).releaseBuildDigest } else { $null }
-            if ($installedDigest -ceq $expectedDigest) { break }
-            if ((Get-Date) -ge $deadline) { throw 'Authenticated predecessor update did not commit before timeout.' }
-            Start-Sleep -Milliseconds 250
-          } while ($true)
-          node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-          if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw 'Public 0.0.67 fixed maintenance image survived authenticated upgrade.' }
-          $faultRoot = 'preserved/tmp/windows-fault-artifacts/${{ matrix.arch }}'
-          $productionRepair = Join-Path $env:RUNNER_TEMP 'talking-quill-production-repair.exe'
-          Copy-Item -LiteralPath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -Destination $productionRepair
-          $setupProbe = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
-          if ($setupProbe.Count -ne 1) { throw 'Expected one production fresh setup recovery probe.' }
-          $faultEvidence = @()
-          foreach ($fault in @(Get-ChildItem $faultRoot/Talking-Quill-*-repair-*.exe | Sort-Object Name)) {
-            $crash = Start-Process -FilePath $fault.FullName -ArgumentList '/S' -Wait -PassThru
-            if ($crash.ExitCode -ne 197) { throw "Fault lifecycle did not terminate at its authenticated seam: $($fault.Name)" }
-            # Kill the real production recovery worker after its durable recovery intent appears,
-            # then rerun the same production package to prove restart idempotence.
-            $firstRecovery = Start-Process -FilePath $setupProbe[0].FullName -ArgumentList '/S' -PassThru
-            $recoveryInterrupted = $false
-            $recoveryDeadline = (Get-Date).AddSeconds(30)
-            while ((Get-Date) -lt $recoveryDeadline) {
-              if (Test-Path -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") {
-                $recoveryState = Get-Content -LiteralPath "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json" -Raw | ConvertFrom-Json
-                if ($recoveryState.phase -like 'recovering-*') {
-                  $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $firstRecovery.Id -and $_.ExecutablePath -ceq $setupProbe[0].FullName } | Sort-Object CreationDate -Descending | Select-Object -First 1)
-                  if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $recoveryInterrupted = $true; break }
-                }
-              }
-              Start-Sleep -Milliseconds 2
-            }
-            $firstRecovery.WaitForExit()
-            if (-not $recoveryInterrupted) { throw "Production recovery mutation was not interrupted: $($fault.Name)" }
-            $recovery = Start-Process -FilePath $setupProbe[0].FullName -ArgumentList '/S' -Wait -PassThru
-            if ($recovery.ExitCode -ne 78) { throw "Production recovery probe did not reject after recovery: $($fault.Name) / $($recovery.ExitCode)" }
-            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
-            if (Test-Path -LiteralPath $transaction) { throw "Recovery was not terminal before repair: $($fault.Name)" }
-            $recoveredIdentity = Get-Content -LiteralPath "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json" -Raw | ConvertFrom-Json
-            if ($recoveredIdentity.releaseBuildDigest -cne $expectedDigest) { throw "Recovered identity was neither the exact candidate nor an accepted terminal topology: $($fault.Name)" }
-            $appPath = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe' -Name '(default)').'(default)'
-            $quiet = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString).QuietUninstallString
-            $legacyServiceAbsent = $null -eq (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
-            $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
-            $PSNativeCommandUseErrorActionPreference = $false
-            & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
-            $taskQueryExit = $LASTEXITCODE
-            $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
-            if ($taskQueryExit -notin @(0, 1)) { throw "Legacy task query failed: $taskQueryExit" }
-            $legacyTaskAbsent = $taskQueryExit -eq 1
-            if ($appPath -cne "$env:ProgramFiles\Talking Quill\Talking Quill.exe" -or $quiet -cnotmatch '^".+\\Talking Quill Maintenance-[0-9a-f]{32}\.exe" /S$' -or -not $legacyServiceAbsent -or -not $legacyTaskAbsent) { throw "Recovered registrations or legacy authority are invalid: $($fault.Name)" }
-            $faultEvidence += @{ fault = $fault.Name; crashExitCode = 197; recoveryExitCode = 78; recoveredReleaseBuildDigest = $recoveredIdentity.releaseBuildDigest; inspectedBeforeRepair = $true; productionRecoveryInterrupted = $recoveryInterrupted; appPathExact = $true; quietUninstallExact = $true; legacyServiceAbsent = $true; legacyTaskAbsent = $true }
-            $postRecoveryRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
-            if ($postRecoveryRepair.ExitCode -ne 0) { throw "Fault lifecycle repair failed: $($fault.Name)" }
-            node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-            if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw "Public 0.0.67 fixed maintenance image survived recovery: $($fault.Name)" }
-          }
-          @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; sourceCommit = '${{ needs.validate.outputs.release_commit }}'; sourceTree = '${{ needs.validate.outputs.release_tree }}'; productionUpdateInterrupted = $updateInterrupted; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
-          $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-          & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
-          if ($LASTEXITCODE -ne 0) { throw 'Successful lifecycle observer compilation failed.' }
-          $repairHash = (Get-FileHash -LiteralPath $productionRepair -Algorithm SHA256).Hash.ToLowerInvariant()
-          & tmp/windows-installer-success-observer.exe $productionRepair tmp/windows-installer-success-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' update $repairHash
-          if ($LASTEXITCODE -ne 0) { throw 'Successful authenticated repair observation failed.' }
-          $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
-          $quiet = (Get-ItemProperty -LiteralPath $uninstallKey -Name QuietUninstallString).QuietUninstallString
-          if ($quiet -cnotmatch '^".+\\Talking Quill Maintenance-[0-9a-f]{32}\.exe" /S$') { throw 'Generation-specific QuietUninstallString is not exact.' }
-          foreach ($staleSchema in @(1, 2)) {
-            $staleGeneration = if ($staleSchema -eq 1) { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } else { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
-            $staleRoot = Join-Path $env:LOCALAPPDATA "Talking Quill\Windows Update Recovery\$staleGeneration"
-            New-Item -ItemType Directory -Path $staleRoot -Force | Out-Null
-            @{ schemaVersion = $staleSchema; generation = $staleGeneration; request = '--windows-update-bootstrap-v2=dGVzdA=='; nonce = ('11' * 16); sourceVersion = '0.0.69'; targetVersion = '0.0.70'; phase = 'armed'; completedVersion = $null } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $staleRoot 'relaunch-record-v1.json') -Encoding utf8
-            New-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "Talking Quill Update Relaunch $staleGeneration" -Value ('"' + $recoveryLauncher + '" --windows-update-relaunch-v1=' + $staleGeneration) -PropertyType String -Force | Out-Null
-          }
-          $terminalAcceptanceSetups = @(Get-ChildItem 'preserved/tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/Talking-Quill-*-repair-terminalAcceptance.exe')
-          if ($terminalAcceptanceSetups.Count -ne 1) { throw 'Expected one isolated nonpromotable terminal acceptance setup.' }
-          $terminalAcceptanceSetup = $terminalAcceptanceSetups[0].FullName
-          $terminalAcceptanceHash = (Get-FileHash -LiteralPath $terminalAcceptanceSetup -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($terminalAcceptanceHash -ceq $repairHash) { throw 'Terminal acceptance setup was not built separately from production.' }
-          $recoveryLauncherHash = (Get-FileHash -LiteralPath $recoveryLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
-          $terminalFaultEvidence = @()
-          $terminalFaults = @(
-            'pre-CreateService',
-            'post-service-pre-record',
-            'post-record-pre-start',
-            'failure-action-restart',
-            'service-stopped-pre-DeleteService',
-            'post-delete-pre-image-removal',
-            'pre-maintenance-deletion-ownership',
-            'post-maintenance-deletion-ownership',
-            'post-final-launcher-ownership',
-            'post-uninstall-unregister',
-            'post-journal-removal',
-            'post-root-tombstone-rename',
-            'post-tombstone-content-removal',
-            'post-tombstone-record-removal',
-            'post-tombstone-marker-removal',
-            'post-tombstone-removal',
-            'post-maintenance-posix-delete',
-            'post-final-deletion-ownership',
-            'post-final-launcher-posix-delete',
-            'pre-machine-relaunch-owner-clear',
-            'post-machine-relaunch-owner-clear',
-            'post-owner-clear-posix-cleanup'
-          )
-          foreach ($terminalFault in $terminalFaults) {
-            $baselineUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
-            if (-not (Test-Path -LiteralPath $baselineUninstaller) -or (Get-FileHash -LiteralPath $baselineUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $repairHash) { throw "Terminal scenario did not start from the exact production baseline at $terminalFault" }
-            if (@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue).Count -ne 0 -or (Test-Path -LiteralPath "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json")) { throw "Terminal scenario inherited active cleanup authority at $terminalFault" }
-            $acceptanceInstall = Start-Process -FilePath $terminalAcceptanceSetup -ArgumentList '/S' -Wait -PassThru
-            if ($acceptanceInstall.ExitCode -ne 0) { throw "Isolated terminal acceptance setup failed at $terminalFault: $($acceptanceInstall.ExitCode)" }
-            $installedAcceptanceUninstaller = "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe"
-            if ((Get-FileHash -LiteralPath $installedAcceptanceUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $terminalAcceptanceHash) { throw "Installed terminal acceptance uninstaller hash mismatch at $terminalFault" }
-            Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
-            New-Item -Path 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Force | Out-Null
-            New-ItemProperty -LiteralPath 'HKLM:\Software\Talking Quill\AcceptanceTerminalFault' -Name Phase -Value $terminalFault -PropertyType String -Force | Out-Null
-            $faultedUninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -Wait -PassThru
-            Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
-            if ($terminalFault -cne 'failure-action-restart') {
-              $maintenanceQuiet = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' -Name QuietUninstallString -ErrorAction SilentlyContinue
-              $maintenanceMatch = if ($null -ne $maintenanceQuiet) { [regex]::Match($maintenanceQuiet, '^"(.+\\Talking Quill Maintenance-[0-9a-f]{32}\.exe)" /S$') } else { $null }
-              $maintenancePath = if ($null -ne $maintenanceMatch -and $maintenanceMatch.Success) { $maintenanceMatch.Groups[1].Value } else { $null }
-              $maintenanceHash = if ($null -ne $maintenancePath -and (Test-Path -LiteralPath $maintenancePath)) { (Get-FileHash -LiteralPath $maintenancePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
-              $callableMaintenance = ($maintenanceQuiet -ceq ('"' + $maintenancePath + '" /S')) -and ($maintenanceHash -ceq $terminalAcceptanceHash)
-              $terminalServiceCandidates = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'TalkingQuillTerminalCleanup-%'" -ErrorAction SilentlyContinue | Where-Object { $_.StartMode -ceq 'Auto' -and $_.StartName -ceq 'LocalSystem' -and $_.PathName -cmatch '^"(.+\.Talking Quill Terminal Cleanup-[0-9a-f]{32}\.exe)" /TQ-TERMINAL-SERVICE=[0-9a-f]{32}$' })
-              $autoTerminalService = $terminalServiceCandidates.Count -eq 1
-              if ($autoTerminalService) {
-                $serviceImage = [regex]::Match($terminalServiceCandidates[0].PathName, '^"(.+\.exe)"').Groups[1].Value
-                $autoTerminalService = (Test-Path -LiteralPath $serviceImage) -and ((Get-FileHash -LiteralPath $serviceImage -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $terminalAcceptanceHash)
-              }
-              $machineOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
-              $machineOwnerMatch = if ($null -ne $machineOwnerCommand) { [regex]::Match($machineOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$') } else { $null }
-              $authenticatedMachineOwner = $null -ne $machineOwnerMatch -and $machineOwnerMatch.Success -and (Test-Path -LiteralPath $machineOwnerMatch.Groups[1].Value) -and ((Get-FileHash -LiteralPath $machineOwnerMatch.Groups[1].Value -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $recoveryLauncherHash)
-              $terminalWorkCommitted = $terminalFault -in @('post-final-launcher-posix-delete', 'pre-machine-relaunch-owner-clear', 'post-machine-relaunch-owner-clear', 'post-owner-clear-posix-cleanup')
-              if (-not $callableMaintenance -and -not $autoTerminalService -and -not $authenticatedMachineOwner -and -not $terminalWorkCommitted) { throw "Terminal fault retained no authenticated callable authority at $terminalFault" }
-            }
-            $recoveredBySetup = $false
-            if ($terminalFault -ceq 'failure-action-restart') {
-              if ($faultedUninstall.ExitCode -ne 0) { throw "Terminal service failure action did not recover: $($faultedUninstall.ExitCode)" }
-            } else {
-              if ($faultedUninstall.ExitCode -ne 197) { throw "Terminal fault did not interrupt at $terminalFault: $($faultedUninstall.ExitCode)" }
-              $resumeOwnerCommand = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
-              $resumeOwnerPath = if ($null -ne $resumeOwnerCommand) { [regex]::Match($resumeOwnerCommand, '^"(.+\.exe)" --windows-update-relaunch-owner-v1$').Groups[1].Value } else { $null }
-              if ($terminalFault -notin @('post-machine-relaunch-owner-clear', 'post-owner-clear-posix-cleanup')) {
-                if ($null -eq $resumeOwnerPath -or -not (Test-Path -LiteralPath $resumeOwnerPath)) { throw "Terminal fault lost its machine recovery owner at $terminalFault" }
-                $terminalResume = Start-Process -FilePath $resumeOwnerPath -ArgumentList '--windows-update-relaunch-owner-v1' -Wait -PassThru
-                if ($terminalResume.ExitCode -ne 0) { throw "Terminal owner recovery failed at $terminalFault: $($terminalResume.ExitCode)" }
-              }
-            }
-            $terminalRecoveryDeadline = (Get-Date).AddSeconds(240)
-            do {
-              $terminalMaintenanceRemains = -not $recoveredBySetup -and $null -ne $maintenancePath -and (Test-Path -LiteralPath $maintenancePath)
-              $pendingTerminalState = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
-              $terminalTombstonesRemain = @(Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill.recovery-tombstone-*' | Where-Object { @($pendingTerminalState) -notcontains ('\??\' + $_.FullName) }).Count -ne 0
-              $terminalRunRemains = $null -ne (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue)
-              if (-not $terminalMaintenanceRemains -and -not $terminalTombstonesRemain -and -not $terminalRunRemains) { break }
-              Start-Sleep -Milliseconds 250
-            } while ((Get-Date) -lt $terminalRecoveryDeadline)
-            if ($terminalMaintenanceRemains -or $terminalTombstonesRemain -or $terminalRunRemains) { throw "Terminal owner recovery timed out at $terminalFault" }
-            if (@(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue).Count -ne 0) { throw "Terminal service remained after $terminalFault" }
-            if (@(Get-ChildItem -LiteralPath $env:ProgramData -Force | Where-Object Name -Like '.Talking Quill Terminal Cleanup-*.exe').Count -ne 0) { throw "Terminal image remained after $terminalFault" }
-            $terminalFaultEvidence += @{ phase = $terminalFault; acceptanceSetupSha256 = $terminalAcceptanceHash; installedUninstallerSha256 = $terminalAcceptanceHash; isolated = $true; recovered = $true }
-            if (-not $recoveredBySetup) {
-              $terminalRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
-              if ($terminalRepair.ExitCode -ne 0) { throw "Terminal fault reinstall failed at $terminalFault: $($terminalRepair.ExitCode)" }
-            }
-          }
-          Remove-Item Env:TQ_TERMINAL_FAULT -ErrorAction SilentlyContinue
-          $uninstall = Start-Process -FilePath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -ArgumentList '/S' -PassThru
-          $normalRelocated = $false
-          $terminalOwnerObserved = $false
-          $terminalGeneration = $null
-          $relocatedDeadline = (Get-Date).AddSeconds(30)
-          while (-not $uninstall.HasExited -and (Get-Date) -lt $relocatedDeadline) {
-            $normalRelocated = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ([IO.Path]::GetTempPath().TrimEnd('\') + '\.TalkingQuill-uninstall-*.exe') }).Count -eq 1
-            $terminalRecordPath = "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json"
-            if (Test-Path -LiteralPath $terminalRecordPath) {
-              $terminalRecord = Get-Content -LiteralPath $terminalRecordPath -Raw | ConvertFrom-Json
-              $terminalGeneration = $terminalRecord.generation
-              if ($terminalGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Terminal service generation is invalid.' }
-              $terminalService = Get-CimInstance Win32_Service -Filter "Name='TalkingQuillTerminalCleanup-$terminalGeneration'" -ErrorAction SilentlyContinue
-              $expectedServiceCommand = '"' + $terminalRecord.serviceImage + '" /TQ-TERMINAL-SERVICE=' + $terminalGeneration
-              $terminalOwnerObserved = $terminalOwnerObserved -or ($null -ne $terminalService -and $terminalService.StartMode -ceq 'Auto' -and $terminalService.StartName -ceq 'LocalSystem' -and $terminalService.PathName -ceq $expectedServiceCommand)
-            }
-            if ($normalRelocated -and $terminalOwnerObserved) { break }
-            Start-Sleep -Milliseconds 10
-          }
-          $uninstall.WaitForExit()
-          if (-not $normalRelocated) { throw 'Normal uninstall did not execute through one relocated worker.' }
-          if (-not $terminalOwnerObserved) { throw 'Terminal uninstall did not publish a durable launcher-owned record.' }
-          if ($uninstall.ExitCode -ne 0) { throw "Synchronous native setup uninstall failed: $($uninstall.ExitCode)" }
-          $pendingTerminalDeletion = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
-          $osOwnedTerminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.recovery-tombstone-*' -or $_.Name -like '.Talking Quill Terminal Relaunch-*.exe' })
-          foreach ($ownedResidue in $osOwnedTerminalResidue) {
-            if (-not (@($pendingTerminalDeletion) -contains ('\??\' + $ownedResidue.FullName))) { throw "Terminal residue lacks exact reboot deletion ownership: $($ownedResidue.FullName)" }
-          }
-          $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
-          $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\.Talking Quill.maintenance-generation-v1", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
-          $terminalResidue += @(Get-ChildItem -LiteralPath $env:ProgramFiles -Filter 'Talking Quill Maintenance-*.exe' -ErrorAction SilentlyContinue | ForEach-Object FullName)
-          $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
-          $terminalRegistry = @($terminalKeys)
-          $terminalRelaunchOwner = Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Talking Quill Update Relaunch' -ErrorAction SilentlyContinue
-          if ($null -ne $terminalRelaunchOwner) { $terminalRegistry += 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run::Talking Quill Update Relaunch' }
-          $terminalServices = @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue)
-          $terminalRegistry += @($terminalServices | ForEach-Object { "SCM::$($_.Name)" })
-          foreach ($staleGeneration in @('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')) {
-            $staleRoot = Join-Path $env:LOCALAPPDATA "Talking Quill\Windows Update Recovery\$staleGeneration"
-            $staleProfileValue = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "Talking Quill Update Relaunch $staleGeneration" -ErrorAction SilentlyContinue
-            if ($null -ne $staleProfileValue) { $terminalRegistry += "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run::Talking Quill Update Relaunch $staleGeneration" }
-            if (Test-Path -LiteralPath $staleRoot) { $terminalResidue += $staleRoot }
-          }
-          if ($terminalResidue.Count -ne 0 -or $terminalRegistry.Count -ne 0) { throw 'Synchronous uninstall retained protected recovery residue.' }
-          $faultDocument = Get-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
-          $faultDocument | Add-Member -NotePropertyName terminalCleanup -NotePropertyValue @{ inspected = $true; acceptanceSetupSha256 = $terminalAcceptanceHash; scenarios = @($terminalFaultEvidence); residue = @($terminalResidue); registry = @($terminalRegistry) }
-          $faultDocument | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
-
-      - name: Upload successful authenticated lifecycle evidence
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+          $baselineHash = (Get-FileHash -LiteralPath $baseline[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baselineHash -cne $env:BASELINE_INSTALLER_SHA256) { throw 'Local baseline installer is not the protected approved binary.' }
+          $installLocal = Start-Process $baseline[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($installLocal.ExitCode -ne 0) { throw "Local baseline install failed: $($installLocal.ExitCode)" }
+          $manifestPath = "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json"
+          $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+          $manifestHash = ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes))).ToLowerInvariant()
+          if ($manifestHash -cne $env:BASELINE_MANIFEST_SHA256) { throw 'Installed local manifest is not the protected approved manifest.' }
+          $installedManifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
+          if ($installedManifest.version -cne '0.0.67' -or $installedManifest.platform -cne 'win' -or $installedManifest.architecture -cne '${{ matrix.arch }}') { throw 'Installed local baseline manifest is invalid.' }
+          $gatewayRole = @($installedManifest.roles | Where-Object role -CEQ 'gateway')
+          $ownerRole = @($installedManifest.roles | Where-Object role -CEQ 'owner')
+          if ($gatewayRole.Count -ne 1 -or $ownerRole.Count -ne 1) { throw 'Local baseline role inventory is invalid.' }
+          $gatewayPath = Join-Path "$env:ProgramFiles\Talking Quill" $gatewayRole[0].path
+          $ownerPath = Join-Path "$env:ProgramFiles\Talking Quill" $ownerRole[0].path
+          $gatewayHash = (Get-FileHash $gatewayPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ownerHash = (Get-FileHash $ownerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($gatewayHash -cne $gatewayRole[0].sha256 -or $ownerHash -cne $ownerRole[0].sha256 -or $gatewayHash -cne $env:BASELINE_GATEWAY_SHA256 -or $ownerHash -cne $env:BASELINE_OWNER_SHA256 -or $installedManifest.releaseBuildDigest -cne $env:BASELINE_RELEASE_BUILD_DIGEST) { throw 'Local installed roles or release digest do not match protected policy and the preserved manifest.' }
+          $updaterMarkerPresent = @(Get-ChildItem $env:ProgramData -Filter 'relaunch-record-marker-v1' -File -Recurse -ErrorAction SilentlyContinue).Count -ne 0
+          if ($updaterMarkerPresent) { throw 'Local 0.0.67 unexpectedly has a public updater marker.' }
+          $profileRoot = Join-Path $env:LOCALAPPDATA 'Talking Quill\profiles'
+          $modelRoot = Join-Path $env:LOCALAPPDATA 'Talking Quill\models'
+          New-Item -ItemType Directory -Force $profileRoot,$modelRoot | Out-Null
+          [IO.File]::WriteAllText((Join-Path $profileRoot 'migration-sentinel.json'),'local-profile-preserve-v1',[Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText((Join-Path $modelRoot 'migration-model.sentinel'),'local-model-preserve-v1',[Text.UTF8Encoding]::new($false))
+          $profilesBefore = @(Inventory $profileRoot); $modelsBefore = @(Inventory $modelRoot); $sentinelsBefore = @($profilesBefore + $modelsBefore)
+          $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
+          $uninstallMatch = [regex]::Match($quiet, '^"(.+\\Talking Quill Maintenance\.exe)" /S$')
+          if (-not $uninstallMatch.Success -or -not (Test-Path -LiteralPath $uninstallMatch.Groups[1].Value)) { throw 'Local baseline uninstall registration is not the exact fixed local path.' }
+          $uninstall = Start-Process $uninstallMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Local uninstall failed: $($uninstall.ExitCode)" }
+          $machineProcesses = @(Get-Process 'Talking Quill','talking-quill-helper','talking-quill-keyboard-owner' -ErrorAction SilentlyContinue | ForEach-Object ProcessName)
+          $machineResidue = @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\Talking Quill Maintenance.exe", 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
+          $created = $false; $mutex = [Threading.Mutex]::new($false,'Global\TalkingQuill.NativeSetup.V2',[ref]$created); $mutex.Dispose()
+          if (-not $created -or $machineProcesses.Count -ne 0 -or $machineResidue.Count -ne 0) { throw 'Local uninstall retained machine authority, singleton ownership, or residue.' }
+          $profilesAfterUninstall = @(Inventory $profileRoot); $modelsAfterUninstall = @(Inventory $modelRoot); $sentinelsAfterUninstall = @($profilesAfterUninstall + $modelsAfterUninstall)
+          if (($profilesBefore | ConvertTo-Json -Compress) -cne ($profilesAfterUninstall | ConvertTo-Json -Compress) -or ($modelsBefore | ConvertTo-Json -Compress) -cne ($modelsAfterUninstall | ConvertTo-Json -Compress)) { throw 'Local uninstall did not preserve exact profile/model inventories.' }
+          $freshHash = (Get-FileHash $fresh[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installFresh = Start-Process $fresh[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($installFresh.ExitCode -ne 0) { throw "Fresh trust-root install failed: $($installFresh.ExitCode)" }
+          $targetManifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+          $targetGateway = @($targetManifest.roles | Where-Object role -CEQ 'gateway')[0]
+          $targetOwner = @($targetManifest.roles | Where-Object role -CEQ 'owner')[0]
+          $targetGatewayHash = (Get-FileHash (Join-Path "$env:ProgramFiles\Talking Quill" $targetGateway.path) -Algorithm SHA256).Hash.ToLowerInvariant()
+          $targetOwnerHash = (Get-FileHash (Join-Path "$env:ProgramFiles\Talking Quill" $targetOwner.path) -Algorithm SHA256).Hash.ToLowerInvariant()
+          $profilesAfterFresh = @(Inventory $profileRoot); $modelsAfterFresh = @(Inventory $modelRoot); $sentinelsAfterFresh = @($profilesAfterFresh + $modelsAfterFresh)
+          if (($profilesBefore | ConvertTo-Json -Compress) -cne ($profilesAfterFresh | ConvertTo-Json -Compress) -or ($modelsBefore | ConvertTo-Json -Compress) -cne ($modelsAfterFresh | ConvertTo-Json -Compress)) { throw 'Fresh trust-root install did not preserve exact profile/model inventories.' }
+          $targetQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
+          $targetMatch = [regex]::Match($targetQuiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
+          if (-not $targetMatch.Success) { throw 'Fresh trust-root uninstall registration is invalid.' }
+          $evidence = [ordered]@{ schemaVersion=1; mode='local-uninstall-preserve-fresh'; provenance='local-non-public'; architecture='${{ matrix.arch }}'; sourceVersion='0.0.67'; targetVersion='0.0.69'; sourceCommit='${{ needs.validate.outputs.release_commit }}'; sourceTree='${{ needs.validate.outputs.release_tree }}'; baselineWorkflowRunId=$env:BASELINE_RUN_ID; baselineArtifactDigest=$env:BASELINE_ARTIFACT_DIGEST; localInstallerSha256=$baselineHash; installedManifestSha256=$manifestHash; installedManifestUtf8Base64=[Convert]::ToBase64String($manifestBytes); installedManifest=$installedManifest; installedReleaseBuildDigest=$installedManifest.releaseBuildDigest; installedGatewaySha256=$gatewayHash; installedOwnerSha256=$ownerHash; updaterMarkerPresent=$false; profileInventoryBefore=$profilesBefore; profileInventoryAfterUninstall=$profilesAfterUninstall; profileInventoryAfterFresh=$profilesAfterFresh; modelInventoryBefore=$modelsBefore; modelInventoryAfterUninstall=$modelsAfterUninstall; modelInventoryAfterFresh=$modelsAfterFresh; sentinelInventoryBefore=$sentinelsBefore; sentinelInventoryAfterUninstall=$sentinelsAfterUninstall; sentinelInventoryAfterFresh=$sentinelsAfterFresh; machineQuitObserved=($machineProcesses.Count -eq 0); singletonReleased=$created; uninstallExitCode=$uninstall.ExitCode; uninstallResidue=@($machineResidue); freshInstallExitCode=$installFresh.ExitCode; targetInstallerSha256=$freshHash; targetReleaseBuildDigest=$targetManifest.releaseBuildDigest; targetGatewaySha256=$targetGatewayHash; targetOwnerSha256=$targetOwnerHash; targetMaintenanceGeneration=$targetMatch.Groups[2].Value; passed=$true }
+          $evidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -NoNewline -Encoding utf8 tmp/windows-local-migration-${{ matrix.arch }}.json
+          $cleanup = Start-Process $targetMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
+          if ($cleanup.ExitCode -ne 0) { throw "Migration runner cleanup failed: $($cleanup.ExitCode)" }
+      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-native-installed-lifecycle-evidence
-          path: |
-            tmp/windows-installer-success-${{ matrix.arch }}.json
-            tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json
+          name: windows-${{ matrix.arch }}-local-migration-evidence
+          path: tmp/windows-local-migration-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -819,7 +501,7 @@ jobs:
 
   assemble:
     name: Checksum preserved Windows x64 installer
-    needs: [validate, package, smoke, lifecycle, fresh-lifecycle]
+    needs: [validate, package, smoke, migration-lifecycle, fresh-lifecycle]
     runs-on: ubuntu-latest
     environment: release-signing
     permissions:
@@ -857,8 +539,8 @@ jobs:
           path: smoke-evidence/arm64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: windows-*-native-installed-lifecycle-evidence
-          path: installed-evidence
+          pattern: windows-*-local-migration-evidence
+          path: migration-evidence
           merge-multiple: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -881,21 +563,19 @@ jobs:
             test "${#installer[@]}" -eq 1
             node scripts/windows-installer-ui-evidence.mjs --evidence smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch"
             node scripts/windows-installer-success-evidence.mjs --evidence fresh-evidence/windows-installer-success-fresh-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch" --operation fresh
-            update=(preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-update.exe)
-            test "${#update[@]}" -eq 1
-            node scripts/windows-installer-success-evidence.mjs --evidence installed-evidence/windows-installer-success-$arch.json --installer "${update[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-update.json --arch "$arch" --operation repair
             cp smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json release-artifacts/
-            cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-{setup,update}.exe release-artifacts/
-            cp preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-update.exe.blockmap release-artifacts/
-            cp preserved/$arch/tmp/release-upload/latest-$arch.yml release-artifacts/
-            cp preserved/$arch/tmp/release-upload/release-identity-win-$arch.json release-artifacts/
+            cp "${installer[0]}" release-artifacts/
             cp preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json release-artifacts/
-            cp preserved/$arch/tmp/release-upload/provenance-win-$arch-update.json release-artifacts/
-            grep -q 'talkingQuillRelease:' release-artifacts/latest-$arch.yml
-            ARCH=$arch node -e 'const arch=process.env.ARCH; const value=require(`./release-artifacts/release-identity-win-${arch}.json`); if (value.platform !== "win" || value.architecture !== arch || value.predecessor === null || value.roles?.map(({role}) => role).join(",") !== "gateway,owner") process.exit(1)'
+            cp migration-evidence/windows-local-migration-$arch.json release-artifacts/
+            terminal_fault=(preserved/$arch/tmp/windows-terminal-fault-artifacts/$arch/Talking-Quill-*-repair-terminalAcceptance.exe)
+            test "${#terminal_fault[@]}" -eq 1
+            TERMINAL_FAULT_PATH="${terminal_fault[0]}" ARCH="$arch" SOURCE_COMMIT='${{ needs.validate.outputs.release_commit }}' SOURCE_TREE='${{ needs.validate.outputs.release_tree }}' node --input-type=module - <<'NODE'
+            import { createHash } from 'node:crypto'; import { readFileSync, writeFileSync } from 'node:fs';
+            const sha256=createHash('sha256').update(readFileSync(process.env.TERMINAL_FAULT_PATH)).digest('hex');
+            writeFileSync(`release-artifacts/windows-terminal-fault-candidate-${process.env.ARCH}.json`,JSON.stringify({schemaVersion:1,architecture:process.env.ARCH,classification:'nonpromotable-acceptance-fault',sha256,sourceCommit:process.env.SOURCE_COMMIT,sourceTree:process.env.SOURCE_TREE}));
+            NODE
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
-          cp installed-evidence/*.json release-artifacts/
           for arch in x64 arm64; do
             run_id="$REBOOT_EVIDENCE_X64_RUN_ID"
             if [ "$arch" = arm64 ]; then run_id="$REBOOT_EVIDENCE_ARM64_RUN_ID"; fi
@@ -916,7 +596,8 @@ jobs:
           const directory = 'release-artifacts';
           const manifestPath = `${directory}/release-manifest.json`;
           const manifest = validateReleaseManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
-          const provenance = ['arm64', 'x64'].flatMap((arch) => ['setup', 'update'].map((mode) => {
+          const provenance = ['arm64', 'x64'].map((arch) => {
+            const mode = 'setup';
             const name = `provenance-win-${arch}-${mode}.json`;
             const value = JSON.parse(fs.readFileSync(`${directory}/${name}`, 'utf8'));
             validateArtifactProvenanceManifest(value);
@@ -932,7 +613,7 @@ jobs:
             }
             return { name, platform: 'win', arch, mode, sourceTree: value.sourceTree,
               sourceTreeSha256: value.sourceTreeSha256 };
-          }));
+          });
           if (new Set(provenance.map(({ sourceTreeSha256 }) => sourceTreeSha256)).size !== 1) {
             throw new Error('Architecture provenance source-tree hashes disagree');
           }

@@ -14,12 +14,12 @@ import { verifyAuthenticatedSetupReceipt } from './windows-installer-success-evi
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SOURCE = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*$/u;
-const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v2\0');
+const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v3\0');
 const SUCCESS_NAMES = (arch) => [
   [`windows-installer-success-fresh-${arch}.json`, 'fresh', 'install'],
-  [`windows-installer-success-${arch}.json`, 'repair', 'repair'],
 ];
-const FAULT_NAME = (arch) => `windows-installer-fault-recovery-${arch}.json`;
+const MIGRATION_NAME = (arch) => `windows-local-migration-${arch}.json`;
+const TERMINAL_FAULT_NAME = (arch) => `windows-terminal-fault-candidate-${arch}.json`;
 const REBOOT_NAME = (arch) => `windows-reboot-acceptance-${arch}.json`;
 
 function exactObject(value, keys, label) {
@@ -92,68 +92,6 @@ function validateProductionInterruptions(value, arch) {
     value.finishUninstallRecovery !== true
   )
     throw new Error(`${arch} production interruption evidence is invalid`);
-}
-
-const TERMINAL_FAULT_PHASES = [
-  'failure-action-restart',
-  'post-delete-pre-image-removal',
-  'post-final-deletion-ownership',
-  'post-final-launcher-ownership',
-  'post-final-launcher-posix-delete',
-  'post-journal-removal',
-  'post-machine-relaunch-owner-clear',
-  'post-owner-clear-posix-cleanup',
-  'post-maintenance-deletion-ownership',
-  'post-maintenance-posix-delete',
-  'post-record-pre-start',
-  'post-root-tombstone-rename',
-  'post-service-pre-record',
-  'post-tombstone-content-removal',
-  'post-tombstone-marker-removal',
-  'post-tombstone-record-removal',
-  'post-tombstone-removal',
-  'post-uninstall-unregister',
-  'pre-CreateService',
-  'pre-machine-relaunch-owner-clear',
-  'pre-maintenance-deletion-ownership',
-  'service-stopped-pre-DeleteService',
-].sort();
-
-function validateTerminalCleanup(value, arch) {
-  exactObject(
-    value,
-    ['acceptanceSetupSha256', 'inspected', 'residue', 'registry', 'scenarios'],
-    `${arch} terminal cleanup evidence`,
-  );
-  const phases = value.scenarios?.map(({ phase }) => phase);
-  if (
-    value.inspected !== true ||
-    !/^[0-9a-f]{64}$/u.test(value.acceptanceSetupSha256) ||
-    !Array.isArray(value.scenarios) ||
-    value.scenarios.some(
-      (scenario) =>
-        Object.keys(scenario).sort().join(',') !==
-          'acceptanceSetupSha256,installedUninstallerSha256,isolated,phase,recovered' ||
-        scenario.acceptanceSetupSha256 !== value.acceptanceSetupSha256 ||
-        scenario.installedUninstallerSha256 !== value.acceptanceSetupSha256 ||
-        scenario.isolated !== true ||
-        scenario.recovered !== true,
-    ) ||
-    new Set(phases).size !== phases.length ||
-    [...phases].sort().join(',') !== TERMINAL_FAULT_PHASES.join(',') ||
-    !Array.isArray(value.residue) ||
-    value.residue.length !== 0 ||
-    !Array.isArray(value.registry) ||
-    value.registry.length !== 0
-  )
-    throw new Error(`${arch} terminal cleanup evidence is invalid`);
-  return {
-    acceptanceSetupSha256: value.acceptanceSetupSha256,
-    inspected: true,
-    scenarios: value.scenarios,
-    residue: [],
-    registry: [],
-  };
 }
 
 function validateSuccess(value, arch, operation, action) {
@@ -251,136 +189,216 @@ function validateSuccess(value, arch, operation, action) {
   };
 }
 
-function validateFault(value, arch) {
-  exactObject(
-    value,
-    [
-      'schemaVersion',
-      'architecture',
-      'sourceCommit',
-      'sourceTree',
-      'productionUpdateInterrupted',
-      'candidateSha256',
-      'releaseBuildDigest',
-      'faults',
-      'terminalCleanup',
-      'passed',
-    ],
-    `${arch} fault evidence`,
-  );
-  if (
-    value.schemaVersion !== 1 ||
-    value.architecture !== arch ||
-    value.passed !== true ||
-    value.productionUpdateInterrupted !== true ||
-    !SOURCE.test(value.sourceCommit) ||
-    !SOURCE.test(value.sourceTree) ||
-    !SHA256.test(value.candidateSha256) ||
-    !SHA256.test(value.releaseBuildDigest) ||
-    !Array.isArray(value.faults) ||
-    value.faults.length !== 10
-  )
-    throw new Error(`${arch} fault evidence is invalid`);
-  const terminalCleanup = validateTerminalCleanup(value.terminalCleanup, arch);
-  for (const fault of value.faults) {
-    exactObject(
-      fault,
-      [
-        'fault',
-        'crashExitCode',
-        'recoveryExitCode',
-        'inspectedBeforeRepair',
-        'productionRecoveryInterrupted',
-        'recoveredReleaseBuildDigest',
-        'appPathExact',
-        'quietUninstallExact',
-        'legacyServiceAbsent',
-        'legacyTaskAbsent',
-      ],
-      `${arch} fault phase result`,
-    );
-    if (
-      typeof fault.fault !== 'string' ||
-      fault.fault.length === 0 ||
-      fault.crashExitCode !== 197 ||
-      fault.recoveryExitCode !== 78 ||
-      fault.inspectedBeforeRepair !== true ||
-      fault.productionRecoveryInterrupted !== true ||
-      fault.recoveredReleaseBuildDigest !== value.releaseBuildDigest ||
-      fault.appPathExact !== true ||
-      fault.quietUninstallExact !== true ||
-      fault.legacyServiceAbsent !== true ||
-      fault.legacyTaskAbsent !== true
-    )
-      throw new Error(`${arch} fault phase result is invalid`);
-  }
-  const expectedFaults = [
-    'committed',
-    'legacyRetired',
-    'legacyRetiring',
-    'predecessorMoved',
-    'prepared',
-    'published',
-    'publishedBeforePersist',
-    'publishing',
-    'registered',
-    'staged',
-  ];
-  const actualFaults = value.faults
-    .map(({ fault }) => fault.replace(/^.*repair-|\.exe$/gu, ''))
-    .sort();
-  if (actualFaults.join(',') !== expectedFaults.sort().join(','))
-    throw new Error(`${arch} fault phase inventory is invalid`);
-  return {
-    kind: 'fault',
-    architecture: arch,
-    operation: 'fault-recovery',
-    action: 'fault',
-    passed: value.passed,
-    exitCode: 0,
-    packageSha256: value.candidateSha256,
-    releaseBuildDigest: value.releaseBuildDigest,
-    layoutDigest: value.releaseBuildDigest,
-    sourceCommit: value.sourceCommit,
-    sourceTree: value.sourceTree,
-    processTokenImageKernelObservations: [],
-    peerObservation: null,
-    installedState: null,
-    faultPhase: value.faults.map(({ fault }) => fault),
-    faultResult: value.faults,
-    terminalCleanup,
-    evidence: value,
-  };
-}
-
 function validateArchitectureBinding(records, arch) {
   const claims = records
     .filter(({ claims: record }) => record.architecture === arch)
     .map(({ claims: record }) => record);
   const fresh = claims.find(({ operation }) => operation === 'fresh');
-  const repair = claims.find(({ operation }) => operation === 'repair');
-  const fault = claims.find(({ operation }) => operation === 'fault-recovery');
+  const migration = claims.find(({ operation }) => operation === 'local-uninstall-preserve-fresh');
+  const terminalFault = claims.find(({ operation }) => operation === 'reboot-pending-delete');
+  const reboot = claims.find(({ terminalFaultClassification }) => terminalFaultClassification);
   if (
     fresh === undefined ||
-    repair === undefined ||
-    fault === undefined ||
-    fault.packageSha256 !== repair.packageSha256 ||
-    fault.releaseBuildDigest !== repair.releaseBuildDigest ||
-    fresh.releaseBuildDigest !== repair.releaseBuildDigest ||
-    fresh.sourceCommit !== repair.sourceCommit ||
-    fresh.sourceTree !== repair.sourceTree ||
-    fault.sourceCommit !== repair.sourceCommit ||
-    fault.sourceTree !== repair.sourceTree ||
-    fresh.installedState.gatewaySha256 !== repair.installedState.gatewaySha256 ||
-    fresh.installedState.ownerSha256 !== repair.installedState.ownerSha256
+    migration === undefined ||
+    terminalFault === undefined ||
+    reboot === undefined ||
+    migration.packageSha256 !== fresh.packageSha256 ||
+    migration.releaseBuildDigest !== fresh.releaseBuildDigest ||
+    migration.sourceCommit !== fresh.sourceCommit ||
+    migration.sourceTree !== fresh.sourceTree ||
+    migration.localProvenance !== 'local-non-public' ||
+    terminalFault.packageSha256 === fresh.packageSha256 ||
+    reboot.terminalFaultCandidateSha256 !== terminalFault.packageSha256 ||
+    reboot.recoveryFreshCandidateSha256 !== fresh.packageSha256
   )
     throw new Error(`${arch} promotion evidence generation binding is invalid`);
+}
+
+function validateInventory(value, label) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some(
+      (entry) =>
+        entry === null ||
+        typeof entry !== 'object' ||
+        Object.keys(entry).sort().join(',') !== 'path,sha256' ||
+        typeof entry.path !== 'string' ||
+        entry.path.length === 0 ||
+        !SHA256.test(entry.sha256),
+    ) ||
+    new Set(value.map(({ path }) => path)).size !== value.length
+  )
+    throw new Error(`${label} inventory is invalid`);
+}
+
+function validateLocalMigration(source, arch, freshClaims) {
+  const value = JSON.parse(source);
+  exactObject(
+    value,
+    [
+      'schemaVersion',
+      'mode',
+      'provenance',
+      'architecture',
+      'sourceVersion',
+      'targetVersion',
+      'sourceCommit',
+      'sourceTree',
+      'baselineWorkflowRunId',
+      'baselineArtifactDigest',
+      'localInstallerSha256',
+      'installedManifestSha256',
+      'installedManifestUtf8Base64',
+      'installedManifest',
+      'installedReleaseBuildDigest',
+      'installedGatewaySha256',
+      'installedOwnerSha256',
+      'updaterMarkerPresent',
+      'profileInventoryBefore',
+      'profileInventoryAfterUninstall',
+      'profileInventoryAfterFresh',
+      'modelInventoryBefore',
+      'modelInventoryAfterUninstall',
+      'modelInventoryAfterFresh',
+      'sentinelInventoryBefore',
+      'sentinelInventoryAfterUninstall',
+      'sentinelInventoryAfterFresh',
+      'machineQuitObserved',
+      'singletonReleased',
+      'uninstallExitCode',
+      'uninstallResidue',
+      'freshInstallExitCode',
+      'targetInstallerSha256',
+      'targetReleaseBuildDigest',
+      'targetGatewaySha256',
+      'targetOwnerSha256',
+      'targetMaintenanceGeneration',
+      'passed',
+    ],
+    `${arch} local migration evidence`,
+  );
+  const manifestBytes = Buffer.from(value.installedManifestUtf8Base64 ?? '', 'base64');
+  let decodedManifest;
+  try {
+    decodedManifest = JSON.parse(manifestBytes.toString('utf8'));
+  } catch {
+    throw new Error(`${arch} preserved installed manifest is invalid`);
+  }
+  const manifest = value.installedManifest;
+  const roles = manifest?.roles;
+  const gateway = Array.isArray(roles) ? roles.find(({ role }) => role === 'gateway') : undefined;
+  const owner = Array.isArray(roles) ? roles.find(({ role }) => role === 'owner') : undefined;
+  for (const [inventory, label] of [
+    [value.profileInventoryBefore, 'profile before'],
+    [value.profileInventoryAfterUninstall, 'profile after uninstall'],
+    [value.profileInventoryAfterFresh, 'profile after fresh'],
+    [value.modelInventoryBefore, 'model before'],
+    [value.modelInventoryAfterUninstall, 'model after uninstall'],
+    [value.modelInventoryAfterFresh, 'model after fresh'],
+    [value.sentinelInventoryBefore, 'sentinel before'],
+    [value.sentinelInventoryAfterUninstall, 'sentinel after uninstall'],
+    [value.sentinelInventoryAfterFresh, 'sentinel after fresh'],
+  ])
+    validateInventory(inventory, `${arch} ${label}`);
+  if (
+    value.schemaVersion !== 1 ||
+    value.mode !== 'local-uninstall-preserve-fresh' ||
+    value.provenance !== 'local-non-public' ||
+    value.architecture !== arch ||
+    value.sourceVersion !== '0.0.67' ||
+    value.targetVersion !== '0.0.69' ||
+    value.sourceCommit !== freshClaims.sourceCommit ||
+    value.sourceTree !== freshClaims.sourceTree ||
+    !GENERATION.test(value.baselineWorkflowRunId) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(value.baselineArtifactDigest) ||
+    !SHA256.test(value.localInstallerSha256) ||
+    !SHA256.test(value.installedManifestSha256) ||
+    manifestBytes.length === 0 ||
+    hash(manifestBytes) !== value.installedManifestSha256 ||
+    canonicalJson(decodedManifest) !== canonicalJson(manifest) ||
+    manifest?.version !== '0.0.67' ||
+    manifest?.platform !== 'win' ||
+    manifest?.architecture !== arch ||
+    manifest?.releaseBuildDigest !== value.installedReleaseBuildDigest ||
+    gateway?.sha256 !== value.installedGatewaySha256 ||
+    owner?.sha256 !== value.installedOwnerSha256 ||
+    !SHA256.test(value.installedReleaseBuildDigest) ||
+    !SHA256.test(value.installedGatewaySha256) ||
+    !SHA256.test(value.installedOwnerSha256) ||
+    value.updaterMarkerPresent !== false ||
+    canonicalJson(value.profileInventoryBefore) !==
+      canonicalJson(value.profileInventoryAfterUninstall) ||
+    canonicalJson(value.profileInventoryBefore) !==
+      canonicalJson(value.profileInventoryAfterFresh) ||
+    canonicalJson(value.modelInventoryBefore) !==
+      canonicalJson(value.modelInventoryAfterUninstall) ||
+    canonicalJson(value.modelInventoryBefore) !== canonicalJson(value.modelInventoryAfterFresh) ||
+    canonicalJson(value.sentinelInventoryBefore) !==
+      canonicalJson(value.sentinelInventoryAfterUninstall) ||
+    canonicalJson(value.sentinelInventoryBefore) !==
+      canonicalJson(value.sentinelInventoryAfterFresh) ||
+    value.machineQuitObserved !== true ||
+    value.singletonReleased !== true ||
+    value.uninstallExitCode !== 0 ||
+    !Array.isArray(value.uninstallResidue) ||
+    value.uninstallResidue.length !== 0 ||
+    value.freshInstallExitCode !== 0 ||
+    value.targetInstallerSha256 !== freshClaims.packageSha256 ||
+    value.targetReleaseBuildDigest !== freshClaims.releaseBuildDigest ||
+    value.targetGatewaySha256 !== freshClaims.installedState?.gatewaySha256 ||
+    value.targetOwnerSha256 !== freshClaims.installedState?.ownerSha256 ||
+    !/^[0-9a-f]{32}$/u.test(value.targetMaintenanceGeneration) ||
+    value.passed !== true
+  )
+    throw new Error(`${arch} local-uninstall-preserve-fresh evidence is invalid`);
+  return {
+    kind: 'local-migration',
+    architecture: arch,
+    operation: value.mode,
+    action: 'uninstall-preserve-fresh',
+    passed: true,
+    exitCode: 0,
+    packageSha256: value.targetInstallerSha256,
+    releaseBuildDigest: value.targetReleaseBuildDigest,
+    layoutDigest: value.targetReleaseBuildDigest,
+    sourceCommit: value.sourceCommit,
+    sourceTree: value.sourceTree,
+    localProvenance: value.provenance,
+    baselineWorkflowRunId: value.baselineWorkflowRunId,
+    baselineArtifactDigest: value.baselineArtifactDigest,
+    localInstallerSha256: value.localInstallerSha256,
+    installedManifestSha256: value.installedManifestSha256,
+    installedGatewaySha256: value.installedGatewaySha256,
+    installedOwnerSha256: value.installedOwnerSha256,
+    targetMaintenanceGeneration: value.targetMaintenanceGeneration,
+  };
+}
+
+function validateTerminalFaultDescriptor(source, arch, freshClaims) {
+  const value = JSON.parse(source);
+  exactObject(
+    value,
+    ['schemaVersion', 'architecture', 'classification', 'sha256', 'sourceCommit', 'sourceTree'],
+    `${arch} terminal fault descriptor`,
+  );
+  if (
+    value.schemaVersion !== 1 ||
+    value.architecture !== arch ||
+    value.classification !== 'nonpromotable-acceptance-fault' ||
+    !SHA256.test(value.sha256) ||
+    value.sha256 === freshClaims.packageSha256 ||
+    value.sourceCommit !== freshClaims.sourceCommit ||
+    value.sourceTree !== freshClaims.sourceTree
+  )
+    throw new Error(`${arch} terminal fault descriptor is invalid`);
+  return value;
 }
 
 function validateRebootEvidence(
   source,
   arch,
-  faultClaims,
+  terminalFault,
   freshClaims,
   pinned,
   expectedWorkflowRunId,
@@ -409,6 +427,10 @@ function validateRebootEvidence(
       'machineIdentity',
       'preBootIdentity',
       'postBootIdentity',
+      'rebootRequestMethod',
+      'rebootRequestDelaySeconds',
+      'rebootRequestAcceptedAt',
+      'rebootRequestExitCode',
       'generationBefore',
       'generationAfter',
       'terminalGeneration',
@@ -434,11 +456,11 @@ function validateRebootEvidence(
     envelope.schemaVersion !== 1 ||
     payload.schemaVersion !== 1 ||
     payload.architecture !== arch ||
-    payload.terminalFaultCandidateSha256 !== faultClaims.terminalCleanup.acceptanceSetupSha256 ||
+    payload.terminalFaultCandidateSha256 !== terminalFault.sha256 ||
     payload.recoveryFreshCandidateSha256 !== freshClaims.packageSha256 ||
     payload.terminalFaultCandidateSha256 === payload.recoveryFreshCandidateSha256 ||
-    payload.sourceRevision !== faultClaims.sourceCommit ||
-    payload.sourceTree !== faultClaims.sourceTree ||
+    payload.sourceRevision !== terminalFault.sourceCommit ||
+    payload.sourceTree !== terminalFault.sourceTree ||
     payload.workflowRunId !== expectedWorkflowRunId ||
     !Number.isSafeInteger(payload.workflowRunAttempt) ||
     payload.workflowRunAttempt < 1 ||
@@ -450,6 +472,11 @@ function validateRebootEvidence(
     typeof payload.machineIdentity !== 'string' ||
     payload.machineIdentity.length === 0 ||
     payload.preBootIdentity === payload.postBootIdentity ||
+    payload.rebootRequestMethod !== 'shutdown.exe' ||
+    payload.rebootRequestDelaySeconds !== 30 ||
+    payload.rebootRequestExitCode !== 0 ||
+    typeof payload.rebootRequestAcceptedAt !== 'string' ||
+    !Number.isFinite(Date.parse(payload.rebootRequestAcceptedAt)) ||
     !/^[0-9a-f]{32}$/u.test(payload.generationBefore) ||
     !/^[0-9a-f]{32}$/u.test(payload.generationAfter) ||
     payload.generationBefore === payload.generationAfter ||
@@ -473,7 +500,12 @@ function validateRebootEvidence(
     !verifyBytes('sha256', signed, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)
   )
     throw new Error(`${arch} real reboot acceptance evidence is invalid`);
-  return { ...payload, sourceCommit: faultClaims.sourceCommit, sourceTree: faultClaims.sourceTree };
+  return {
+    ...payload,
+    sourceCommit: terminalFault.sourceCommit,
+    sourceTree: terminalFault.sourceTree,
+    terminalFaultClassification: terminalFault.classification,
+  };
 }
 
 async function evidenceRecords(directory, pinned, rebootRunIds) {
@@ -487,10 +519,34 @@ async function evidenceRecords(directory, pinned, rebootRunIds) {
       records.push({ file: name, sha256: hash(source), claims });
     }
     if (freshClaims === undefined) throw new Error(`${arch} fresh evidence is missing`);
-    const name = FAULT_NAME(arch);
-    const source = await readFile(resolve(directory, name));
-    const faultClaims = validateFault(JSON.parse(source), arch);
-    records.push({ file: name, sha256: hash(source), claims: faultClaims });
+    const migrationName = MIGRATION_NAME(arch);
+    const migrationSource = await readFile(resolve(directory, migrationName));
+    records.push({
+      file: migrationName,
+      sha256: hash(migrationSource),
+      claims: validateLocalMigration(migrationSource, arch, freshClaims),
+    });
+    const terminalFaultName = TERMINAL_FAULT_NAME(arch);
+    const terminalFaultSource = await readFile(resolve(directory, terminalFaultName));
+    const terminalFault = validateTerminalFaultDescriptor(terminalFaultSource, arch, freshClaims);
+    records.push({
+      file: terminalFaultName,
+      sha256: hash(terminalFaultSource),
+      claims: {
+        kind: 'nonpromotable-fault-descriptor',
+        architecture: arch,
+        operation: 'reboot-pending-delete',
+        action: 'fault',
+        passed: true,
+        exitCode: 0,
+        packageSha256: terminalFault.sha256,
+        releaseBuildDigest: freshClaims.releaseBuildDigest,
+        layoutDigest: freshClaims.layoutDigest,
+        sourceCommit: terminalFault.sourceCommit,
+        sourceTree: terminalFault.sourceTree,
+        classification: terminalFault.classification,
+      },
+    });
     const rebootName = REBOOT_NAME(arch);
     const rebootSource = await readFile(resolve(directory, rebootName));
     records.push({
@@ -499,7 +555,7 @@ async function evidenceRecords(directory, pinned, rebootRunIds) {
       claims: validateRebootEvidence(
         rebootSource,
         arch,
-        faultClaims,
+        terminalFault,
         freshClaims,
         pinned,
         rebootRunIds[arch],
@@ -550,8 +606,18 @@ export async function createWindowsPromotionEvidence({
     throw new Error('Lifecycle evidence source identities disagree');
   const keyId = hash(pinned);
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     promotionClass: 'protected-release-acceptance',
+    releasePolicy: {
+      version: '0.0.69',
+      mode: 'fresh-trust-root',
+      trustRootVersion: '0.0.69',
+      localMigration: {
+        sourceVersion: '0.0.67',
+        provenance: 'local-non-public',
+        mode: 'local-uninstall-preserve-fresh',
+      },
+    },
     repository,
     workflowRunId,
     sourceCommit,
@@ -589,6 +655,7 @@ export async function verifyWindowsPromotionEvidence({
     [
       'schemaVersion',
       'promotionClass',
+      'releasePolicy',
       'repository',
       'workflowRunId',
       'sourceCommit',
@@ -603,7 +670,18 @@ export async function verifyWindowsPromotionEvidence({
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
   const keyId = hash(pinned);
   if (
-    envelope.payload.schemaVersion !== 2 ||
+    envelope.payload.schemaVersion !== 3 ||
+    canonicalJson(envelope.payload.releasePolicy) !==
+      canonicalJson({
+        version: '0.0.69',
+        mode: 'fresh-trust-root',
+        trustRootVersion: '0.0.69',
+        localMigration: {
+          sourceVersion: '0.0.67',
+          provenance: 'local-non-public',
+          mode: 'local-uninstall-preserve-fresh',
+        },
+      }) ||
     envelope.signature.scheme !== 'p256-sha256-p1363-v1' ||
     envelope.signature.keyId !== keyId ||
     envelope.payload.promotionKeySha256 !== keyId ||
