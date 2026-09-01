@@ -23,6 +23,7 @@ export function validateSharedReleaseArtifacts(
     readonly version: string;
     readonly platform: 'win' | 'mac' | string;
     readonly arch: 'x64' | 'arm64' | string;
+    readonly artifactKind?: string;
   },
 ): void;
 export function finalArtifactNamesForIdentity(
@@ -31,6 +32,7 @@ export function finalArtifactNamesForIdentity(
     readonly version: string;
     readonly platform: 'win' | 'mac' | string;
     readonly arch: 'x64' | 'arm64' | string;
+    readonly artifactKind?: string;
   },
 ): string[];
 export function validateExpectedFinalArtifacts(
@@ -40,6 +42,7 @@ export function validateExpectedFinalArtifacts(
     readonly version: string;
     readonly platform: 'win' | 'mac' | string;
     readonly arch: 'x64' | 'arm64' | string;
+    readonly artifactKind?: string;
   },
 ): void;
 export function validateFinalArtifactInspection(

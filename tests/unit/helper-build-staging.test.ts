@@ -251,11 +251,11 @@ describe('R9 role-separated native staging contract', () => {
     );
   });
 
-  it('defines exactly two Windows runtime roles plus one recovery utility with one suppression owner', () => {
+  it('defines the exact three-role Windows native inventory with one suppression owner', () => {
     expect(nativeRoleLayout('win32')).toEqual([
       expect.objectContaining({ role: 'gateway', suppressionCapable: false }),
       expect.objectContaining({ role: 'owner', suppressionCapable: true }),
-      expect.objectContaining({ role: 'utility', suppressionCapable: false }),
+      expect.objectContaining({ role: 'recovery-launcher', suppressionCapable: false }),
     ]);
     for (const platform of ['win32', 'darwin'] as const) {
       const layout = nativeRoleLayout(platform);
@@ -292,6 +292,21 @@ describe('R9 role-separated native staging contract', () => {
   });
 
   it('rejects missing, extra, wrong-architecture, and second-owner bytes', async () => {
+    await stageWindows('x64');
+    await rm(resolve(root, 'talking-quill-update-recovery-launcher.exe'));
+    await expect(
+      verifyStagedNativeRoleSet(root, { platform: 'win32', architecture: 'x64' }),
+    ).rejects.toThrow('role set mismatch');
+
+    await stageWindows('x64');
+    await writeFile(
+      resolve(root, 'talking-quill-update-recovery-launcher.exe'),
+      pe('arm64', WINDOWS_UPDATE_RECOVERY_LAUNCHER_MARKER),
+    );
+    await expect(
+      verifyStagedNativeRoleSet(root, { platform: 'win32', architecture: 'x64' }),
+    ).rejects.toThrow('architecture mismatch');
+
     await stageWindows('x64');
     await rm(resolve(root, 'talking-quill-keyboard-owner.exe'));
     await expect(

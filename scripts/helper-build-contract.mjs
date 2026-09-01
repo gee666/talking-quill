@@ -62,7 +62,7 @@ const ROLE_LAYOUTS = Object.freeze({
     }),
     Object.freeze({
       name: 'talking-quill-update-recovery-launcher.exe',
-      role: 'utility',
+      role: 'recovery-launcher',
       suppressionCapable: false,
     }),
   ]),
@@ -161,7 +161,11 @@ export async function verifyMacosServiceBridgeBuildContract(path) {
   forbidMarkersExcept(executable, 'macOS service bridge', MACOS_SERVICE_BRIDGE_MARKER);
 }
 
-export const CANONICAL_WINDOWS_NATIVE_ROLES = Object.freeze(['gateway', 'owner']);
+export const CANONICAL_WINDOWS_NATIVE_ROLES = Object.freeze([
+  'gateway',
+  'owner',
+  'recovery-launcher',
+]);
 
 export async function verifyCompleteNativeRoleInventory(paths, assignedRolePaths) {
   if (

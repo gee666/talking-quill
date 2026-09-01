@@ -493,6 +493,7 @@ const COMMON_RESOURCE_PATHS = [
 const WINDOWS_PERSONAL_RUNTIME_RESOURCES = Object.freeze([
   'helper/talking-quill-helper.exe',
   'helper/talking-quill-keyboard-owner.exe',
+  'helper/talking-quill-update-recovery-launcher.exe',
 ]);
 const RELEASE_PACKAGE_METADATA_PATH = 'keyboard-owner-release-v1.json';
 const PLATFORM_RESOURCE_PATHS = Object.freeze({
@@ -656,7 +657,7 @@ export function validateSharedReleaseArtifacts(artifactNames, mode, expectedArti
 
 export function finalArtifactNamesForIdentity(artifactNames, expectedArtifact) {
   validateExpectedArtifactIdentity(expectedArtifact);
-  const expectedStem = `Talking-Quill-${expectedArtifact.version}-${expectedArtifact.platform}-${expectedArtifact.arch}`;
+  const expectedStem = `Talking-Quill-${expectedArtifact.version}-${expectedArtifact.platform}-${expectedArtifact.arch}${expectedArtifact.artifactKind === undefined ? '' : `-${expectedArtifact.artifactKind}`}`;
   const expectedNamePattern = new RegExp(`^${escapeRegExp(expectedStem)}\\.(?:exe|dmg|zip)$`, 'u');
   return artifactNames.map(normalizePackagePath).filter((name) => expectedNamePattern.test(name));
 }
@@ -850,7 +851,10 @@ function validateExpectedArtifactIdentity(expectedArtifact) {
     typeof expectedArtifact !== 'object' ||
     !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/u.test(expectedArtifact.version) ||
     !['win', 'mac'].includes(expectedArtifact.platform) ||
-    !['x64', 'arm64'].includes(expectedArtifact.arch)
+    !['x64', 'arm64'].includes(expectedArtifact.arch) ||
+    (expectedArtifact.artifactKind !== undefined &&
+      (expectedArtifact.platform !== 'win' ||
+        !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(expectedArtifact.artifactKind)))
   ) {
     throw new Error('Expected final-artifact version, platform, and architecture are invalid');
   }

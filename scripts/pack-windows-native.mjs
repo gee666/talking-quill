@@ -136,6 +136,7 @@ const manifest = {
   target: {
     gatewaySha256: roleHash('gateway'),
     ownerSha256: roleHash('owner'),
+    recoveryLauncherSha256: roleHash('recovery-launcher'),
     releaseBuildDigest: sourceManifest.releaseBuildDigest,
   },
   treeSha256,

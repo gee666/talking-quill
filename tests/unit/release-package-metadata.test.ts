@@ -62,6 +62,7 @@ beforeEach(async () => {
   for (const path of [
     'resources/helper/talking-quill-helper.exe',
     'resources/helper/talking-quill-keyboard-owner.exe',
+    'resources/helper/talking-quill-update-recovery-launcher.exe',
     'Talking Quill.exe',
     'Talking Quill.app/Contents/Resources/helper/talking-quill-helper',
     'Talking Quill.app/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner',
@@ -105,6 +106,7 @@ describe('owner-enabled serialized release package identity', () => {
       expect(metadata.roles.map(({ role }: { role: string }) => role)).toEqual([
         'gateway',
         'owner',
+        'recovery-launcher',
       ]);
     }
     const path = resolve(root, RELEASE_PACKAGE_METADATA_NAME);
@@ -365,6 +367,13 @@ describe('owner-enabled serialized release package identity', () => {
     if (gateway === undefined) throw new Error('Missing gateway fixture');
     gateway.sha256 = digest('substituted gateway');
     expect(() => validatePackageReleaseMetadata(changed)).toThrow('layout digest');
+    const duplicateRole = JSON.parse(JSON.stringify(metadata)) as {
+      roles: { role: string }[];
+    };
+    const duplicateTarget = duplicateRole.roles[2];
+    if (duplicateTarget === undefined) throw new Error('Missing recovery launcher fixture');
+    duplicateTarget.role = 'owner';
+    expect(() => validatePackageReleaseMetadata(duplicateRole)).toThrow('role layout or hash');
     const maliciousOwner = JSON.parse(JSON.stringify(metadata)) as {
       roles: { role: string; sha256: string }[];
     };

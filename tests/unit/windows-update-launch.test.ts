@@ -41,6 +41,12 @@ const candidate = {
       sha256: '44'.repeat(32),
       suppressionCapable: true,
     },
+    {
+      role: 'recovery-launcher',
+      path: 'resources/helper/talking-quill-update-recovery-launcher.exe',
+      sha256: '55'.repeat(32),
+      suppressionCapable: false,
+    },
   ],
   predecessor: {
     platform: 'win' as const,

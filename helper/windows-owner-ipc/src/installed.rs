@@ -120,7 +120,18 @@ impl InstalledRelease {
             .ok_or(InstalledReleaseError::Manifest)?;
         let manifest_path = resources.join(MANIFEST_NAME);
         let bytes = read_locked_manifest(&manifest_path)?;
-        Self::from_manifest_bytes(gateway, owner, purpose, resources, &bytes)
+        let recovery_launcher = read_locked_file(
+            &resources.join("helper/talking-quill-update-recovery-launcher.exe"),
+            64 * 1024 * 1024,
+        )?;
+        Self::from_manifest_bytes(
+            gateway,
+            owner,
+            purpose,
+            resources,
+            &bytes,
+            &recovery_launcher,
+        )
     }
 
     fn from_manifest_bytes(
@@ -129,6 +140,7 @@ impl InstalledRelease {
         purpose: ChannelPurpose,
         resources: &Path,
         bytes: &[u8],
+        recovery_launcher: &[u8],
     ) -> Result<Self, InstalledReleaseError> {
         if !peer_facts_match_session(gateway, owner)
             || gateway.architecture != owner.architecture
@@ -177,7 +189,7 @@ impl InstalledRelease {
                 .as_ref()
                 .map(|value| value.tree.as_str())
                 != Some(manifest.source_tree.as_str())
-            || manifest.roles.len() != 2
+            || manifest.roles.len() != 3
             || manifest.update.channel != format!("latest-{architecture}")
             || manifest.update.payload != "tqpkg2"
             || manifest.update.companion.is_some()
@@ -194,8 +206,21 @@ impl InstalledRelease {
         }
         let gateway_relative = "resources/helper/talking-quill-helper.exe";
         let owner_relative = "resources/helper/talking-quill-keyboard-owner.exe";
+        let recovery_launcher_relative =
+            "resources/helper/talking-quill-update-recovery-launcher.exe";
+        if pe_architecture(recovery_launcher) != Some(architecture)
+            || !has_source_identity(
+                &recovery_launcher,
+                &manifest.source_commit,
+                &manifest.source_tree,
+            )
+        {
+            return Err(InstalledReleaseError::Manifest);
+        }
+        let recovery_launcher_sha256: [u8; 32] = Sha256::digest(recovery_launcher).into();
         let mut gateway_seen = false;
         let mut owner_seen = false;
+        let mut recovery_launcher_seen = false;
         for (index, role) in manifest.roles.iter().enumerate() {
             match (index, role.role.as_str()) {
                 (0, "gateway")
@@ -214,12 +239,21 @@ impl InstalledRelease {
                 {
                     owner_seen = true;
                 }
+                (2, "recovery-launcher")
+                    if !recovery_launcher_seen
+                        && !role.suppression_capable
+                        && role.path == recovery_launcher_relative
+                        && parse_hex32(&role.sha256)? == recovery_launcher_sha256 =>
+                {
+                    recovery_launcher_seen = true;
+                }
                 _ => return Err(InstalledReleaseError::Manifest),
             }
         }
         let helper_directory = resources.join("helper");
         if !gateway_seen
             || !owner_seen
+            || !recovery_launcher_seen
             || !path_eq(
                 &helper_directory.join("talking-quill-helper.exe"),
                 &gateway.canonical_image,
@@ -338,6 +372,10 @@ impl InstalledRelease {
 }
 
 fn read_locked_manifest(path: &Path) -> Result<Vec<u8>, InstalledReleaseError> {
+    read_locked_file(path, MAX_MANIFEST_BYTES)
+}
+
+fn read_locked_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, InstalledReleaseError> {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING,
     };
@@ -361,7 +399,7 @@ fn read_locked_manifest(path: &Path) -> Result<Vec<u8>, InstalledReleaseError> {
         .metadata()
         .map_err(|_| InstalledReleaseError::Manifest)?
         .len();
-    if !(1..=MAX_MANIFEST_BYTES).contains(&length) {
+    if !(1..=max_bytes).contains(&length) {
         return Err(InstalledReleaseError::Manifest);
     }
     let mut bytes = Vec::with_capacity(length as usize);
@@ -371,6 +409,40 @@ fn read_locked_manifest(path: &Path) -> Result<Vec<u8>, InstalledReleaseError> {
         return Err(InstalledReleaseError::Manifest);
     }
     Ok(bytes)
+}
+
+fn pe_architecture(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 64 || bytes.get(..2) != Some(b"MZ") {
+        return None;
+    }
+    let pe = u32::from_le_bytes(bytes.get(60..64)?.try_into().ok()?) as usize;
+    if bytes.get(pe..pe + 4) != Some(b"PE\0\0") {
+        return None;
+    }
+    match u16::from_le_bytes(bytes.get(pe + 4..pe + 6)?.try_into().ok()?) {
+        0x8664 => Some("x64"),
+        0xaa64 => Some("arm64"),
+        _ => None,
+    }
+}
+
+fn has_source_identity(bytes: &[u8], commit: &str, tree: &str) -> bool {
+    [
+        ("TALKING_QUILL_SOURCE_COMMIT=", commit),
+        ("TALKING_QUILL_SOURCE_TREE=", tree),
+    ]
+    .iter()
+    .all(|(prefix, expected)| {
+        let offsets: Vec<usize> = bytes
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(_, window)| *window == prefix.as_bytes())
+            .map(|(offset, _)| offset)
+            .collect();
+        offsets.len() == 1
+            && bytes.get(offsets[0] + prefix.len()..offsets[0] + prefix.len() + 40)
+                == Some(expected.as_bytes())
+    })
 }
 
 pub fn protected_policy_proof(binding: &StablePipeBinding) -> Vec<u8> {
@@ -564,12 +636,32 @@ mod tests {
         }
     }
 
+    fn recovery_launcher(architecture: &str) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 256];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[60..64].copy_from_slice(&128_u32.to_le_bytes());
+        bytes[128..132].copy_from_slice(b"PE\0\0");
+        let machine = if architecture == "arm64" {
+            0xaa64_u16
+        } else {
+            0x8664_u16
+        };
+        bytes[132..134].copy_from_slice(&machine.to_le_bytes());
+        bytes.extend_from_slice(
+            format!("TALKING_QUILL_SOURCE_COMMIT={}", "11".repeat(20)).as_bytes(),
+        );
+        bytes
+            .extend_from_slice(format!("TALKING_QUILL_SOURCE_TREE={}", "22".repeat(20)).as_bytes());
+        bytes
+    }
+
     fn manifest_with(
         gateway: u8,
         owner: u8,
         architecture: &str,
         predecessor: serde_json::Value,
     ) -> Vec<u8> {
+        let launcher_sha256: [u8; 32] = Sha256::digest(recovery_launcher(architecture)).into();
         let mut value = serde_json::json!({
             "schemaVersion": 1,
             "kind": "talking-quill-local-owner-release",
@@ -582,7 +674,8 @@ mod tests {
             "sourceTree": "22".repeat(20),
             "roles": [
                 {"role":"gateway","path":"resources/helper/talking-quill-helper.exe","sha256":hex(&[gateway;32]),"suppressionCapable":false},
-                {"role":"owner","path":"resources/helper/talking-quill-keyboard-owner.exe","sha256":hex(&[owner;32]),"suppressionCapable":true}
+                {"role":"owner","path":"resources/helper/talking-quill-keyboard-owner.exe","sha256":hex(&[owner;32]),"suppressionCapable":true},
+                {"role":"recovery-launcher","path":"resources/helper/talking-quill-update-recovery-launcher.exe","sha256":hex(&launcher_sha256),"suppressionCapable":false}
             ],
             "predecessor": predecessor,
             "releaseBuildDigest": hex(&[0;32]),
@@ -603,6 +696,13 @@ mod tests {
         manifest_with(gateway, owner, "x64", serde_json::Value::Null)
     }
 
+    fn recovery_launcher_for(gateway: &PeerFacts) -> Vec<u8> {
+        recovery_launcher(match gateway.architecture {
+            WindowsArchitecture::X64 => "x64",
+            WindowsArchitecture::Arm64 => "arm64",
+        })
+    }
+
     fn hex(value: &[u8; 32]) -> String {
         value.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -618,6 +718,7 @@ mod tests {
             ChannelPurpose::Capture,
             resources,
             &manifest(1, 2),
+            &recovery_launcher_for(&gateway),
         )
         .unwrap();
         let parsed: ReleaseManifest = serde_json::from_slice(&manifest(1, 2)).unwrap();
@@ -651,6 +752,7 @@ mod tests {
             ChannelPurpose::Capture,
             resources,
             &bytes,
+            &recovery_launcher_for(&gateway),
         )
         .unwrap();
         assert_eq!(release.policy[13], 1);
@@ -673,6 +775,7 @@ mod tests {
             ChannelPurpose::Capture,
             resources,
             &bytes,
+            &recovery_launcher_for(&gateway),
         )
         .unwrap();
         assert_eq!(release.policy[11], 2);
@@ -696,6 +799,7 @@ mod tests {
                 ChannelPurpose::Capture,
                 resources,
                 &bytes,
+                &recovery_launcher_for(&gateway),
             )
             .is_err()
         );
@@ -723,6 +827,7 @@ mod tests {
                 ChannelPurpose::Capture,
                 resources,
                 &bytes,
+                &recovery_launcher_for(&gateway),
             )
             .is_err()
         );
@@ -739,7 +844,8 @@ mod tests {
                 &owner,
                 ChannelPurpose::Capture,
                 resources,
-                &manifest(3, 5)
+                &manifest(3, 5),
+                &recovery_launcher_for(&gateway),
             )
             .is_err()
         );
@@ -750,7 +856,8 @@ mod tests {
                 &owner,
                 ChannelPurpose::Capture,
                 resources,
-                &manifest(3, 4)
+                &manifest(3, 4),
+                &recovery_launcher_for(&gateway),
             )
             .is_err()
         );

@@ -25,6 +25,7 @@ export interface Tqpkg2Manifest {
     releaseBuildDigest: string;
     gatewaySha256: string;
     ownerSha256: string;
+    recoveryLauncherSha256: string;
   }>;
   readonly faultPhase:
     | null

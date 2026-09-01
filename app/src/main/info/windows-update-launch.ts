@@ -70,7 +70,7 @@ export function buildWindowsElevationLaunch(
 function isValidCandidate(candidate: WindowsUpdateCandidateIdentity): boolean {
   const digest = (value: string): boolean => /^[0-9a-f]{64}$/u.test(value);
   const architecture = candidate.architecture;
-  const [gateway, owner] = candidate.roles;
+  const [gateway, owner, recoveryLauncher] = candidate.roles;
   return (
     candidate.platform === 'win' &&
     (architecture === 'x64' || architecture === 'arm64') &&
@@ -87,7 +87,7 @@ function isValidCandidate(candidate: WindowsUpdateCandidateIdentity): boolean {
     candidate.authorization.scheme === 'p256-sha256-v1' &&
     digest(candidate.authorization.verificationKeySha256) &&
     /^[A-Za-z0-9+/]{8,}={0,2}$/u.test(candidate.authorization.signature) &&
-    candidate.roles.length === 2 &&
+    candidate.roles.length === 3 &&
     gateway?.role === 'gateway' &&
     gateway.path === 'resources/helper/talking-quill-helper.exe' &&
     !gateway.suppressionCapable &&
@@ -96,6 +96,10 @@ function isValidCandidate(candidate: WindowsUpdateCandidateIdentity): boolean {
     owner.path === 'resources/helper/talking-quill-keyboard-owner.exe' &&
     owner.suppressionCapable &&
     digest(owner.sha256) &&
+    recoveryLauncher?.role === 'recovery-launcher' &&
+    recoveryLauncher.path === 'resources/helper/talking-quill-update-recovery-launcher.exe' &&
+    !recoveryLauncher.suppressionCapable &&
+    digest(recoveryLauncher.sha256) &&
     candidate.predecessor.platform === 'win' &&
     candidate.predecessor.architecture === architecture &&
     /^\d+\.\d+\.\d+$/u.test(candidate.predecessor.version) &&

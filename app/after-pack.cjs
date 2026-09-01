@@ -27,6 +27,26 @@ module.exports = async function hardenElectron(context) {
   }
   if (context.electronPlatformName === 'darwin') await chmod(helper, 0o755);
   await verifyArchitecture(helper, context.electronPlatformName, context.arch);
+  if (context.electronPlatformName === 'win32') {
+    const architecture = context.arch === 1 ? 'x64' : context.arch === 3 ? 'arm64' : null;
+    if (architecture === null) {
+      throw new Error(`Unsupported package architecture: ${String(context.arch)}`);
+    }
+    const helperDirectory = join(context.appOutDir, 'resources', 'helper');
+    const { nativeRoleLayout, verifyNativeSourceIdentity, verifyStagedNativeRoleSet } =
+      await import('../scripts/helper-build-contract.mjs');
+    const { currentSourceIdentity } = await import('../scripts/source-identity.mjs');
+    await verifyStagedNativeRoleSet(helperDirectory, {
+      platform: 'win32',
+      architecture,
+    });
+    const sourceIdentity = currentSourceIdentity();
+    await Promise.all(
+      nativeRoleLayout('win32').map((role) =>
+        verifyNativeSourceIdentity(join(helperDirectory, role.name), sourceIdentity),
+      ),
+    );
+  }
 
   console.log('  • hardening Electron fuses');
   const product = context.packager.appInfo.productFilename;

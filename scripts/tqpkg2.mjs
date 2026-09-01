@@ -165,7 +165,12 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
       'treeSha256',
       'version',
     ]) ||
-    !exactKeys(manifest.target, ['gatewaySha256', 'ownerSha256', 'releaseBuildDigest']) ||
+    !exactKeys(manifest.target, [
+      'gatewaySha256',
+      'ownerSha256',
+      'recoveryLauncherSha256',
+      'releaseBuildDigest',
+    ]) ||
     Buffer.from(canonicalJson(manifest)).compare(manifestBytes) !== 0 ||
     manifest.schemaVersion !== 2 ||
     manifest.architecture !== expectedArchitecture ||
@@ -189,6 +194,7 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
     !hex(manifest.target?.releaseBuildDigest) ||
     !hex(manifest.target?.gatewaySha256) ||
     !hex(manifest.target?.ownerSha256) ||
+    !hex(manifest.target?.recoveryLauncherSha256) ||
     (manifest.faultPhase !== null &&
       (manifest.packageMode !== 'repair' ||
         !allowAcceptanceFaults ||
@@ -246,6 +252,18 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
   }
   if (expectedOffset !== size || tqpkg2TreeDigest(manifest.files) !== manifest.treeSha256)
     throw new Error('TQPKG2 tree digest is invalid');
+  const targetFiles = [
+    ['resources/helper/talking-quill-helper.exe', manifest.target.gatewaySha256],
+    ['resources/helper/talking-quill-keyboard-owner.exe', manifest.target.ownerSha256],
+    [
+      'resources/helper/talking-quill-update-recovery-launcher.exe',
+      manifest.target.recoveryLauncherSha256,
+    ],
+  ];
+  for (const [path, sha256] of targetFiles) {
+    const matches = manifest.files.filter((file) => file.path === path && file.sha256 === sha256);
+    if (matches.length !== 1) throw new Error('TQPKG2 target native role is missing or ambiguous');
+  }
   return { manifest, contents, packageOffset: offset, packageSize: size, manifestSize };
 }
 
@@ -265,6 +283,7 @@ export function bindTqpkg2OwnerManifest(manifest, owner) {
     owner.releaseBuildDigest !== manifest.target.releaseBuildDigest ||
     role('gateway') !== manifest.target.gatewaySha256 ||
     role('owner') !== manifest.target.ownerSha256 ||
+    role('recovery-launcher') !== manifest.target.recoveryLauncherSha256 ||
     !predecessor(owner.predecessor, manifest.predecessor)
   )
     throw new Error('TQPKG2 identity is not bound to owner release manifest');

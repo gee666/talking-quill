@@ -100,15 +100,21 @@ describe('runtime immutable publication selection', () => {
       roles: [
         {
           role: 'gateway',
-          path: 'resources/helper/gateway.exe',
+          path: 'resources/helper/talking-quill-helper.exe',
           sha256: digest('1'),
           suppressionCapable: false,
         },
         {
           role: 'owner',
-          path: 'resources/helper/owner.exe',
+          path: 'resources/helper/talking-quill-keyboard-owner.exe',
           sha256: digest('2'),
           suppressionCapable: true,
+        },
+        {
+          role: 'recovery-launcher',
+          path: 'resources/helper/talking-quill-update-recovery-launcher.exe',
+          sha256: digest('5'),
+          suppressionCapable: false,
         },
       ],
       predecessor: null,

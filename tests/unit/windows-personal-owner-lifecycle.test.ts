@@ -9,11 +9,12 @@ describe('Windows gateway and owner lifecycle contract', () => {
       readFile('helper/keyboard-owner/src/windows_runtime.rs', 'utf8'),
       readFile('helper/keyboard-owner/src/runtime.rs', 'utf8'),
     ]);
-    expect(contract).toContain(
-      "CANONICAL_WINDOWS_NATIVE_ROLES = Object.freeze(['gateway', 'owner'])",
+    expect(contract).toMatch(
+      /CANONICAL_WINDOWS_NATIVE_ROLES = Object\.freeze\(\[\s*'gateway',\s*'owner',\s*'recovery-launcher',/u,
     );
     expect(contract).toContain("name: 'talking-quill-helper.exe'");
     expect(contract).toContain("name: 'talking-quill-keyboard-owner.exe'");
+    expect(contract).toContain("name: 'talking-quill-update-recovery-launcher.exe'");
     expect(contract).not.toContain('TalkingQuillKeyboardAuthority.exe');
     expect(launcher).toContain('current_pipe_name');
     expect(launcher).toContain('named_pipe_server_pid');

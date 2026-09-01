@@ -2376,6 +2376,10 @@ fn stage_predecessor_evidence(installed_gateway: &Path, directory: &Path) -> Res
     copy_restricted_snapshot(
         &helper_directory.join("talking-quill-keyboard-owner.exe"),
         &directory.join("predecessor-owner.exe"),
+    )?;
+    copy_restricted_snapshot(
+        &helper_directory.join("talking-quill-update-recovery-launcher.exe"),
+        &directory.join("predecessor-recovery-launcher.exe"),
     )
 }
 
@@ -2496,8 +2500,8 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
         || !digest(&candidate.release_build_digest)
         || !digest(&candidate.package_layout_digest)
         || !digest(&candidate.package_sha256)
-        || candidate.roles.len() != 2
-        || installed.roles.len() != 2
+        || candidate.roles.len() != 3
+        || installed.roles.len() != 3
         || candidate.predecessor.platform != "win"
         || candidate.predecessor.architecture != installed.architecture
         || candidate.predecessor.version != installed.version
@@ -2514,20 +2518,30 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
     }
     let candidate_gateway = update_role(&candidate.roles, "gateway")?;
     let candidate_owner = update_role(&candidate.roles, "owner")?;
+    let candidate_recovery_launcher = update_role(&candidate.roles, "recovery-launcher")?;
     let installed_gateway = update_role(&installed.roles, "gateway")?;
     let installed_owner = update_role(&installed.roles, "owner")?;
+    let installed_recovery_launcher = update_role(&installed.roles, "recovery-launcher")?;
     if installed_gateway.path != "resources/helper/talking-quill-helper.exe"
         || installed_gateway.suppression_capable
         || installed_owner.path != "resources/helper/talking-quill-keyboard-owner.exe"
         || !installed_owner.suppression_capable
+        || installed_recovery_launcher.path
+            != "resources/helper/talking-quill-update-recovery-launcher.exe"
+        || installed_recovery_launcher.suppression_capable
         || !digest(&installed_gateway.sha256)
         || !digest(&installed_owner.sha256)
+        || !digest(&installed_recovery_launcher.sha256)
         || candidate_gateway.path != "resources/helper/talking-quill-helper.exe"
         || candidate_gateway.suppression_capable
         || !digest(&candidate_gateway.sha256)
         || candidate_owner.path != "resources/helper/talking-quill-keyboard-owner.exe"
         || !candidate_owner.suppression_capable
         || !digest(&candidate_owner.sha256)
+        || candidate_recovery_launcher.path
+            != "resources/helper/talking-quill-update-recovery-launcher.exe"
+        || candidate_recovery_launcher.suppression_capable
+        || !digest(&candidate_recovery_launcher.sha256)
         || candidate.predecessor.gateway_sha256 != installed_gateway.sha256
         || candidate.predecessor.owner_sha256 != installed_owner.sha256
     {
@@ -2539,17 +2553,22 @@ fn verify_update_relation(candidate: &UpdateCandidate, package_sha256: &str) -> 
     } else {
         "talking-quill-keyboard-owner.exe"
     };
-    let mut owner_file = open_locked(
-        &current
-            .parent()
-            .ok_or(EXIT_IDENTITY_MISMATCH)?
-            .join(owner_name),
-    )
-    .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let role_directory = current.parent().ok_or(EXIT_IDENTITY_MISMATCH)?;
+    let mut owner_file =
+        open_locked(&role_directory.join(owner_name)).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    let recovery_launcher_name = if staged {
+        "predecessor-recovery-launcher.exe"
+    } else {
+        "talking-quill-update-recovery-launcher.exe"
+    };
+    let mut recovery_launcher_file = open_locked(&role_directory.join(recovery_launcher_name))
+        .map_err(|_| EXIT_IDENTITY_MISMATCH)?;
     if hash_file(&mut gateway_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?
         != decode_hash(&installed_gateway.sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
         || hash_file(&mut owner_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?
             != decode_hash(&installed_owner.sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
+        || hash_file(&mut recovery_launcher_file).map_err(|_| EXIT_IDENTITY_MISMATCH)?
+            != decode_hash(&installed_recovery_launcher.sha256).ok_or(EXIT_IDENTITY_MISMATCH)?
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
@@ -5175,6 +5194,12 @@ mod tests {
                     sha256: "22".repeat(32),
                     suppression_capable: true,
                 },
+                UpdateRole {
+                    role: "recovery-launcher".into(),
+                    path: "resources/helper/talking-quill-update-recovery-launcher.exe".into(),
+                    sha256: "33".repeat(32),
+                    suppression_capable: false,
+                },
             ],
             predecessor: UpdatePredecessor {
                 platform: "win".into(),
@@ -5196,7 +5221,7 @@ mod tests {
     fn candidate_role_and_predecessor_layout_matches_the_javascript_contract() {
         assert_eq!(
             canonical_candidate_layout(&candidate()).unwrap(),
-            "77976155fb7b3d468eafa5bd2d5efc8419a969f09df0fe17e69ba08dde2d4892"
+            "edd8c82885e70192cf07b0fbf006e74734ed8009df89a8fe0fe8529369156d30"
         );
     }
 

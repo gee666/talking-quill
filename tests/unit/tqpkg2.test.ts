@@ -14,19 +14,24 @@ function fixture(
   mode: 'fresh' | 'update' | 'repair' = 'fresh',
   mutate?: (manifest: Record<string, unknown>) => void,
 ) {
-  const content = Buffer.from('payload'),
-    block = zstdCompressSync(content),
-    path = 'resources/app.asar';
-  const files = [
-    {
-      path,
-      mode: 0,
-      size: content.length,
-      sha256: sha(content),
-      blockOffset: 0,
-      blockSize: block.length,
-    },
-  ];
+  const payloads = [
+    ['resources/app.asar', Buffer.from('payload')],
+    ['resources/helper/talking-quill-helper.exe', Buffer.from('gateway')],
+    ['resources/helper/talking-quill-keyboard-owner.exe', Buffer.from('owner')],
+    [
+      'resources/helper/talking-quill-update-recovery-launcher.exe',
+      Buffer.from('recovery-launcher'),
+    ],
+  ] as const;
+  const blocks = payloads.map(([, content]) => zstdCompressSync(content));
+  const files = payloads.map(([path, content], index) => ({
+    path,
+    mode: 0,
+    size: content.length,
+    sha256: sha(content),
+    blockOffset: 0,
+    blockSize: blocks[index]?.length ?? 0,
+  }));
   const manifest: Record<string, unknown> = {
     architecture: 'x64',
     faultPhase: null,
@@ -46,18 +51,21 @@ function fixture(
     sourceTree: 'b'.repeat(40),
     target: {
       releaseBuildDigest: '4'.repeat(64),
-      gatewaySha256: '5'.repeat(64),
-      ownerSha256: '6'.repeat(64),
+      gatewaySha256: sha(payloads[1][1]),
+      ownerSha256: sha(payloads[2][1]),
+      recoveryLauncherSha256: sha(payloads[3][1]),
     },
     treeSha256: tqpkg2TreeDigest(files),
     version: '0.0.69',
   };
   mutate?.(manifest);
   let manifestBytes = Buffer.from(canonicalJson(manifest));
-  const file = files[0];
-  if (file === undefined) throw new Error('fixture file is missing');
-  for (let index = 0; index < 3; index += 1) {
-    file.blockOffset = manifestBytes.length;
+  for (let index = 0; index < 4; index += 1) {
+    let offset = manifestBytes.length;
+    for (const file of files) {
+      file.blockOffset = offset;
+      offset += file.blockSize;
+    }
     manifestBytes = Buffer.from(canonicalJson(manifest));
   }
   const stub = Buffer.alloc(512);
@@ -67,7 +75,7 @@ function fixture(
   stub.writeUInt16LE(0x8664, 68);
   stub.writeUInt16LE(0x20b, 88);
   stub.writeUInt16LE(2, 156);
-  const packageBytes = Buffer.concat([manifestBytes, block]),
+  const packageBytes = Buffer.concat([manifestBytes, ...blocks]),
     footer = Buffer.alloc(128);
   footer.write('TQPKG2\0\0', 0, 'ascii');
   footer.writeUInt32LE(2, 8);
@@ -121,6 +129,14 @@ describe('shared TQPKG2 parser', () => {
         'x64',
       ),
     ).toThrow();
+    expect(() =>
+      parseTqpkg2(
+        fixture('fresh', (manifest) => {
+          (manifest.target as Record<string, unknown>).recoveryLauncherSha256 = '0'.repeat(64);
+        }),
+        'x64',
+      ),
+    ).toThrow('target native role');
   });
   it('rejects concatenated valid Zstd frames', () => {
     const first = zstdCompressSync(Buffer.from('first'));

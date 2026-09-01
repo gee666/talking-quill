@@ -18,6 +18,11 @@ export function parseUnsignedUpdateIdentity(
       ? [
           ['gateway', 'resources/helper/talking-quill-helper.exe', false],
           ['owner', 'resources/helper/talking-quill-keyboard-owner.exe', true],
+          [
+            'recovery-launcher',
+            'resources/helper/talking-quill-update-recovery-launcher.exe',
+            false,
+          ],
         ]
       : [
           ['gateway', 'Talking Quill.app/Contents/Resources/helper/talking-quill-helper', false],

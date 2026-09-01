@@ -3353,7 +3353,9 @@ fn installed_matches_target(
             .and_then(|value| value.as_str())
             == Some(package.manifest.target.release_build_digest.as_str())
         && role("gateway") == Some(package.manifest.target.gateway_sha256.as_str())
-        && role("owner") == Some(package.manifest.target.owner_sha256.as_str()))
+        && role("owner") == Some(package.manifest.target.owner_sha256.as_str())
+        && role("recovery-launcher")
+            == Some(package.manifest.target.recovery_launcher_sha256.as_str()))
 }
 
 fn authorize_package_mode(
@@ -3592,6 +3594,37 @@ fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> 
             .and_then(|role| role.get("sha256"))
             .and_then(|hash| hash.as_str())
     };
+    let roles_match = value
+        .get("roles")
+        .and_then(|roles| roles.as_array())
+        .is_some_and(|roles| {
+            let expected = [
+                (
+                    "gateway",
+                    "resources/helper/talking-quill-helper.exe",
+                    false,
+                ),
+                (
+                    "owner",
+                    "resources/helper/talking-quill-keyboard-owner.exe",
+                    true,
+                ),
+                (
+                    "recovery-launcher",
+                    "resources/helper/talking-quill-update-recovery-launcher.exe",
+                    false,
+                ),
+            ];
+            roles.len() == expected.len()
+                && roles.iter().zip(expected).all(|(role, expected)| {
+                    role.get("role").and_then(|value| value.as_str()) == Some(expected.0)
+                        && role.get("path").and_then(|value| value.as_str()) == Some(expected.1)
+                        && role
+                            .get("suppressionCapable")
+                            .and_then(|value| value.as_bool())
+                            == Some(expected.2)
+                })
+        });
     let predecessor_matches = match (&package.manifest.predecessor, value.get("predecessor")) {
         (None, Some(previous)) => previous.is_null(),
         (Some(expected), Some(previous)) => {
@@ -3611,8 +3644,9 @@ fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> 
     let acceptance_repair = cfg!(feature = "acceptance-faults")
         && package.manifest.fault_phase.is_some()
         && package.manifest.package_mode == "repair";
-    if value.get("version").and_then(|item| item.as_str())
-        != Some(package.manifest.version.as_str())
+    if !roles_match
+        || value.get("version").and_then(|item| item.as_str())
+            != Some(package.manifest.version.as_str())
         || value.get("architecture").and_then(|item| item.as_str())
             != Some(package.manifest.architecture.as_str())
         || value.get("sourceCommit").and_then(|item| item.as_str())
@@ -3628,11 +3662,72 @@ fn validate_staged_release_identity(package: &ParsedPackage, staging: &Path) -> 
             != Some(package.manifest.target.release_build_digest.as_str())
         || role("gateway") != Some(package.manifest.target.gateway_sha256.as_str())
         || role("owner") != Some(package.manifest.target.owner_sha256.as_str())
+        || role("recovery-launcher")
+            != Some(package.manifest.target.recovery_launcher_sha256.as_str())
         || (!acceptance_repair && !predecessor_matches)
     {
         return Err(fail(
             EXIT_REJECTED,
             "Staged release identity does not match TQPKG2.",
+        ));
+    }
+    for relative in [
+        "resources/helper/talking-quill-helper.exe",
+        "resources/helper/talking-quill-keyboard-owner.exe",
+        "resources/helper/talking-quill-update-recovery-launcher.exe",
+    ] {
+        validate_staged_native_role(
+            &staging.join(relative),
+            &package.manifest.architecture,
+            &package.manifest.source_commit,
+            &package.manifest.source_tree,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_staged_native_role(
+    path: &Path,
+    architecture: &str,
+    source_commit: &str,
+    source_tree: &str,
+) -> Result<()> {
+    let bytes = fs::read(path).map_err(io_failure)?;
+    let pe = bytes
+        .get(60..64)
+        .and_then(|value| value.try_into().ok())
+        .map(u32::from_le_bytes)
+        .map(|value| value as usize);
+    let machine = pe.and_then(|offset| {
+        (bytes.get(offset..offset + 4) == Some(b"PE\0\0"))
+            .then(|| bytes.get(offset + 4..offset + 6))
+            .flatten()
+            .and_then(|value| value.try_into().ok())
+            .map(u16::from_le_bytes)
+    });
+    let expected_machine = match architecture {
+        "x64" => 0x8664,
+        "arm64" => 0xaa64,
+        _ => 0,
+    };
+    let marker_is_exact = |name: &str, expected: &str| {
+        let prefix = format!("{name}=");
+        let matches: Vec<&[u8]> = bytes
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(_, window)| *window == prefix.as_bytes())
+            .filter_map(|(offset, _)| bytes.get(offset + prefix.len()..offset + prefix.len() + 40))
+            .collect();
+        matches.len() == 1 && matches[0] == expected.as_bytes()
+    };
+    if bytes.get(..2) != Some(b"MZ")
+        || machine != Some(expected_machine)
+        || !marker_is_exact("TALKING_QUILL_SOURCE_COMMIT", source_commit)
+        || !marker_is_exact("TALKING_QUILL_SOURCE_TREE", source_tree)
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Staged native role architecture or source identity is invalid.",
         ));
     }
     Ok(())

@@ -16,6 +16,7 @@ const ROLE_LAYOUT = Object.freeze({
   win: Object.freeze([
     ['gateway', 'resources/helper/talking-quill-helper.exe', false],
     ['owner', 'resources/helper/talking-quill-keyboard-owner.exe', true],
+    ['recovery-launcher', 'resources/helper/talking-quill-update-recovery-launcher.exe', false],
   ]),
   mac: Object.freeze([
     ['gateway', 'Talking Quill.app/Contents/Resources/helper/talking-quill-helper', false],

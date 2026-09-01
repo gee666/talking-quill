@@ -101,6 +101,12 @@ describe('runtime unsigned updater identity', () => {
           sha256: digest('2'),
           suppressionCapable: true,
         },
+        {
+          role: 'recovery-launcher',
+          path: 'resources/helper/talking-quill-update-recovery-launcher.exe',
+          sha256: digest('3'),
+          suppressionCapable: false,
+        },
       ],
     } as const;
     expect(parseUnsignedUpdateIdentity(windowsIdentity, 'win32', 'x64', '1.2.3')).toEqual(

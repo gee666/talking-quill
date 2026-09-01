@@ -171,7 +171,7 @@ if (freshTrustRoot) {
     identity.predecessor.architecture !== architecture ||
     !Array.isArray(identity?.roles) ||
     JSON.stringify(identity.roles.map((role) => role?.role)) !==
-      JSON.stringify(['gateway', 'owner']) ||
+      JSON.stringify(['gateway', 'owner', 'recovery-launcher']) ||
     identity.roles.filter((role) => role?.suppressionCapable === true).length !== 1 ||
     JSON.stringify(updater?.talkingQuillRelease) !== JSON.stringify(identity)
   ) {

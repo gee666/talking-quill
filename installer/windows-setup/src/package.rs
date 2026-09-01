@@ -58,6 +58,7 @@ pub struct TargetIdentity {
     pub release_build_digest: String,
     pub gateway_sha256: String,
     pub owner_sha256: String,
+    pub recovery_launcher_sha256: String,
 }
 
 fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -261,6 +262,7 @@ fn validate_manifest(
         || !hex_digest(&manifest.target.release_build_digest)
         || !hex_digest(&manifest.target.gateway_sha256)
         || !hex_digest(&manifest.target.owner_sha256)
+        || !hex_digest(&manifest.target.recovery_launcher_sha256)
         || (manifest.fault_phase.is_some()
             && (!cfg!(feature = "acceptance-faults") || manifest.package_mode != "repair"))
         || manifest.fault_phase.as_deref().is_some_and(|phase| {
@@ -335,6 +337,8 @@ fn validate_manifest(
         != Some(manifest.target.gateway_sha256.as_str())
         || role_hash("resources/helper/talking-quill-keyboard-owner.exe")
             != Some(manifest.target.owner_sha256.as_str())
+        || role_hash("resources/helper/talking-quill-update-recovery-launcher.exe")
+            != Some(manifest.target.recovery_launcher_sha256.as_str())
         || manifest
             .files
             .iter()
@@ -448,11 +452,15 @@ mod tests {
     use super::*;
 
     fn fixture() -> Vec<u8> {
-        let payloads: [(&str, &[u8]); 3] = [
+        let payloads: [(&str, &[u8]); 4] = [
             ("resources/helper/talking-quill-helper.exe", b"gateway"),
             (
                 "resources/helper/talking-quill-keyboard-owner.exe",
                 b"owner",
+            ),
+            (
+                "resources/helper/talking-quill-update-recovery-launcher.exe",
+                b"recovery-launcher",
             ),
             ("resources/keyboard-owner-release-v1.json", b"release"),
         ];
@@ -472,7 +480,7 @@ mod tests {
         let mut value = serde_json::json!({
             "architecture":"x64", "files":files,
             "faultPhase":null, "packageMode":"fresh", "predecessor":null, "schemaVersion":2, "sourceCommit":"ab".repeat(20),
-            "sourceTree":"cd".repeat(20), "target":{"gatewaySha256":hex(&Sha256::digest(b"gateway")),"ownerSha256":hex(&Sha256::digest(b"owner")),"releaseBuildDigest":"33".repeat(32)},
+            "sourceTree":"cd".repeat(20), "target":{"gatewaySha256":hex(&Sha256::digest(b"gateway")),"ownerSha256":hex(&Sha256::digest(b"owner")),"recoveryLauncherSha256":hex(&Sha256::digest(b"recovery-launcher")),"releaseBuildDigest":"33".repeat(32)},
             "treeSha256":hex(&tree.finalize()), "version":"0.0.69"
         });
         let mut manifest = serde_json::to_vec(&value).unwrap();
@@ -582,6 +590,7 @@ mod tests {
                     release_build_digest: "33".repeat(32),
                     gateway_sha256: "44".repeat(32),
                     owner_sha256: "55".repeat(32),
+                    recovery_launcher_sha256: "66".repeat(32),
                 },
                 fault_phase: None,
                 tree_sha256: "66".repeat(32),
@@ -723,6 +732,7 @@ mod tests {
                 release_build_digest: "33".repeat(32),
                 gateway_sha256: "44".repeat(32),
                 owner_sha256: "55".repeat(32),
+                recovery_launcher_sha256: "66".repeat(32),
             },
             fault_phase: None,
             tree_sha256: "22".repeat(32),

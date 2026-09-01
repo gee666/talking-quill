@@ -13,7 +13,7 @@ export const LEGACY_NATIVE_MARKERS: readonly Buffer[];
 
 export interface NativeRoleContract {
   readonly name: string;
-  readonly role: 'gateway' | 'owner' | 'authority' | 'utility';
+  readonly role: 'gateway' | 'owner' | 'authority' | 'recovery-launcher';
   readonly suppressionCapable: boolean;
 }
 
@@ -23,6 +23,7 @@ export function verifyHelperBuildContract(
   path: string,
   options: { readonly windows: boolean },
 ): Promise<void>;
+export function verifyWindowsUpdateRecoveryLauncherBuildContract(path: string): Promise<void>;
 export function verifyMacosServiceBridgeBuildContract(path: string): Promise<void>;
 export function verifyCompleteNativeRoleInventory(
   paths: readonly string[],

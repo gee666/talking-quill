@@ -170,7 +170,21 @@ const artifactEvidence = await inspectFinalArtifacts(
   isMacBundle,
   strictArtifactInspection,
   artifactRequirement,
-  { version: expectedVersion, platform: boundPlatform, arch: boundArch },
+  {
+    version: expectedVersion,
+    platform: boundPlatform,
+    arch: boundArch,
+    ...(boundPlatform === 'win'
+      ? {
+          artifactKind:
+            process.env.TALKING_QUILL_NATIVE_FAULT_PHASE === undefined
+              ? process.env.TALKING_QUILL_PACKAGE_MODE === 'fresh'
+                ? 'setup'
+                : process.env.TALKING_QUILL_PACKAGE_MODE
+              : `repair-${process.env.TALKING_QUILL_NATIVE_FAULT_PHASE}`,
+        }
+      : {}),
+  },
   unpackedReleaseMetadata,
 );
 const noticeCheck = spawnSync(process.execPath, ['scripts/generate-notices.mjs', '--check'], {
@@ -579,6 +593,7 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
     !/^[0-9a-f]{64}$/u.test(manifest.target?.releaseBuildDigest ?? '') ||
     !/^[0-9a-f]{64}$/u.test(manifest.target?.gatewaySha256 ?? '') ||
     !/^[0-9a-f]{64}$/u.test(manifest.target?.ownerSha256 ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(manifest.target?.recoveryLauncherSha256 ?? '') ||
     !Array.isArray(manifest.files) ||
     manifest.files.length === 0 ||
     manifest.files.length > 200_000
@@ -671,6 +686,7 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
     ownerManifest.releaseBuildDigest !== manifest.target.releaseBuildDigest ||
     role('gateway') !== manifest.target.gatewaySha256 ||
     role('owner') !== manifest.target.ownerSha256 ||
+    role('recovery-launcher') !== manifest.target.recoveryLauncherSha256 ||
     !predecessorMatches(ownerManifest.predecessor, manifest.predecessor)
   ) {
     throw new Error('Windows TQPKG2 identity is not bound to the owner release manifest');
@@ -708,7 +724,12 @@ async function inspectExtractedRuntime(root, mac, expectedArch, unpackedReleaseM
       'helper',
       mac ? 'talking-quill-helper' : 'talking-quill-helper.exe',
     ),
-    ...(mac ? [] : [resolve(extractedResources, 'helper/talking-quill-keyboard-owner.exe')]),
+    ...(mac
+      ? []
+      : [
+          resolve(extractedResources, 'helper/talking-quill-keyboard-owner.exe'),
+          resolve(extractedResources, 'helper/talking-quill-update-recovery-launcher.exe'),
+        ]),
     resolve(
       extractedResources,
       'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node',

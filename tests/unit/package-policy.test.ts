@@ -253,6 +253,7 @@ const validResources = (target: 'win' | 'mac', architecture: 'x64' | 'arm64' = '
           'keyboard-owner-release-v1.json',
           'helper/talking-quill-helper.exe',
           'helper/talking-quill-keyboard-owner.exe',
+          'helper/talking-quill-update-recovery-launcher.exe',
         ]
       : ['helper/talking-quill-helper']),
   ];
@@ -785,6 +786,8 @@ describe('packaged runtime allowlist', () => {
   it('keeps afterPack as a read-only bidirectional ONNX structural gate', async () => {
     const source = await readFile(resolve('app/after-pack.cjs'), 'utf8');
     expect(source).toContain('await verifyPackagedStructure(context)');
+    expect(source).toContain('await verifyStagedNativeRoleSet(helperDirectory');
+    expect(source).toContain("nativeRoleLayout('win32')");
     expect(source).not.toContain('before-pack');
     expect(source).not.toContain('pruneOnnxRuntime');
     expect(source).not.toContain('rmSync');
@@ -870,6 +873,12 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateExpectedFinalArtifacts([], 'none', winX64)).not.toThrow();
     expect(() =>
       validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-x64.exe'], 'native-setup', winX64),
+    ).not.toThrow();
+    expect(() =>
+      validateExpectedFinalArtifacts(['Talking-Quill-1.0.0-win-x64-setup.exe'], 'native-setup', {
+        ...winX64,
+        artifactKind: 'setup',
+      }),
     ).not.toThrow();
     expect(() =>
       validateExpectedFinalArtifacts(
@@ -1102,6 +1111,12 @@ describe('packaged runtime allowlist', () => {
     expect(() => validateResourceEntries([...validResources('mac'), 'elevate.exe'], 'mac')).toThrow(
       'Unexpected packaged resources',
     );
+    expect(() =>
+      validateResourceEntries(
+        [...validResources('mac'), 'helper/talking-quill-update-recovery-launcher.exe'],
+        'mac',
+      ),
+    ).toThrow('Unexpected packaged resources');
     expect(() =>
       validateResourceEntries(
         [

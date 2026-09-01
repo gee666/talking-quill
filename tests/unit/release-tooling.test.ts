@@ -211,7 +211,7 @@ function createAssemblyFixture(): void {
     }),
   );
 
-  const roles = ['gateway', 'owner'].map((role, index) => ({
+  const roles = ['gateway', 'owner', 'recovery-launcher'].map((role, index) => ({
     role,
     path: `roles/${role}-x64`,
     sha256: String(index + 1).repeat(64),

@@ -6,7 +6,7 @@ import type { InstalledWindowsUpdateIdentity } from './publication-selection';
 
 const Hex = z.string().regex(/^[0-9a-f]{64}$/u);
 const Role = z.strictObject({
-  role: z.enum(['gateway', 'owner']),
+  role: z.enum(['gateway', 'owner', 'recovery-launcher']),
   path: z.string().min(1).max(512),
   sha256: Hex,
   suppressionCapable: z.boolean(),
@@ -23,7 +23,7 @@ const Manifest = z
     freshInstall: z.literal(true).optional(),
     sourceCommit: z.string().regex(/^[0-9a-f]{40}$/u),
     sourceTree: z.string().regex(/^[0-9a-f]{40}$/u),
-    roles: z.array(Role).length(2),
+    roles: z.array(Role).length(3),
     predecessor: z.unknown().nullable(),
     releaseBuildDigest: Hex,
     packageLayoutDigest: Hex,
@@ -37,6 +37,23 @@ const Manifest = z
     }
     if ((manifest.packageMode === 'update') !== hasPredecessor) {
       context.addIssue({ code: 'custom', message: 'Predecessor metadata is inconsistent' });
+    }
+    const expectedRoles = [
+      ['gateway', 'resources/helper/talking-quill-helper.exe', false],
+      ['owner', 'resources/helper/talking-quill-keyboard-owner.exe', true],
+      ['recovery-launcher', 'resources/helper/talking-quill-update-recovery-launcher.exe', false],
+    ] as const;
+    if (
+      expectedRoles.some((expected, index) => {
+        const role = manifest.roles[index];
+        return (
+          role?.role !== expected[0] ||
+          role.path !== expected[1] ||
+          role.suppressionCapable !== expected[2]
+        );
+      })
+    ) {
+      context.addIssue({ code: 'custom', message: 'Installed native role layout is invalid' });
     }
   });
 
@@ -55,7 +72,7 @@ export async function readInstalledWindowsUpdateIdentity(
   );
   if (manifest.architecture !== architecture)
     throw new Error('Installed Windows update architecture is invalid');
-  const role = (name: 'gateway' | 'owner') => {
+  const role = (name: 'gateway' | 'owner' | 'recovery-launcher') => {
     const matches = manifest.roles.filter((candidate) => candidate.role === name);
     if (matches.length !== 1) throw new Error('Installed Windows update roles are ambiguous');
     const value = matches.at(0);
@@ -64,7 +81,8 @@ export async function readInstalledWindowsUpdateIdentity(
   };
   const gateway = role('gateway');
   const owner = role('owner');
-  for (const value of [gateway, owner]) {
+  const recoveryLauncher = role('recovery-launcher');
+  for (const value of [gateway, owner, recoveryLauncher]) {
     const path = resolve(root, value.path);
     const relation = relative(root, path);
     if (relation === '' || relation.startsWith('..') || isAbsolute(relation))
