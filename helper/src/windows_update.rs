@@ -154,6 +154,8 @@ struct TerminalUninstallRecord {
     generation: String,
     phase: String,
     maintenance_sha256: String,
+    uninstall_command: String,
+    quiet_uninstall_command: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -696,10 +698,14 @@ fn terminal_uninstall_record() -> Result<Option<TerminalUninstallRecord>, i32> {
     }
     let record: TerminalUninstallRecord =
         serde_json::from_slice(&bytes).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
-    if record.schema_version != 1
+    let maintenance = known_folder(&FOLDERID_ProgramFiles)?.join("Talking Quill Maintenance.exe");
+    let uninstall_command = format!("\"{}\"", maintenance.display());
+    if record.schema_version != 2
         || validate_generation(&record.generation).is_err()
         || !matches!(record.phase.as_str(), "armed" | "machine-retired")
         || decode_hash(&record.maintenance_sha256).is_none()
+        || record.uninstall_command != uninstall_command
+        || record.quiet_uninstall_command != format!("{uninstall_command} /S")
     {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
@@ -3087,19 +3093,33 @@ fn machine_lock_file(predecessor_policy_epoch: u8) -> Result<PathBuf, i32> {
         return Err(EXIT_LAUNCH_FAILED);
     }
     reclaim_machine_lock_pending(&root)?;
+    let terminal_owner_present = terminal_uninstall_record()?.is_some();
     let published = read_registry_string(key, MACHINE_LOCK_REGISTRY_VALUE)?;
     let published = if let Some(retired) = published
         .as_deref()
         .and_then(|value| value.strip_prefix(MACHINE_LOCK_RETIRED_PREFIX))
     {
         validate_generation(retired)?;
-        // A terminal uninstall may crash after closing publication but before clearing Run.
-        // Its protected record is the only authority allowed to reuse the retained lock tree.
-        if terminal_uninstall_record()?.is_none() {
-            unsafe { RegCloseKey(key) };
-            return Err(EXIT_IDENTITY_MISMATCH);
+        let retired_directory = root.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{retired}"));
+        if terminal_owner_present && retired_directory.exists() {
+            Some(retired.to_owned())
+        } else {
+            if unsafe {
+                RegDeleteValueW(
+                    key,
+                    wide_nul(Path::new(MACHINE_LOCK_REGISTRY_VALUE))?.as_ptr(),
+                )
+            } != 0
+                || unsafe { RegFlushKey(key) } != 0
+            {
+                unsafe { RegCloseKey(key) };
+                return Err(EXIT_LAUNCH_FAILED);
+            }
+            if retired_directory.exists() {
+                reclaim_retired_machine_lock_directory(&retired_directory)?;
+            }
+            None
         }
-        Some(retired.to_owned())
     } else {
         published
     };
@@ -3107,7 +3127,7 @@ fn machine_lock_file(predecessor_policy_epoch: u8) -> Result<PathBuf, i32> {
         validate_generation(&suffix)?;
         root.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"))
     } else {
-        if predecessor_policy_epoch >= LEGACY_LOCK_RETIREMENT_EPOCH {
+        if predecessor_policy_epoch >= LEGACY_LOCK_RETIREMENT_EPOCH && !terminal_owner_present {
             unsafe { RegCloseKey(key) };
             return Err(EXIT_IDENTITY_MISMATCH);
         }
@@ -3199,6 +3219,12 @@ fn verify_machine_lock_tree(directory: &Path) -> Result<PathBuf, i32> {
         return Err(EXIT_IDENTITY_MISMATCH);
     }
     Ok(lock)
+}
+
+fn reclaim_retired_machine_lock_directory(directory: &Path) -> Result<(), i32> {
+    verify_machine_lock_tree(directory)?;
+    let identity = owned_tree_identity(directory).map_err(|_| EXIT_IDENTITY_MISMATCH)?;
+    remove_owned_tree(directory, &identity).map_err(|_| EXIT_LAUNCH_FAILED)
 }
 
 fn reclaim_unpublished_machine_lock_directories(root: &Path) -> Result<(), i32> {

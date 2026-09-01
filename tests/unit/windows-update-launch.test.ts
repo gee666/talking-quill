@@ -67,7 +67,7 @@ describe('Windows elevated updater launch', () => {
     ).toBeNull();
   });
 
-  it('takes verified legacy migration locks in fixed order before the protected file lock', async () => {
+  it('takes verified predecessor locks in fixed order before the protected file lock', async () => {
     const [helper, setup] = await Promise.all([
       readFile('helper/src/windows_update.rs', 'utf8'),
       readFile('installer/windows-setup/src/windows.rs', 'utf8'),
@@ -109,6 +109,7 @@ describe('Windows elevated updater launch', () => {
       'collect_finalizer_deletion_paths(&launcher, &mut tree)?',
     );
     expect(setup).toContain('relocated_uninstall_matches_maintenance(target, paths)?');
+    expect(setup).toContain('authenticated_relocated_image');
     const finalize = setup.slice(setup.indexOf('fn finalize_uninstall'));
     expect(finalize.indexOf('system.unregister_app_path()?')).toBeLessThan(
       finalize.indexOf('system.unregister_uninstall()?'),
@@ -133,10 +134,14 @@ describe('Windows elevated updater launch', () => {
       retirement.indexOf('system.unregister_app_path()?'),
     );
     expect(retirement.indexOf('remove_transaction(paths)?')).toBeLessThan(
-      retirement.indexOf('system.unregister_uninstall()?'),
-    );
-    expect(retirement.indexOf('system.unregister_uninstall()?')).toBeLessThan(
       retirement.indexOf('write_terminal_uninstall_phase(paths, generation, "machine-retired")'),
+    );
+    expect(
+      retirement.indexOf('write_terminal_uninstall_phase(paths, generation, "machine-retired")'),
+    ).toBeLessThan(retirement.lastIndexOf('system.unregister_uninstall()'));
+    expect(retirement).toContain('register_uninstall_executable(&paths.maintenance_uninstaller)?');
+    expect(setup).toContain(
+      'RegCreateKeyExW(\n            HKEY_LOCAL_MACHINE,\n            wide(OsStr::new(UNINSTALL_KEY))',
     );
     const terminalCleanup = setup.slice(
       setup.indexOf('fn finish_terminal_uninstall'),
@@ -145,10 +150,25 @@ describe('Windows elevated updater launch', () => {
     expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
-    expect(terminalCleanup.indexOf('arm_mapped_image_deletion(&launcher)?')).toBeLessThan(
-      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
+    expect(terminalCleanup.indexOf('MOVEFILE_DELAY_UNTIL_REBOOT')).toBeLessThan(
+      terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?'),
     );
-    expect(terminalCleanup.trimEnd()).toMatch(/clear_machine_relaunch_owner\(paths\)\n\}\s*$/u);
+    expect(terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)?')).toBeLessThan(
+      terminalCleanup.indexOf('let _ = arm_mapped_image_deletion(&launcher);'),
+    );
+    expect(terminalCleanup).not.toContain('arm_mapped_image_deletion(&launcher)?');
+    const lockRetirement = setup.slice(
+      setup.indexOf('fn retire_machine_lock_publication'),
+      setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),
+    );
+    expect(lockRetirement).toContain('delete_registry_tree_durable(');
+    const terminalRecovery = setup.slice(
+      setup.indexOf('fn run_terminal_uninstall_recovery'),
+      setup.indexOf('fn enumerate_registry_subkeys'),
+    );
+    expect(terminalRecovery.indexOf('retire_machine_lock_publication(&paths)?')).toBeLessThan(
+      terminalRecovery.indexOf('remove_machine_lock_residue(&paths, &suffix)?'),
+    );
     const residue = setup.slice(setup.indexOf('if uninstall_authorized'));
     expect(residue).toContain('read_terminal_uninstall_record(&paths)?');
   });

@@ -52,7 +52,7 @@
     "lint:helper": "cargo clippy --manifest-path helper/Cargo.toml --locked --all-targets -- -D warnings",
     "format:helper": "cargo fmt --manifest-path helper/Cargo.toml --all -- --check",
     "dead-code": "knip --config knip.json",
-    "release:audit": "node scripts/release-audit.mjs && node scripts/reference-independence.mjs",
+    "release:audit": "node scripts/release-audit.mjs && node scripts/reference-independence.mjs && node scripts/windows-recovery-lineage.mjs",
     "release:clean-output": "node scripts/clean-release-output.mjs",
     "release:preflight": "node scripts/release-source-preflight.mjs",
     "release:assemble": "node scripts/assemble-release.mjs",

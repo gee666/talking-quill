@@ -3,6 +3,15 @@
   "repository": "gee666/talking-quill",
   "productName": "Talking Quill",
   "artifactPrefix": "Talking-Quill",
+  "windowsRecoveryLineage": {
+    "schemaVersion": 1,
+    "currentRelaunchRecordSchema": 3,
+    "unsupportedUnpublishedRelaunchRecordSchemas": [1, 2],
+    "publishedArtifacts": [
+      { "version": "0.0.67", "relaunchRecordSchema": null },
+      { "version": "0.0.69", "relaunchRecordSchema": 3 }
+    ]
+  },
   "releaseTagSignerFingerprints": [],
   "approvedTopLevel": [
     ".gitattributes",
