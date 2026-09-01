@@ -19,15 +19,19 @@ function validate(payload) {
   const keys = Object.keys(payload).sort().join(',');
   if (
     keys !==
-      'architecture,candidateSha256,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,runnerLabel,runnerName,schemaVersion,sourceRevision,sourceTree,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
+      'architecture,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
     payload.schemaVersion !== 1 ||
     !ARCHITECTURES.has(payload.architecture) ||
-    !SHA256.test(payload.candidateSha256) ||
+    !SHA256.test(payload.terminalFaultCandidateSha256) ||
+    !SHA256.test(payload.recoveryFreshCandidateSha256) ||
+    payload.terminalFaultCandidateSha256 === payload.recoveryFreshCandidateSha256 ||
     !/^[0-9a-f]{40}$/u.test(payload.sourceRevision) ||
     !/^[0-9a-f]{40}$/u.test(payload.sourceTree) ||
     !/^tq-reboot-(x64|arm64)-[a-z0-9-]+$/u.test(payload.runnerLabel) ||
     typeof payload.runnerName !== 'string' ||
     payload.runnerName.length === 0 ||
+    typeof payload.serviceImage !== 'string' ||
+    payload.serviceImage.length === 0 ||
     !SHA256.test(payload.checkpointSha256) ||
     !/^[1-9][0-9]*$/u.test(payload.workflowRunId) ||
     !Number.isSafeInteger(payload.workflowRunAttempt) ||
@@ -51,6 +55,10 @@ function validate(payload) {
         !path.endsWith(`.Talking Quill Terminal Cleanup-${payload.terminalGeneration}.exe`),
     ) ||
     new Set(payload.pendingDeleteSources).size !== payload.pendingDeleteSources.length ||
+    !payload.pendingDeleteSources.some((path) => {
+      const normalized = path.startsWith('\\??\\') ? path.slice(4) : path;
+      return normalized.toLowerCase() === payload.serviceImage.toLowerCase();
+    }) ||
     payload.windowsConsumedPendingDeletes !== true
   ) {
     throw new Error('Real reboot acceptance evidence is invalid');
@@ -66,15 +74,15 @@ async function validateCheckpoint(payload, checkpointPath) {
   const checkpoint = JSON.parse(bytes);
   if (
     Object.keys(checkpoint).sort().join(',') !==
-      'architecture,candidateSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,preBootIdentity,runnerLabel,runnerName,schemaVersion,sourceRevision,sourceTree,terminalGeneration,workflowRunAttempt,workflowRunId' ||
+      'architecture,generationBefore,machineIdentity,pendingDeleteSources,preBootIdentity,recoveryFreshCandidateSha256,runnerLabel,runnerName,schemaVersion,serviceImage,sourceRevision,sourceTree,terminalFaultCandidateSha256,terminalGeneration,workflowRunAttempt,workflowRunId' ||
     payload.checkpointSha256 !== createHash('sha256').update(bytes).digest('hex')
   )
     throw new Error('Real reboot checkpoint is invalid');
   for (const key of [
     'architecture',
-    'candidateSha256',
+    'terminalFaultCandidateSha256',
+    'recoveryFreshCandidateSha256',
     'generationBefore',
-    'generationAfter',
     'machineIdentity',
     'preBootIdentity',
     'runnerLabel',
@@ -82,6 +90,7 @@ async function validateCheckpoint(payload, checkpointPath) {
     'sourceRevision',
     'sourceTree',
     'terminalGeneration',
+    'serviceImage',
     'workflowRunAttempt',
     'workflowRunId',
   ]) {

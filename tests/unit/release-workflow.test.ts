@@ -187,7 +187,22 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('PendingFileRenameOperations');
     expect(lifecycle).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
     expect(realRebootWorkflow).toContain('Restart-Computer -Force');
-    expect(realRebootWorkflow).toContain('fresh_candidate_url');
+    expect(realRebootWorkflow).toContain('terminal_fault_candidate_url');
+    expect(realRebootWorkflow).toContain('recovery_fresh_candidate_url');
+    expect(realRebootWorkflow).toContain('terminalFaultCandidateSha256');
+    expect(realRebootWorkflow).toContain('recoveryFreshCandidateSha256');
+    expect(realRebootWorkflow).toContain(
+      'Installed uninstaller is not the exact acceptance-fault artifact.',
+    );
+    expect(realRebootWorkflow).toContain(
+      'Reboot deletion source disappeared before Restart-Computer',
+    );
+    expect(realRebootWorkflow).toContain(
+      'Pending deletion source disappeared immediately before Restart-Computer',
+    );
+    expect(realRebootWorkflow).toContain(
+      'Windows did not delete the exact checkpointed terminal service image.',
+    );
     expect(realRebootWorkflow).not.toContain('inputs.runner_label');
     expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_X64_RUNNER_LABEL');
     expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_ARM64_MACHINE_ID');
@@ -195,9 +210,7 @@ describe('Windows native release workflow', () => {
     expect(realRebootWorkflow).toContain('sourceTree');
     expect(realRebootWorkflow).toContain('workflowRunAttempt');
     expect(realRebootWorkflow).toContain('trusted-checkpoint/pre-reboot-checkpoint.json');
-    expect(realRebootWorkflow).toContain(
-      'Fresh candidate did not finish terminal uninstall and continue installation',
-    );
+    expect(realRebootWorkflow).toContain('Production fresh recovery/install failed');
     expect(realRebootWorkflow).toContain('reboot-coordinator');
     expect(realRebootWorkflow).toContain('preBootIdentity');
     expect(realRebootWorkflow).toContain('postBootIdentity');

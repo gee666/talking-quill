@@ -377,7 +377,14 @@ function validateArchitectureBinding(records, arch) {
     throw new Error(`${arch} promotion evidence generation binding is invalid`);
 }
 
-function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkflowRunId) {
+function validateRebootEvidence(
+  source,
+  arch,
+  faultClaims,
+  freshClaims,
+  pinned,
+  expectedWorkflowRunId,
+) {
   const envelope = JSON.parse(source);
   exactObject(
     envelope,
@@ -390,7 +397,8 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
     [
       'schemaVersion',
       'architecture',
-      'candidateSha256',
+      'terminalFaultCandidateSha256',
+      'recoveryFreshCandidateSha256',
       'sourceRevision',
       'sourceTree',
       'workflowRunId',
@@ -404,6 +412,7 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
       'generationBefore',
       'generationAfter',
       'terminalGeneration',
+      'serviceImage',
       'pendingDeleteSources',
       'windowsConsumedPendingDeletes',
     ],
@@ -425,7 +434,9 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
     envelope.schemaVersion !== 1 ||
     payload.schemaVersion !== 1 ||
     payload.architecture !== arch ||
-    payload.candidateSha256 !== faultClaims.terminalCleanup.acceptanceSetupSha256 ||
+    payload.terminalFaultCandidateSha256 !== faultClaims.terminalCleanup.acceptanceSetupSha256 ||
+    payload.recoveryFreshCandidateSha256 !== freshClaims.packageSha256 ||
+    payload.terminalFaultCandidateSha256 === payload.recoveryFreshCandidateSha256 ||
     payload.sourceRevision !== faultClaims.sourceCommit ||
     payload.sourceTree !== faultClaims.sourceTree ||
     payload.workflowRunId !== expectedWorkflowRunId ||
@@ -443,6 +454,8 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
     !/^[0-9a-f]{32}$/u.test(payload.generationAfter) ||
     payload.generationBefore === payload.generationAfter ||
     !/^[0-9a-f]{32}$/u.test(payload.terminalGeneration) ||
+    typeof payload.serviceImage !== 'string' ||
+    payload.serviceImage.length === 0 ||
     !Array.isArray(payload.pendingDeleteSources) ||
     payload.pendingDeleteSources.length === 0 ||
     payload.pendingDeleteSources.some(
@@ -451,6 +464,10 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
         !path.endsWith(`.Talking Quill Terminal Cleanup-${payload.terminalGeneration}.exe`),
     ) ||
     new Set(payload.pendingDeleteSources).size !== payload.pendingDeleteSources.length ||
+    !payload.pendingDeleteSources.some((path) => {
+      const normalized = path.startsWith('\\??\\') ? path.slice(4) : path;
+      return normalized.toLowerCase() === payload.serviceImage.toLowerCase();
+    }) ||
     payload.windowsConsumedPendingDeletes !== true ||
     signature.length !== 64 ||
     !verifyBytes('sha256', signed, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)
@@ -462,14 +479,14 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
 async function evidenceRecords(directory, pinned, rebootRunIds) {
   const records = [];
   for (const arch of ['arm64', 'x64']) {
+    let freshClaims;
     for (const [name, operation, action] of SUCCESS_NAMES(arch)) {
       const source = await readFile(resolve(directory, name));
-      records.push({
-        file: name,
-        sha256: hash(source),
-        claims: validateSuccess(JSON.parse(source), arch, operation, action),
-      });
+      const claims = validateSuccess(JSON.parse(source), arch, operation, action);
+      if (operation === 'fresh') freshClaims = claims;
+      records.push({ file: name, sha256: hash(source), claims });
     }
+    if (freshClaims === undefined) throw new Error(`${arch} fresh evidence is missing`);
     const name = FAULT_NAME(arch);
     const source = await readFile(resolve(directory, name));
     const faultClaims = validateFault(JSON.parse(source), arch);
@@ -479,7 +496,14 @@ async function evidenceRecords(directory, pinned, rebootRunIds) {
     records.push({
       file: rebootName,
       sha256: hash(rebootSource),
-      claims: validateRebootEvidence(rebootSource, arch, faultClaims, pinned, rebootRunIds[arch]),
+      claims: validateRebootEvidence(
+        rebootSource,
+        arch,
+        faultClaims,
+        freshClaims,
+        pinned,
+        rebootRunIds[arch],
+      ),
     });
     validateArchitectureBinding(records, arch);
   }

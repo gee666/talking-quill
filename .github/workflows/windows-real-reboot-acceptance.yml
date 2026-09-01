@@ -7,10 +7,18 @@ on:
         required: true
         type: choice
         options: [x64, arm64]
-      fresh_candidate_url:
+      terminal_fault_candidate_url:
+        description: HTTPS URL for the nonpromotable repair-mode acceptance-fault setup
         required: true
         type: string
-      fresh_candidate_sha256:
+      terminal_fault_candidate_sha256:
+        required: true
+        type: string
+      recovery_fresh_candidate_url:
+        description: HTTPS URL for the promotable production fresh setup
+        required: true
+        type: string
+      recovery_fresh_candidate_sha256:
         required: true
         type: string
       source_revision:
@@ -49,8 +57,10 @@ jobs:
       - name: Install candidate and persist pre-reboot checkpoint
         shell: pwsh
         env:
-          SETUP_URL: ${{ inputs.fresh_candidate_url }}
-          SETUP_SHA256: ${{ inputs.fresh_candidate_sha256 }}
+          TERMINAL_FAULT_URL: ${{ inputs.terminal_fault_candidate_url }}
+          TERMINAL_FAULT_SHA256: ${{ inputs.terminal_fault_candidate_sha256 }}
+          RECOVERY_FRESH_URL: ${{ inputs.recovery_fresh_candidate_url }}
+          RECOVERY_FRESH_SHA256: ${{ inputs.recovery_fresh_candidate_sha256 }}
           ARCHITECTURE: ${{ inputs.architecture }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
           SOURCE_TREE: ${{ inputs.source_tree }}
@@ -59,17 +69,24 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          if ($env:SETUP_URL -cnotmatch '^https://') { throw 'Acceptance setup URL must use HTTPS.' }
-          if ($env:SETUP_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:SOURCE_REVISION -cnotmatch '^[0-9a-f]{40}$' -or $env:SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$' -or $env:RUNNER_LABEL -cnotmatch '^tq-reboot-(x64|arm64)-[a-z0-9-]+$' -or $env:EXPECTED_MACHINE_ID -cnotmatch '^[0-9A-Fa-f-]{36}$') { throw 'Candidate or runner binding is invalid.' }
+          if ($env:TERMINAL_FAULT_URL -cnotmatch '^https://' -or $env:RECOVERY_FRESH_URL -cnotmatch '^https://') { throw 'Acceptance artifact URLs must use HTTPS.' }
+          if ($env:TERMINAL_FAULT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:RECOVERY_FRESH_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:TERMINAL_FAULT_SHA256 -ceq $env:RECOVERY_FRESH_SHA256 -or $env:SOURCE_REVISION -cnotmatch '^[0-9a-f]{40}$' -or $env:SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$' -or $env:RUNNER_LABEL -cnotmatch '^tq-reboot-(x64|arm64)-[a-z0-9-]+$' -or $env:EXPECTED_MACHINE_ID -cnotmatch '^[0-9A-Fa-f-]{36}$') { throw 'Candidate or runner binding is invalid.' }
           $machineIdentity = (Get-CimInstance Win32_ComputerSystemProduct).UUID
           if ($machineIdentity -cne $env:EXPECTED_MACHINE_ID) { throw 'Pre-reboot job ran on the wrong dedicated machine.' }
           if ((git rev-parse HEAD).Trim() -cne $env:SOURCE_REVISION -or (git rev-parse 'HEAD^{tree}').Trim() -cne $env:SOURCE_TREE) { throw 'Checked-out source identity does not match the reboot request.' }
           New-Item -ItemType Directory -Force (Split-Path -Parent $env:CHECKPOINT), tmp/windows-real-reboot | Out-Null
-          $setup = (Resolve-Path tmp/windows-real-reboot).Path + '\acceptance-setup.exe'
-          Invoke-WebRequest -Uri $env:SETUP_URL -OutFile $setup
-          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:SETUP_SHA256) { throw 'Acceptance setup hash mismatch.' }
-          $install = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
-          if ($install.ExitCode -ne 0) { throw "Candidate install failed: $($install.ExitCode)" }
+          $artifactRoot = (Resolve-Path tmp/windows-real-reboot).Path
+          $faultSetup = Join-Path $artifactRoot 'terminal-fault-repair.exe'
+          $freshSetup = Join-Path $artifactRoot 'production-fresh.exe'
+          Invoke-WebRequest -Uri $env:TERMINAL_FAULT_URL -OutFile $faultSetup
+          Invoke-WebRequest -Uri $env:RECOVERY_FRESH_URL -OutFile $freshSetup
+          if ((Get-FileHash $faultSetup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:TERMINAL_FAULT_SHA256) { throw 'Terminal fault setup hash mismatch.' }
+          if ((Get-FileHash $freshSetup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RECOVERY_FRESH_SHA256) { throw 'Recovery fresh setup hash mismatch.' }
+          $install = Start-Process $freshSetup -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Production fresh install failed: $($install.ExitCode)" }
+          $faultRepair = Start-Process $faultSetup -ArgumentList '/S' -Wait -PassThru
+          if ($faultRepair.ExitCode -ne 0) { throw "Acceptance-fault repair failed: $($faultRepair.ExitCode)" }
+          if ((Get-FileHash "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:TERMINAL_FAULT_SHA256) { throw 'Installed uninstaller is not the exact acceptance-fault artifact.' }
           $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
           $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
           if (-not $match.Success) { throw 'Generation-specific maintenance registration is invalid.' }
@@ -93,18 +110,13 @@ jobs:
           $terminalGeneration = @($terminalGenerations)[0]
           $terminalRecord = Get-Content -Raw "$env:ProgramData\Talking Quill Update Recovery\terminal-uninstall-record-v1.json" | ConvertFrom-Json
           if ($terminalRecord.generation -cne $terminalGeneration) { throw 'Pending deletion generation does not match the authenticated terminal record.' }
-          $continuation = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
-          if ($continuation.ExitCode -ne 0) { throw "Fresh candidate did not finish terminal uninstall and continue installation: $($continuation.ExitCode)" }
-          if (Test-Path "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") { throw 'Fresh continuation returned before terminal recovery completed.' }
-          $continuedQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
-          $continuedMatch = [regex]::Match($continuedQuiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
-          if (-not $continuedMatch.Success -or $continuedMatch.Groups[2].Value -ceq $match.Groups[2].Value) { throw 'Fresh continuation did not publish a distinct maintenance generation.' }
+          foreach ($source in @($ownedSources)) { $dosPath = ([string]$source) -replace '^\\\?\?\\',''; if (-not (Test-Path -LiteralPath $dosPath)) { throw "Pending deletion source is missing before checkpoint: $dosPath" } }
           $checkpoint = [ordered]@{
             schemaVersion = 1; workflowRunId = $env:WORKFLOW_RUN_ID; workflowRunAttempt = [int]$env:WORKFLOW_RUN_ATTEMPT
-            architecture = $env:ARCHITECTURE; candidateSha256 = $env:SETUP_SHA256; sourceRevision = $env:SOURCE_REVISION; sourceTree = $env:SOURCE_TREE
+            architecture = $env:ARCHITECTURE; terminalFaultCandidateSha256 = $env:TERMINAL_FAULT_SHA256; recoveryFreshCandidateSha256 = $env:RECOVERY_FRESH_SHA256; sourceRevision = $env:SOURCE_REVISION; sourceTree = $env:SOURCE_TREE
             runnerLabel = $env:RUNNER_LABEL; runnerName = $env:RUNNER_NAME; machineIdentity = $machineIdentity
             preBootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
-            generationBefore = $match.Groups[2].Value; generationAfter = $continuedMatch.Groups[2].Value; terminalGeneration = $terminalGeneration; pendingDeleteSources = @($ownedSources)
+            generationBefore = $match.Groups[2].Value; terminalGeneration = $terminalGeneration; serviceImage = $terminalRecord.serviceImage; pendingDeleteSources = @($ownedSources)
           }
           $checkpoint | ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 $env:CHECKPOINT
           Copy-Item $env:CHECKPOINT tmp/windows-real-reboot/pre-reboot-checkpoint.json
@@ -113,11 +125,25 @@ jobs:
           name: windows-${{ inputs.architecture }}-pre-reboot-checkpoint
           path: tmp/windows-real-reboot/pre-reboot-checkpoint.json
           retention-days: 30
-      - name: Schedule genuine reboot after checkpoint upload
+      - name: Assert reboot source topology and schedule genuine reboot
         shell: pwsh
         run: |
-          $command = "Start-Sleep -Seconds 30; Restart-Computer -Force"
-          Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command',$command
+          $checkpoint = Get-Content -Raw $env:CHECKPOINT | ConvertFrom-Json
+          $ownedPaths = @($checkpoint.pendingDeleteSources | ForEach-Object { ([string]$_) -replace '^\\\?\?\\','' })
+          if ($ownedPaths.Count -eq 0 -or $checkpoint.serviceImage -cnotin $ownedPaths) { throw 'Checkpoint does not bind the terminal service image to its pending deletion pair.' }
+          foreach ($path in $ownedPaths) { if (-not (Test-Path -LiteralPath $path)) { throw "Reboot deletion source disappeared before Restart-Computer: $path" } }
+          $checkpointPath = $env:CHECKPOINT.Replace("'", "''")
+          $rebootScript = @"
+          Start-Sleep -Seconds 30
+          `$checkpoint = Get-Content -Raw '$checkpointPath' | ConvertFrom-Json
+          foreach (`$source in @(`$checkpoint.pendingDeleteSources)) {
+            `$path = ([string]`$source) -replace '^\\\?\?\\',''
+            if (-not (Test-Path -LiteralPath `$path)) { throw "Pending deletion source disappeared immediately before Restart-Computer: `$path" }
+          }
+          Restart-Computer -Force
+          "@
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rebootScript))
+          Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand',$encoded
 
   reboot-coordinator:
     needs: prepare-reboot
@@ -153,10 +179,11 @@ jobs:
         shell: pwsh
         env:
           ARCHITECTURE: ${{ inputs.architecture }}
-          CANDIDATE_SHA256: ${{ inputs.fresh_candidate_sha256 }}
+          TERMINAL_FAULT_SHA256: ${{ inputs.terminal_fault_candidate_sha256 }}
+          RECOVERY_FRESH_SHA256: ${{ inputs.recovery_fresh_candidate_sha256 }}
+          RECOVERY_FRESH_URL: ${{ inputs.recovery_fresh_candidate_url }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
           SOURCE_TREE: ${{ inputs.source_tree }}
-          SETUP_URL: ${{ inputs.fresh_candidate_url }}
           RUNNER_LABEL: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_REBOOT_X64_RUNNER_LABEL || vars.TALKING_QUILL_REBOOT_ARM64_RUNNER_LABEL }}
           EXPECTED_MACHINE_ID: ${{ inputs.architecture == 'x64' && vars.TALKING_QUILL_REBOOT_X64_MACHINE_ID || vars.TALKING_QUILL_REBOOT_ARM64_MACHINE_ID }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -166,17 +193,25 @@ jobs:
           if ((Get-FileHash $trustedCheckpoint -Algorithm SHA256).Hash -cne (Get-FileHash $env:CHECKPOINT -Algorithm SHA256).Hash) { throw 'Durable checkpoint differs from the uploaded pre-reboot checkpoint.' }
           $before = Get-Content -Raw $trustedCheckpoint | ConvertFrom-Json
           $machineIdentity = (Get-CimInstance Win32_ComputerSystemProduct).UUID
-          if ($before.workflowRunId -cne $env:WORKFLOW_RUN_ID -or [int]$before.workflowRunAttempt -ne [int]$env:WORKFLOW_RUN_ATTEMPT -or $before.candidateSha256 -cne $env:CANDIDATE_SHA256 -or $before.sourceRevision -cne $env:SOURCE_REVISION -or $before.sourceTree -cne $env:SOURCE_TREE -or $before.architecture -cne $env:ARCHITECTURE -or $before.runnerLabel -cne $env:RUNNER_LABEL -or $before.runnerName -cne $env:RUNNER_NAME -or $before.machineIdentity -cne $env:EXPECTED_MACHINE_ID -or $machineIdentity -cne $env:EXPECTED_MACHINE_ID) { throw 'Post-reboot checkpoint binding is invalid.' }
+          if ($before.workflowRunId -cne $env:WORKFLOW_RUN_ID -or [int]$before.workflowRunAttempt -ne [int]$env:WORKFLOW_RUN_ATTEMPT -or $before.terminalFaultCandidateSha256 -cne $env:TERMINAL_FAULT_SHA256 -or $before.recoveryFreshCandidateSha256 -cne $env:RECOVERY_FRESH_SHA256 -or $before.sourceRevision -cne $env:SOURCE_REVISION -or $before.sourceTree -cne $env:SOURCE_TREE -or $before.architecture -cne $env:ARCHITECTURE -or $before.runnerLabel -cne $env:RUNNER_LABEL -or $before.runnerName -cne $env:RUNNER_NAME -or $before.machineIdentity -cne $env:EXPECTED_MACHINE_ID -or $machineIdentity -cne $env:EXPECTED_MACHINE_ID) { throw 'Post-reboot checkpoint binding is invalid.' }
           $postBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('O')
           if ([datetime]$postBoot -le [datetime]$before.preBootIdentity) { throw 'A genuine later boot was not observed.' }
           $pendingAfter = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
           if (@($before.pendingDeleteSources).Count -eq 0 -or @($pendingAfter | Where-Object { $_ -cin @($before.pendingDeleteSources) }).Count -ne 0) { throw 'Windows did not consume the exact candidate-owned pending deletes.' }
           foreach ($source in @($before.pendingDeleteSources)) { $dosPath = ([string]$source) -replace '^\\\?\?\\',''; if (Test-Path -LiteralPath $dosPath) { throw "Windows retained candidate-owned reboot residue: $dosPath" } }
+          if (Test-Path -LiteralPath $before.serviceImage) { throw 'Windows did not delete the exact checkpointed terminal service image.' }
+          New-Item -ItemType Directory -Force tmp/windows-real-reboot-post | Out-Null
+          $freshSetup = (Resolve-Path tmp/windows-real-reboot-post).Path + '\production-fresh.exe'
+          Invoke-WebRequest -Uri $env:RECOVERY_FRESH_URL -OutFile $freshSetup
+          if ((Get-FileHash $freshSetup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RECOVERY_FRESH_SHA256) { throw 'Post-reboot recovery fresh setup hash mismatch.' }
+          $recovery = Start-Process $freshSetup -ArgumentList '/S' -Wait -PassThru
+          if ($recovery.ExitCode -ne 0) { throw "Production fresh recovery/install failed: $($recovery.ExitCode)" }
+          if (Test-Path "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json") { throw 'Production fresh setup returned before terminal uninstall recovery completed.' }
           $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
           $match = [regex]::Match($quiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
-          if (-not $match.Success -or $match.Groups[2].Value -cne $before.generationAfter -or -not (Test-Path $match.Groups[1].Value)) { throw 'Fresh continuation did not survive reboot consumption.' }
+          if (-not $match.Success -or $match.Groups[2].Value -ceq $before.generationBefore -or -not (Test-Path $match.Groups[1].Value)) { throw 'Production fresh recovery did not publish a distinct callable generation.' }
           $checkpointSha256 = (Get-FileHash -LiteralPath $trustedCheckpoint -Algorithm SHA256).Hash.ToLowerInvariant()
-          [ordered]@{ schemaVersion=1; architecture=$before.architecture; candidateSha256=$before.candidateSha256; sourceRevision=$before.sourceRevision; sourceTree=$before.sourceTree; workflowRunId=$before.workflowRunId; workflowRunAttempt=[int]$before.workflowRunAttempt; checkpointSha256=$checkpointSha256; runnerLabel=$before.runnerLabel; runnerName=$before.runnerName; machineIdentity=$before.machineIdentity; preBootIdentity=$before.preBootIdentity; postBootIdentity=$postBoot; generationBefore=$before.generationBefore; generationAfter=$before.generationAfter; terminalGeneration=$before.terminalGeneration; pendingDeleteSources=@($before.pendingDeleteSources); windowsConsumedPendingDeletes=$true } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 reboot-evidence-input.json
+          [ordered]@{ schemaVersion=1; architecture=$before.architecture; terminalFaultCandidateSha256=$before.terminalFaultCandidateSha256; recoveryFreshCandidateSha256=$before.recoveryFreshCandidateSha256; sourceRevision=$before.sourceRevision; sourceTree=$before.sourceTree; workflowRunId=$before.workflowRunId; workflowRunAttempt=[int]$before.workflowRunAttempt; checkpointSha256=$checkpointSha256; runnerLabel=$before.runnerLabel; runnerName=$before.runnerName; machineIdentity=$before.machineIdentity; preBootIdentity=$before.preBootIdentity; postBootIdentity=$postBoot; generationBefore=$before.generationBefore; generationAfter=$match.Groups[2].Value; terminalGeneration=$before.terminalGeneration; serviceImage=$before.serviceImage; pendingDeleteSources=@($before.pendingDeleteSources); windowsConsumedPendingDeletes=$true } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 reboot-evidence-input.json
       - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ inputs.architecture }}-unsigned-real-reboot-evidence

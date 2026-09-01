@@ -257,7 +257,8 @@ async function fixture() {
     const payload = {
       schemaVersion: 1,
       architecture,
-      candidateSha256: 'ef'.repeat(32),
+      terminalFaultCandidateSha256: 'ef'.repeat(32),
+      recoveryFreshCandidateSha256: sha('a'),
       sourceRevision: source('b'),
       sourceTree: source('c'),
       workflowRunId: architecture === 'x64' ? '456' : '789',
@@ -271,6 +272,7 @@ async function fixture() {
       generationBefore: '1'.repeat(32),
       generationAfter: '2'.repeat(32),
       terminalGeneration: '3'.repeat(32),
+      serviceImage: `C:\\ProgramData\\.Talking Quill Terminal Cleanup-${'3'.repeat(32)}.exe`,
       pendingDeleteSources: [
         `\\??\\C:\\ProgramData\\.Talking Quill Terminal Cleanup-${'3'.repeat(32)}.exe`,
       ],
