@@ -442,6 +442,7 @@ jobs:
             Start-Sleep -Milliseconds 250
           } while ($true)
           node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
+          if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw 'Public 0.0.67 fixed maintenance image survived authenticated upgrade.' }
           $faultRoot = 'preserved/tmp/windows-fault-artifacts/${{ matrix.arch }}'
           $productionRepair = Join-Path $env:RUNNER_TEMP 'talking-quill-production-repair.exe'
           Copy-Item -LiteralPath "$env:ProgramFiles\Talking Quill\Uninstall Talking Quill.exe" -Destination $productionRepair
@@ -489,6 +490,7 @@ jobs:
             $postRecoveryRepair = Start-Process -FilePath $productionRepair -ArgumentList '/S' -Wait -PassThru
             if ($postRecoveryRepair.ExitCode -ne 0) { throw "Fault lifecycle repair failed: $($fault.Name)" }
             node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
+            if (Test-Path -LiteralPath "$env:ProgramFiles\Talking Quill Maintenance.exe") { throw "Public 0.0.67 fixed maintenance image survived recovery: $($fault.Name)" }
           }
           @{ schemaVersion = 1; architecture = '${{ matrix.arch }}'; sourceCommit = '${{ needs.validate.outputs.release_commit }}'; sourceTree = '${{ needs.validate.outputs.release_tree }}'; productionUpdateInterrupted = $updateInterrupted; candidateSha256 = $candidateHash; releaseBuildDigest = $expectedDigest; faults = $faultEvidence; passed = $true } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath tmp/windows-installer-fault-recovery-${{ matrix.arch }}.json -Encoding utf8
           $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
@@ -630,7 +632,7 @@ jobs:
             if (-not (@($pendingTerminalDeletion) -contains ('\??\' + $ownedResidue.FullName))) { throw "Terminal residue lacks exact reboot deletion ownership: $($ownedResidue.FullName)" }
           }
           $terminalResidue = @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
-          $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\.Talking Quill.maintenance-generation-v1", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
+          $terminalResidue += @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\Talking Quill Maintenance.exe", "$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json", "$env:ProgramFiles\.Talking Quill.maintenance-generation-v1", "$env:ProgramData\Talking Quill Update Recovery") | Where-Object { Test-Path -LiteralPath $_ }
           $terminalResidue += @(Get-ChildItem -LiteralPath $env:ProgramFiles -Filter 'Talking Quill Maintenance-*.exe' -ErrorAction SilentlyContinue | ForEach-Object FullName)
           $terminalKeys = @('HKLM:\Software\Talking Quill\RecoveryStateLockV1', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
           $terminalRegistry = @($terminalKeys)

@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -422,9 +422,12 @@ fn run_inner() -> Result<i32> {
         let action = if relocated {
             let original = process_image(parent_process_id()?)?;
             let installed = controller_paths.install.join("Uninstall Talking Quill.exe");
+            let legacy_maintenance = legacy_fixed_maintenance_path(&controller_paths)?;
             let expected =
                 if canonical(&original)? == canonical(&controller_paths.maintenance_uninstaller)? {
                     controller_paths.maintenance_uninstaller.clone()
+                } else if canonical(&original).ok() == canonical(&legacy_maintenance).ok() {
+                    legacy_maintenance
                 } else if canonical(&original)? == canonical(&installed)? {
                     installed
                 } else if is_uninstall_finalizer(&original)? {
@@ -436,11 +439,17 @@ fn run_inner() -> Result<i32> {
                         "Relocated uninstall source is not an authenticated maintenance image.",
                     ));
                 };
+            let maintenance_authority =
+                if expected == legacy_fixed_maintenance_path(&controller_paths)? {
+                    &expected
+                } else {
+                    &controller_paths.maintenance_uninstaller
+                };
             relocated_identity_guard = Some(validate_relocated_uninstall_image(
                 &current,
                 &original,
                 &expected,
-                &controller_paths.maintenance_uninstaller,
+                maintenance_authority,
             )?);
             let (action, server, requested_silent, requested_lifecycle_parent) =
                 WorkerChannel::connect_and_authenticate(&current, Some(&expected))?;
@@ -987,7 +996,7 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
             "TQPKG2 architecture does not match the native setup image.",
         ));
     }
-    let paths = paths()?;
+    let mut paths = paths()?;
     let predecessor_policy_epoch = installed_recovery_policy_epoch(&paths)?;
     let mut machine_lock = Some(MachineLock::acquire(
         &paths,
@@ -1000,12 +1009,18 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         .ok_or_else(|| fail(EXIT_FAILURE, "Installer state root is invalid."))?;
     assert_plain_directory(state_root)?;
     cleanup_transaction_residue(state_root)?;
-    // The protected staged predecessor authenticates the persisted signed snapshot and exact
-    // setup package before native journal recovery touches a moved tree.
+    let finishing_existing_uninstall = pending_uninstall_transaction(&paths)?;
+    // A pending uninstall is already durable machine authority. Validate the signed package and
+    // predecessor arguments, but defer installed-state predecessor authentication until recovery
+    // only when a predecessor still exists.
     let predecessor_authorized = if legacy_predecessor {
-        authenticate_predecessor_helper(&package, &paths)?;
         validate_predecessor_arguments(&package, &current)?;
-        true
+        if finishing_existing_uninstall {
+            false
+        } else {
+            authenticate_predecessor_helper(&package, &paths)?;
+            true
+        }
     } else {
         false
     };
@@ -1016,7 +1031,9 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
         false
     };
     let system = WindowsNativeSystem;
-    let finishing_existing_uninstall = pending_uninstall_transaction(&paths)?;
+    if !finishing_existing_uninstall && authenticate_legacy_fixed_maintenance(&package, &paths)? {
+        retire_legacy_fixed_maintenance(&paths)?;
+    }
     // A relocated controller must stop mapping the installed image before finish-uninstall
     // recovery can delete it. The existing protected journal is sufficient durable authority.
     if finishing_existing_uninstall
@@ -1034,13 +1051,31 @@ fn run_worker(_silent: bool, legacy_predecessor: bool) -> Result<i32> {
     recover_with_adapter(&paths, &system)?;
     recover_terminal_recovery_tombstones(&paths)?;
     if finishing_existing_uninstall {
-        if authenticated_controller
-            .as_ref()
-            .is_some_and(|(_, _, _, lifecycle_parent)| *lifecycle_parent != 0)
-        {
-            complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;
+        complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;
+        if path_present(&legacy_fixed_maintenance_path(&paths)?)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Legacy fixed maintenance collision survived terminal recovery.",
+            ));
         }
-        return Ok(0);
+        if requested_action == Some(Action::Uninstall) {
+            return Ok(0);
+        }
+        // Terminal retirement removes the predecessor and its generation. Rebuild paths so a
+        // continued fresh install cannot recreate an image already owned by reboot deletion.
+        paths = self::paths()?;
+        machine_lock = Some(MachineLock::acquire(
+            &paths,
+            120_000,
+            installed_recovery_policy_epoch(&paths)?,
+        )?);
+        let recovered_action = derive_action(&current, &paths)?;
+        if requested_action.is_some_and(|requested| requested != recovered_action) {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Recovered machine state does not match the authenticated setup request.",
+            ));
+        }
     }
     if uninstall_authorized && !path_present(&paths.transaction)? && !path_present(&paths.install)?
     {
@@ -3343,8 +3378,13 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         .ok()
         .zip(canonical(&paths.maintenance_uninstaller).ok())
         .is_some_and(|(current, maintenance)| current == maintenance);
+    let legacy_maintenance = canonical(current)
+        .ok()
+        .zip(canonical(&legacy_fixed_maintenance_path(paths)?).ok())
+        .is_some_and(|(current, legacy)| current == legacy);
     let finalizer = is_uninstall_finalizer(current)?;
     if maintenance
+        || legacy_maintenance
         || finalizer
         || current
             .file_name()
@@ -3353,7 +3393,11 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         let parent = current
             .parent()
             .ok_or_else(|| fail(EXIT_REJECTED, "Invalid installed setup path."))?;
-        if !maintenance && !finalizer && canonical(parent)? != canonical(&paths.install)? {
+        if !maintenance
+            && !legacy_maintenance
+            && !finalizer
+            && canonical(parent)? != canonical(&paths.install)?
+        {
             return Err(fail(
                 EXIT_REJECTED,
                 "Uninstall image is outside the installed tree.",
@@ -3361,7 +3405,9 @@ fn derive_action(current: &Path, paths: &Paths) -> Result<Action> {
         }
         return Ok(Action::Uninstall);
     }
-    if paths.install.exists() {
+    if pending_uninstall_transaction(paths)? {
+        Ok(Action::Install)
+    } else if paths.install.exists() {
         Ok(Action::Repair)
     } else {
         Ok(Action::Install)
@@ -4117,6 +4163,172 @@ fn recover_with_system(paths: &Paths, update_system_state: bool) -> Result<()> {
     } else {
         recover_with_adapter(paths, &InjectedNativeSystem)
     }
+}
+
+const LEGACY_FIXED_MAINTENANCE_VERSION: &str = "0.0.67";
+
+fn legacy_fixed_maintenance_path(paths: &Paths) -> Result<PathBuf> {
+    Ok(paths
+        .maintenance_uninstaller
+        .parent()
+        .ok_or_else(|| fail(EXIT_REJECTED, "Maintenance path has no parent."))?
+        .join("Talking Quill Maintenance.exe"))
+}
+
+fn plain_pe_image(path: &Path) -> Result<bool> {
+    let mut file = File::open(path).map_err(io_failure)?;
+    let mut dos = [0_u8; 64];
+    file.read_exact(&mut dos).map_err(io_failure)?;
+    if &dos[..2] != b"MZ" {
+        return Ok(false);
+    }
+    let offset = u32::from_le_bytes(dos[60..64].try_into().unwrap()) as u64;
+    if !(64..=16 * 1024 * 1024).contains(&offset) {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(io_failure)?;
+    let mut signature = [0_u8; 4];
+    file.read_exact(&mut signature).map_err(io_failure)?;
+    Ok(signature == *b"PE\0\0")
+}
+
+fn authenticate_legacy_fixed_maintenance(package: &ParsedPackage, paths: &Paths) -> Result<bool> {
+    let legacy = legacy_fixed_maintenance_path(paths)?;
+    if !path_present(&legacy)? {
+        return Ok(false);
+    }
+    assert_plain_file(&legacy)?;
+    let installed_setup = paths.install.join("Uninstall Talking Quill.exe");
+    let installed_manifest = paths
+        .install
+        .join("resources/keyboard-owner-release-v1.json");
+    assert_plain_file(&installed_setup)?;
+    assert_plain_file(&installed_manifest)?;
+    if !plain_pe_image(&legacy)? || file_hash(&legacy)? != file_hash(&installed_setup)? {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy fixed maintenance image identity is invalid.",
+        ));
+    }
+    let installed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&installed_manifest).map_err(io_failure)?)
+            .map_err(|_| fail(EXIT_REJECTED, "Legacy installed identity is invalid."))?;
+    let expected = if package.manifest.version == LEGACY_FIXED_MAINTENANCE_VERSION {
+        Some((
+            package.manifest.target.release_build_digest.as_str(),
+            package.manifest.target.gateway_sha256.as_str(),
+            package.manifest.target.owner_sha256.as_str(),
+        ))
+    } else {
+        package
+            .manifest
+            .predecessor
+            .as_ref()
+            .filter(|value| value.version == LEGACY_FIXED_MAINTENANCE_VERSION)
+            .map(|value| {
+                (
+                    value.release_build_digest.as_str(),
+                    value.gateway_sha256.as_str(),
+                    value.owner_sha256.as_str(),
+                )
+            })
+    };
+    let role = |name: &str| {
+        installed
+            .get("roles")
+            .and_then(|value| value.as_array())
+            .and_then(|roles| {
+                roles
+                    .iter()
+                    .find(|role| role.get("role").and_then(|value| value.as_str()) == Some(name))
+            })
+            .and_then(|role| role.get("sha256"))
+            .and_then(|value| value.as_str())
+    };
+    let Some((release_digest, gateway, owner)) = expected else {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy fixed maintenance predecessor policy is invalid.",
+        ));
+    };
+    if installed.get("version").and_then(|value| value.as_str())
+        != Some(LEGACY_FIXED_MAINTENANCE_VERSION)
+        || installed
+            .get("architecture")
+            .and_then(|value| value.as_str())
+            != Some(package.manifest.architecture.as_str())
+        || installed
+            .get("releaseBuildDigest")
+            .and_then(|value| value.as_str())
+            != Some(release_digest)
+        || role("gateway") != Some(gateway)
+        || role("owner") != Some(owner)
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy fixed maintenance product identity is invalid.",
+        ));
+    }
+    let registered = registered_uninstall_executable()?.ok_or_else(|| {
+        fail(
+            EXIT_REJECTED,
+            "Legacy fixed maintenance registration is missing.",
+        )
+    })?;
+    let registered_canonical = canonical(&registered)?;
+    let registration_is_legacy = registered_canonical == canonical(&legacy)?;
+    let registration_is_generated = path_present(&paths.maintenance_uninstaller)?
+        && registered_canonical == canonical(&paths.maintenance_uninstaller)?
+        && file_hash(&paths.maintenance_uninstaller)? == file_hash(&installed_setup)?;
+    if !registration_is_legacy && !registration_is_generated {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy fixed maintenance registration is invalid.",
+        ));
+    }
+    let mut key = ptr::null_mut();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(OsStr::new(UNINSTALL_KEY)).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    } != 0
+    {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy uninstall registration is missing.",
+        ));
+    }
+    let quiet = read_registry_value(key, "QuietUninstallString", 4096)?;
+    unsafe { RegCloseKey(key) };
+    if quiet.as_deref() != Some(format!("\"{}\" /S", registered.display()).as_str()) {
+        return Err(fail(
+            EXIT_REJECTED,
+            "Legacy quiet uninstall registration is invalid.",
+        ));
+    }
+    Ok(true)
+}
+
+fn retire_legacy_fixed_maintenance(paths: &Paths) -> Result<()> {
+    let legacy = legacy_fixed_maintenance_path(paths)?;
+    ensure_maintenance_uninstaller(paths)?;
+    register_uninstall_executable(&paths.maintenance_uninstaller)?;
+    fs::remove_file(&legacy).map_err(io_failure)?;
+    if path_present(&legacy)? {
+        return Err(fail(
+            EXIT_FAILURE,
+            "Legacy fixed maintenance image retirement did not commit.",
+        ));
+    }
+    flush_setup_directory(
+        legacy
+            .parent()
+            .ok_or_else(|| fail(EXIT_REJECTED, "Legacy maintenance path has no parent."))?,
+    )
 }
 
 fn maintenance_generation_from_name(name: &str) -> Option<&str> {
@@ -7801,6 +8013,53 @@ mod tests {
             legacy_task_file: root.join("task"),
             program_data: root.join("program-data"),
         }
+    }
+
+    #[test]
+    fn pending_uninstall_reselection_is_process_stable_without_a_lifecycle_parent() {
+        if let Some(root) = std::env::var_os("TQ_PENDING_UNINSTALL_RESELECT_CHILD") {
+            let paths = test_paths(Path::new(&root));
+            let lifecycle_parent = std::env::var("TQ_PENDING_UNINSTALL_LIFECYCLE_PARENT")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            assert!(matches!(lifecycle_parent, 0 | 42));
+            assert!(
+                derive_action(&std::env::current_exe().unwrap(), &paths).unwrap()
+                    == Action::Install
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "tq-pending-uninstall-reselect-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let paths = test_paths(&root);
+        fs::write(
+            &paths.transaction,
+            br#"{"schemaVersion":2,"phase":"uninstall-cleanup-complete","action":"uninstall","hadPredecessor":true}"#,
+        )
+        .unwrap();
+        let image = std::env::current_exe().unwrap();
+        for lifecycle_parent in [0, 42] {
+            let status = Command::new(&image)
+                .args([
+                    "--exact",
+                    "windows::tests::pending_uninstall_reselection_is_process_stable_without_a_lifecycle_parent",
+                    "--nocapture",
+                ])
+                .env("TQ_PENDING_UNINSTALL_RESELECT_CHILD", &root)
+                .env(
+                    "TQ_PENDING_UNINSTALL_LIFECYCLE_PARENT",
+                    lifecycle_parent.to_string(),
+                )
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

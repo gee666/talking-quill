@@ -187,12 +187,26 @@ describe('Windows native release workflow', () => {
     expect(lifecycle).toContain('PendingFileRenameOperations');
     expect(lifecycle).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
     expect(realRebootWorkflow).toContain('Restart-Computer -Force');
+    expect(realRebootWorkflow).toContain('fresh_candidate_url');
+    expect(realRebootWorkflow).not.toContain('inputs.runner_label');
+    expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_X64_RUNNER_LABEL');
+    expect(realRebootWorkflow).toContain('vars.TALKING_QUILL_REBOOT_ARM64_MACHINE_ID');
+    expect(realRebootWorkflow).toContain('EXPECTED_MACHINE_ID');
+    expect(realRebootWorkflow).toContain('sourceTree');
+    expect(realRebootWorkflow).toContain('workflowRunAttempt');
+    expect(realRebootWorkflow).toContain('trusted-checkpoint/pre-reboot-checkpoint.json');
+    expect(realRebootWorkflow).toContain(
+      'Fresh candidate did not finish terminal uninstall and continue installation',
+    );
     expect(realRebootWorkflow).toContain('reboot-coordinator');
     expect(realRebootWorkflow).toContain('preBootIdentity');
     expect(realRebootWorkflow).toContain('postBootIdentity');
     expect(realRebootWorkflow).toContain('generationBefore');
     expect(realRebootWorkflow).toContain('generationAfter');
     expect(realRebootWorkflow).toContain('windows-reboot-acceptance-evidence.mjs sign');
+    expect(realRebootWorkflow).toContain(
+      'windows-reboot-acceptance-${{ inputs.architecture }}.json trusted-checkpoint/pre-reboot-checkpoint.json "$EXPECTED_RUNNER_LABEL" "$EXPECTED_MACHINE_ID"',
+    );
     expect(realRebootWorkflow).not.toMatch(/Set-ItemProperty[^\n]+PendingFileRenameOperations/u);
     expect(workflow).toContain('build-windows-acceptance-fault-setup.mjs');
     expect(workflow).toContain('repair-terminalAcceptance.exe');

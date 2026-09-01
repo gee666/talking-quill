@@ -133,9 +133,12 @@ internal static class SuccessfulSetupObserver
                     Convert.ToString(key.GetValue("Path")) == installedRoot;
             }
             registrationsExact = registrationsExact && appPathExact;
-            bool terminalTopology = !File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), ".Talking Quill.native-transaction-v2.json")) &&
-                !Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), ".Talking Quill.native-staging")) &&
-                !Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), ".Talking Quill.native-backup"));
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            bool terminalTopology = !File.Exists(Path.Combine(programFiles, ".Talking Quill.native-transaction-v2.json")) &&
+                !Directory.Exists(Path.Combine(programFiles, ".Talking Quill.native-staging")) &&
+                !Directory.Exists(Path.Combine(programFiles, ".Talking Quill.native-backup")) &&
+                !File.Exists(Path.Combine(programFiles, "Talking Quill Maintenance.exe")) &&
+                Directory.GetFiles(programFiles, "Talking Quill Maintenance-*.exe", SearchOption.TopDirectoryOnly).Length == 1;
             bool passed = protocolAuthenticated && installedIdentityBound && registrationsExact && terminalTopology && shells.Length == 0 && observerErrors.Length == 0;
             string json = "{\"schemaVersion\":2,\"installer\":" + Quote(Path.GetFileName(installer)) +
                 ",\"installerSha256\":" + Quote(installerHash) + ",\"architecture\":" + Quote(package["architecture"]) +

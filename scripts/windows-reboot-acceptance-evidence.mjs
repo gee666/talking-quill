@@ -19,11 +19,15 @@ function validate(payload) {
   const keys = Object.keys(payload).sort().join(',');
   if (
     keys !==
-      'architecture,candidateSha256,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,schemaVersion,sourceRevision,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
+      'architecture,candidateSha256,checkpointSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,postBootIdentity,preBootIdentity,runnerLabel,runnerName,schemaVersion,sourceRevision,sourceTree,terminalGeneration,windowsConsumedPendingDeletes,workflowRunAttempt,workflowRunId' ||
     payload.schemaVersion !== 1 ||
     !ARCHITECTURES.has(payload.architecture) ||
     !SHA256.test(payload.candidateSha256) ||
     !/^[0-9a-f]{40}$/u.test(payload.sourceRevision) ||
+    !/^[0-9a-f]{40}$/u.test(payload.sourceTree) ||
+    !/^tq-reboot-(x64|arm64)-[a-z0-9-]+$/u.test(payload.runnerLabel) ||
+    typeof payload.runnerName !== 'string' ||
+    payload.runnerName.length === 0 ||
     !SHA256.test(payload.checkpointSha256) ||
     !/^[1-9][0-9]*$/u.test(payload.workflowRunId) ||
     !Number.isSafeInteger(payload.workflowRunAttempt) ||
@@ -57,9 +61,54 @@ function signedBytes(payload) {
   return Buffer.concat([DOMAIN, Buffer.from(canonical(payload))]);
 }
 
-export async function signRebootEvidence(input, output, privateKeyBase64) {
+async function validateCheckpoint(payload, checkpointPath) {
+  const bytes = await readFile(checkpointPath);
+  const checkpoint = JSON.parse(bytes);
+  if (
+    Object.keys(checkpoint).sort().join(',') !==
+      'architecture,candidateSha256,generationAfter,generationBefore,machineIdentity,pendingDeleteSources,preBootIdentity,runnerLabel,runnerName,schemaVersion,sourceRevision,sourceTree,terminalGeneration,workflowRunAttempt,workflowRunId' ||
+    payload.checkpointSha256 !== createHash('sha256').update(bytes).digest('hex')
+  )
+    throw new Error('Real reboot checkpoint is invalid');
+  for (const key of [
+    'architecture',
+    'candidateSha256',
+    'generationBefore',
+    'generationAfter',
+    'machineIdentity',
+    'preBootIdentity',
+    'runnerLabel',
+    'runnerName',
+    'sourceRevision',
+    'sourceTree',
+    'terminalGeneration',
+    'workflowRunAttempt',
+    'workflowRunId',
+  ]) {
+    if (canonical(payload[key]) !== canonical(checkpoint[key]))
+      throw new Error(`Real reboot checkpoint ${key} binding is invalid`);
+  }
+  if (canonical(payload.pendingDeleteSources) !== canonical(checkpoint.pendingDeleteSources))
+    throw new Error('Real reboot checkpoint pending deletion binding is invalid');
+}
+
+export async function signRebootEvidence(
+  input,
+  output,
+  privateKeyBase64,
+  checkpointPath,
+  expectedRunnerLabel,
+  expectedMachineIdentity,
+) {
   const payload = JSON.parse(await readFile(input, 'utf8'));
   validate(payload);
+  if (!checkpointPath) throw new Error('Real reboot checkpoint is required');
+  await validateCheckpoint(payload, checkpointPath);
+  if (
+    payload.runnerLabel !== expectedRunnerLabel ||
+    payload.machineIdentity.toLowerCase() !== expectedMachineIdentity?.toLowerCase()
+  )
+    throw new Error('Real reboot runner policy is invalid');
   const key = createPrivateKey({
     key: Buffer.from(privateKeyBase64, 'base64'),
     format: 'der',
@@ -105,11 +154,23 @@ if (
   process.argv[1] === new URL(import.meta.url).pathname ||
   process.argv[1]?.replaceAll('\\', '/') === new URL(import.meta.url).pathname.slice(1)
 ) {
-  const [command, input, output] = process.argv.slice(2);
-  if (command !== 'sign' || !input || !output) throw new Error('Usage: sign INPUT OUTPUT');
+  const [command, input, output, checkpoint, expectedRunnerLabel, expectedMachineIdentity] =
+    process.argv.slice(2);
+  if (
+    command !== 'sign' ||
+    !input ||
+    !output ||
+    !checkpoint ||
+    !expectedRunnerLabel ||
+    !expectedMachineIdentity
+  )
+    throw new Error('Usage: sign INPUT OUTPUT CHECKPOINT RUNNER_LABEL MACHINE_ID');
   await signRebootEvidence(
     input,
     output,
     process.env.TALKING_QUILL_WINDOWS_REBOOT_ACCEPTANCE_SIGNING_KEY_PKCS8_BASE64 ?? '',
+    checkpoint,
+    expectedRunnerLabel,
+    expectedMachineIdentity,
   );
 }

@@ -392,9 +392,12 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
       'architecture',
       'candidateSha256',
       'sourceRevision',
+      'sourceTree',
       'workflowRunId',
       'workflowRunAttempt',
       'checkpointSha256',
+      'runnerLabel',
+      'runnerName',
       'machineIdentity',
       'preBootIdentity',
       'postBootIdentity',
@@ -424,10 +427,14 @@ function validateRebootEvidence(source, arch, faultClaims, pinned, expectedWorkf
     payload.architecture !== arch ||
     payload.candidateSha256 !== faultClaims.terminalCleanup.acceptanceSetupSha256 ||
     payload.sourceRevision !== faultClaims.sourceCommit ||
+    payload.sourceTree !== faultClaims.sourceTree ||
     payload.workflowRunId !== expectedWorkflowRunId ||
     !Number.isSafeInteger(payload.workflowRunAttempt) ||
     payload.workflowRunAttempt < 1 ||
     !SHA256.test(payload.checkpointSha256) ||
+    !/^tq-reboot-(x64|arm64)-[a-z0-9-]+$/u.test(payload.runnerLabel) ||
+    typeof payload.runnerName !== 'string' ||
+    payload.runnerName.length === 0 ||
     envelope.publicKeySha256 !== keyHash ||
     typeof payload.machineIdentity !== 'string' ||
     payload.machineIdentity.length === 0 ||

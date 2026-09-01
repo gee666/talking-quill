@@ -167,6 +167,11 @@ describe('Windows elevated updater launch', () => {
     expect(setup).not.toContain('retire_fixed_reinstall_deletion_ownership');
     expect(setup).not.toContain('retain_nonfixed_pending_pairs');
     expect(setup).toContain('Talking Quill Maintenance-{maintenance_generation}.exe');
+    expect(setup).toContain('LEGACY_FIXED_MAINTENANCE_VERSION: &str = "0.0.67"');
+    expect(setup).toContain('.join("Talking Quill Maintenance.exe")');
+    expect(setup).toContain('authenticate_legacy_fixed_maintenance(&package, &paths)?');
+    expect(setup).toContain('Legacy fixed maintenance image identity is invalid.');
+    expect(setup).toContain('retire_legacy_fixed_maintenance(&paths)?');
     expect(setup).toContain('talking-quill-update-recovery-launcher-{maintenance_generation}.exe');
     const maintenanceRetirement = setup.slice(
       setup.indexOf('fn wait_for_terminal_service_retirement'),
@@ -182,6 +187,16 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('decode_pending_rename_pairs');
     expect(setup).toContain('destination.is_empty()');
     expect(setup).toContain('Pending deletion data lacks its final terminator.');
+    const pendingRecovery = setup.slice(
+      setup.indexOf('if finishing_existing_uninstall {\n        complete_terminal_uninstall'),
+      setup.indexOf('if uninstall_authorized && !path_present'),
+    );
+    expect(pendingRecovery).toContain(
+      'complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;',
+    );
+    expect(pendingRecovery).toContain('if requested_action == Some(Action::Uninstall)');
+    expect(pendingRecovery).toContain('paths = self::paths()?;');
+    expect(pendingRecovery).not.toContain('lifecycle_parent)| *lifecycle_parent != 0');
     const lockRetirement = setup.slice(
       setup.indexOf('fn retire_machine_lock_publication'),
       setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),
