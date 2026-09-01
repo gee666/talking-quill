@@ -11,7 +11,7 @@ import {
 
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 function fixture(
-  mode: 'fresh' | 'update' | 'repair' = 'fresh',
+  mode: 'fresh' | 'update' | 'repair' | 'stale-schema2-cleanup' = 'fresh',
   mutate?: (manifest: Record<string, unknown>) => void,
 ) {
   const payloads = [
@@ -90,6 +90,13 @@ function fixture(
 describe('shared TQPKG2 parser', () => {
   it.each(['fresh', 'update', 'repair'] as const)('parses strict %s policy', (mode) => {
     expect(parseTqpkg2(fixture(mode), 'x64').manifest.packageMode).toBe(mode);
+  });
+  it('gates stale schema-2 cleanup packages to explicit inspection', () => {
+    const bytes = fixture('stale-schema2-cleanup');
+    expect(() => parseTqpkg2(bytes, 'x64')).toThrow();
+    expect(parseTqpkg2(bytes, 'x64', { allowStaleSchema2Cleanup: true }).manifest.packageMode).toBe(
+      'stale-schema2-cleanup',
+    );
   });
   it.each(['../x', 'a\\b', 'a:b', 'CON', 'dir/nul.txt', 'a./b'])(
     'rejects hostile path %s',

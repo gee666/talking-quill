@@ -35,25 +35,26 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       'elevated && arguments.len() == 1 && arguments[0] == "/TQ-CLEAN-STALE-SCHEMA2";',
     );
     expect(index('if direct_cleanup_requested {')).toBeLessThan(index('if !elevated {'));
-    expect(source).toContain(
-      'run_direct_elevated_stale_schema2_cleanup()?;\n        return Ok(0);',
-    );
+    expect(source).toContain('return run_direct_elevated_stale_schema2_cleanup()');
+    expect(source).toContain('.map_err(|error| fail(EXIT_REJECTED, error.message));');
     expect(source).toContain('const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;');
     expect(source).toContain('integrity_rid >= SECURITY_MANDATORY_HIGH_RID');
-    expect(source).toContain('peer_claims(std::process::id())?.integrity_rid');
+    expect(source).toContain(
+      'peer_claims(std::process::id()).map(|claims| (elevated, claims.integrity_rid))',
+    );
     expect(source).toContain('"Direct stale cleanup requires a high elevated token."');
     expect(source).toContain('direct_stale_cleanup_rejects_wrong_arguments_and_token_modes');
   });
 
   it('binds direct cleanup to the running package image and compiled source identity', () => {
     expect(source).toContain('canonical(&current)? != canonical(&kernel_image)?');
-    expect(source).toContain('.share_mode(FILE_SHARE_READ)');
+    expect(source).toContain('.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)');
     expect(source).toContain('let package = package::parse(&mut image, length)');
     expect(source).toContain('option_env!("TALKING_QUILL_RELEASE_COMMIT")');
     expect(source).toContain('option_env!("TALKING_QUILL_RELEASE_TREE")');
     expect(source).toContain('package.manifest.source_commit != source_commit');
     expect(source).toContain('package.manifest.source_tree != source_tree');
-    expect(source).toContain('package.manifest.package_mode != "fresh"');
+    expect(source).toContain('package.manifest.package_mode != "stale-schema2-cleanup"');
     expect(source).toContain('package.manifest.predecessor.is_some()');
     expect(source).toContain('package.manifest.fault_phase.is_some()');
     expect(source).toContain('!staged_path_is_protected(parent, true)?');

@@ -98,7 +98,11 @@ export function zstdFrameLength(bytes) {
   return offset + (checksum ? 4 : 0);
 }
 
-export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults = false } = {}) {
+export function parseTqpkg2(
+  bytes,
+  expectedArchitecture,
+  { allowAcceptanceFaults = false, allowStaleSchema2Cleanup = false } = {},
+) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 384 || bytes.readUInt16LE(0) !== 0x5a4d)
     throw new Error('TQPKG2 image is not PE');
   const pe = bytes.readUInt32LE(0x3c),
@@ -177,8 +181,15 @@ export function parseTqpkg2(bytes, expectedArchitecture, { allowAcceptanceFaults
     !/^\d+\.\d+\.\d+$/u.test(manifest.version ?? '') ||
     !/^[0-9a-f]{40}$/u.test(manifest.sourceCommit ?? '') ||
     !/^[0-9a-f]{40}$/u.test(manifest.sourceTree ?? '') ||
-    !['fresh', 'update', 'repair'].includes(manifest.packageMode) ||
+    ![
+      'fresh',
+      'update',
+      'repair',
+      ...(allowStaleSchema2Cleanup ? ['stale-schema2-cleanup'] : []),
+    ].includes(manifest.packageMode) ||
     (manifest.packageMode === 'update') !== (manifest.predecessor !== null) ||
+    (manifest.packageMode === 'stale-schema2-cleanup' &&
+      (manifest.predecessor !== null || manifest.faultPhase !== null)) ||
     (manifest.predecessor !== null &&
       (!exactKeys(manifest.predecessor, [
         'gatewaySha256',

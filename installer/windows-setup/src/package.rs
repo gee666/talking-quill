@@ -255,10 +255,11 @@ fn validate_manifest(
         || !valid_version(&manifest.version)
         || !git_object_id(&manifest.source_commit)
         || !git_object_id(&manifest.source_tree)
-        || !matches!(
+        || !(matches!(
             manifest.package_mode.as_str(),
             "fresh" | "update" | "repair"
-        )
+        ) || (cfg!(feature = "stale-schema2-cleanup")
+            && manifest.package_mode == "stale-schema2-cleanup"))
         || !hex_digest(&manifest.target.release_build_digest)
         || !hex_digest(&manifest.target.gateway_sha256)
         || !hex_digest(&manifest.target.owner_sha256)
@@ -285,6 +286,8 @@ fn validate_manifest(
         || manifest.files.is_empty()
         || manifest.files.len() > MAX_FILES
         || (manifest.package_mode == "update") != manifest.predecessor.is_some()
+        || (manifest.package_mode == "stale-schema2-cleanup"
+            && (manifest.predecessor.is_some() || manifest.fault_phase.is_some()))
     {
         return Err(PackageError::Identity);
     }

@@ -7,10 +7,10 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const architecture = process.argv[2];
 if (!['x64', 'arm64'].includes(architecture ?? '')) {
-  throw new Error('Usage: build-windows-acceptance-fault-setup.mjs <x64|arm64>');
+  throw new Error('Usage: build-windows-stale-schema2-cleanup-setup.mjs <x64|arm64>');
 }
-if (process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1') {
-  throw new Error('Acceptance-fault setup requires the installed-acceptance build gate');
+if (process.env.TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD !== '1') {
+  throw new Error('Stale schema-2 cleanup setup requires its explicit build gate');
 }
 const target = architecture === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
 const manifest = resolve(repositoryRoot, 'installer', 'windows-setup', 'Cargo.toml');
@@ -18,7 +18,7 @@ const targetDirectory = resolve(
   repositoryRoot,
   'tmp',
   'cargo-target',
-  'windows-setup-acceptance-faults',
+  'windows-setup-stale-schema2-cleanup',
 );
 const result = spawnSync(
   'cargo',
@@ -32,25 +32,18 @@ const result = spawnSync(
     target,
     '--release',
     '--locked',
+    '--no-default-features',
     '--features',
-    'acceptance-faults',
+    'stale-schema2-cleanup',
   ],
   { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true },
 );
 if (result.status !== 0) {
-  throw new Error(`acceptance-fault Windows setup build failed for ${architecture}`);
+  throw new Error(`stale schema-2 cleanup Windows setup build failed for ${architecture}`);
 }
-const output = resolve(repositoryRoot, 'tmp', 'windows-setup-acceptance-faults', architecture);
+const output = resolve(repositoryRoot, 'tmp', 'windows-setup-stale-schema2-cleanup', architecture);
 await mkdir(output, { recursive: true });
-const built = resolve(
-  repositoryRoot,
-  'tmp',
-  'cargo-target',
-  'windows-setup-acceptance-faults',
-  target,
-  'release',
-  'talking-quill-windows-setup.exe',
-);
+const built = resolve(targetDirectory, target, 'release', 'talking-quill-windows-setup.exe');
 const published = resolve(output, 'talking-quill-windows-setup.exe');
 await copyFile(built, published);
 const setupSha256 = createHash('sha256')
@@ -58,6 +51,12 @@ const setupSha256 = createHash('sha256')
   .digest('hex');
 await writeFile(
   resolve(output, 'nonpromotable.json'),
-  `${JSON.stringify({ schemaVersion: 1, architecture, acceptanceFaults: true, promotable: false, setupSha256 })}\n`,
+  `${JSON.stringify({
+    schemaVersion: 1,
+    architecture,
+    staleSchema2Cleanup: true,
+    promotable: false,
+    setupSha256,
+  })}\n`,
   'utf8',
 );

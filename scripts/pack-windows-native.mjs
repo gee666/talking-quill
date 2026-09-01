@@ -23,8 +23,10 @@ const input = resolve(
   architecture === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked',
 );
 const packageMode = process.env.TALKING_QUILL_PACKAGE_MODE;
-if (!['fresh', 'update', 'repair'].includes(packageMode)) {
-  throw new Error('TALKING_QUILL_PACKAGE_MODE must be fresh, update, or repair');
+if (!['fresh', 'update', 'repair', 'stale-schema2-cleanup'].includes(packageMode)) {
+  throw new Error(
+    'TALKING_QUILL_PACKAGE_MODE must be fresh, update, repair, or stale-schema2-cleanup',
+  );
 }
 const faultPhase = process.env.TALKING_QUILL_NATIVE_FAULT_PHASE ?? null;
 const artifactKind =
@@ -34,12 +36,23 @@ const output = resolve(
   `Talking-Quill-${packageJson.version}-win-${architecture}-${artifactKind}.exe`,
 );
 const acceptanceFaultPackage = faultPhase !== null;
+const staleSchema2CleanupPackage = packageMode === 'stale-schema2-cleanup';
 const stub = resolve(
   root,
-  acceptanceFaultPackage ? 'tmp/windows-setup-acceptance-faults' : 'tmp/windows-setup',
+  acceptanceFaultPackage
+    ? 'tmp/windows-setup-acceptance-faults'
+    : staleSchema2CleanupPackage
+      ? 'tmp/windows-setup-stale-schema2-cleanup'
+      : 'tmp/windows-setup',
   architecture,
   'talking-quill-windows-setup.exe',
 );
+if (staleSchema2CleanupPackage && process.env.TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD !== '1') {
+  throw new Error('stale schema-2 cleanup package requires its explicit build gate');
+}
+if (staleSchema2CleanupPackage && (faultPhase !== null || packageMode === 'update')) {
+  throw new Error('stale schema-2 cleanup package cannot carry a predecessor or fault phase');
+}
 if (
   acceptanceFaultPackage &&
   process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1'
@@ -48,6 +61,34 @@ if (
 }
 if (acceptanceFaultPackage && packageMode !== 'repair') {
   throw new Error('acceptance-fault setup is restricted to repair packages');
+}
+if (staleSchema2CleanupPackage) {
+  const metadata = JSON.parse(
+    await readFile(
+      resolve(
+        root,
+        'tmp',
+        'windows-setup-stale-schema2-cleanup',
+        architecture,
+        'nonpromotable.json',
+      ),
+      'utf8',
+    ),
+  );
+  const stubSha256 = createHash('sha256')
+    .update(await readFile(stub))
+    .digest('hex');
+  if (
+    Object.keys(metadata).sort().join(',') !==
+      'architecture,promotable,schemaVersion,setupSha256,staleSchema2Cleanup' ||
+    metadata.schemaVersion !== 1 ||
+    metadata.architecture !== architecture ||
+    metadata.staleSchema2Cleanup !== true ||
+    metadata.promotable !== false ||
+    metadata.setupSha256 !== stubSha256
+  ) {
+    throw new Error('stale schema-2 cleanup setup metadata is invalid');
+  }
 }
 if (acceptanceFaultPackage) {
   const metadata = JSON.parse(
@@ -171,7 +212,22 @@ const pending = `${output}.pending-native-package`;
 await rm(pending, { force: true });
 await writeFile(pending, Buffer.concat([stubBytes, packageBytes, footer]), { flag: 'wx' });
 await rm(output, { force: true });
+if (staleSchema2CleanupPackage) await rm(`${output}.nonpromotable.json`, { force: true });
 await rename(pending, output);
+if (staleSchema2CleanupPackage) {
+  const packageSha256 = hash(await readFile(output));
+  await writeFile(
+    `${output}.nonpromotable.json`,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      architecture,
+      packageMode,
+      packageSha256,
+      promotable: false,
+    })}\n`,
+    { flag: 'wx' },
+  );
+}
 if (packageMode === 'update') await rebuildUpdateMetadata(output);
 console.log(`Packed ${paths.length} files into ${output}`);
 

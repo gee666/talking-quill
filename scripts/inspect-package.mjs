@@ -522,6 +522,16 @@ async function inspectFinalArtifacts(
 
 async function extractNativePackage(artifact, output, expectedArchitecture) {
   const bytes = await readFile(artifact);
+  if (canonicalPackage) {
+    for (const marker of ['/TQ-CLEAN-STALE-SCHEMA2', '/TQ-DIAGNOSE-STALE-SCHEMA2']) {
+      if (
+        bytes.includes(Buffer.from(marker, 'ascii')) ||
+        bytes.includes(Buffer.from(marker, 'utf16le'))
+      ) {
+        throw new Error(`Canonical Windows package contains cleanup feature marker: ${marker}`);
+      }
+    }
+  }
   const exactPackage = parseTqpkg2(bytes, expectedArchitecture, {
     allowAcceptanceFaults: process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD === '1',
   });
