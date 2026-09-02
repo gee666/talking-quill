@@ -44,15 +44,31 @@ export function canonicalJson(value: unknown): string;
 export function validateTqpkg2Path(path: string): void;
 export function zstdFrameLength(bytes: Buffer): number;
 export function tqpkg2TreeDigest(files: readonly Tqpkg2File[]): string;
+export interface Tqpkg2ProductionParseOptions {
+  readonly allowAcceptanceFaults?: boolean;
+}
+export interface Tqpkg2CleanupBuildParseOptions extends Tqpkg2ProductionParseOptions {
+  readonly allowStaleSchema2Cleanup: true;
+}
+export type Tqpkg2CleanupBuildManifest = Omit<Tqpkg2Manifest, 'packageMode'> &
+  Readonly<{
+    packageMode: Tqpkg2Manifest['packageMode'] | 'stale-schema2-cleanup';
+  }>;
+export interface Tqpkg2ParseResult<Manifest = Tqpkg2Manifest> {
+  readonly manifest: Manifest;
+  readonly contents: ReadonlyMap<string, Buffer>;
+  readonly packageOffset: number;
+  readonly packageSize: number;
+  readonly manifestSize: number;
+}
 export function parseTqpkg2(
   bytes: Buffer,
   expectedArchitecture: 'x64' | 'arm64',
-  options?: Readonly<{ allowAcceptanceFaults?: boolean }>,
-): Readonly<{
-  manifest: Tqpkg2Manifest;
-  contents: ReadonlyMap<string, Buffer>;
-  packageOffset: number;
-  packageSize: number;
-  manifestSize: number;
-}>;
+  options: Tqpkg2CleanupBuildParseOptions,
+): Readonly<Tqpkg2ParseResult<Tqpkg2CleanupBuildManifest>>;
+export function parseTqpkg2(
+  bytes: Buffer,
+  expectedArchitecture: 'x64' | 'arm64',
+  options?: Tqpkg2ProductionParseOptions,
+): Readonly<Tqpkg2ParseResult>;
 export function bindTqpkg2OwnerManifest(manifest: Tqpkg2Manifest, owner: unknown): void;

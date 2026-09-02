@@ -146,7 +146,9 @@ describe('packaged stale schema-2 diagnosis', () => {
     expect(e2e).toContain('rm(cleanupTarget, { recursive: true, force: true })');
     expect(e2e).toContain('canonicalPackage.manifest.sourceCommit !== sourceCommit');
     expect(e2e).toContain('diagnosticPackage.manifest.sourceTree !== sourceTree');
-    expect(e2e).toContain('parseTqpkg2(await readFile(canonical)');
+    expect(e2e).toContain(
+      'const canonicalPackage = parseTqpkg2(await readFile(canonical), architecture);',
+    );
     expect(e2e).toContain('allowStaleSchema2Cleanup: true');
     expect(e2e).toContain('canonicalResult.status !== 64');
     expect(e2e).toContain('rejectedDispatch.status !== 64');

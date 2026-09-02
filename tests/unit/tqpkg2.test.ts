@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   canonicalJson,
   parseTqpkg2,
   tqpkg2TreeDigest,
   validateTqpkg2Path,
   zstdFrameLength,
+  type Tqpkg2ProductionParseOptions,
 } from '../../scripts/tqpkg2.mjs';
 
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -91,12 +92,16 @@ describe('shared TQPKG2 parser', () => {
   it.each(['fresh', 'update', 'repair'] as const)('parses strict %s policy', (mode) => {
     expect(parseTqpkg2(fixture(mode), 'x64').manifest.packageMode).toBe(mode);
   });
-  it('gates stale schema-2 cleanup packages to explicit inspection', () => {
+  it('gates stale schema-2 cleanup packages to explicit cleanup-build inspection', () => {
     const bytes = fixture('stale-schema2-cleanup');
+    expectTypeOf<Tqpkg2ProductionParseOptions>().not.toHaveProperty('allowStaleSchema2Cleanup');
     expect(() => parseTqpkg2(bytes, 'x64')).toThrow();
-    expect(parseTqpkg2(bytes, 'x64', { allowStaleSchema2Cleanup: true }).manifest.packageMode).toBe(
-      'stale-schema2-cleanup',
-    );
+    expect(() => parseTqpkg2(bytes, 'x64', { allowAcceptanceFaults: true })).toThrow();
+    const cleanupBuild = parseTqpkg2(bytes, 'x64', { allowStaleSchema2Cleanup: true });
+    expectTypeOf(cleanupBuild.manifest.packageMode).toEqualTypeOf<
+      'fresh' | 'update' | 'repair' | 'stale-schema2-cleanup'
+    >();
+    expect(cleanupBuild.manifest.packageMode).toBe('stale-schema2-cleanup');
   });
   it.each(['../x', 'a\\b', 'a:b', 'CON', 'dir/nul.txt', 'a./b'])(
     'rejects hostile path %s',
