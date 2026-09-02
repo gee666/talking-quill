@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import {
   closeSync,
@@ -84,7 +84,7 @@ try {
     finalFailures.push(error);
   }
   try {
-    recoverRecordedNamespaces(deleter);
+    recoverRecordedNamespaces(deleter, true);
   } catch (error) {
     finalFailures.push(error);
   }
@@ -169,6 +169,7 @@ function prepareNamespace(namespaceId) {
   const recordId = randomBytes(16).toString('hex');
   const record = {
     schemaVersion: RECORD_SCHEMA,
+    revision: 0,
     recordId,
     namespaceId,
     phase: 'native-creating',
@@ -231,15 +232,17 @@ async function runNamespaceSession(record) {
       bindingNonce: entry.bindingNonce,
     })),
   };
-  const supervisor = spawn(deleter, ['--namespace-session', JSON.stringify(request)], {
+  const supervisor = spawn(deleter, ['--namespace-session'], {
     stdio: ['pipe', 'pipe', 'inherit'],
     windowsHide: true,
     env: { ...process.env, TQ_MACHINE_LOCK_TEST_GUARD_EXE: deleter },
   });
+  supervisor.stdin.write(`${JSON.stringify(request)}\n`);
   const exited = new Promise((done, reject) => {
     supervisor.once('error', reject);
     supervisor.once('exit', (code, signal) => done({ code, signal }));
   });
+  let logsDrained = false;
   try {
     const lines = createInterface({ input: supervisor.stdout, crlfDelay: Infinity });
     const iterator = lines[Symbol.asyncIterator]();
@@ -272,8 +275,23 @@ async function runNamespaceSession(record) {
     record.creatingRoot = null;
     record.phase = 'roots-created';
     writeRecord(record);
-    supervisor.stdin.end('run\n');
+    supervisor.stdin.write('run\n');
     const completed = await nextNamespaceSessionEvent(iterator, record.controlNonce);
+    if (completed === null) {
+      const failed = await exited;
+      assertSupervisorExited(record);
+      throw new SupervisorFailure(
+        failed.code,
+        `native namespace supervisor exited before authenticated teardown: ${failed.code}`,
+      );
+    }
+    if (completed.event !== 'completed') {
+      throw new Error('native namespace supervisor returned an invalid completion event');
+    }
+    await drainChildLog(childStdoutLogPath, process.stdout);
+    await drainChildLog(childStderrLogPath, process.stderr);
+    logsDrained = true;
+    supervisor.stdin.end('drained\n');
     const result = await exited;
     if (result.signal) throw new Error(`native namespace supervisor ended with ${result.signal}`);
     if (result.code !== 0 || completed?.event !== 'completed') {
@@ -308,8 +326,10 @@ async function runNamespaceSession(record) {
     assertSupervisorExited(record);
     throw error;
   } finally {
-    await drainChildLog(childStdoutLogPath, process.stdout);
-    await drainChildLog(childStderrLogPath, process.stderr);
+    if (!logsDrained) {
+      await drainChildLog(childStdoutLogPath, process.stdout);
+      await drainChildLog(childStderrLogPath, process.stderr);
+    }
     cleanupChildLog(childStdoutLogPath);
     cleanupChildLog(childStderrLogPath);
   }
@@ -321,6 +341,25 @@ async function supervisorFailureTestPause() {
   writeFileSync(`${path}.ready`, 'ready\n', { flag: 'wx' });
   while (!existsSync(`${path}.continue`)) {
     await new Promise((done) => setTimeout(done, 10));
+  }
+}
+
+function drainRecoveredLog(path, destinationFd) {
+  if (!existsSync(path)) return;
+  if (!isPlainPath(path, false) || lstatSync(path).nlink !== 1) {
+    throw new Error('recovered child log is not an exact regular file');
+  }
+  assertProtectedRecord(path);
+  const source = openSync(path, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const count = readSync(source, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      writeFileSync(destinationFd, buffer.subarray(0, count));
+    }
+  } finally {
+    closeSync(source);
   }
 }
 
@@ -432,21 +471,203 @@ function assertProtectedRecord(path) {
   }
 }
 
+function recordDigest(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function pendingAuthenticationBytes(recordId, previousSha256, nextRevision, recordBytes) {
+  return Buffer.concat([
+    Buffer.from(`${recordId}\n${previousSha256 ?? '-'}\n${nextRevision}\n`, 'utf8'),
+    recordBytes,
+  ]);
+}
+
+function pendingAuthPath(pending) {
+  return `${pending}:TalkingQuill.PendingAuth.V1`;
+}
+
+function pendingIntentPath(recordId) {
+  return resolve(recordRoot, `${recordId}.pending-intent-v1`);
+}
+
+function recoverJsPendingRecord(recordId, ownerMayBeCurrent = false) {
+  const pending = resolve(recordRoot, `${recordId}.pending-v1`);
+  if (!existsSync(pending)) return;
+  if (!isPlainPath(pending, false) || lstatSync(pending).nlink !== 1) {
+    throw new Error('cleanup-record pending file is not an exact regular file');
+  }
+  assertProtectedRecord(pending);
+  const destination = recordPath(recordId);
+  const intentPath = pendingIntentPath(recordId);
+  if (
+    !existsSync(intentPath) ||
+    !isPlainPath(intentPath, false) ||
+    lstatSync(intentPath).nlink !== 1
+  ) {
+    throw new Error('cleanup-record pending intent is absent or invalid');
+  }
+  assertProtectedRecord(intentPath);
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  if (
+    intent.version !== 1 ||
+    intent.recordId !== recordId ||
+    intent.recordDirectoryIdentity !== fileIdentity(recordRoot) ||
+    !Number.isInteger(intent.owner?.Pid) ||
+    (processIdentityAlive(intent.owner) && !(ownerMayBeCurrent && intent.owner.Pid === process.pid))
+  ) {
+    throw new Error('cleanup-record pending intent identity changed');
+  }
+  const currentBytes = existsSync(destination) ? readFileSync(destination) : null;
+  const current = currentBytes === null ? null : JSON.parse(currentBytes.toString('utf8'));
+  if (current !== null) validateRecord(current);
+  let candidate;
+  let auth;
+  try {
+    const candidateBytes = readFileSync(pending);
+    candidate = JSON.parse(candidateBytes.toString('utf8'));
+    auth = JSON.parse(readFileSync(pendingAuthPath(pending), 'utf8'));
+    const keyRecord = current ?? candidate;
+    const expectedMac = createHmac('sha256', Buffer.from(keyRecord.controlNonce, 'hex'))
+      .update(
+        pendingAuthenticationBytes(
+          recordId,
+          currentBytes === null ? null : recordDigest(currentBytes),
+          candidate.revision,
+          candidateBytes,
+        ),
+      )
+      .digest();
+    const actualMac = Buffer.from(auth.mac ?? '', 'hex');
+    if (
+      auth.version !== 1 ||
+      auth.recordId !== recordId ||
+      candidate.recordId !== recordId ||
+      auth.previousSha256 !== (currentBytes === null ? null : recordDigest(currentBytes)) ||
+      auth.nextRevision !== (current?.revision ?? -1) + 1 ||
+      candidate.revision !== auth.nextRevision ||
+      actualMac.length !== expectedMac.length ||
+      !timingSafeEqual(actualMac, expectedMac)
+    ) {
+      throw new Error('cleanup-record pending authentication failed');
+    }
+    validateRecord(candidate);
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && error?.code !== 'ENOENT') throw error;
+    unlinkSync(pending);
+    fsyncDirectory(recordRoot);
+    return;
+  }
+  renameSync(pending, destination);
+  unlinkSync(intentPath);
+  fsyncDirectory(recordRoot);
+}
+
+function recoverJsPendingRecords(ownerMayBeCurrent = false) {
+  if (!existsSync(recordRoot)) return;
+  for (const name of readdirSync(recordRoot).sort()) {
+    const match = /^([0-9a-f]{32})\.pending-v1$/u.exec(name);
+    if (match) recoverJsPendingRecord(match[1], ownerMayBeCurrent);
+  }
+  for (const name of readdirSync(recordRoot).sort()) {
+    const match = /^([0-9a-f]{32})\.pending-intent-v1$/u.exec(name);
+    if (!match) continue;
+    const intent = resolve(recordRoot, name);
+    if (!isPlainPath(intent, false) || lstatSync(intent).nlink !== 1) {
+      throw new Error('orphan cleanup-record pending intent is invalid');
+    }
+    assertProtectedRecord(intent);
+    const value = JSON.parse(readFileSync(intent, 'utf8'));
+    if (
+      value.version !== 1 ||
+      value.recordId !== match[1] ||
+      value.recordDirectoryIdentity !== fileIdentity(recordRoot) ||
+      !Number.isInteger(value.owner?.Pid) ||
+      (processIdentityAlive(value.owner) && !(ownerMayBeCurrent && value.owner.Pid === process.pid))
+    ) {
+      throw new Error('orphan cleanup-record pending intent identity changed');
+    }
+    unlinkSync(intent);
+    fsyncDirectory(recordRoot);
+  }
+}
+
+function jsRecordCrashAt(phase) {
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === phase) {
+    throw new SupervisorFailure(197, `injected JS record crash at ${phase}`);
+  }
+}
+
 function writeRecord(record) {
-  validateRecord(record);
   ensureProtectedRecordRoot();
   const path = recordPath(record.recordId);
-  const temporary = `${path}.tmp-${randomBytes(8).toString('hex')}`;
-  const bytes = `${JSON.stringify(record)}\n`;
-  const handle = openSync(temporary, 'wx');
+  const pending = resolve(recordRoot, `${record.recordId}.pending-v1`);
+  const intent = pendingIntentPath(record.recordId);
+  recoverJsPendingRecord(record.recordId, true);
+  if (existsSync(intent)) recoverJsPendingRecords(true);
+  const previousBytes = existsSync(path) ? readFileSync(path) : null;
+  const previous = previousBytes === null ? null : JSON.parse(previousBytes.toString('utf8'));
+  if (previous !== null) validateRecord(previous);
+  record.revision = (previous?.revision ?? -1) + 1;
+  validateRecord(record);
+  const recordBytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+  const intentHandle = openSync(intent, 'wx');
+  applyExactRecordAcl(intent, false);
   try {
-    writeFileSync(handle, bytes, 'utf8');
+    writeFileSync(
+      intentHandle,
+      `${JSON.stringify({
+        version: 1,
+        recordId: record.recordId,
+        recordDirectoryIdentity: record.recordDirectoryIdentity,
+        owner: record.owner,
+      })}\n`,
+      'utf8',
+    );
+    fsyncSync(intentHandle);
+  } finally {
+    closeSync(intentHandle);
+  }
+  fsyncDirectory(recordRoot);
+  const handle = openSync(pending, 'wx');
+  applyExactRecordAcl(pending, false);
+  jsRecordCrashAt('js-record-pending-created');
+  try {
+    writeFileSync(handle, recordBytes);
+    jsRecordCrashAt('js-record-pending-written');
     fsyncSync(handle);
+    jsRecordCrashAt('js-record-pending-flushed');
   } finally {
     closeSync(handle);
   }
-  applyExactRecordAcl(temporary, false);
-  renameSync(temporary, path);
+  const previousSha256 = previousBytes === null ? null : recordDigest(previousBytes);
+  const auth = {
+    version: 1,
+    recordId: record.recordId,
+    previousSha256,
+    nextRevision: record.revision,
+    mac: createHmac('sha256', Buffer.from(record.controlNonce, 'hex'))
+      .update(
+        pendingAuthenticationBytes(record.recordId, previousSha256, record.revision, recordBytes),
+      )
+      .digest('hex'),
+  };
+  const authHandle = openSync(pendingAuthPath(pending), 'wx');
+  try {
+    const authBytes = `${JSON.stringify(auth)}\n`;
+    if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'js-record-auth-written') {
+      writeFileSync(authHandle, authBytes.slice(0, Math.floor(authBytes.length / 2)), 'utf8');
+      jsRecordCrashAt('js-record-auth-written');
+    }
+    writeFileSync(authHandle, authBytes, 'utf8');
+    fsyncSync(authHandle);
+    jsRecordCrashAt('js-record-auth-flushed');
+  } finally {
+    closeSync(authHandle);
+  }
+  fsyncDirectory(recordRoot);
+  renameSync(pending, path);
+  unlinkSync(intent);
+  jsRecordCrashAt('js-record-replaced');
   fsyncDirectory(recordRoot);
 }
 
@@ -477,9 +698,10 @@ function migrateSchema3Record(record) {
   return record;
 }
 
-function recoverRecordedNamespaces(deleter) {
+function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
   if (!existsSync(recordRoot)) return;
   if (!isPlainPath(recordRoot, true)) throw new Error('cleanup record root is not plain');
+  recoverJsPendingRecords(ownerMayBeCurrent);
   recoverNativeRecordTemps();
   const files = readdirSync(recordRoot).sort();
   for (const name of files) {
@@ -527,21 +749,26 @@ function recoverRecordedNamespaces(deleter) {
   assertNoUnknownNamespaces(ids);
   for (let value of records) {
     if (
-      processIdentityAlive(value.owner) ||
+      (processIdentityAlive(value.owner) &&
+        !(ownerMayBeCurrent && value.owner.Pid === process.pid)) ||
       processIdentityAlive(value.child) ||
       processIdentityAlive(value.supervisor)
     ) {
       throw new Error(`machine-lock cleanup record is owned by a live process: ${value.recordId}`);
     }
     value = migrateSchema3Record(value);
-    cleanupRecord(value, deleter, false);
+    if (value.schemaVersion === RECORD_SCHEMA) {
+      drainRecoveredLog(resolve(recordRoot, value.childStdoutLogFile), process.stdout.fd);
+      drainRecoveredLog(resolve(recordRoot, value.childStderrLogFile), process.stderr.fd);
+    }
+    cleanupRecord(value, deleter, ownerMayBeCurrent);
   }
   removeEmptyParents();
 }
 
 function recoverNativeRecordTemps() {
   for (const name of readdirSync(recordRoot).sort()) {
-    const match = /^([0-9a-f]{32})\.native-tmp$/u.exec(name);
+    const match = /^([0-9a-f]{32})\.native-[0-9a-f]{32}\.pending-v1$/u.exec(name);
     if (!match) continue;
     const temporary = resolve(recordRoot, name);
     const destination = recordPath(match[1]);
@@ -561,6 +788,13 @@ function recoverNativeRecordTemps() {
       validateRecord(candidate);
       if (candidate.recordId !== match[1]) {
         throw new Error('native cleanup-record temporary identity changed');
+      }
+      const current = readRecord(destination);
+      if (
+        candidate.controlNonce !== current.controlNonce ||
+        candidate.revision !== (current.revision ?? -1) + 1
+      ) {
+        throw new Error('native cleanup-record temporary revision changed');
       }
       writeRecord(candidate);
     } catch (error) {
@@ -589,7 +823,9 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   ) {
     throw new Error('machine-lock cleanup record ancestor identity changed');
   }
-  if (record.roots.length !== rootKinds.length) record.partialCreation = true;
+  if (record.roots.length !== rootKinds.length || record.supervisor === null) {
+    record.partialCreation = true;
+  }
   const sealingInventory = ![
     'inventory-sealed',
     'deleting-root',
@@ -873,6 +1109,12 @@ function validateRecord(record) {
   }
   assertNamespaceId(record.namespaceId);
   assertNamespaceId(record.recordId);
+  if (
+    record.revision !== undefined &&
+    (!Number.isSafeInteger(record.revision) || record.revision < 0)
+  ) {
+    throw new Error('cleanup record revision is invalid');
+  }
   const validProcessIdentity = (identity) =>
     Number.isInteger(identity?.Pid) &&
     identity.Pid > 0 &&
@@ -909,6 +1151,7 @@ function validateRecord(record) {
   if (
     record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
     record.phase !== 'native-creating' &&
+    record.partialCreation !== true &&
     !validProcessIdentity(record.supervisor)
   ) {
     throw new Error('cleanup record supervisor identity is invalid');

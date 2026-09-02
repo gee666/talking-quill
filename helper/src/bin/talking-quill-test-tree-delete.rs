@@ -52,13 +52,18 @@ fn main() {
     }
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if let [mode, request] = arguments.as_slice()
+    if let [mode] = arguments.as_slice()
         && mode == "--namespace-session"
     {
-        let Some(request) = request.to_str() else {
-            std::process::exit(64);
-        };
-        let Ok(request) = serde_json::from_str::<NamespaceSessionRequest>(request) else {
+        use std::io::BufRead;
+        let mut request = String::new();
+        if std::io::BufReader::new(std::io::stdin())
+            .read_line(&mut request)
+            .is_err()
+        {
+            std::process::exit(65);
+        }
+        let Ok(request) = serde_json::from_str::<NamespaceSessionRequest>(&request) else {
             std::process::exit(65);
         };
         match run_namespace_session(request) {
@@ -113,48 +118,62 @@ fn main() {
         {
             std::process::exit(78);
         }
-        let debug_name = std::ffi::OsStr::new("SeDebugPrivilege")
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let mut privilege: LUID_AND_ATTRIBUTES = unsafe { std::mem::zeroed() };
-        if unsafe {
-            LookupPrivilegeValueW(std::ptr::null(), debug_name.as_ptr(), &mut privilege.Luid)
-        } == 0
-        {
-            unsafe { CloseHandle(token) };
-            std::process::exit(78);
+        for privilege_name in [
+            "SeDebugPrivilege",
+            "SeTakeOwnershipPrivilege",
+            "SeRestorePrivilege",
+        ] {
+            let name = std::ffi::OsStr::new(privilege_name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>();
+            let mut privilege: LUID_AND_ATTRIBUTES = unsafe { std::mem::zeroed() };
+            if unsafe {
+                LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut privilege.Luid)
+            } == 0
+            {
+                unsafe { CloseHandle(token) };
+                std::process::exit(78);
+            }
+            privilege.Attributes = SE_PRIVILEGE_ENABLED;
+            let state = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [privilege],
+            };
+            unsafe { SetLastError(0) };
+            let adjusted = unsafe {
+                AdjustTokenPrivileges(
+                    token,
+                    0,
+                    &state,
+                    size_of::<TOKEN_PRIVILEGES>() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            let adjust_error = unsafe { GetLastError() };
+            if adjusted == 0 || adjust_error != ERROR_NOT_ALL_ASSIGNED {
+                eprintln!("{privilege_name} remains assignable in the supervised child");
+                unsafe { CloseHandle(token) };
+                std::process::exit(79);
+            }
         }
-        privilege.Attributes = SE_PRIVILEGE_ENABLED;
-        let state = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [privilege],
-        };
-        unsafe { SetLastError(0) };
-        let adjusted = unsafe {
-            AdjustTokenPrivileges(
-                token,
-                0,
-                &state,
-                size_of::<TOKEN_PRIVILEGES>() as u32,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        let adjust_error = unsafe { GetLastError() };
         unsafe { CloseHandle(token) };
-        if adjusted == 0 || adjust_error != ERROR_NOT_ALL_ASSIGNED {
-            eprintln!("SeDebugPrivilege remains assignable in the supervised child");
-            std::process::exit(79);
-        }
         let synchronized = unsafe { OpenProcess(0x0010_0000, 0, pid) };
         if synchronized.is_null() {
             std::process::exit(78);
         }
+        let query = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if query.is_null() {
+            unsafe { CloseHandle(synchronized) };
+            std::process::exit(78);
+        }
+        unsafe { CloseHandle(query) };
         for access in [
             PROCESS_DUP_HANDLE,
             PROCESS_VM_READ,
-            PROCESS_QUERY_LIMITED_INFORMATION,
+            0x0004_0000,
+            0x0008_0000,
         ] {
             let opened = unsafe { OpenProcess(access, 0, pid) };
             if !opened.is_null() {
@@ -534,28 +553,26 @@ fn update_session_record(
     path: &std::path::Path,
     update: impl FnOnce(&mut serde_json::Value) -> Result<(), &'static str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
     let mut record = serde_json::from_slice::<serde_json::Value>(&std::fs::read(path)?)?;
     update(&mut record).map_err(std::io::Error::other)?;
-    let temporary = path.with_extension("native-tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)?;
+    let revision = record["revision"]
+        .as_u64()
+        .ok_or_else(|| std::io::Error::other("cleanup record revision is invalid"))?;
+    record["revision"] = serde_json::Value::from(
+        revision
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("cleanup record revision exhausted"))?,
+    );
+    let pending =
+        talking_quill_helper::machine_lock_test_namespace::create_native_record_pending(path)?;
     session_record_crash_at("native-record-temp-created");
-    talking_quill_helper::machine_lock_test_namespace::protect_cleanup_record(&temporary)?;
     session_record_crash_at("native-record-temp-protected");
-    file.write_all(&serde_json::to_vec(&record)?)?;
+    pending.write(&serde_json::to_vec(&record)?)?;
     session_record_crash_at("native-record-temp-written");
-    file.sync_all()?;
+    pending.flush()?;
     session_record_crash_at("native-record-temp-flushed");
-    drop(file);
-    std::fs::rename(&temporary, path)?;
-    talking_quill_helper::owned_tree::flush_owned_directory(
-        path.parent()
-            .ok_or_else(|| std::io::Error::other("cleanup record has no parent"))?,
-    )?;
+    pending.replace()?;
+    session_record_crash_at("native-record-temp-replaced");
     Ok(())
 }
 
@@ -674,10 +691,12 @@ fn run_namespace_session(
                 .ok_or("cleanup record path has no identity")?,
             &request.control_nonce,
         )?;
+    let supervisor_claim =
+        talking_quill_helper::machine_lock_test_namespace::retain_supervisor_claim()?;
     unsafe {
         std::env::set_var(
-            "TQ_MACHINE_LOCK_TEST_SUPERVISOR_PID",
-            std::process::id().to_string(),
+            "TQ_MACHINE_LOCK_TEST_SUPERVISOR_CLAIM",
+            supervisor_claim.claim(),
         );
     }
     unsafe {
@@ -701,11 +720,13 @@ fn run_namespace_session(
         )),
     );
     unsafe {
-        std::env::remove_var("TQ_MACHINE_LOCK_TEST_SUPERVISOR_PID");
+        std::env::remove_var("TQ_MACHINE_LOCK_TEST_SUPERVISOR_CLAIM");
         std::env::remove_var("TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE");
     }
     drop(record_privacy);
-    let child_code = child_result.map_err(|_| "job supervision failed")?;
+    drop(supervisor_claim);
+    let (child_code, stdout_guard, stderr_guard) =
+        child_result.map_err(|_| "job supervision failed")?;
     for (_, root) in &mut roots {
         root.restore_root_for_teardown()?;
     }
@@ -789,6 +810,15 @@ fn run_namespace_session(
         &request.control_nonce,
         serde_json::json!({"event": "completed", "childExitCode": child_code}),
     )?;
+    let mut drained = String::new();
+    std::io::BufReader::new(std::io::stdin()).read_line(&mut drained)?;
+    if drained.trim() != "drained" {
+        return Err("namespace session did not receive log drain acknowledgement".into());
+    }
+    unsafe {
+        windows_sys::Win32::Foundation::CloseHandle(stdout_guard);
+        windows_sys::Win32::Foundation::CloseHandle(stderr_guard);
+    }
     Ok(())
 }
 
@@ -805,14 +835,30 @@ fn supervise(command: &str, namespaces: &[RetainedNamespace]) -> Result<u32, ()>
             .map_err(|_| ())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    supervise_job(command, None)
+    let (code, stdout, stderr) = supervise_job(command, None)?;
+    unsafe {
+        if !stdout.is_null() {
+            windows_sys::Win32::Foundation::CloseHandle(stdout);
+        }
+        if !stderr.is_null() {
+            windows_sys::Win32::Foundation::CloseHandle(stderr);
+        }
+    }
+    Ok(code)
 }
 
 #[cfg(windows)]
 fn supervise_job(
     command: &str,
     child_log_paths: Option<(&std::path::Path, &std::path::Path)>,
-) -> Result<u32, ()> {
+) -> Result<
+    (
+        u32,
+        windows_sys::Win32::Foundation::HANDLE,
+        windows_sys::Win32::Foundation::HANDLE,
+    ),
+    (),
+> {
     use std::{mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
     use windows_sys::Win32::{
         Foundation::{
@@ -820,12 +866,11 @@ fn supervise_job(
         },
         Security::{
             AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
-            SE_PRIVILEGE_REMOVED, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
-            TOKEN_QUERY,
+            SE_PRIVILEGE_REMOVED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
         },
         Storage::FileSystem::{
-            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FlushFileBuffers, OPEN_EXISTING,
         },
         System::{
             JobObjects::{
@@ -871,31 +916,38 @@ fn supervise_job(
             return Err(());
         }
         let token = Handle(token);
-        let name = std::ffi::OsStr::new("SeDebugPrivilege")
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let mut privilege: LUID_AND_ATTRIBUTES = unsafe { zeroed() };
-        if unsafe { LookupPrivilegeValueW(null_mut(), name.as_ptr(), &mut privilege.Luid) } == 0 {
-            return Err(());
-        }
-        privilege.Attributes = SE_PRIVILEGE_REMOVED;
-        let state = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [privilege],
-        };
-        if unsafe {
-            AdjustTokenPrivileges(
-                token.0,
-                0,
-                &state,
-                size_of::<TOKEN_PRIVILEGES>() as u32,
-                null_mut(),
-                null_mut(),
-            )
-        } == 0
-        {
-            return Err(());
+        for privilege_name in [
+            "SeDebugPrivilege",
+            "SeTakeOwnershipPrivilege",
+            "SeRestorePrivilege",
+        ] {
+            let name = std::ffi::OsStr::new(privilege_name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>();
+            let mut privilege: LUID_AND_ATTRIBUTES = unsafe { zeroed() };
+            if unsafe { LookupPrivilegeValueW(null_mut(), name.as_ptr(), &mut privilege.Luid) } == 0
+            {
+                return Err(());
+            }
+            privilege.Attributes = SE_PRIVILEGE_REMOVED;
+            let state = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [privilege],
+            };
+            if unsafe {
+                AdjustTokenPrivileges(
+                    token.0,
+                    0,
+                    &state,
+                    size_of::<TOKEN_PRIVILEGES>() as u32,
+                    null_mut(),
+                    null_mut(),
+                )
+            } == 0
+            {
+                return Err(());
+            }
         }
         Ok(())
     };
@@ -929,95 +981,95 @@ fn supervise_job(
     let mut attribute_list = AttributeList(null_mut());
     let mut startup_ex: STARTUPINFOEXW = unsafe { zeroed() };
     let mut startup: STARTUPINFOW = unsafe { zeroed() };
-    let (startup_pointer, creation_flags) =
-        if let Some((stdout_log_path, stderr_log_path)) = child_log_paths {
-            let security = SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: null_mut(),
-                bInheritHandle: 1,
-            };
-            let create_log = |path: &std::path::Path| {
-                let path = path
-                    .as_os_str()
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect::<Vec<_>>();
-                Handle(unsafe {
-                    CreateFileW(
-                        path.as_ptr(),
-                        GENERIC_WRITE,
-                        FILE_SHARE_READ | FILE_SHARE_DELETE,
-                        &security,
-                        CREATE_NEW,
-                        FILE_ATTRIBUTE_NORMAL,
-                        null_mut(),
-                    )
-                })
-            };
-            let output = create_log(stdout_log_path);
-            let error = create_log(stderr_log_path);
-            let nul = std::ffi::OsStr::new("NUL")
+    let (startup_pointer, creation_flags) = if let Some((stdout_log_path, stderr_log_path)) =
+        child_log_paths
+    {
+        let mut exact_security =
+            talking_quill_helper::machine_lock_test_namespace::exact_inheritable_file_security()
+                .map_err(|_| ())?;
+        let security = exact_security.inheritable_attributes();
+        let create_log = |path: &std::path::Path| {
+            let path = path
+                .as_os_str()
                 .encode_wide()
                 .chain(Some(0))
                 .collect::<Vec<_>>();
-            let input = Handle(unsafe {
+            Handle(unsafe {
                 CreateFileW(
-                    nul.as_ptr(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    path.as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_READ,
                     &security,
-                    OPEN_EXISTING,
+                    CREATE_NEW,
                     FILE_ATTRIBUTE_NORMAL,
                     null_mut(),
                 )
-            });
-            if output.0 == INVALID_HANDLE_VALUE
-                || error.0 == INVALID_HANDLE_VALUE
-                || input.0 == INVALID_HANDLE_VALUE
-            {
-                return Err(());
-            }
-            inherited_handles.extend([input.0, output.0, error.0]);
-            let mut attribute_bytes = 0usize;
-            unsafe {
-                InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
-            }
-            attribute_storage.resize(attribute_bytes.div_ceil(size_of::<usize>()), 0);
-            attribute_list.0 = attribute_storage.as_mut_ptr().cast();
-            if unsafe {
-                InitializeProcThreadAttributeList(attribute_list.0, 1, 0, &mut attribute_bytes)
-            } == 0
-                || unsafe {
-                    UpdateProcThreadAttribute(
-                        attribute_list.0,
-                        0,
-                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                        inherited_handles.as_ptr().cast(),
-                        size_of_val(inherited_handles.as_slice()),
-                        null_mut(),
-                        null_mut(),
-                    )
-                } == 0
-            {
-                return Err(());
-            }
-            startup_ex.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-            startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-            startup_ex.StartupInfo.hStdInput = input.0;
-            startup_ex.StartupInfo.hStdOutput = output.0;
-            startup_ex.StartupInfo.hStdError = error.0;
-            startup_ex.lpAttributeList = attribute_list.0;
-            stdout_handle = Some(output);
-            stderr_handle = Some(error);
-            input_handle = Some(input);
-            (
-                (&raw const startup_ex.StartupInfo),
-                CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-            )
-        } else {
-            startup.cb = size_of::<STARTUPINFOW>() as u32;
-            (&raw const startup, CREATE_SUSPENDED)
+            })
         };
+        let output = create_log(stdout_log_path);
+        let error = create_log(stderr_log_path);
+        let nul = std::ffi::OsStr::new("NUL")
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let input = Handle(unsafe {
+            CreateFileW(
+                nul.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &security,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        });
+        if output.0 == INVALID_HANDLE_VALUE
+            || error.0 == INVALID_HANDLE_VALUE
+            || input.0 == INVALID_HANDLE_VALUE
+        {
+            return Err(());
+        }
+        inherited_handles.extend([input.0, output.0, error.0]);
+        let mut attribute_bytes = 0usize;
+        unsafe {
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
+        }
+        attribute_storage.resize(attribute_bytes.div_ceil(size_of::<usize>()), 0);
+        attribute_list.0 = attribute_storage.as_mut_ptr().cast();
+        if unsafe {
+            InitializeProcThreadAttributeList(attribute_list.0, 1, 0, &mut attribute_bytes)
+        } == 0
+            || unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list.0,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    inherited_handles.as_ptr().cast(),
+                    size_of_val(inherited_handles.as_slice()),
+                    null_mut(),
+                    null_mut(),
+                )
+            } == 0
+        {
+            return Err(());
+        }
+        startup_ex.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup_ex.StartupInfo.hStdInput = input.0;
+        startup_ex.StartupInfo.hStdOutput = output.0;
+        startup_ex.StartupInfo.hStdError = error.0;
+        startup_ex.lpAttributeList = attribute_list.0;
+        stdout_handle = Some(output);
+        stderr_handle = Some(error);
+        input_handle = Some(input);
+        (
+            (&raw const startup_ex.StartupInfo),
+            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+        )
+    } else {
+        startup.cb = size_of::<STARTUPINFOW>() as u32;
+        (&raw const startup, CREATE_SUSPENDED)
+    };
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     if unsafe {
         CreateProcessW(
@@ -1037,8 +1089,6 @@ fn supervise_job(
         return Err(());
     }
     drop(input_handle);
-    drop(stdout_handle);
-    drop(stderr_handle);
     drop(attribute_list);
     drop(attribute_storage);
     let process_handle = Handle(process.hProcess);
@@ -1075,9 +1125,32 @@ fn supervise_job(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    for log in [&stdout_handle, &stderr_handle] {
+        if let Some(log) = log
+            && unsafe { FlushFileBuffers(log.0) } == 0
+        {
+            return Err(());
+        }
+    }
+    let stdout_guard = stdout_handle
+        .take()
+        .map(|handle| {
+            let raw = handle.0;
+            std::mem::forget(handle);
+            raw
+        })
+        .unwrap_or(null_mut());
+    let stderr_guard = stderr_handle
+        .take()
+        .map(|handle| {
+            let raw = handle.0;
+            std::mem::forget(handle);
+            raw
+        })
+        .unwrap_or(null_mut());
     let mut exit_code = 0;
     if unsafe { GetExitCodeProcess(process_handle.0, &mut exit_code) } == 0 {
         return Err(());
     }
-    Ok(exit_code)
+    Ok((exit_code, stdout_guard, stderr_guard))
 }

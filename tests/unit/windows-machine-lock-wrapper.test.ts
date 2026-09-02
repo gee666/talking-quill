@@ -28,10 +28,17 @@ const nativeHelper = resolve(
 
 run('Windows machine-lock wrapper teardown', () => {
   it.each([
+    'js-record-pending-created',
+    'js-record-pending-written',
+    'js-record-pending-flushed',
+    'js-record-auth-written',
+    'js-record-auth-flushed',
+    'js-record-replaced',
     'native-record-temp-created',
     'native-record-temp-protected',
     'native-record-temp-written',
     'native-record-temp-flushed',
+    'native-record-temp-replaced',
     'intent-partial-write',
     'intent-written-before-flush',
     'intent-file-flushed',
@@ -178,6 +185,8 @@ run('Windows machine-lock wrapper teardown', () => {
   it('protects supervisor process authority and isolates forged control frames', () => {
     const result = runWrapper('node tests/fixtures/machine-lock-test-control-forgery.mjs', {
       TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE: '123456',
+      TQ_MACHINE_LOCK_TEST_SUPERVISOR_CLAIM:
+        '{"pid":4,"creationTime":1,"imagePath":"spoof","imageIdentity":"1:1","imageSha256":"00"}',
     });
     expect(result.status, result.stderr).toBe(0);
     const forgedPrefix =
@@ -227,6 +236,43 @@ run('Windows machine-lock wrapper teardown', () => {
     const parent = resolve(pause, '..');
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   }, 120_000);
+
+  it.each(['hardlink', 'reparse'] as const)(
+    'rejects a crashed native pending-record %s replacement',
+    async (kind) => {
+      const token = randomBytes(16).toString('hex');
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-native-pending`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'native-record-temp-flushed',
+        TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+      });
+      await waitForPath(`${pause}.ready`);
+      const pendingName = readdirSync(records).find((name) =>
+        /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name),
+      )!;
+      const pending = resolve(records, pendingName);
+      const outside = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-outside`);
+      mkdirSync(outside);
+      const sentinel = resolve(outside, 'sentinel');
+      writeFileSync(sentinel, 'native pending sentinel\n', 'utf8');
+      unlinkSync(pending);
+      if (kind === 'hardlink') linkSync(sentinel, pending);
+      else symlinkSync(sentinel, pending, 'file');
+      writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+      expect((await running).code).not.toBe(197);
+      expect(readFileSync(sentinel, 'utf8')).toBe('native pending sentinel\n');
+      unlinkSync(pending);
+      unlinkSync(sentinel);
+      rmdirSync(outside);
+      unlinkSync(`${pause}.ready`);
+      unlinkSync(`${pause}.continue`);
+      expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+      const parent = resolve(pause, '..');
+      if (readdirSync(parent).length === 0) rmdirSync(parent);
+    },
+    120_000,
+  );
 
   it('retains namespace root and parent handles while the child runs', () => {
     const result = runWrapper('node tests/fixtures/machine-lock-test-retained-parent.mjs');

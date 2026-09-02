@@ -12,7 +12,9 @@ use std::{
     ptr::{null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION, HANDLE, LocalFree},
+    Foundation::{
+        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION, FILETIME, HANDLE, LocalFree,
+    },
     Security::{
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
@@ -27,10 +29,10 @@ use windows_sys::Win32::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
         CommitTransaction, CreateFileW, CreateTransaction, DELETE, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FlushFileBuffers,
-        GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OPEN_EXISTING,
-        READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo,
+        FlushFileBuffers, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
+        OPEN_EXISTING, READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
     },
     System::{
         IO::OVERLAPPED,
@@ -41,7 +43,10 @@ use windows_sys::Win32::{
             RegOpenKeyExW, RegOpenKeyTransactedW, RegQueryInfoKeyW, RegQueryValueExW,
             RegSetValueExW,
         },
-        Threading::{GetCurrentProcess, OpenProcessToken},
+        Threading::{
+            GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcessToken,
+            QueryFullProcessImageNameW,
+        },
     },
 };
 
@@ -98,6 +103,13 @@ unsafe extern "system" {
         create_options: u32,
         ea_buffer: *mut c_void,
         ea_length: u32,
+    ) -> i32;
+    fn NtSetInformationFile(
+        file_handle: HANDLE,
+        io_status_block: *mut IoStatusBlock,
+        file_information: *mut c_void,
+        length: u32,
+        file_information_class: u32,
     ) -> i32;
     fn NtDeleteKey(key_handle: HANDLE) -> i32;
     fn NtQueryKey(
@@ -223,6 +235,303 @@ impl ProtectedRootSession {
             &ads_sha256,
         )
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupervisorClaim<'a> {
+    pid: u32,
+    creation_time: u64,
+    image_path: &'a str,
+    image_identity: String,
+    image_sha256: String,
+}
+
+pub struct ExactFileSecurity {
+    descriptor: Descriptor,
+}
+
+impl ExactFileSecurity {
+    pub fn inheritable_attributes(&mut self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.descriptor.0,
+            bInheritHandle: 1,
+        }
+    }
+}
+
+pub fn exact_inheritable_file_security() -> io::Result<ExactFileSecurity> {
+    Ok(ExactFileSecurity {
+        descriptor: exact_descriptor(false)?,
+    })
+}
+
+pub struct SupervisorClaimGuard {
+    claim: String,
+    _image: Handle,
+}
+
+impl SupervisorClaimGuard {
+    pub fn claim(&self) -> &str {
+        &self.claim
+    }
+}
+
+pub fn retain_supervisor_claim() -> io::Result<SupervisorClaimGuard> {
+    let mut creation: FILETIME = unsafe { zeroed() };
+    let mut exit: FILETIME = unsafe { zeroed() };
+    let mut kernel: FILETIME = unsafe { zeroed() };
+    let mut user: FILETIME = unsafe { zeroed() };
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut path = vec![0_u16; 32_768];
+    let mut length = path.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(GetCurrentProcess(), 0, path.as_mut_ptr(), &mut length) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    path.truncate(length as usize);
+    let path_text = String::from_utf16(&path)
+        .map_err(|_| io::Error::other("supervisor image path is not valid UTF-16"))?;
+    path.push(0);
+    let image = Handle(unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ,
+            FILE_SHARE_READ,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if image.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut image_information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(image.0, &mut image_information) } == 0
+        || image_information.dwFileAttributes
+            & (windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY
+                | FILE_ATTRIBUTE_REPARSE_POINT)
+            != 0
+    {
+        return Err(io::Error::other(
+            "supervisor image is not an exact regular file",
+        ));
+    }
+    let identity = identity(image.0)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let mut read = 0u32;
+        if unsafe {
+            ReadFile(
+                image.0,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut read,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read as usize]);
+    }
+    let claim = serde_json::to_string(&SupervisorClaim {
+        pid: unsafe { GetCurrentProcessId() },
+        creation_time: ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64,
+        image_path: &path_text,
+        image_identity: identity,
+        image_sha256: hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    })
+    .map_err(io::Error::other)?;
+    Ok(SupervisorClaimGuard {
+        claim,
+        _image: image,
+    })
+}
+
+pub struct NativeRecordPending {
+    parent: Handle,
+    file: Handle,
+    destination: Vec<u16>,
+    name: String,
+}
+
+impl NativeRecordPending {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let mut written = 0u32;
+            if unsafe {
+                WriteFile(
+                    self.file.0,
+                    bytes[offset..].as_ptr().cast(),
+                    (bytes.len() - offset).min(u32::MAX as usize) as u32,
+                    &mut written,
+                    null_mut(),
+                )
+            } == 0
+                || written == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            offset += written as usize;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&self) -> io::Result<()> {
+        if unsafe { FlushFileBuffers(self.file.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn replace(self) -> io::Result<()> {
+        let name_bytes = self.destination.len() * size_of::<u16>();
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let mut buffer = vec![0_u8; size_of::<FILE_RENAME_INFO>() + name_bytes];
+        let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*information).Anonymous.ReplaceIfExists = true;
+            (*information).RootDirectory = self.parent.0;
+            (*information).FileNameLength = name_bytes as u32;
+            std::ptr::copy_nonoverlapping(
+                self.destination.as_ptr(),
+                buffer.as_mut_ptr().add(header).cast(),
+                self.destination.len(),
+            );
+        }
+        let mut status_block = IoStatusBlock {
+            status_or_pointer: 0,
+            information: 0,
+        };
+        let status = unsafe {
+            NtSetInformationFile(
+                self.file.0,
+                &mut status_block,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                10,
+            )
+        };
+        if status < 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(status) } as i32,
+            ));
+        }
+        if unsafe { FlushFileBuffers(self.parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+pub fn create_native_record_pending(path: &Path) -> io::Result<NativeRecordPending> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup record has no parent"))?;
+    let destination = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record name is invalid"))?;
+    let record_id = destination
+        .strip_suffix(".json")
+        .ok_or_else(|| io::Error::other("cleanup record suffix is invalid"))?;
+    validate_namespace_id(record_id)?;
+    let parent = open_directory(parent_path)?;
+    let descriptor = exact_descriptor(false)?;
+    for _ in 0..32 {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(io::Error::other)?;
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let name = format!("{record_id}.native-{suffix}.pending-v1");
+        let mut name_wide = name.encode_utf16().collect::<Vec<_>>();
+        let mut unicode = UnicodeString {
+            length: (name_wide.len() * 2) as u16,
+            maximum_length: (name_wide.len() * 2) as u16,
+            buffer: name_wide.as_mut_ptr(),
+        };
+        let mut attributes = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as u32,
+            root_directory: parent.0,
+            object_name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: descriptor.0,
+            security_quality_of_service: null_mut(),
+        };
+        let mut status_block = IoStatusBlock {
+            status_or_pointer: 0,
+            information: 0,
+        };
+        let mut handle = null_mut();
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                windows_sys::Win32::Foundation::GENERIC_WRITE
+                    | DELETE
+                    | FILE_READ_ATTRIBUTES
+                    | READ_CONTROL
+                    | 0x0010_0000,
+                &mut attributes,
+                &mut status_block,
+                null_mut(),
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+                FILE_CREATE,
+                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT_NT,
+                null_mut(),
+                0,
+            )
+        };
+        if status < 0 {
+            let error = unsafe { RtlNtStatusToDosError(status) };
+            if error == windows_sys::Win32::Foundation::ERROR_FILE_EXISTS {
+                continue;
+            }
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        let file = Handle(handle);
+        validate_exact_security(file.0, false)?;
+        validate_regular_file(file.0)?;
+        return Ok(NativeRecordPending {
+            parent,
+            file,
+            destination: destination.encode_utf16().collect(),
+            name,
+        });
+    }
+    Err(io::Error::other(
+        "cannot allocate a unique native cleanup-record pending name",
+    ))
 }
 
 pub struct CleanupRecordPrivacyGuard {
@@ -673,7 +982,7 @@ pub fn registry_root_inventory() -> io::Result<Option<KeyInventory>> {
 
 pub fn harden_current_process_for_supervised_child() -> io::Result<()> {
     let descriptor_sddl = format!(
-        "D:P(D;;0x000fffff;;;{0})(D;;0x000fffff;;;OW)(A;;0x001fffff;;;SY)(A;;0x00100000;;;{0})",
+        "D:P(D;;0x000fefff;;;{0})(D;;0x000fefff;;;OW)(A;;0x001fffff;;;SY)(A;;0x00101000;;;{0})",
         current_user_sid()?
     );
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
@@ -734,7 +1043,10 @@ pub fn consume_cleanup_record_temp(path: &Path) -> io::Result<Vec<u8>> {
     let file = Handle(unsafe {
         CreateFileW(
             wide(path)?.as_ptr(),
-            windows_sys::Win32::Foundation::GENERIC_READ | DELETE | FILE_READ_ATTRIBUTES,
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | FILE_READ_ATTRIBUTES
+                | READ_CONTROL,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             null_mut(),
             OPEN_EXISTING,
@@ -757,6 +1069,7 @@ pub fn consume_cleanup_record_temp(path: &Path) -> io::Result<Vec<u8>> {
             "cleanup-record temporary is not an exact regular file",
         ));
     }
+    validate_exact_security(file.0, false)?;
     let bytes = read_handle(file.0)?;
     let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
     if unsafe {
