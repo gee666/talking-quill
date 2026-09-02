@@ -35,6 +35,9 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(testGuard).toContain('recoverRecordedNamespaces(deleter)');
     expect(testGuard).toContain('assertNoUnknownNamespaces()');
     expect(testGuard).toContain('productionResidueSnapshot()');
+    expect(testGuard).toContain("& $native '--stream-inventory' $entry.FullName");
+    expect(testGuard).toContain('Streams=$streams');
+    expect(testGuard).toContain('if($LASTEXITCODE-ne0)');
     expect(testGuard).toContain("phase = 'inventory-sealed'");
     expect(testGuard).toContain('handle-bound machine-lock test tree deletion failed');
     expect(testGuard).not.toContain('takeown.exe');

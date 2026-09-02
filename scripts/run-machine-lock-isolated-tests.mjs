@@ -124,7 +124,7 @@ async function acquireSerializer() {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      "$m=[Threading.Mutex]::new($false,'Global\\TalkingQuill.MachineLockTests.V1');try{if(-not $m.WaitOne(300000)){exit 2};[Console]::Out.WriteLine('ready');[Console]::Out.Flush();[Console]::In.ReadLine()|Out-Null}finally{try{$m.ReleaseMutex()}catch{};$m.Dispose()}",
+      "$m=[Threading.Mutex]::new($false,'Global\\TalkingQuill.MachineLockTests.V1');try{$acquired=$false;try{$acquired=$m.WaitOne(300000)}catch [Threading.AbandonedMutexException]{$acquired=$true};if(-not $acquired){exit 2};[Console]::Out.WriteLine('ready');[Console]::Out.Flush();[Console]::In.ReadLine()|Out-Null}finally{try{$m.ReleaseMutex()}catch{};$m.Dispose()}",
     ],
     { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true },
   );
@@ -166,11 +166,16 @@ function prepareNamespace(namespaceId) {
       identity: null,
       inventory: [],
       ownershipPrefix: `v1.${record.recordId}.${namespaceId}.${kind}.${randomBytes(16).toString('hex')}`,
+      bindingNonce: randomBytes(16).toString('hex'),
+      bindingFile: `${record.recordId}.${kind}.binding-v1`,
+      adsSha256: null,
     };
     record.roots.push(rootRecord);
     record.creatingRoot = kind;
     writeRecord(record);
-    rootRecord.identity = createProtectedNamespaceRoot(path, rootRecord.ownershipPrefix);
+    const created = createProtectedNamespaceRoot(path, rootRecord);
+    rootRecord.identity = created.identity;
+    rootRecord.adsSha256 = created.adsSha256;
     record.creatingRoot = null;
     writeRecord(record);
   }
@@ -180,20 +185,35 @@ function prepareNamespace(namespaceId) {
   return record;
 }
 
-function createProtectedNamespaceRoot(path, ownershipPrefix) {
-  const result = spawnSync(deleter, ['--create-protected-root', path, ownershipPrefix], {
-    encoding: 'utf8',
-    windowsHide: true,
-    env: process.env,
-  });
+function createProtectedNamespaceRoot(path, rootRecord) {
+  const result = spawnSync(
+    deleter,
+    [
+      '--create-protected-root',
+      path,
+      rootRecord.ownershipPrefix,
+      resolve(recordRoot, rootRecord.bindingFile),
+      rootRecord.bindingNonce,
+    ],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: process.env,
+    },
+  );
   if (result.status === 197) process.exit(197);
   if (result.status !== 0) throw new Error(`native protected root creation failed: ${path}`);
-  const identity = result.stdout.trim();
-  if (!/^\d+:\d+$/u.test(identity)) throw new Error('native protected root identity is invalid');
+  const created = JSON.parse(result.stdout);
+  if (
+    !/^\d+:\d+$/u.test(created.identity ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(created.adsSha256 ?? '')
+  ) {
+    throw new Error('native protected root result is invalid');
+  }
   if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'create-after-record-before-identity') {
     process.exit(197);
   }
-  return identity;
+  return created;
 }
 
 function createTestRegistryNamespace(namespaceId) {
@@ -277,11 +297,27 @@ function recoverRecordedNamespaces(deleter) {
   if (!isPlainPath(recordRoot, true)) throw new Error('cleanup record root is not plain');
   const files = readdirSync(recordRoot).sort();
   for (const name of files) {
-    if (!/^[0-9a-f]{32}\.json$/u.test(name)) {
+    if (
+      !/^[0-9a-f]{32}\.json$/u.test(name) &&
+      !/^[0-9a-f]{32}\.[a-z-]+\.binding-v1(?:\.intent-v1)?$/u.test(name)
+    ) {
       throw new Error(`unknown machine-lock cleanup record: ${name}`);
     }
   }
-  const records = files.map((name) => readRecord(resolve(recordRoot, name)));
+  const records = files
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => readRecord(resolve(recordRoot, name)));
+  const expectedBindings = new Set(
+    records.flatMap((record) =>
+      record.roots.flatMap((entry) => [entry.bindingFile, `${entry.bindingFile}.intent-v1`]),
+    ),
+  );
+  for (const name of files.filter(
+    (entry) => entry.endsWith('.binding-v1') || entry.endsWith('.intent-v1'),
+  )) {
+    if (!expectedBindings.has(name))
+      throw new Error(`orphan machine-lock cleanup binding: ${name}`);
+  }
   const ids = new Set();
   for (const value of records) {
     if (ids.has(value.namespaceId))
@@ -330,6 +366,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     const path = namespaceRoot(rootRecord.kind, record.namespaceId);
     if (!existsSync(path)) {
       if (rootRecord.identity === null && record.creatingRoot === rootRecord.kind) {
+        deleteCreationArtifacts(rootRecord);
         record.deletedRoots.push(rootRecord.kind);
         record.creatingRoot = null;
         continue;
@@ -338,6 +375,8 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
         record.deletedRoots.includes(rootRecord.kind) ||
         record.deletingRoot === rootRecord.kind
       ) {
+        if (rootRecord.identity === null) deleteCreationArtifacts(rootRecord);
+        else deleteRootBinding(rootRecord);
         if (!record.deletedRoots.includes(rootRecord.kind))
           record.deletedRoots.push(rootRecord.kind);
         record.deletingRoot = null;
@@ -346,7 +385,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
       throw new Error(`recorded machine-lock root is missing: ${path}`);
     }
     if (rootRecord.identity === null && record.creatingRoot === rootRecord.kind) {
-      removeInterruptedNamespaceRoot(path, rootRecord.ownershipPrefix);
+      removeInterruptedNamespaceRoot(path, rootRecord);
       record.deletedRoots.push(rootRecord.kind);
       record.creatingRoot = null;
       continue;
@@ -354,6 +393,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     if (rootRecord.identity === null) {
       throw new Error(`recorded machine-lock root identity is absent: ${path}`);
     }
+    verifyRootBinding(path, rootRecord);
     if (ownedTreeIdentity(path) !== rootRecord.identity) {
       throw new Error(`recorded machine-lock root identity changed: ${path}`);
     }
@@ -394,6 +434,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     if (result.status !== 0) {
       throw new Error(`handle-bound machine-lock test tree deletion failed: ${path}`);
     }
+    deleteRootBinding(rootRecord);
     record.deletedRoots.push(rootRecord.kind);
     record.deletingRoot = null;
     writeRecord(record);
@@ -419,14 +460,74 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   removeEmptyParents();
 }
 
-function removeInterruptedNamespaceRoot(path, ownershipPrefix) {
-  const result = spawnSync(deleter, ['--remove-interrupted-root', path, ownershipPrefix], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
+function removeInterruptedNamespaceRoot(path, rootRecord) {
+  const result = spawnSync(
+    deleter,
+    [
+      '--remove-interrupted-root',
+      path,
+      rootRecord.ownershipPrefix,
+      resolve(recordRoot, rootRecord.bindingFile),
+      rootRecord.bindingNonce,
+    ],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
   if (result.status !== 0) {
     throw new Error(`interrupted protected root is not an exact authenticated orphan: ${path}`);
   }
+}
+
+function deleteCreationArtifacts(rootRecord) {
+  const result = spawnSync(
+    deleter,
+    [
+      '--delete-creation-artifacts',
+      resolve(recordRoot, rootRecord.bindingFile),
+      rootRecord.ownershipPrefix,
+      rootRecord.bindingNonce,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status !== 0) throw new Error('interrupted creation artifact deletion failed');
+}
+
+function verifyRootBinding(path, rootRecord) {
+  const result = spawnSync(
+    deleter,
+    [
+      '--verify-root-binding',
+      path,
+      rootRecord.ownershipPrefix,
+      resolve(recordRoot, rootRecord.bindingFile),
+      rootRecord.bindingNonce,
+      rootRecord.identity,
+      rootRecord.adsSha256,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status !== 0) throw new Error(`protected root binding changed: ${path}`);
+}
+
+function deleteRootBinding(rootRecord) {
+  const path = resolve(recordRoot, rootRecord.bindingFile);
+  if (!existsSync(path) && !existsSync(`${path}.intent-v1`)) return;
+  const result = spawnSync(
+    deleter,
+    [
+      '--delete-root-binding',
+      path,
+      rootRecord.ownershipPrefix,
+      rootRecord.bindingNonce,
+      rootRecord.identity,
+      rootRecord.adsSha256,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status === 197) process.exit(197);
+  if (result.status !== 0) throw new Error(`protected root binding deletion failed: ${path}`);
 }
 
 function exactInventorySubset(actual, expected) {
@@ -505,6 +606,11 @@ function validateRecord(record) {
       typeof entry.ownershipPrefix !== 'string' ||
       !entry.ownershipPrefix.startsWith(prefix) ||
       !/^[0-9a-f]{32}$/u.test(entry.ownershipPrefix.slice(prefix.length)) ||
+      !/^[0-9a-f]{32}$/u.test(entry.bindingNonce ?? '') ||
+      entry.bindingFile !== `${record.recordId}.${entry.kind}.binding-v1` ||
+      (entry.adsSha256 !== null && !/^[0-9a-f]{64}$/u.test(entry.adsSha256)) ||
+      (entry.identity === null && entry.adsSha256 !== null) ||
+      (entry.identity !== null && entry.adsSha256 === null) ||
       (entry.identity === null &&
         record.creatingRoot !== entry.kind &&
         !record.deletedRoots.includes(entry.kind)) ||
@@ -707,11 +813,30 @@ function fsyncDirectory(path) {
 }
 
 function productionResidueSnapshot() {
+  const streamInventoryHelper = deleter.replaceAll("'", "''");
   return powershellText(String.raw`
+    $native='${streamInventoryHelper}'
     $pd=[Environment]::GetFolderPath('CommonApplicationData')
     $roots=@(Get-ChildItem -LiteralPath $pd -Force -ErrorAction Stop|Where-Object {$_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.machine-lock-pending-*' -or $_.Name -like '.Talking Quill.machine-lifecycle-retained-*'})
     $items=@()
-    foreach($root in $roots){$entries=@($root);if($root.PSIsContainer){$entries+=@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse -ErrorAction Stop)};foreach($entry in $entries){$items+=[pscustomobject]@{Path=$entry.FullName;Attributes=[string]$entry.Attributes;Length=$entry.Length;Sddl=(Get-Acl -LiteralPath $entry.FullName).Sddl;FileId=(& fsutil.exe file queryfileid $entry.FullName 2>&1|Out-String).Trim();Sha256=if($entry.PSIsContainer){$null}else{(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256).Hash}}}}
+    foreach($root in $roots){
+      $entries=@($root)
+      if($root.PSIsContainer){$entries+=@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse -ErrorAction Stop)}
+      foreach($entry in $entries){
+        $streamJson=& $native '--stream-inventory' $entry.FullName
+        if($LASTEXITCODE-ne0){throw "native NTFS stream inventory failed: $($entry.FullName)"}
+        $streams=@($streamJson|ConvertFrom-Json -ErrorAction Stop)
+        $items+=[pscustomobject]@{
+          Path=$entry.FullName
+          Attributes=[string]$entry.Attributes
+          Length=$entry.Length
+          Sddl=(Get-Acl -LiteralPath $entry.FullName).Sddl
+          FileId=(& fsutil.exe file queryfileid $entry.FullName 2>&1|Out-String).Trim()
+          Sha256=if($entry.PSIsContainer){$null}else{(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256).Hash}
+          Streams=$streams
+        }
+      }
+    }
     $registryPath='Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill'
     $registry=& reg.exe query 'HKLM\Software\Talking Quill' /s 2>&1|Out-String
     $registryKeys=@()

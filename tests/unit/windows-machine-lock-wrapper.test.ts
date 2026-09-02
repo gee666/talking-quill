@@ -28,11 +28,27 @@ const nativeHelper = resolve(
 
 run('Windows machine-lock wrapper teardown', () => {
   it.each([
-    'create-before-record',
+    'intent-partial-write',
+    'intent-written-before-flush',
+    'intent-file-flushed',
+    'intent-parent-flushed',
+    'intent-flushed-before-root',
+    'create-before-binding',
+    'binding-partial-write',
+    'binding-written-before-flush',
+    'binding-file-flushed',
+    'binding-parent-flushed',
+    'binding-flushed-before-ads',
+    'ads-partial-write',
+    'ads-written-before-flush',
+    'ads-file-flushed',
+    'ads-parent-flushed',
+    'ads-flushed-before-return',
     'create-after-record-before-identity',
     'roots-created',
     'inventory-sealed',
     'deleted-root:helper',
+    'binding-deleted-before-intent',
     'registry-deleted',
   ])(
     'recovers a durable record after a crash at %s',
@@ -41,7 +57,7 @@ run('Windows machine-lock wrapper teardown', () => {
         TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
       });
       expect(crashed.status).toBe(197);
-      expect(readdirSync(records)).toHaveLength(1);
+      expect(readdirSync(records).filter((entry) => entry.endsWith('.json'))).toHaveLength(1);
 
       const recovered = runWrapper('cmd.exe /d /c exit 0');
       expect(recovered.status, recovered.stderr).toBe(0);
@@ -84,6 +100,79 @@ run('Windows machine-lock wrapper teardown', () => {
     },
     120_000,
   );
+
+  it('reports native stream inventory failures', () => {
+    const result = spawnSync(nativeHelper, ['--stream-inventory', resolve('.')], {
+      env: { ...process.env, TQ_MACHINE_LOCK_TEST_STREAM_INVENTORY_FAIL: '1' },
+      encoding: 'utf8',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('forced stream inventory failure');
+  });
+
+  it('inventories and hashes a directory ADS', () => {
+    const directory = resolve('tmp', 'machine-lock-wrapper-tests', randomBytes(16).toString('hex'));
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(`${directory}:probe`, 'directory stream\n', 'utf8');
+    const result = spawnSync(nativeHelper, ['--stream-inventory', directory], { encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toContainEqual({
+      name: ':probe:$DATA',
+      size: 17,
+      sha256: '3c22970cd1b5bf1f4f24a19d2e412e48d9add19db886219e70bf725a649483a1',
+    });
+    unlinkSync(`${directory}:probe`);
+    rmdirSync(directory);
+    const parent = resolve(directory, '..');
+    if (readdirSync(parent).length === 0) rmdirSync(parent);
+  });
+
+  it('rejects an ownership ADS mutation after sealing', () => {
+    const record = leaveSealedRecord();
+    const rootRecord = record.roots.find((entry: { kind: string }) => entry.kind === 'helper');
+    const root = resolve('tmp', 'machine-lock-tests', 'helper', record.namespaceId);
+    const stream = `${root}:TalkingQuill.TestOwnership.V1`;
+    writeFileSync(stream, 'mutated ownership\n', 'utf8');
+    expect(runWrapper('cmd.exe /d /c exit 0').status).not.toBe(0);
+    writeFileSync(stream, `${rootRecord.ownershipPrefix}:${rootRecord.identity}`, 'utf8');
+    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+  }, 120_000);
+
+  it('rejects a registry link type before namespace child creation', () => {
+    const rootKey = 'HKCU\\Software\\Talking Quill Tests';
+    const namespace = randomBytes(16).toString('hex');
+    expect(spawnSync(nativeHelper, ['--registry-create-link-fixture']).status).toBe(0);
+    expect(spawnSync(nativeHelper, ['--registry-create', namespace]).status).not.toBe(0);
+    expect(spawnSync('reg.exe', ['query', `${rootKey}\\${namespace}`]).status).not.toBe(0);
+    expect(spawnSync(nativeHelper, ['--registry-remove-link-fixture']).status).toBe(0);
+  }, 120_000);
+
+  it('preserves a registry child raced into empty-root deletion', async () => {
+    const rootKey = 'HKCU\\Software\\Talking Quill Tests';
+    const sibling = randomBytes(16).toString('hex');
+    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${sibling}-empty-registry`);
+    mkdirSync(resolve(pause, '..'), { recursive: true });
+    expect(spawnSync(nativeHelper, ['--registry-create-empty-root-fixture']).status).toBe(0);
+    const child = spawn(nativeHelper, ['--registry-delete-empty-root'], {
+      env: { ...process.env, TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE: pause },
+      windowsHide: true,
+    });
+    const completed = new Promise<number | null>((done, reject) => {
+      child.once('error', reject);
+      child.once('exit', done);
+    });
+    await waitForPath(`${pause}.ready`);
+    expect(spawnSync('reg.exe', ['add', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
+    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+    expect(await completed).not.toBe(0);
+    expect(spawnSync('reg.exe', ['query', `${rootKey}\\${sibling}`]).status).toBe(0);
+    expect(spawnSync('reg.exe', ['delete', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
+    unlinkSync(`${pause}.ready`);
+    unlinkSync(`${pause}.continue`);
+    expect(spawnSync(nativeHelper, ['--registry-delete-empty-root']).status).toBe(0);
+    const parent = resolve(pause, '..');
+    if (readdirSync(parent).length === 0) rmdirSync(parent);
+  }, 120_000);
 
   it('rejects a registry value raced after native handle validation', async () => {
     const record = leaveSealedRecord();

@@ -2,7 +2,9 @@
 
 use crate::owned_tree::flush_owned_directory;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
+    ffi::c_void,
     io,
     mem::zeroed,
     os::windows::ffi::OsStrExt,
@@ -21,26 +23,62 @@ use windows_sys::Win32::{
         PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CommitTransaction, CreateDirectoryW, CreateFileW,
-        CreateTransaction, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle,
-        OPEN_EXISTING, READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
+        BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
+        CommitTransaction, CreateDirectoryW, CreateFileW, CreateTransaction, DELETE,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING,
+        READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
     },
     System::{
         Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY,
             REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, RegCloseKey, RegCreateKeyExW,
-            RegDeleteKeyExW, RegDeleteKeyTransactedW, RegDeleteValueW, RegEnumKeyExW,
-            RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegOpenKeyTransactedW, RegQueryInfoKeyW,
+            RegDeleteKeyTransactedW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegFlushKey,
+            RegOpenKeyExW, RegOpenKeyTransactedW, RegQueryInfoKeyW, RegQueryValueExW,
+            RegSetValueExW,
         },
         Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
 
 const OWNERSHIP_STREAM: &str = "TalkingQuill.TestOwnership.V1";
+const REG_LINK_TYPE: u32 = 6;
+const REG_OPTION_CREATE_LINK: u32 = 2;
+const KEY_CREATE_LINK: u32 = 0x0020;
 const ERROR_SUCCESS: u32 = 0;
+const KEY_NAME_INFORMATION: i32 = 3;
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtDeleteKey(key_handle: HANDLE) -> i32;
+    fn NtQueryKey(
+        key_handle: HANDLE,
+        key_information_class: i32,
+        key_information: *mut c_void,
+        length: u32,
+        result_length: *mut u32,
+    ) -> i32;
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupBinding {
+    version: u32,
+    nonce: String,
+    ownership_prefix: String,
+    root_identity: String,
+    ads_sha256: String,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreationIntent {
+    version: u32,
+    nonce: String,
+    ownership_prefix: String,
+}
 
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -93,34 +131,295 @@ pub struct RegistryValue {
     pub data_hex: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamInventory {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+pub fn stream_inventory(path: &Path) -> io::Result<Vec<StreamInventory>> {
+    if std::env::var_os("TQ_MACHINE_LOCK_TEST_STREAM_INVENTORY_FAIL").is_some() {
+        return Err(io::Error::other("forced stream inventory failure"));
+    }
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut context = null_mut();
+    let result = stream_inventory_inner(file.0, &mut context);
+    let mut ignored = 0;
+    unsafe {
+        BackupRead(file.0, null_mut(), 0, &mut ignored, 1, 0, &mut context);
+    }
+    result
+}
+
+fn stream_inventory_inner(
+    handle: HANDLE,
+    context: &mut *mut c_void,
+) -> io::Result<Vec<StreamInventory>> {
+    const HEADER_SIZE: usize = 20;
+    let mut streams = Vec::new();
+    loop {
+        let mut header = [0_u8; HEADER_SIZE];
+        let read = backup_read(handle, &mut header, context)?;
+        if read == 0 {
+            break;
+        }
+        if read != HEADER_SIZE {
+            return Err(io::Error::other("truncated backup stream header"));
+        }
+        let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let size = i64::from_le_bytes(header[8..16].try_into().unwrap());
+        let name_size = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
+        if size < 0 || !name_size.is_multiple_of(2) || name_size > 64 * 1024 {
+            return Err(io::Error::other("invalid backup stream metadata"));
+        }
+        let mut name_bytes = vec![0_u8; name_size];
+        backup_read_exact(handle, &mut name_bytes, context)?;
+        let name_units = name_bytes
+            .chunks_exact(2)
+            .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+            .collect::<Vec<_>>();
+        let mut digest = Sha256::new();
+        let mut remaining = size as u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        while remaining != 0 {
+            let length = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
+            backup_read_exact(handle, &mut buffer[..length], context)?;
+            if stream_id == BACKUP_DATA || stream_id == BACKUP_ALTERNATE_DATA {
+                digest.update(&buffer[..length]);
+            }
+            remaining -= length as u64;
+        }
+        if stream_id == BACKUP_DATA || stream_id == BACKUP_ALTERNATE_DATA {
+            let name = if name_units.is_empty() {
+                "::$DATA".to_owned()
+            } else {
+                String::from_utf16(&name_units).map_err(io::Error::other)?
+            };
+            streams.push(StreamInventory {
+                name,
+                size: size as u64,
+                sha256: digest
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            });
+        }
+    }
+    streams.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(streams)
+}
+
+fn backup_read(handle: HANDLE, buffer: &mut [u8], context: &mut *mut c_void) -> io::Result<usize> {
+    let mut read = 0;
+    if unsafe {
+        BackupRead(
+            handle,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut read,
+            0,
+            0,
+            context,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(read as usize)
+}
+
+fn backup_read_exact(
+    handle: HANDLE,
+    mut buffer: &mut [u8],
+    context: &mut *mut c_void,
+) -> io::Result<()> {
+    while !buffer.is_empty() {
+        let read = backup_read(handle, buffer, context)?;
+        if read == 0 {
+            return Err(io::Error::other("truncated backup stream"));
+        }
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
 pub fn delete_empty_registry_root() -> io::Result<()> {
-    let Some(software) =
-        open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
+    let transaction =
+        Handle(unsafe { CreateTransaction(null_mut(), null_mut(), 0, 0, 0, 30_000, null()) });
+    if transaction.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let Some(software) = open_relative_key_transacted(
+        HKEY_CURRENT_USER,
+        "Software",
+        KEY_READ | KEY_WRITE,
+        transaction.0,
+    )?
     else {
         return Ok(());
     };
-    let Some(test_root) =
-        open_relative_key(&software, "Talking Quill Tests", KEY_READ | KEY_WRITE)?
+    verify_key_path(&software, &["Software"])?;
+    reject_registry_link(&software)?;
+    let Some(test_root) = open_relative_key_transacted(
+        software.0,
+        "Talking Quill Tests",
+        KEY_READ | KEY_WRITE,
+        transaction.0,
+    )?
     else {
         return Ok(());
     };
+    verify_relative_key_path(&software, &test_root, "Talking Quill Tests")?;
+    reject_registry_link(&test_root)?;
     let inventory = inventory_key(&test_root)?;
     if !inventory.subkeys.is_empty() || !inventory.values.is_empty() {
         return Err(io::Error::other("test registry root is not empty"));
     }
-    if unsafe {
-        RegDeleteKeyExW(
+    registry_delete_test_pause()?;
+    if inventory_key(&test_root)? != inventory {
+        return Err(io::Error::other(
+            "test registry root changed before deletion",
+        ));
+    }
+    let status = unsafe {
+        RegDeleteKeyTransactedW(
             software.0,
             wide(Path::new("Talking Quill Tests"))?.as_ptr(),
             0,
             0,
+            transaction.0,
+            null(),
         )
-    } != ERROR_SUCCESS
-    {
+    };
+    if status != ERROR_SUCCESS || unsafe { CommitTransaction(transaction.0) } == 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+pub fn create_empty_registry_root_fixture() -> io::Result<()> {
+    let software = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
+        .ok_or_else(|| io::Error::other("HKCU Software is absent"))?;
+    verify_key_path(&software, &["Software"])?;
+    if open_relative_key(&software, "Talking Quill Tests", KEY_READ)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "test registry root exists",
+        ));
+    }
+    let root = create_relative_key(&software, "Talking Quill Tests")?;
+    verify_relative_key_path(&software, &root, "Talking Quill Tests")?;
+    if unsafe { RegFlushKey(root.0) } != ERROR_SUCCESS {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { RegFlushKey(software.0) } != ERROR_SUCCESS {
-        return Err(io::Error::last_os_error());
+    Ok(())
+}
+
+pub fn create_registry_link_fixture() -> io::Result<()> {
+    let software = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
+        .ok_or_else(|| io::Error::other("HKCU Software is absent"))?;
+    verify_key_path(&software, &["Software"])?;
+    if open_relative_key(&software, "Talking Quill Tests", KEY_READ)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "test registry root exists",
+        ));
+    }
+    let descriptor = exact_descriptor(false)?;
+    let attributes = security_attributes(&descriptor);
+    let mut key = null_mut();
+    let mut disposition = 0;
+    let status = unsafe {
+        RegCreateKeyExW(
+            software.0,
+            wide(Path::new("Talking Quill Tests"))?.as_ptr(),
+            0,
+            null(),
+            REG_OPTION_CREATE_LINK,
+            KEY_READ | KEY_WRITE,
+            &attributes,
+            &mut key,
+            &mut disposition,
+        )
+    };
+    let link = Key(key);
+    if status != ERROR_SUCCESS || disposition != REG_CREATED_NEW_KEY {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let target = wide(Path::new(&format!(
+        r"\REGISTRY\USER\{}\Software",
+        current_user_sid()?
+    )))?;
+    let status = unsafe {
+        RegSetValueExW(
+            link.0,
+            wide(Path::new("SymbolicLinkValue"))?.as_ptr(),
+            0,
+            REG_LINK_TYPE,
+            target.as_ptr().cast(),
+            (target.len() * size_of::<u16>()) as u32,
+        )
+    };
+    if status != ERROR_SUCCESS || unsafe { RegFlushKey(link.0) } != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+pub fn remove_registry_link_fixture() -> io::Result<()> {
+    let software = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
+        .ok_or_else(|| io::Error::other("HKCU Software is absent"))?;
+    verify_key_path(&software, &["Software"])?;
+    let link = open_relative_key(
+        &software,
+        "Talking Quill Tests",
+        KEY_READ | KEY_WRITE | KEY_CREATE_LINK | DELETE,
+    )
+    .map_err(|error| io::Error::other(format!("cannot open registry link fixture: {error}")))?
+    .ok_or_else(|| io::Error::other("registry link fixture is absent"))?;
+    verify_relative_key_path(&software, &link, "Talking Quill Tests").map_err(|error| {
+        io::Error::other(format!("cannot verify registry link fixture: {error}"))
+    })?;
+    let mut value_type = 0;
+    let mut length = 0;
+    let value_name = wide(Path::new("SymbolicLinkValue"))?;
+    let status = unsafe {
+        RegQueryValueExW(
+            link.0,
+            value_name.as_ptr(),
+            null(),
+            &mut value_type,
+            null_mut(),
+            &mut length,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if value_type != REG_LINK_TYPE || length == 0 || length > 4096 {
+        return Err(io::Error::other("registry link fixture changed"));
+    }
+    let status = unsafe { NtDeleteKey(link.0) };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "cannot delete retained registry link fixture: NTSTATUS {status:#x}"
+        )));
     }
     Ok(())
 }
@@ -129,14 +428,35 @@ pub fn registry_root_inventory() -> io::Result<Option<KeyInventory>> {
     let Some(software) = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ)? else {
         return Ok(None);
     };
+    verify_key_path(&software, &["Software"])?;
+    reject_registry_link(&software)?;
     let Some(test_root) = open_relative_key(&software, "Talking Quill Tests", KEY_READ)? else {
         return Ok(None);
     };
+    verify_relative_key_path(&software, &test_root, "Talking Quill Tests")?;
+    reject_registry_link(&test_root)?;
     Ok(Some(inventory_key(&test_root)?))
 }
 
-pub fn create_protected_root(path: &Path, ownership_prefix: &str) -> io::Result<String> {
+pub fn create_protected_root(
+    path: &Path,
+    ownership_prefix: &str,
+    binding_path: &Path,
+    binding_nonce: &str,
+) -> io::Result<(String, String)> {
     validate_prefix(ownership_prefix)?;
+    validate_nonce(binding_nonce)?;
+    let intent = CreationIntent {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+    };
+    write_new_protected_file(
+        &intent_path(binding_path),
+        &serde_json::to_vec(&intent).map_err(io::Error::other)?,
+        "intent",
+    )?;
+    crash_at("intent-flushed-before-root");
     let directory_descriptor = exact_descriptor(true)?;
     let attributes = security_attributes(&directory_descriptor);
     let path_wide = wide(path)?;
@@ -146,55 +466,36 @@ pub fn create_protected_root(path: &Path, ownership_prefix: &str) -> io::Result<
     let root = open_directory(path)?;
     validate_directory(root.0)?;
     validate_exact_security(root.0, true)?;
-    if std::env::var_os("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref()
-        == Some(std::ffi::OsStr::new("create-before-record"))
-    {
-        std::process::exit(197);
-    }
+    crash_at("create-before-binding");
     let identity = identity(root.0)?;
     drop(root);
-    let record = format!("{ownership_prefix}:{identity}");
-    let file_descriptor = exact_descriptor(false)?;
-    let file_attributes = security_attributes(&file_descriptor);
+    let ads = format!("{ownership_prefix}:{identity}");
+    let ads_sha256 = hex_digest(ads.as_bytes());
+    let binding = CleanupBinding {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+        root_identity: identity.clone(),
+        ads_sha256: ads_sha256.clone(),
+    };
+    let binding_bytes = serde_json::to_vec(&binding).map_err(io::Error::other)?;
+    write_new_protected_file(binding_path, &binding_bytes, "binding")?;
+    crash_at("binding-flushed-before-ads");
     let stream = ownership_stream(path)?;
-    let stream_wide = wide(&stream)?;
-    let file = Handle(unsafe {
-        CreateFileW(
-            stream_wide.as_ptr(),
-            windows_sys::Win32::Foundation::GENERIC_READ
-                | windows_sys::Win32::Foundation::GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            &file_attributes,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            null_mut(),
-        )
-    });
-    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    let bytes = record.as_bytes();
-    let mut written = 0;
-    if unsafe {
-        WriteFile(
-            file.0,
-            bytes.as_ptr().cast(),
-            bytes.len() as u32,
-            &mut written,
-            null_mut(),
-        )
-    } == 0
-        || written as usize != bytes.len()
-        || unsafe { FlushFileBuffers(file.0) } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
+    write_new_protected_file(&stream, ads.as_bytes(), "ads")?;
+    crash_at("ads-flushed-before-return");
     flush_owned_directory(path).map_err(io::Error::other)?;
-    Ok(identity)
+    Ok((identity, ads_sha256))
 }
 
-pub fn remove_interrupted_root(path: &Path, ownership_prefix: &str) -> io::Result<()> {
+pub fn remove_interrupted_root(
+    path: &Path,
+    ownership_prefix: &str,
+    binding_path: &Path,
+    binding_nonce: &str,
+) -> io::Result<()> {
     validate_prefix(ownership_prefix)?;
+    validate_nonce(binding_nonce)?;
     let parent_path = path
         .parent()
         .ok_or_else(|| io::Error::other("protected root has no parent"))?;
@@ -206,63 +507,141 @@ pub fn remove_interrupted_root(path: &Path, ownership_prefix: &str) -> io::Resul
         return Err(io::Error::other("interrupted root is not empty"));
     }
     let identity = identity(root.0)?;
-    let stream = ownership_stream(path)?;
-    match read_stream(&stream) {
-        Ok(value) if value == format!("{ownership_prefix}:{identity}") => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Ok(value) => {
-            return Err(io::Error::other(format!(
-                "interrupted ownership record is invalid: {value}"
-            )));
-        }
-        Err(error) => return Err(error),
+    let expected_intent = expected_intent(ownership_prefix, binding_nonce);
+    if read_intent(&intent_path(binding_path))? != expected_intent {
+        return Err(io::Error::other("external creation intent changed"));
     }
-    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-    if unsafe {
-        SetFileInformationByHandle(
-            root.0,
-            FileDispositionInfo,
-            (&raw mut disposition).cast(),
-            size_of::<FILE_DISPOSITION_INFO>() as u32,
-        )
-    } == 0
+    let binding = read_binding(binding_path).ok().filter(|binding| {
+        binding.version == 1
+            && binding.nonce == binding_nonce
+            && binding.ownership_prefix == ownership_prefix
+            && binding.root_identity == identity
+    });
+    if binding.is_none() && read_stream(&ownership_stream(path)?).is_ok() {
+        return Err(io::Error::other(
+            "ownership ADS exists without a complete external binding",
+        ));
+    }
+    handle_delete_empty_root(root, parent)?;
+    if let Some(binding) = binding {
+        delete_binding(binding_path, &binding)?;
+    } else if binding_path.try_exists()? {
+        delete_exact_protected_file(binding_path)?;
+    }
+    delete_intent(&intent_path(binding_path), &expected_intent)?;
+    Ok(())
+}
+
+pub fn verify_root_binding(
+    path: &Path,
+    binding_path: &Path,
+    ownership_prefix: &str,
+    binding_nonce: &str,
+    root_identity: &str,
+    ads_sha256: &str,
+) -> io::Result<()> {
+    let root = open_directory(path)?;
+    validate_directory(root.0)?;
+    validate_exact_security(root.0, true)?;
+    if identity(root.0)? != root_identity {
+        return Err(io::Error::other("root binding identity changed"));
+    }
+    let expected = CleanupBinding {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+        root_identity: root_identity.to_owned(),
+        ads_sha256: ads_sha256.to_owned(),
+    };
+    if read_binding(binding_path)? != expected {
+        return Err(io::Error::other("external cleanup binding changed"));
+    }
+    if read_intent(&intent_path(binding_path))? != expected_intent(ownership_prefix, binding_nonce)
     {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::other("external creation intent changed"));
     }
-    drop(root);
-    if unsafe { FlushFileBuffers(parent.0) } == 0 {
-        return Err(io::Error::last_os_error());
+    let ads = read_stream(&ownership_stream(path)?)?;
+    if hex_digest(ads.as_bytes()) != ads_sha256 {
+        return Err(io::Error::other("root ownership ADS changed"));
+    }
+    Ok(())
+}
+
+pub fn delete_cleanup_binding(
+    binding_path: &Path,
+    ownership_prefix: &str,
+    binding_nonce: &str,
+    root_identity: &str,
+    ads_sha256: &str,
+) -> io::Result<()> {
+    let expected = CleanupBinding {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+        root_identity: root_identity.to_owned(),
+        ads_sha256: ads_sha256.to_owned(),
+    };
+    if binding_path.try_exists()? {
+        delete_binding(binding_path, &expected)?;
+        crash_at("binding-deleted-before-intent");
+    }
+    let intent = expected_intent(ownership_prefix, binding_nonce);
+    let intent_path = intent_path(binding_path);
+    if intent_path.try_exists()? {
+        delete_intent(&intent_path, &intent)?;
+    }
+    Ok(())
+}
+
+pub fn delete_interrupted_creation_artifacts(
+    binding_path: &Path,
+    ownership_prefix: &str,
+    binding_nonce: &str,
+) -> io::Result<()> {
+    let intent_path = intent_path(binding_path);
+    if binding_path.try_exists()? {
+        delete_exact_protected_file(binding_path)?;
+    }
+    if intent_path.try_exists()? {
+        match read_intent(&intent_path) {
+            Ok(actual) if actual == expected_intent(ownership_prefix, binding_nonce) => {
+                delete_intent(&intent_path, &actual)?;
+            }
+            Err(_) => delete_exact_protected_file(&intent_path)?,
+            Ok(_) => return Err(io::Error::other("external creation intent changed")),
+        }
     }
     Ok(())
 }
 
 pub fn create_registry_namespace(namespace_id: &str) -> io::Result<()> {
     validate_namespace_id(namespace_id)?;
-    let descriptor = exact_descriptor(false)?;
-    let attributes = security_attributes(&descriptor);
-    let path = wide(Path::new(&format!(
-        "Software\\Talking Quill Tests\\{namespace_id}"
-    )))?;
-    let mut key = null_mut();
-    let mut disposition = 0;
-    let status = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            path.as_ptr(),
-            0,
-            null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_READ | KEY_WRITE,
-            &attributes,
-            &mut key,
-            &mut disposition,
-        )
+    let software = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
+        .ok_or_else(|| io::Error::other("HKCU Software is absent"))?;
+    verify_key_path(&software, &["Software"])?;
+    reject_registry_link(&software)?;
+    let test_root = match open_relative_key(&software, "Talking Quill Tests", KEY_READ | KEY_WRITE)?
+    {
+        Some(key) => key,
+        None => create_relative_key(&software, "Talking Quill Tests")?,
     };
-    let key = Key(key);
-    if status != ERROR_SUCCESS || disposition != REG_CREATED_NEW_KEY {
-        return Err(io::Error::from_raw_os_error(status as i32));
+    verify_key_path(&test_root, &["Software", "Talking Quill Tests"])?;
+    reject_registry_link(&test_root)?;
+    if open_relative_key(&test_root, namespace_id, KEY_READ)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "registry namespace exists",
+        ));
     }
-    if unsafe { RegFlushKey(key.0) } != ERROR_SUCCESS {
+    let namespace = create_relative_key(&test_root, namespace_id)?;
+    verify_key_path(
+        &namespace,
+        &["Software", "Talking Quill Tests", namespace_id],
+    )?;
+    reject_registry_link(&namespace)?;
+    if unsafe { RegFlushKey(namespace.0) } != ERROR_SUCCESS
+        || unsafe { RegFlushKey(test_root.0) } != ERROR_SUCCESS
+    {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -325,6 +704,7 @@ pub fn delete_registry_exact(namespace_id: &str, expected: &RegistryInventory) -
             transaction.0,
         )?
         .ok_or_else(|| io::Error::other("recovery registry key disappeared"))?;
+        verify_relative_key_path(&namespace, &recovery, "RecoveryStateLockV1")?;
         if inventory_key(&recovery)? != *recovery_expected {
             return Err(io::Error::other("recovery registry key changed"));
         }
@@ -442,6 +822,7 @@ fn open_registry_chain(namespace_id: &str, access: u32) -> io::Result<Option<(Ke
     let Some(namespace) = open_relative_key(&test_root, namespace_id, access)? else {
         return Ok(None);
     };
+    verify_registry_chain(&software, &test_root, &namespace, namespace_id)?;
     Ok(Some((software, test_root, namespace)))
 }
 
@@ -465,7 +846,25 @@ fn open_registry_chain_transacted(
     else {
         return Ok(None);
     };
+    verify_registry_chain(&software, &test_root, &namespace, namespace_id)?;
     Ok(Some((software, test_root, namespace)))
+}
+
+fn verify_registry_chain(
+    software: &Key,
+    test_root: &Key,
+    namespace: &Key,
+    namespace_id: &str,
+) -> io::Result<()> {
+    verify_key_path(software, &["Software"])?;
+    verify_key_path(test_root, &["Software", "Talking Quill Tests"])?;
+    verify_key_path(
+        namespace,
+        &["Software", "Talking Quill Tests", namespace_id],
+    )?;
+    reject_registry_link(software)?;
+    reject_registry_link(test_root)?;
+    reject_registry_link(namespace)
 }
 
 fn open_relative_key_transacted(
@@ -519,6 +918,7 @@ fn inventory_from_handles(
             open_relative_key(namespace, "RecoveryStateLockV1", KEY_READ)?
         }
         .ok_or_else(|| io::Error::other("recovery key disappeared"))?;
+        verify_relative_key_path(namespace, &key, "RecoveryStateLockV1")?;
         Some(inventory_key(&key)?)
     } else {
         None
@@ -535,6 +935,18 @@ fn inventory_from_handles(
 }
 
 fn inventory_key(key: &Key) -> io::Result<KeyInventory> {
+    let inventory = inventory_key_allow_link(key)?;
+    if inventory
+        .values
+        .iter()
+        .any(|value| value.value_type == REG_LINK_TYPE)
+    {
+        return Err(io::Error::other("registry link value is forbidden"));
+    }
+    Ok(inventory)
+}
+
+fn inventory_key_allow_link(key: &Key) -> io::Result<KeyInventory> {
     let mut subkey_count = 0;
     let mut max_subkey = 0;
     let mut value_count = 0;
@@ -657,6 +1069,98 @@ fn delete_recorded_values(key: &Key, values: &[RegistryValue]) -> io::Result<()>
     Ok(())
 }
 
+fn create_relative_key(parent: &Key, name: &str) -> io::Result<Key> {
+    if name.contains('\\') || name.contains('/') {
+        return Err(io::Error::other("registry component is not relative"));
+    }
+    let descriptor = exact_descriptor(false)?;
+    let attributes = security_attributes(&descriptor);
+    let mut key = null_mut();
+    let mut disposition = 0;
+    let status = unsafe {
+        RegCreateKeyExW(
+            parent.0,
+            wide(Path::new(name))?.as_ptr(),
+            0,
+            null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WRITE,
+            &attributes,
+            &mut key,
+            &mut disposition,
+        )
+    };
+    if status != ERROR_SUCCESS || disposition != REG_CREATED_NEW_KEY {
+        if !key.is_null() {
+            unsafe { RegCloseKey(key) };
+        }
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(Key(key))
+}
+
+fn reject_registry_link(key: &Key) -> io::Result<()> {
+    if inventory_key(key)?
+        .values
+        .iter()
+        .any(|value| value.value_type == REG_LINK_TYPE)
+    {
+        return Err(io::Error::other("registry link is forbidden"));
+    }
+    Ok(())
+}
+
+fn verify_relative_key_path(parent: &Key, child: &Key, name: &str) -> io::Result<()> {
+    let expected = format!("{}\\{name}", canonical_key_path(parent)?);
+    if !canonical_key_path(child)?.eq_ignore_ascii_case(&expected) {
+        return Err(io::Error::other(
+            "registry child redirected from retained parent",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_key_path(key: &Key) -> io::Result<String> {
+    let mut buffer = vec![0_u8; 4096];
+    let mut needed = 0;
+    let status = unsafe {
+        NtQueryKey(
+            key.0,
+            KEY_NAME_INFORMATION,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut needed,
+        )
+    };
+    if status < 0 || needed as usize > buffer.len() || needed < 4 {
+        return Err(io::Error::other("cannot query canonical registry path"));
+    }
+    let byte_length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+    if !byte_length.is_multiple_of(2) || byte_length + 4 > needed as usize {
+        return Err(io::Error::other("canonical registry path is malformed"));
+    }
+    let mut units = Vec::with_capacity(byte_length / 2);
+    for offset in (4..4 + byte_length).step_by(2) {
+        units.push(u16::from_le_bytes([buffer[offset], buffer[offset + 1]]));
+    }
+    String::from_utf16(&units).map_err(io::Error::other)
+}
+
+fn verify_key_path(key: &Key, components: &[&str]) -> io::Result<()> {
+    let actual = canonical_key_path(key)?;
+    let mut expected = format!(r"\REGISTRY\USER\{}", current_user_sid()?);
+    for component in components {
+        expected.push('\\');
+        expected.push_str(component);
+    }
+    if !actual.eq_ignore_ascii_case(&expected) {
+        return Err(io::Error::other(
+            "registry key redirected from its canonical hive path",
+        ));
+    }
+    Ok(())
+}
+
 fn open_relative_key(parent: &Key, name: &str, access: u32) -> io::Result<Option<Key>> {
     open_relative_key_raw(parent.0, name, access)
 }
@@ -729,6 +1233,269 @@ fn identity(handle: HANDLE) -> io::Result<String> {
         info.dwVolumeSerialNumber,
         (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)
     ))
+}
+
+fn write_new_protected_file(path: &Path, bytes: &[u8], label: &str) -> io::Result<()> {
+    let descriptor = exact_descriptor(false)?;
+    let attributes = security_attributes(&descriptor);
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | windows_sys::Win32::Foundation::GENERIC_WRITE
+                | DELETE
+                | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let split = bytes.len().div_ceil(2);
+    write_all_handle(file.0, &bytes[..split])?;
+    crash_at(&format!("{label}-partial-write"));
+    write_all_handle(file.0, &bytes[split..])?;
+    crash_at(&format!("{label}-written-before-flush"));
+    if unsafe { FlushFileBuffers(file.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    crash_at(&format!("{label}-file-flushed"));
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("protected file has no parent"))?;
+    flush_owned_directory(parent).map_err(io::Error::other)?;
+    crash_at(&format!("{label}-parent-flushed"));
+    Ok(())
+}
+
+fn write_all_handle(handle: HANDLE, bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut written = 0;
+    if unsafe {
+        WriteFile(
+            handle,
+            bytes.as_ptr().cast(),
+            bytes.len() as u32,
+            &mut written,
+            null_mut(),
+        )
+    } == 0
+        || written as usize != bytes.len()
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn intent_path(binding_path: &Path) -> PathBuf {
+    let mut value = binding_path.as_os_str().to_owned();
+    value.push(".intent-v1");
+    PathBuf::from(value)
+}
+
+fn expected_intent(ownership_prefix: &str, binding_nonce: &str) -> CreationIntent {
+    CreationIntent {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+    }
+}
+
+fn read_intent(path: &Path) -> io::Result<CreationIntent> {
+    let file = open_protected_file(path)?;
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    serde_json::from_slice(&read_handle(file.0)?).map_err(io::Error::other)
+}
+
+fn read_binding(path: &Path) -> io::Result<CleanupBinding> {
+    let file = open_protected_file(path)?;
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    let bytes = read_handle(file.0)?;
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
+fn delete_intent(path: &Path, expected: &CreationIntent) -> io::Result<()> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("creation intent has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    let file = open_protected_file(path)?;
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    if serde_json::from_slice::<CreationIntent>(&read_handle(file.0)?).map_err(io::Error::other)?
+        != *expected
+    {
+        return Err(io::Error::other("external creation intent changed"));
+    }
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.0,
+            FileDispositionInfo,
+            (&raw mut disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn delete_binding(path: &Path, expected: &CleanupBinding) -> io::Result<()> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup binding has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    let file = open_protected_file(path)?;
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    if serde_json::from_slice::<CleanupBinding>(&read_handle(file.0)?).map_err(io::Error::other)?
+        != *expected
+    {
+        return Err(io::Error::other("cleanup binding changed"));
+    }
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.0,
+            FileDispositionInfo,
+            (&raw mut disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn delete_exact_protected_file(path: &Path) -> io::Result<()> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("protected file has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    let file = open_protected_file(path)?;
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.0,
+            FileDispositionInfo,
+            (&raw mut disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn validate_regular_file(handle: HANDLE) -> io::Result<()> {
+    let mut information = unsafe { zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | 0x10) != 0
+        || information.nNumberOfLinks != 1
+    {
+        return Err(io::Error::other(
+            "protected file is not exact non-reparse single-link data",
+        ));
+    }
+    Ok(())
+}
+
+fn open_protected_file(path: &Path) -> io::Result<Handle> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ | DELETE | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+fn read_handle(handle: HANDLE) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0_u8; 4096];
+    let mut read = 0;
+    if unsafe {
+        ReadFile(
+            handle,
+            bytes.as_mut_ptr().cast(),
+            bytes.len() as u32,
+            &mut read,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(read as usize);
+    Ok(bytes)
+}
+
+fn handle_delete_empty_root(root: Handle, parent: Handle) -> io::Result<()> {
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            root.0,
+            FileDispositionInfo,
+            (&raw mut disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(root);
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn crash_at(phase: &str) {
+    if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok(phase) {
+        std::process::exit(197);
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn read_stream(path: &Path) -> io::Result<String> {
@@ -924,6 +1691,13 @@ fn security_attributes(descriptor: &Descriptor) -> SECURITY_ATTRIBUTES {
 fn validate_prefix(value: &str) -> io::Result<()> {
     if value.is_empty() || value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(io::Error::other("invalid ownership prefix"));
+    }
+    Ok(())
+}
+
+fn validate_nonce(value: &str) -> io::Result<()> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other("invalid cleanup binding nonce"));
     }
     Ok(())
 }

@@ -28,16 +28,21 @@ fn main() {
         }
     }
     match arguments.as_slice() {
-        [mode, path, prefix] if mode == "--create-protected-root" => {
-            let Some(prefix) = prefix.to_str() else {
+        [mode, path, prefix, binding, nonce] if mode == "--create-protected-root" => {
+            let (Some(prefix), Some(nonce)) = (prefix.to_str(), nonce.to_str()) else {
                 std::process::exit(64);
             };
             match talking_quill_helper::machine_lock_test_namespace::create_protected_root(
                 std::path::Path::new(path),
                 prefix,
+                std::path::Path::new(binding),
+                nonce,
             ) {
-                Ok(identity) => {
-                    println!("{identity}");
+                Ok((identity, ads_sha256)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"identity": identity, "adsSha256": ads_sha256})
+                    );
                     return;
                 }
                 Err(error) => {
@@ -46,14 +51,122 @@ fn main() {
                 }
             }
         }
-        [mode, path, prefix] if mode == "--remove-interrupted-root" => {
-            let Some(prefix) = prefix.to_str() else {
+        [mode, path, prefix, binding, nonce] if mode == "--remove-interrupted-root" => {
+            let (Some(prefix), Some(nonce)) = (prefix.to_str(), nonce.to_str()) else {
                 std::process::exit(64);
             };
             match talking_quill_helper::machine_lock_test_namespace::remove_interrupted_root(
                 std::path::Path::new(path),
                 prefix,
+                std::path::Path::new(binding),
+                nonce,
             ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, binding, prefix, nonce] if mode == "--delete-creation-artifacts" => {
+            let (Some(prefix), Some(nonce)) = (prefix.to_str(), nonce.to_str()) else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::delete_interrupted_creation_artifacts(
+                std::path::Path::new(binding),
+                prefix,
+                nonce,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path, prefix, binding, nonce, identity, hash] if mode == "--verify-root-binding" => {
+            let (Some(prefix), Some(nonce), Some(identity), Some(hash)) = (
+                prefix.to_str(),
+                nonce.to_str(),
+                identity.to_str(),
+                hash.to_str(),
+            ) else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::verify_root_binding(
+                std::path::Path::new(path),
+                std::path::Path::new(binding),
+                prefix,
+                nonce,
+                identity,
+                hash,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, binding, prefix, nonce, identity, hash] if mode == "--delete-root-binding" => {
+            let (Some(prefix), Some(nonce), Some(identity), Some(hash)) = (
+                prefix.to_str(),
+                nonce.to_str(),
+                identity.to_str(),
+                hash.to_str(),
+            ) else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::delete_cleanup_binding(
+                std::path::Path::new(binding),
+                prefix,
+                nonce,
+                identity,
+                hash,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path] if mode == "--stream-inventory" => {
+            match talking_quill_helper::machine_lock_test_namespace::stream_inventory(
+                std::path::Path::new(path),
+            ) {
+                Ok(inventory) => {
+                    println!("{}", serde_json::to_string(&inventory).unwrap());
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode] if mode == "--registry-create-empty-root-fixture" => {
+            match talking_quill_helper::machine_lock_test_namespace::create_empty_registry_root_fixture() {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode] if mode == "--registry-create-link-fixture" => {
+            match talking_quill_helper::machine_lock_test_namespace::create_registry_link_fixture()
+            {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode] if mode == "--registry-remove-link-fixture" => {
+            match talking_quill_helper::machine_lock_test_namespace::remove_registry_link_fixture()
+            {
                 Ok(()) => return,
                 Err(error) => {
                     eprintln!("{error}");
