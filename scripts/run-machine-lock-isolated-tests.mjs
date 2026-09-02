@@ -22,7 +22,6 @@ const LEGACY_RECORD_SCHEMAS = [1, 2, 3];
 const root = resolve(import.meta.dirname, '..');
 const stateRoot = resolve(root, 'tmp', 'machine-lock-tests');
 const recordRoot = resolve(stateRoot, '.cleanup-records-v1');
-const evidenceRoot = resolve(root, 'tmp', 'machine-lock-log-evidence-v1');
 const rootKinds = ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit'];
 const separator = process.argv.indexOf('--');
 if (separator === -1 || separator === process.argv.length - 1) {
@@ -184,6 +183,7 @@ function prepareNamespace(namespaceId) {
     controlNonce: randomBytes(16).toString('hex'),
     childStdoutLogFile: `${recordId}.stdout.log`,
     childStderrLogFile: `${recordId}.stderr.log`,
+    logsRetired: false,
     projectRootIdentity: fileIdentity(root),
     stateRootIdentity: fileIdentity(stateRoot),
     recordDirectoryIdentity: fileIdentity(recordRoot),
@@ -337,18 +337,22 @@ async function runNamespaceSession(record) {
     throw error;
   } finally {
     if (logsDrained) {
-      cleanupChildLog(childStdoutLogPath);
-      cleanupChildLog(childStderrLogPath);
+      cleanupChildLog(
+        childStdoutLogPath,
+        record.recordId,
+        'stdout',
+        record.recordDirectoryIdentity,
+      );
+      cleanupChildLog(
+        childStderrLogPath,
+        record.recordId,
+        'stderr',
+        record.recordDirectoryIdentity,
+      );
+      record.logsRetired = true;
+      writeRecord(record);
     }
   }
-}
-
-function logsPreservedTestPause() {
-  const path = process.env.TQ_MACHINE_LOCK_TEST_LOGS_PRESERVED_PAUSE_FILE;
-  if (!path) return;
-  writeFileSync(`${path}.ready`, 'ready\n', { flag: 'wx' });
-  const wait = new Int32Array(new SharedArrayBuffer(4));
-  while (!existsSync(`${path}.continue`)) Atomics.wait(wait, 0, 0, 10);
 }
 
 async function supervisorFailureTestPause() {
@@ -360,130 +364,93 @@ async function supervisorFailureTestPause() {
   }
 }
 
-function ensureProtectedEvidenceRoot() {
-  mkdirSync(evidenceRoot, { recursive: true });
-  if (!isPlainPath(evidenceRoot, true)) {
-    throw new Error('recovered-log evidence root is not plain');
-  }
-  applyExactRecordAcl(evidenceRoot, true);
-  const protectedDirectory = spawnSync(deleter, ['--protect-cleanup-directory', evidenceRoot], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  if (protectedDirectory.status !== 0) {
-    throw new Error('cannot apply native recovered-log evidence protection');
-  }
-  fsyncDirectory(evidenceRoot);
-  fsyncDirectory(dirname(evidenceRoot));
-}
-
 function recoveredLogPlans(record) {
   const plans = [];
   if (record.childStdoutLogFile !== undefined) {
-    plans.push({ channel: 'stdout', source: record.childStdoutLogFile });
+    plans.push({ stream: 'stdout', source: record.childStdoutLogFile });
   }
   if (record.childStderrLogFile !== undefined) {
-    plans.push({ channel: 'stderr', source: record.childStderrLogFile });
+    plans.push({ stream: 'stderr', source: record.childStderrLogFile });
   }
   if (record.legacyChildLogFile !== undefined || record.childLogFile !== undefined) {
-    plans.push({ channel: 'combined', source: record.legacyChildLogFile ?? record.childLogFile });
+    plans.push({ stream: 'combined', source: record.legacyChildLogFile ?? record.childLogFile });
   }
   return plans;
 }
 
-function verifyPreservedEvidence(record) {
-  if (
-    !existsSync(evidenceRoot) ||
-    ownedTreeIdentity(evidenceRoot) !== record.evidenceDirectoryIdentity ||
-    pathAcl(evidenceRoot) !== record.evidenceDirectoryAcl
-  ) {
-    throw new Error('recovered-log evidence directory identity changed');
-  }
-  const expected = new Set();
-  for (const entry of record.recoveredLogEvidence) {
-    if (!entry.present) continue;
-    expected.add(entry.fileName);
-    const path = resolve(evidenceRoot, entry.fileName);
-    const inspected = spawnSync(deleter, ['--inspect-cleanup-log-evidence', path], {
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    if (inspected.status !== 0) {
-      throw new Error(`recovered-log evidence verification failed: ${entry.fileName}`);
-    }
-    const actual = JSON.parse(inspected.stdout);
-    if (actual.byteLength !== entry.byteLength || actual.sha256 !== entry.sha256) {
-      throw new Error(`recovered-log evidence content changed: ${entry.fileName}`);
-    }
-  }
-  for (const name of readdirSync(evidenceRoot)) {
-    if (name.startsWith(`${record.recordId}.`) && !expected.has(name)) {
-      throw new Error(`unknown recovered-log evidence entry: ${name}`);
-    }
+function recoveredLogCrashAt(phase) {
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === phase) {
+    throw new SupervisorFailure(197, `injected crash at ${phase}`);
   }
 }
 
-function preserveRecoveredLogs(record) {
-  if (record.logsPreserved === true) {
-    verifyPreservedEvidence(record);
-    return false;
-  }
-  const plans = recoveredLogPlans(record);
-  if (plans.length === 0) return false;
-  ensureProtectedEvidenceRoot();
-  const evidence = [];
-  for (const plan of plans) {
-    const source = resolve(recordRoot, plan.source);
-    const fileName = `${record.recordId}.${plan.channel}.evidence-v1`;
-    const destination = resolve(evidenceRoot, fileName);
-    if (!existsSync(source) && !existsSync(destination)) {
-      evidence.push({ channel: plan.channel, fileName, present: false });
-      continue;
+function emitRecoveredLog(frame) {
+  try {
+    if (process.env.TQ_MACHINE_LOCK_TEST_DIAGNOSTIC_WRITE_FAIL === '1') {
+      throw new Error('injected recovered-log diagnostic write failure');
     }
-    const preserved = spawnSync(deleter, ['--preserve-cleanup-log', source, destination], {
-      encoding: 'utf8',
-      windowsHide: true,
-      env: process.env,
-    });
-    if (preserved.status === 197) {
-      throw new SupervisorFailure(197, 'injected recovered-log preservation crash');
-    }
-    if (preserved.status !== 0) {
-      throw new Error(`recovered-log preservation failed: ${preserved.stderr.trim()}`);
-    }
-    evidence.push({
-      channel: plan.channel,
-      fileName,
-      present: true,
-      ...JSON.parse(preserved.stdout),
-    });
+    writeFileSync(process.stderr.fd, `TQ_MACHINE_LOCK_RECOVERED_LOG:${JSON.stringify(frame)}\n`);
+  } catch {
+    // Recovered output is diagnostic only. Teardown must continue.
   }
-  if (!evidence.some((entry) => entry.present)) return false;
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'recovered-logs-moved') {
-    throw new SupervisorFailure(197, 'injected crash after recovered logs moved');
+}
+
+function retireRecoveredLogs(record) {
+  if (record.logsRetired === true) return;
+  for (const plan of recoveredLogPlans(record)) {
+    const path = resolve(recordRoot, plan.source);
+    const inspected = spawnSync(
+      deleter,
+      ['--inspect-cleanup-log', path, record.recordId, plan.stream, record.recordDirectoryIdentity],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        maxBuffer: 180 * 1024 * 1024,
+      },
+    );
+    if (![0, 3].includes(inspected.status)) {
+      throw new Error(`recovered ${plan.stream} log authentication failed`);
+    }
+    const log = inspected.status === 0 ? JSON.parse(inspected.stdout) : null;
+    if (log !== null) {
+      recoveredLogCrashAt(`recovered-log-authenticated:${plan.stream}`);
+      // Emission precedes deletion. A crash may repeat this frame; consumers deduplicate by
+      // recordId, stream, and hash.
+      emitRecoveredLog({
+        recordId: record.recordId,
+        stream: plan.stream,
+        hash: log.sha256,
+        content: log.content,
+      });
+      recoveredLogCrashAt(`recovered-log-emitted:${plan.stream}`);
+    }
+    const deleted = spawnSync(
+      deleter,
+      [
+        '--delete-cleanup-log',
+        path,
+        record.recordId,
+        log?.sha256 ?? '-',
+        plan.stream,
+        record.recordDirectoryIdentity,
+      ],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: process.env,
+      },
+    );
+    if (deleted.status === 197) {
+      throw new SupervisorFailure(197, `injected ${plan.stream} log retirement crash`);
+    }
+    if (deleted.status !== 0) {
+      throw new Error(`recovered ${plan.stream} log deletion failed: ${deleted.stderr.trim()}`);
+    }
   }
-  record.logsPreservedFromPhase = record.phase;
-  record.logsPreserved = true;
-  record.recoveredLogEvidence = evidence;
-  record.evidenceDirectoryIdentity = ownedTreeIdentity(evidenceRoot);
-  record.evidenceDirectoryAcl = pathAcl(evidenceRoot);
-  record.phase = 'logs-preserved';
+  recoveredLogCrashAt('recovered-logs-retired');
+  record.logsRetired = true;
   writeRecord(record);
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'logs-preserved') {
-    throw new SupervisorFailure(197, 'injected crash after logs-preserved publication');
-  }
-  logsPreservedTestPause();
-  const result = {
-    event: 'recovered-log-evidence',
-    recordId: record.recordId,
-    evidenceRoot,
-    files: evidence,
-  };
-  writeFileSync(process.stderr.fd, `TQ_MACHINE_LOCK_TEST_EVIDENCE:${JSON.stringify(result)}\n`);
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'recovered-log-evidence-emitted') {
-    throw new SupervisorFailure(197, 'injected crash after recovered-log evidence result');
-  }
-  return true;
+  recoveredLogCrashAt('logs-retired-record-published');
 }
 
 async function drainChildLog(path, destination) {
@@ -508,13 +475,32 @@ async function drainChildLog(path, destination) {
   }
 }
 
-function cleanupChildLog(path) {
-  if (existsSync(path)) {
-    if (!isPlainPath(path, false) || lstatSync(path).nlink !== 1) {
-      throw new Error('native namespace child log is not an exact regular file');
-    }
-    unlinkSync(path);
+function cleanupChildLog(path, recordId, stream, recordDirectoryIdentity) {
+  const inspected = spawnSync(
+    deleter,
+    ['--inspect-cleanup-log', path, recordId, stream, recordDirectoryIdentity],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 180 * 1024 * 1024,
+    },
+  );
+  if (![0, 3].includes(inspected.status)) {
+    throw new Error('native namespace child log authentication failed');
   }
+  const log = inspected.status === 0 ? JSON.parse(inspected.stdout) : null;
+  const deleted = spawnSync(
+    deleter,
+    ['--delete-cleanup-log', path, recordId, log?.sha256 ?? '-', stream, recordDirectoryIdentity],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  if (deleted.status === 197) {
+    throw new SupervisorFailure(197, `injected ${stream} log deletion crash`);
+  }
+  if (deleted.status !== 0) throw new Error('native namespace child log deletion failed');
 }
 
 async function nextNamespaceSessionEvent(iterator, nonce) {
@@ -648,6 +634,7 @@ function migrateSchema3Record(record) {
   record.controlNonce ??= randomBytes(16).toString('hex');
   record.childStdoutLogFile = `${record.recordId}.stdout.log`;
   record.childStderrLogFile = `${record.recordId}.stderr.log`;
+  record.logsRetired ??= false;
   writeRecord(record);
   return record;
 }
@@ -793,21 +780,17 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   ) {
     throw new Error('machine-lock cleanup record ancestor identity changed');
   }
-  preserveRecoveredLogs(record);
+  retireRecoveredLogs(record);
   if (record.roots.length !== rootKinds.length || record.supervisor === null) {
     record.partialCreation = true;
   }
-  const recordedNamespacePhase =
-    record.logsPreserved === true && record.phase === 'logs-preserved'
-      ? record.logsPreservedFromPhase
-      : record.phase;
   const sealingInventory = ![
     'inventory-sealed',
     'deleting-root',
     'filesystem-deleted',
     'deleting-registry',
     'registry-deleted',
-  ].includes(recordedNamespacePhase);
+  ].includes(record.phase);
   const registryInventory = sealingInventory
     ? registrySnapshot(record.namespaceId)
     : record.registryInventory;
@@ -925,12 +908,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   }
   record.phase = 'registry-deleted';
   writeRecord(record);
-  if (record.schemaVersion === RECORD_SCHEMA) {
-    cleanupChildLog(resolve(recordRoot, record.childStdoutLogFile));
-    cleanupChildLog(resolve(recordRoot, record.childStderrLogFile));
-  }
-  if (record.logsPreserved === true) deleteCleanupRecordWithEvidence(record);
-  else deleteCleanupRecord(record.recordId);
+  deleteCleanupRecord(record.recordId);
   removeEmptyParents();
 }
 
@@ -946,41 +924,6 @@ function assertRetiredRecordNamespaceIsGone(record) {
   }
   if (registrySnapshot(record.namespaceId).present) {
     throw new Error('cleanup record retired before its registry namespace');
-  }
-}
-
-function deleteCleanupRecordWithEvidence(record) {
-  verifyPreservedEvidence(record);
-  const expected = record.recoveredLogEvidence
-    .filter((entry) => entry.present)
-    .map((entry) => ({
-      fileName: entry.fileName,
-      byteLength: entry.byteLength,
-      sha256: entry.sha256,
-    }));
-  const recordFile = recordPath(record.recordId);
-  const recordSha256 = createHash('sha256').update(readFileSync(recordFile)).digest('hex');
-  const deleted = spawnSync(
-    deleter,
-    [
-      '--verify-evidence-and-delete-cleanup-record',
-      recordFile,
-      recordSha256,
-      evidenceRoot,
-      record.evidenceDirectoryIdentity,
-    ],
-    {
-      input: JSON.stringify(expected),
-      encoding: 'utf8',
-      windowsHide: true,
-      env: process.env,
-    },
-  );
-  if (deleted.status === 197) {
-    throw new SupervisorFailure(197, 'injected cleanup-record retirement crash');
-  }
-  if (deleted.status !== 0) {
-    throw new Error(`native evidence-bound record retirement failed: ${deleted.stderr.trim()}`);
   }
 }
 
@@ -1192,50 +1135,24 @@ function validateRecord(record) {
   }
   if (
     record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
-    !['native-creating', 'logs-preserved'].includes(record.phase) &&
+    record.phase !== 'native-creating' &&
     record.partialCreation !== true &&
     !validProcessIdentity(record.supervisor)
   ) {
     throw new Error('cleanup record supervisor identity is invalid');
   }
-  if (record.logsPreserved === true) {
-    if (
-      typeof record.logsPreservedFromPhase !== 'string' ||
-      !Array.isArray(record.recoveredLogEvidence) ||
-      !/^\d+:\d+$/u.test(record.evidenceDirectoryIdentity ?? '') ||
-      typeof record.evidenceDirectoryAcl !== 'string'
-    ) {
-      throw new Error('recovered-log evidence record is invalid');
-    }
-    const expectedChannels = recoveredLogPlans(record).map((entry) => entry.channel);
-    const actualChannels = record.recoveredLogEvidence.map((entry) => entry.channel);
-    if (
-      new Set(actualChannels).size !== actualChannels.length ||
-      JSON.stringify(actualChannels) !== JSON.stringify(expectedChannels)
-    ) {
-      throw new Error('recovered-log evidence channels are invalid');
-    }
-    for (const entry of record.recoveredLogEvidence) {
-      if (
-        !['stdout', 'stderr', 'combined'].includes(entry.channel) ||
-        entry.fileName !== `${record.recordId}.${entry.channel}.evidence-v1` ||
-        typeof entry.present !== 'boolean' ||
-        (entry.present &&
-          (!Number.isSafeInteger(entry.byteLength) ||
-            entry.byteLength < 0 ||
-            !/^[0-9a-f]{64}$/u.test(entry.sha256 ?? '')))
-      ) {
-        throw new Error('recovered-log evidence entry is invalid');
-      }
-    }
-  } else if (
+  if (record.logsRetired !== undefined && typeof record.logsRetired !== 'boolean') {
+    throw new Error('cleanup record log-retirement state is invalid');
+  }
+  if (
     record.logsPreserved !== undefined ||
     record.logsPreservedFromPhase !== undefined ||
     record.recoveredLogEvidence !== undefined ||
     record.evidenceDirectoryIdentity !== undefined ||
-    record.evidenceDirectoryAcl !== undefined
+    record.evidenceDirectoryAcl !== undefined ||
+    record.phase === 'logs-preserved'
   ) {
-    throw new Error('unexpected recovered-log evidence metadata');
+    throw new Error('persistent recovered-log evidence is unsupported');
   }
   for (const identity of [
     record.projectRootIdentity,

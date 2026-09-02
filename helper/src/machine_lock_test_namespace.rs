@@ -23,16 +23,17 @@ use windows_sys::Win32::{
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-        SetFileSecurityW, SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
         CommitTransaction, CreateFileW, CreateTransaction, DELETE, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo,
-        FlushFileBuffers, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
-        OPEN_EXISTING, READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+        FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfo, FileIdInfo, FlushFileBuffers, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OPEN_EXISTING,
+        READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
     },
     System::{
         IO::OVERLAPPED,
@@ -725,7 +726,7 @@ pub fn recover_cleanup_record_backup(path: &Path) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::other("cleanup record previous has no parent"))?,
     )?;
-    let previous = open_evidence_file(path)?;
+    let previous = open_exact_protected_file(path)?;
     let previous_bytes = read_handle(previous.0)?;
     if let Some(destination_bytes) = read_protected_record(&destination)? {
         let destination_sha256 = Sha256::digest(&destination_bytes)
@@ -919,159 +920,35 @@ fn rename_file_handle(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PreservedLogEvidence {
-    pub byte_length: u64,
+pub struct RecoveredCleanupLog {
     pub sha256: String,
+    pub content: String,
 }
 
-fn evidence_for_handle(file: HANDLE) -> io::Result<PreservedLogEvidence> {
-    validate_exact_security(file, false)?;
-    validate_regular_file(file)?;
-    let bytes = read_handle(file)?;
-    Ok(PreservedLogEvidence {
-        byte_length: bytes.len() as u64,
-        sha256: Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    })
-}
-
-pub fn preserve_cleanup_log(source: &Path, destination: &Path) -> io::Result<PreservedLogEvidence> {
-    let source_parent_path = source
-        .parent()
-        .ok_or_else(|| io::Error::other("cleanup log source has no parent"))?;
-    let destination_parent_path = destination
-        .parent()
-        .ok_or_else(|| io::Error::other("cleanup log evidence has no parent"))?;
-    let destination_name = destination
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| io::Error::other("cleanup log evidence name is invalid"))?;
-    let destination_parent = open_directory(destination_parent_path)?;
-    if !source.exists() {
-        let file = open_evidence_file(destination)?;
-        if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        return evidence_for_handle(file.0);
-    }
-    let source_parent = open_directory(source_parent_path)?;
-    let source_file = Handle(unsafe {
-        CreateFileW(
-            wide(source)?.as_ptr(),
-            windows_sys::Win32::Foundation::GENERIC_READ
-                | DELETE
-                | READ_CONTROL
-                | FILE_READ_ATTRIBUTES
-                | SYNCHRONIZE,
-            0,
-            null_mut(),
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-            null_mut(),
-        )
-    });
-    if source_file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    validate_exact_security(source_file.0, false)?;
-    validate_regular_file(source_file.0)?;
-    let bytes = read_handle(source_file.0)?;
-    let evidence = PreservedLogEvidence {
-        byte_length: bytes.len() as u64,
-        sha256: Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    };
-    if destination.exists() {
-        let existing = open_evidence_file(destination)?;
-        let existing_evidence = evidence_for_handle(existing.0)?;
-        if existing_evidence.byte_length != evidence.byte_length
-            || existing_evidence.sha256 != evidence.sha256
-        {
-            return Err(io::Error::other(
-                "cleanup log evidence conflicts with its source",
-            ));
-        }
-    } else {
-        let pending_path = destination.with_file_name(format!("{destination_name}.pending-v1"));
-        let pending = if pending_path.exists() {
-            let pending = open_evidence_file(&pending_path)?;
-            let pending_evidence = evidence_for_handle(pending.0)?;
-            if pending_evidence.byte_length != evidence.byte_length
-                || pending_evidence.sha256 != evidence.sha256
-            {
-                delete_file_handle(pending.0)?;
-                drop(pending);
-                if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                drop(source_file);
-                drop(source_parent);
-                drop(destination_parent);
-                return preserve_cleanup_log(source, destination);
-            }
-            pending
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let value = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(ALPHABET[((value >> 18) & 63) as usize] as char);
+        encoded.push(ALPHABET[((value >> 12) & 63) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((value >> 6) & 63) as usize] as char
         } else {
-            let descriptor = exact_descriptor(false)?;
-            let attributes = security_attributes(&descriptor);
-            let pending = Handle(unsafe {
-                CreateFileW(
-                    wide(&pending_path)?.as_ptr(),
-                    windows_sys::Win32::Foundation::GENERIC_READ
-                        | windows_sys::Win32::Foundation::GENERIC_WRITE
-                        | DELETE
-                        | READ_CONTROL
-                        | FILE_READ_ATTRIBUTES
-                        | SYNCHRONIZE,
-                    0,
-                    &attributes,
-                    CREATE_NEW,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                    null_mut(),
-                )
-            });
-            if pending.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-                return Err(io::Error::last_os_error());
-            }
-            validate_exact_security(pending.0, false)?;
-            validate_regular_file(pending.0)?;
-            if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            record_crash_at("recovered-log-pending-parent-flushed");
-            write_all_handle(pending.0, &bytes)?;
-            record_crash_at("recovered-log-pending-written");
-            if unsafe { FlushFileBuffers(pending.0) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            record_crash_at("recovered-log-file-flushed");
-            pending
-        };
-        rename_file_handle(pending.0, destination_parent.0, destination_name, false)?;
-        record_crash_at("recovered-log-renamed");
-        if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        record_crash_at("recovered-log-evidence-directory-flushed");
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(value & 63) as usize] as char
+        } else {
+            '='
+        });
     }
-    delete_file_handle(source_file.0)?;
-    record_crash_at("recovered-log-source-retired");
-    if unsafe { FlushFileBuffers(source_parent.0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    record_crash_at("recovered-log-source-directory-flushed");
-    Ok(evidence)
+    encoded
 }
 
-pub fn inspect_cleanup_log_evidence(path: &Path) -> io::Result<PreservedLogEvidence> {
-    let file = open_evidence_file(path)?;
-    evidence_for_handle(file.0)
-}
-
-fn open_evidence_file(path: &Path) -> io::Result<Handle> {
+fn open_exact_protected_file(path: &Path) -> io::Result<Handle> {
     let file = Handle(unsafe {
         CreateFileW(
             wide(path)?.as_ptr(),
@@ -1095,122 +972,98 @@ fn open_evidence_file(path: &Path) -> io::Result<Handle> {
     Ok(file)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpectedLogEvidence {
-    pub file_name: String,
-    pub byte_length: u64,
-    pub sha256: String,
-}
-
-pub fn verify_evidence_and_delete_cleanup_record(
-    record_path: &Path,
-    expected_record_sha256: &str,
-    evidence_root: &Path,
-    expected_root_identity: &str,
-    expected: &[ExpectedLogEvidence],
-) -> io::Result<()> {
-    let record_parent = open_directory(
-        record_path
-            .parent()
-            .ok_or_else(|| io::Error::other("cleanup record has no parent"))?,
-    )?;
-    let record = Handle(unsafe {
-        CreateFileW(
-            wide(record_path)?.as_ptr(),
-            windows_sys::Win32::Foundation::GENERIC_READ
-                | DELETE
-                | READ_CONTROL
-                | FILE_READ_ATTRIBUTES
-                | SYNCHRONIZE,
-            FILE_SHARE_READ,
-            null_mut(),
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-            null_mut(),
-        )
-    });
-    if record.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    validate_exact_security(record.0, false)?;
-    validate_regular_file(record.0)?;
-    let record_sha256 = Sha256::digest(&read_handle(record.0)?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if record_sha256 != expected_record_sha256 {
-        return Err(io::Error::other(
-            "cleanup record digest changed before retirement",
-        ));
-    }
-    let evidence_directory = open_directory(evidence_root)?;
-    validate_exact_security(evidence_directory.0, true)?;
-    validate_directory(evidence_directory.0)?;
-    if identity(evidence_directory.0)? != expected_root_identity {
-        return Err(io::Error::other(
-            "recovered-log evidence directory identity changed",
-        ));
-    }
-    let record_id = record_path
-        .file_stem()
+fn validate_cleanup_log_path(path: &Path, record_id: &str, stream: &str) -> io::Result<()> {
+    validate_namespace_id(record_id)?;
+    if path
+        .parent()
+        .and_then(Path::file_name)
         .and_then(|value| value.to_str())
-        .ok_or_else(|| io::Error::other("cleanup record path has no identity"))?;
-    let expected_names = expected
-        .iter()
-        .map(|entry| entry.file_name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let verify_inventory = || -> io::Result<()> {
-        for entry in std::fs::read_dir(evidence_root)? {
-            let name = entry?.file_name();
-            let name = name
-                .to_str()
-                .ok_or_else(|| io::Error::other("recovered-log evidence name is invalid"))?;
-            if name.starts_with(&format!("{record_id}.")) && !expected_names.contains(name) {
-                return Err(io::Error::other("unknown recovered-log evidence entry"));
-            }
-        }
-        Ok(())
+        != Some(".cleanup-records-v1")
+    {
+        return Err(io::Error::other("cleanup log parent is invalid"));
+    }
+    let suffix = match stream {
+        "stdout" => ".stdout.log",
+        "stderr" => ".stderr.log",
+        "combined" => ".log",
+        _ => return Err(io::Error::other("cleanup log stream is invalid")),
     };
-    verify_inventory()?;
-    let mut guards = Vec::with_capacity(expected.len());
-    for entry in expected {
-        let file = open_evidence_file(&evidence_root.join(&entry.file_name))?;
-        let actual = evidence_for_handle(file.0)?;
-        if actual.byte_length != entry.byte_length || actual.sha256 != entry.sha256 {
-            return Err(io::Error::other("recovered-log evidence content changed"));
-        }
-        guards.push(file);
+    if path.file_name().and_then(|value| value.to_str()) != Some(&format!("{record_id}{suffix}")) {
+        return Err(io::Error::other("cleanup log path is not record-bound"));
     }
-    verify_inventory()?;
-    delete_file_handle(record.0)?;
-    record_crash_at("cleanup-record-retired");
-    if unsafe { FlushFileBuffers(record_parent.0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    record_crash_at("cleanup-record-retirement-directory-flushed");
-    drop(guards);
-    drop(evidence_directory);
     Ok(())
 }
 
-pub fn protect_cleanup_directory(path: &Path) -> io::Result<()> {
-    let descriptor = exact_descriptor(true)?;
-    if unsafe {
-        SetFileSecurityW(
-            wide(path)?.as_ptr(),
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            descriptor.0,
-        )
-    } == 0
-    {
+pub fn inspect_cleanup_log(
+    path: &Path,
+    record_id: &str,
+    stream: &str,
+    expected_parent_identity: &str,
+) -> io::Result<Option<RecoveredCleanupLog>> {
+    validate_cleanup_log_path(path, record_id, stream)?;
+    let parent = open_directory(path.parent().unwrap())?;
+    validate_directory(parent.0)?;
+    if file_id_128(parent.0)? != expected_parent_identity {
+        return Err(io::Error::other("cleanup log parent identity changed"));
+    }
+    let file = match open_exact_protected_file(path) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let bytes = read_handle(file.0)?;
+    Ok(Some(RecoveredCleanupLog {
+        sha256: Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        content: base64_encode(&bytes),
+    }))
+}
+
+pub fn delete_cleanup_log(
+    path: &Path,
+    record_id: &str,
+    expected_sha256: Option<&str>,
+    stream: &str,
+    expected_parent_identity: &str,
+) -> io::Result<()> {
+    validate_cleanup_log_path(path, record_id, stream)?;
+    let parent = open_directory(
+        path.parent()
+            .ok_or_else(|| io::Error::other("cleanup log has no parent"))?,
+    )?;
+    validate_directory(parent.0)?;
+    if file_id_128(parent.0)? != expected_parent_identity {
+        return Err(io::Error::other("cleanup log parent identity changed"));
+    }
+    match open_exact_protected_file(path) {
+        Ok(file) => {
+            let actual = Sha256::digest(&read_handle(file.0)?)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if expected_sha256 != Some(actual.as_str()) {
+                return Err(io::Error::other(
+                    "cleanup log digest changed before deletion",
+                ));
+            }
+            delete_file_handle(file.0)?;
+            record_crash_at(&format!("recovered-log-retired:{stream}"));
+        }
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+            if expected_sha256.is_some() {
+                return Err(io::Error::other("authenticated cleanup log disappeared"));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let directory = open_directory(path)?;
-    validate_exact_security(directory.0, true)?;
-    if unsafe { FlushFileBuffers(directory.0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    record_crash_at(&format!(
+        "recovered-log-retirement-directory-flushed:{stream}"
+    ));
     Ok(())
 }
 
@@ -3038,6 +2891,28 @@ fn validate_directory(handle: HANDLE) -> io::Result<()> {
         return Err(io::Error::other("protected root identity is invalid"));
     }
     Ok(())
+}
+
+fn file_id_128(handle: HANDLE) -> io::Result<String> {
+    let mut info: FILE_ID_INFO = unsafe { zeroed() };
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut info).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info
+        .FileId
+        .Identifier
+        .iter()
+        .rev()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn identity(handle: HANDLE) -> io::Result<String> {

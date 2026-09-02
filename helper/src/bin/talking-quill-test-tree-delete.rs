@@ -306,70 +306,49 @@ fn main() {
         }
     }
     match arguments.as_slice() {
-        [mode, path] if mode == "--protect-cleanup-directory" => {
-            match talking_quill_helper::machine_lock_test_namespace::protect_cleanup_directory(
-                std::path::Path::new(path),
-            ) {
-                Ok(()) => return,
-                Err(error) => {
-                    eprintln!("{error}");
-                    std::process::exit(78)
-                }
-            }
-        }
-        [mode, path] if mode == "--inspect-cleanup-log-evidence" => {
-            match talking_quill_helper::machine_lock_test_namespace::inspect_cleanup_log_evidence(
-                std::path::Path::new(path),
-            ) {
-                Ok(evidence) => {
-                    println!("{}", serde_json::to_string(&evidence).unwrap());
-                    return;
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    std::process::exit(78)
-                }
-            }
-        }
-        [mode, source, destination] if mode == "--preserve-cleanup-log" => {
-            match talking_quill_helper::machine_lock_test_namespace::preserve_cleanup_log(
-                std::path::Path::new(source),
-                std::path::Path::new(destination),
-            ) {
-                Ok(evidence) => {
-                    println!("{}", serde_json::to_string(&evidence).unwrap());
-                    return;
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    std::process::exit(78)
-                }
-            }
-        }
-        [mode, record_path, record_sha256, evidence_root, evidence_identity]
-            if mode == "--verify-evidence-and-delete-cleanup-record" =>
-        {
-            let (Some(record_sha256), Some(evidence_identity)) =
-                (record_sha256.to_str(), evidence_identity.to_str())
-            else {
+        [mode, path, record_id, stream, parent_identity] if mode == "--inspect-cleanup-log" => {
+            let (Some(record_id), Some(stream), Some(parent_identity)) = (
+                record_id.to_str(),
+                stream.to_str(),
+                parent_identity.to_str(),
+            ) else {
                 std::process::exit(64);
             };
-            let mut json = String::new();
-            if std::io::stdin().read_to_string(&mut json).is_err() {
-                std::process::exit(65);
+            match talking_quill_helper::machine_lock_test_namespace::inspect_cleanup_log(
+                std::path::Path::new(path),
+                record_id,
+                stream,
+                parent_identity,
+            ) {
+                Ok(Some(log)) => {
+                    println!("{}", serde_json::to_string(&log).unwrap());
+                    return;
+                }
+                Ok(None) => std::process::exit(3),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
             }
-            let Ok(expected) = serde_json::from_str::<Vec<
-                talking_quill_helper::machine_lock_test_namespace::ExpectedLogEvidence,
-            >>(&json)
-            else {
-                std::process::exit(65);
+        }
+        [mode, path, record_id, expected_sha256, stream, parent_identity]
+            if mode == "--delete-cleanup-log" =>
+        {
+            let (Some(record_id), Some(expected_sha256), Some(stream), Some(parent_identity)) = (
+                record_id.to_str(),
+                expected_sha256.to_str(),
+                stream.to_str(),
+                parent_identity.to_str(),
+            ) else {
+                std::process::exit(64);
             };
-            match talking_quill_helper::machine_lock_test_namespace::verify_evidence_and_delete_cleanup_record(
-                std::path::Path::new(record_path),
-                record_sha256,
-                std::path::Path::new(evidence_root),
-                evidence_identity,
-                &expected,
+            let expected_sha256 = (expected_sha256 != "-").then_some(expected_sha256);
+            match talking_quill_helper::machine_lock_test_namespace::delete_cleanup_log(
+                std::path::Path::new(path),
+                record_id,
+                expected_sha256,
+                stream,
+                parent_identity,
             ) {
                 Ok(()) => return,
                 Err(error) => {
