@@ -17,11 +17,11 @@ use windows_sys::Win32::{
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
             ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-            SE_FILE_OBJECT, SE_REGISTRY_KEY,
+            SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_REGISTRY_KEY,
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+        SetFileSecurityW, SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
@@ -29,10 +29,11 @@ use windows_sys::Win32::{
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FlushFileBuffers,
-        GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, ReadFile,
-        SetFileInformationByHandle, WriteFile,
+        GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OPEN_EXISTING,
+        READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
     },
     System::{
+        IO::OVERLAPPED,
         Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY,
             REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, RegCloseKey, RegCreateKeyExW,
@@ -222,6 +223,77 @@ impl ProtectedRootSession {
             &ads_sha256,
         )
     }
+}
+
+pub struct CleanupRecordPrivacyGuard {
+    _handle: Handle,
+    _lock: Box<OVERLAPPED>,
+}
+
+pub fn retain_private_cleanup_record(
+    path: &Path,
+    record_id: &str,
+    control_nonce: &str,
+) -> io::Result<CleanupRecordPrivacyGuard> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ | READ_CONTROL,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_regular_file(file.0)?;
+    let record: serde_json::Value = serde_json::from_slice(&read_handle(file.0)?)
+        .map_err(|_| io::Error::other("cleanup record is not valid JSON"))?;
+    let probe = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if probe.0 != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::other(
+            "cleanup record privacy handle permits a second reader",
+        ));
+    }
+    let mut lock: Box<OVERLAPPED> = Box::new(unsafe { zeroed() });
+    if unsafe {
+        LockFileEx(
+            file.0,
+            LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            lock.as_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if record["schemaVersion"].as_u64() != Some(4)
+        || record["recordId"].as_str() != Some(record_id)
+        || record["controlNonce"].as_str() != Some(control_nonce)
+    {
+        return Err(io::Error::other(
+            "cleanup record private control identity changed",
+        ));
+    }
+    Ok(CleanupRecordPrivacyGuard {
+        _handle: file,
+        _lock: lock,
+    })
 }
 
 pub struct RegistryNamespaceSession {
@@ -597,6 +669,61 @@ pub fn registry_root_inventory() -> io::Result<Option<KeyInventory>> {
     verify_relative_key_path(&software, &test_root, "Talking Quill Tests")?;
     reject_registry_link(&test_root)?;
     Ok(Some(inventory_key(&test_root)?))
+}
+
+pub fn harden_current_process_for_supervised_child() -> io::Result<()> {
+    let descriptor_sddl = format!(
+        "D:P(D;;0x000fffff;;;{0})(D;;0x000fffff;;;OW)(A;;0x001fffff;;;SY)(A;;0x00100000;;;{0})",
+        current_user_sid()?
+    );
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide(Path::new(&descriptor_sddl))?.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let descriptor = Descriptor(descriptor);
+    if unsafe {
+        SetKernelObjectSecurity(
+            GetCurrentProcess(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut actual = null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            GetCurrentProcess(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut actual,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let actual = Descriptor(actual);
+    let expected_text = descriptor_text(descriptor.0)?;
+    let actual_text = descriptor_text(actual.0)?;
+    if actual_text != expected_text {
+        return Err(io::Error::other(format!(
+            "supervisor process DACL verification failed: {actual_text} != {expected_text}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn consume_cleanup_record_temp(path: &Path) -> io::Result<Vec<u8>> {

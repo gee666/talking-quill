@@ -31,8 +31,11 @@ struct NamespaceSessionRequest {
     command: String,
     namespace_id: String,
     record_path: std::path::PathBuf,
-    child_log_path: std::path::PathBuf,
+    child_stdout_log_path: std::path::PathBuf,
+    child_stderr_log_path: std::path::PathBuf,
     control_nonce: String,
+    #[serde(default)]
+    probe_control_handle: bool,
     roots: Vec<NamespaceSessionRoot>,
 }
 
@@ -79,6 +82,108 @@ fn main() {
             Ok(code) => std::process::exit(code as i32),
             Err(()) => std::process::exit(74),
         }
+    }
+    if let [mode, value] = arguments.as_slice()
+        && mode == "--assert-supervisor-process-protected"
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NOT_ALL_ASSIGNED,
+            GetLastError, HANDLE, SetLastError,
+        };
+        use windows_sys::Win32::Security::{
+            AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+            SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_DUP_HANDLE,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+        };
+        let Some(pid) = value.to_str().and_then(|value| value.parse::<u32>().ok()) else {
+            std::process::exit(64);
+        };
+        let mut token = std::ptr::null_mut();
+        if unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut token,
+            )
+        } == 0
+        {
+            std::process::exit(78);
+        }
+        let debug_name = std::ffi::OsStr::new("SeDebugPrivilege")
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut privilege: LUID_AND_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        if unsafe {
+            LookupPrivilegeValueW(std::ptr::null(), debug_name.as_ptr(), &mut privilege.Luid)
+        } == 0
+        {
+            unsafe { CloseHandle(token) };
+            std::process::exit(78);
+        }
+        privilege.Attributes = SE_PRIVILEGE_ENABLED;
+        let state = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [privilege],
+        };
+        unsafe { SetLastError(0) };
+        let adjusted = unsafe {
+            AdjustTokenPrivileges(
+                token,
+                0,
+                &state,
+                size_of::<TOKEN_PRIVILEGES>() as u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        let adjust_error = unsafe { GetLastError() };
+        unsafe { CloseHandle(token) };
+        if adjusted == 0 || adjust_error != ERROR_NOT_ALL_ASSIGNED {
+            eprintln!("SeDebugPrivilege remains assignable in the supervised child");
+            std::process::exit(79);
+        }
+        let synchronized = unsafe { OpenProcess(0x0010_0000, 0, pid) };
+        if synchronized.is_null() {
+            std::process::exit(78);
+        }
+        for access in [
+            PROCESS_DUP_HANDLE,
+            PROCESS_VM_READ,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        ] {
+            let opened = unsafe { OpenProcess(access, 0, pid) };
+            if !opened.is_null() {
+                eprintln!("dangerous supervisor process access remained open: {access:#x}");
+                unsafe { CloseHandle(opened) };
+                unsafe { CloseHandle(synchronized) };
+                std::process::exit(79);
+            }
+        }
+        let mut duplicate: HANDLE = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                synchronized,
+                4usize as HANDLE,
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } != 0
+        {
+            eprintln!("cross-process DuplicateHandle unexpectedly succeeded");
+            unsafe { CloseHandle(duplicate) };
+            unsafe { CloseHandle(synchronized) };
+            std::process::exit(79);
+        }
+        unsafe { CloseHandle(synchronized) };
+        return;
     }
     if let [mode, value] = arguments.as_slice()
         && mode == "--assert-handle-not-inherited"
@@ -557,18 +662,49 @@ fn run_namespace_session(
     if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok("roots-created") {
         std::process::exit(197);
     }
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
-    let control_handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } as usize;
+    talking_quill_helper::machine_lock_test_namespace::harden_current_process_for_supervised_child(
+    )?;
+    let record_privacy =
+        talking_quill_helper::machine_lock_test_namespace::retain_private_cleanup_record(
+            &request.record_path,
+            request
+                .record_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or("cleanup record path has no identity")?,
+            &request.control_nonce,
+        )?;
     unsafe {
         std::env::set_var(
-            "TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE",
-            control_handle.to_string(),
+            "TQ_MACHINE_LOCK_TEST_SUPERVISOR_PID",
+            std::process::id().to_string(),
         );
     }
-    let child_result = supervise_job(&request.command, Some(&request.child_log_path));
     unsafe {
         std::env::remove_var("TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE");
     }
+    if request.probe_control_handle {
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+        let control_handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } as usize;
+        unsafe {
+            std::env::set_var(
+                "TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE",
+                control_handle.to_string(),
+            );
+        }
+    }
+    let child_result = supervise_job(
+        &request.command,
+        Some((
+            &request.child_stdout_log_path,
+            &request.child_stderr_log_path,
+        )),
+    );
+    unsafe {
+        std::env::remove_var("TQ_MACHINE_LOCK_TEST_SUPERVISOR_PID");
+        std::env::remove_var("TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE");
+    }
+    drop(record_privacy);
     let child_code = child_result.map_err(|_| "job supervision failed")?;
     for (_, root) in &mut roots {
         root.restore_root_for_teardown()?;
@@ -673,13 +809,20 @@ fn supervise(command: &str, namespaces: &[RetainedNamespace]) -> Result<u32, ()>
 }
 
 #[cfg(windows)]
-fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Result<u32, ()> {
+fn supervise_job(
+    command: &str,
+    child_log_paths: Option<(&std::path::Path, &std::path::Path)>,
+) -> Result<u32, ()> {
     use std::{mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
         },
-        Security::SECURITY_ATTRIBUTES,
+        Security::{
+            AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+            SE_PRIVILEGE_REMOVED, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+            TOKEN_QUERY,
+        },
         Storage::FileSystem::{
             CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
             FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -694,10 +837,10 @@ fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Res
             Threading::{
                 CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
                 EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread,
-                STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
-                WaitForSingleObject,
+                STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
+                UpdateProcThreadAttribute, WaitForSingleObject,
             },
         },
     };
@@ -719,6 +862,43 @@ fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Res
             }
         }
     }
+
+    let remove_dangerous_privileges = |process: HANDLE| -> Result<(), ()> {
+        let mut token = null_mut();
+        if unsafe { OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) }
+            == 0
+        {
+            return Err(());
+        }
+        let token = Handle(token);
+        let name = std::ffi::OsStr::new("SeDebugPrivilege")
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut privilege: LUID_AND_ATTRIBUTES = unsafe { zeroed() };
+        if unsafe { LookupPrivilegeValueW(null_mut(), name.as_ptr(), &mut privilege.Luid) } == 0 {
+            return Err(());
+        }
+        privilege.Attributes = SE_PRIVILEGE_REMOVED;
+        let state = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [privilege],
+        };
+        if unsafe {
+            AdjustTokenPrivileges(
+                token.0,
+                0,
+                &state,
+                size_of::<TOKEN_PRIVILEGES>() as u32,
+                null_mut(),
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(());
+        }
+        Ok(())
+    };
 
     let job = Handle(unsafe { CreateJobObjectW(null_mut(), null_mut()) });
     if job.0.is_null() {
@@ -742,92 +922,102 @@ fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Res
         .chain(Some(0))
         .collect::<Vec<_>>();
     let mut inherited_handles = Vec::new();
-    let mut log_handle = None;
+    let mut stdout_handle = None;
+    let mut stderr_handle = None;
     let mut input_handle = None;
     let mut attribute_storage = Vec::<usize>::new();
     let mut attribute_list = AttributeList(null_mut());
     let mut startup_ex: STARTUPINFOEXW = unsafe { zeroed() };
     let mut startup: STARTUPINFOW = unsafe { zeroed() };
-    let (startup_pointer, creation_flags) = if let Some(log_path) = child_log_path {
-        let security = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: null_mut(),
-            bInheritHandle: 1,
-        };
-        let log_path = log_path
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let log = Handle(unsafe {
-            CreateFileW(
-                log_path.as_ptr(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_DELETE,
-                &security,
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                null_mut(),
-            )
-        });
-        let nul = std::ffi::OsStr::new("NUL")
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let input = Handle(unsafe {
-            CreateFileW(
-                nul.as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &security,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                null_mut(),
-            )
-        });
-        if log.0 == INVALID_HANDLE_VALUE || input.0 == INVALID_HANDLE_VALUE {
-            return Err(());
-        }
-        inherited_handles.extend([input.0, log.0]);
-        let mut attribute_bytes = 0usize;
-        unsafe {
-            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
-        }
-        attribute_storage.resize(attribute_bytes.div_ceil(size_of::<usize>()), 0);
-        attribute_list.0 = attribute_storage.as_mut_ptr().cast();
-        if unsafe {
-            InitializeProcThreadAttributeList(attribute_list.0, 1, 0, &mut attribute_bytes)
-        } == 0
-            || unsafe {
-                UpdateProcThreadAttribute(
-                    attribute_list.0,
-                    0,
-                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                    inherited_handles.as_ptr().cast(),
-                    size_of_val(inherited_handles.as_slice()),
-                    null_mut(),
+    let (startup_pointer, creation_flags) =
+        if let Some((stdout_log_path, stderr_log_path)) = child_log_paths {
+            let security = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: null_mut(),
+                bInheritHandle: 1,
+            };
+            let create_log = |path: &std::path::Path| {
+                let path = path
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>();
+                Handle(unsafe {
+                    CreateFileW(
+                        path.as_ptr(),
+                        GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_DELETE,
+                        &security,
+                        CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL,
+                        null_mut(),
+                    )
+                })
+            };
+            let output = create_log(stdout_log_path);
+            let error = create_log(stderr_log_path);
+            let nul = std::ffi::OsStr::new("NUL")
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>();
+            let input = Handle(unsafe {
+                CreateFileW(
+                    nul.as_ptr(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    &security,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
                     null_mut(),
                 )
+            });
+            if output.0 == INVALID_HANDLE_VALUE
+                || error.0 == INVALID_HANDLE_VALUE
+                || input.0 == INVALID_HANDLE_VALUE
+            {
+                return Err(());
+            }
+            inherited_handles.extend([input.0, output.0, error.0]);
+            let mut attribute_bytes = 0usize;
+            unsafe {
+                InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
+            }
+            attribute_storage.resize(attribute_bytes.div_ceil(size_of::<usize>()), 0);
+            attribute_list.0 = attribute_storage.as_mut_ptr().cast();
+            if unsafe {
+                InitializeProcThreadAttributeList(attribute_list.0, 1, 0, &mut attribute_bytes)
             } == 0
-        {
-            return Err(());
-        }
-        startup_ex.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-        startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup_ex.StartupInfo.hStdInput = input.0;
-        startup_ex.StartupInfo.hStdOutput = log.0;
-        startup_ex.StartupInfo.hStdError = log.0;
-        startup_ex.lpAttributeList = attribute_list.0;
-        log_handle = Some(log);
-        input_handle = Some(input);
-        (
-            (&raw const startup_ex.StartupInfo),
-            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-        )
-    } else {
-        startup.cb = size_of::<STARTUPINFOW>() as u32;
-        (&raw const startup, CREATE_SUSPENDED)
-    };
+                || unsafe {
+                    UpdateProcThreadAttribute(
+                        attribute_list.0,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                        inherited_handles.as_ptr().cast(),
+                        size_of_val(inherited_handles.as_slice()),
+                        null_mut(),
+                        null_mut(),
+                    )
+                } == 0
+            {
+                return Err(());
+            }
+            startup_ex.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup_ex.StartupInfo.hStdInput = input.0;
+            startup_ex.StartupInfo.hStdOutput = output.0;
+            startup_ex.StartupInfo.hStdError = error.0;
+            startup_ex.lpAttributeList = attribute_list.0;
+            stdout_handle = Some(output);
+            stderr_handle = Some(error);
+            input_handle = Some(input);
+            (
+                (&raw const startup_ex.StartupInfo),
+                CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+            )
+        } else {
+            startup.cb = size_of::<STARTUPINFOW>() as u32;
+            (&raw const startup, CREATE_SUSPENDED)
+        };
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     if unsafe {
         CreateProcessW(
@@ -847,14 +1037,19 @@ fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Res
         return Err(());
     }
     drop(input_handle);
-    drop(log_handle);
+    drop(stdout_handle);
+    drop(stderr_handle);
     drop(attribute_list);
     drop(attribute_storage);
     let process_handle = Handle(process.hProcess);
     let thread_handle = Handle(process.hThread);
-    if unsafe { AssignProcessToJobObject(job.0, process_handle.0) } == 0
-        || unsafe { ResumeThread(thread_handle.0) } == u32::MAX
+    if remove_dangerous_privileges(process_handle.0).is_err()
+        || unsafe { AssignProcessToJobObject(job.0, process_handle.0) } == 0
     {
+        unsafe { TerminateProcess(process_handle.0, 74) };
+        return Err(());
+    }
+    if unsafe { ResumeThread(thread_handle.0) } == u32::MAX {
         unsafe { TerminateJobObject(job.0, 74) };
         return Err(());
     }

@@ -7478,6 +7478,13 @@ fn no_talking_quill_process_except_authenticated_pair(authenticated_parent: bool
     }
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
     let parent = authenticated_parent.then(parent_process_id).transpose()?;
+    #[cfg(any(test, feature = "machine-lock-test-namespace"))]
+    let namespace_supervisor = std::env::var("TQ_MACHINE_LOCK_TEST_SUPERVISOR_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value != 0);
+    #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
+    let namespace_supervisor = None;
     let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
     entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
     if unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } == 0 {
@@ -7499,6 +7506,7 @@ fn no_talking_quill_process_except_authenticated_pair(authenticated_parent: bool
         if candidate
             && entry.th32ProcessID != std::process::id()
             && Some(entry.th32ProcessID) != parent
+            && Some(entry.th32ProcessID) != namespace_supervisor
         {
             let image = process_image(entry.th32ProcessID)?;
             let name = image

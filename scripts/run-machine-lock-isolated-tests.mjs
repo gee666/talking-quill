@@ -18,8 +18,9 @@ import {
 } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
-const RECORD_SCHEMA = 3;
-const LEGACY_RECORD_SCHEMAS = [1, 2];
+const RECORD_SCHEMA = 4;
+const NATIVE_SESSION_SCHEMA = 3;
+const LEGACY_RECORD_SCHEMAS = [1, 2, 3];
 const root = resolve(import.meta.dirname, '..');
 const stateRoot = resolve(root, 'tmp', 'machine-lock-tests');
 const recordRoot = resolve(stateRoot, '.cleanup-records-v1');
@@ -175,7 +176,8 @@ function prepareNamespace(namespaceId) {
     child: null,
     supervisor: null,
     controlNonce: randomBytes(16).toString('hex'),
-    childLogFile: `${recordId}.log`,
+    childStdoutLogFile: `${recordId}.stdout.log`,
+    childStderrLogFile: `${recordId}.stderr.log`,
     projectRootIdentity: fileIdentity(root),
     stateRootIdentity: fileIdentity(stateRoot),
     recordDirectoryIdentity: fileIdentity(recordRoot),
@@ -207,14 +209,19 @@ function prepareNamespace(namespaceId) {
 }
 
 async function runNamespaceSession(record) {
-  const childLogPath = resolve(recordRoot, record.childLogFile);
-  if (existsSync(childLogPath)) throw new Error('native namespace child log already exists');
+  const childStdoutLogPath = resolve(recordRoot, record.childStdoutLogFile);
+  const childStderrLogPath = resolve(recordRoot, record.childStderrLogFile);
+  if (existsSync(childStdoutLogPath) || existsSync(childStderrLogPath)) {
+    throw new Error('native namespace child log already exists');
+  }
   const request = {
     command,
     namespaceId: record.namespaceId,
     recordPath: recordPath(record.recordId),
-    childLogPath,
+    childStdoutLogPath,
+    childStderrLogPath,
     controlNonce: record.controlNonce,
+    probeControlHandle: process.env.TQ_MACHINE_LOCK_TEST_PROBE_CONTROL_HANDLE === '1',
     roots: record.roots.map((entry) => ({
       kind: entry.kind,
       path: namespaceRoot(entry.kind, record.namespaceId),
@@ -229,7 +236,6 @@ async function runNamespaceSession(record) {
     windowsHide: true,
     env: { ...process.env, TQ_MACHINE_LOCK_TEST_GUARD_EXE: deleter },
   });
-  const stopLogDrain = startChildLogDrain(childLogPath);
   const exited = new Promise((done, reject) => {
     supervisor.once('error', reject);
     supervisor.once('exit', (code, signal) => done({ code, signal }));
@@ -302,8 +308,10 @@ async function runNamespaceSession(record) {
     assertSupervisorExited(record);
     throw error;
   } finally {
-    stopLogDrain();
-    cleanupChildLog(childLogPath);
+    await drainChildLog(childStdoutLogPath, process.stdout);
+    await drainChildLog(childStderrLogPath, process.stderr);
+    cleanupChildLog(childStdoutLogPath);
+    cleanupChildLog(childStderrLogPath);
   }
 }
 
@@ -316,28 +324,26 @@ async function supervisorFailureTestPause() {
   }
 }
 
-function startChildLogDrain(path) {
-  let offset = 0;
-  const drain = () => {
-    if (!existsSync(path)) return;
-    const handle = openSync(path, 'r');
-    try {
-      const buffer = Buffer.allocUnsafe(64 * 1024);
-      for (;;) {
-        const count = readSync(handle, buffer, 0, buffer.length, offset);
-        if (count === 0) break;
-        offset += count;
-        process.stdout.write(buffer.subarray(0, count));
-      }
-    } finally {
-      closeSync(handle);
+async function drainChildLog(path, destination) {
+  if (!existsSync(path)) return;
+  const handle = openSync(path, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    for (;;) {
+      const count = readSync(handle, buffer, 0, buffer.length, offset);
+      if (count === 0) break;
+      offset += count;
+      await new Promise((done, reject) => {
+        destination.write(buffer.subarray(0, count), (error) => {
+          if (error) reject(error);
+          else done();
+        });
+      });
     }
-  };
-  const timer = setInterval(drain, 25);
-  return () => {
-    clearInterval(timer);
-    drain();
-  };
+  } finally {
+    closeSync(handle);
+  }
 }
 
 function cleanupChildLog(path) {
@@ -444,6 +450,33 @@ function writeRecord(record) {
   fsyncDirectory(recordRoot);
 }
 
+function migrateSchema3Record(record) {
+  if (record.schemaVersion !== NATIVE_SESSION_SCHEMA) return record;
+  // 73f4391 schema-3 records predate control metadata; eae25e3 records contain both fields.
+  const hasControlNonce = record.controlNonce !== undefined;
+  const hasChildLog = record.childLogFile !== undefined;
+  if (hasControlNonce !== hasChildLog) {
+    throw new Error('schema-3 cleanup record control fields are partial');
+  }
+  if (
+    hasControlNonce &&
+    (!/^[0-9a-f]{32}$/u.test(record.controlNonce) ||
+      record.childLogFile !== `${record.recordId}.log`)
+  ) {
+    throw new Error('schema-3 cleanup record control fields are invalid');
+  }
+  if (record.childLogFile !== undefined) {
+    cleanupChildLog(resolve(recordRoot, record.childLogFile));
+  }
+  delete record.childLogFile;
+  record.schemaVersion = RECORD_SCHEMA;
+  record.controlNonce = randomBytes(16).toString('hex');
+  record.childStdoutLogFile = `${record.recordId}.stdout.log`;
+  record.childStderrLogFile = `${record.recordId}.stderr.log`;
+  writeRecord(record);
+  return record;
+}
+
 function recoverRecordedNamespaces(deleter) {
   if (!existsSync(recordRoot)) return;
   if (!isPlainPath(recordRoot, true)) throw new Error('cleanup record root is not plain');
@@ -451,7 +484,7 @@ function recoverRecordedNamespaces(deleter) {
   const files = readdirSync(recordRoot).sort();
   for (const name of files) {
     if (
-      !/^[0-9a-f]{32}\.(?:json|log)$/u.test(name) &&
+      !/^[0-9a-f]{32}\.(?:json|log|stdout\.log|stderr\.log)$/u.test(name) &&
       !/^[0-9a-f]{32}\.[a-z-]+\.binding-v1(?:\.intent-v1)?$/u.test(name)
     ) {
       throw new Error(`unknown machine-lock cleanup record: ${name}`);
@@ -466,9 +499,15 @@ function recoverRecordedNamespaces(deleter) {
     ),
   );
   const expectedLogs = new Set(
-    records
-      .filter((record) => record.schemaVersion === RECORD_SCHEMA)
-      .map((record) => record.childLogFile),
+    records.flatMap((record) => {
+      if (record.schemaVersion === RECORD_SCHEMA) {
+        return [record.childStdoutLogFile, record.childStderrLogFile];
+      }
+      if (record.schemaVersion === NATIVE_SESSION_SCHEMA && record.childLogFile !== undefined) {
+        return [record.childLogFile];
+      }
+      return [];
+    }),
   );
   for (const name of files.filter((entry) => entry.endsWith('.log'))) {
     if (!expectedLogs.has(name)) throw new Error(`orphan machine-lock child log: ${name}`);
@@ -486,7 +525,7 @@ function recoverRecordedNamespaces(deleter) {
     ids.add(value.namespaceId);
   }
   assertNoUnknownNamespaces(ids);
-  for (const value of records) {
+  for (let value of records) {
     if (
       processIdentityAlive(value.owner) ||
       processIdentityAlive(value.child) ||
@@ -494,6 +533,7 @@ function recoverRecordedNamespaces(deleter) {
     ) {
       throw new Error(`machine-lock cleanup record is owned by a live process: ${value.recordId}`);
     }
+    value = migrateSchema3Record(value);
     cleanupRecord(value, deleter, false);
   }
   removeEmptyParents();
@@ -566,7 +606,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
       if (
         rootRecord.identity === null &&
         (record.creatingRoot === rootRecord.kind ||
-          (record.schemaVersion === RECORD_SCHEMA && record.phase === 'native-creating'))
+          (record.schemaVersion >= NATIVE_SESSION_SCHEMA && record.phase === 'native-creating'))
       ) {
         deleteCreationArtifacts(rootRecord);
         record.deletedRoots.push(rootRecord.kind);
@@ -589,7 +629,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     if (
       rootRecord.identity === null &&
       (record.creatingRoot === rootRecord.kind ||
-        (record.schemaVersion === RECORD_SCHEMA && record.phase === 'native-creating'))
+        (record.schemaVersion >= NATIVE_SESSION_SCHEMA && record.phase === 'native-creating'))
     ) {
       removeInterruptedNamespaceRoot(path, rootRecord);
       record.deletedRoots.push(rootRecord.kind);
@@ -657,11 +697,11 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   const registryNow = registrySnapshot(record.namespaceId);
   if (registryNow.present) {
     const expected =
-      record.schemaVersion === RECORD_SCHEMA && record.phase === 'deleting-registry'
+      record.schemaVersion >= NATIVE_SESSION_SCHEMA && record.phase === 'deleting-registry'
         ? registryNow
         : registryInventory;
     if (
-      record.schemaVersion === RECORD_SCHEMA &&
+      record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
       record.phase === 'deleting-registry' &&
       !registryInventorySubset(registryNow, registryInventory)
     ) {
@@ -675,7 +715,8 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   record.phase = 'registry-deleted';
   writeRecord(record);
   if (record.schemaVersion === RECORD_SCHEMA) {
-    cleanupChildLog(resolve(recordRoot, record.childLogFile));
+    cleanupChildLog(resolve(recordRoot, record.childStdoutLogFile));
+    cleanupChildLog(resolve(recordRoot, record.childStderrLogFile));
   }
   const path = recordPath(record.recordId);
   if (!isPlainPath(path, false)) throw new Error('cleanup record changed before deletion');
@@ -843,15 +884,30 @@ function validateRecord(record) {
   ) {
     throw new Error('cleanup record process identity is invalid');
   }
+  if (record.schemaVersion === NATIVE_SESSION_SCHEMA) {
+    const hasControlNonce = record.controlNonce !== undefined;
+    const hasChildLog = record.childLogFile !== undefined;
+    if (
+      hasControlNonce !== hasChildLog ||
+      (hasControlNonce &&
+        (!/^[0-9a-f]{32}$/u.test(record.controlNonce) ||
+          record.childLogFile !== `${record.recordId}.log`)) ||
+      record.childStdoutLogFile !== undefined ||
+      record.childStderrLogFile !== undefined
+    ) {
+      throw new Error('schema-3 cleanup record control identity is invalid');
+    }
+  }
   if (
     record.schemaVersion === RECORD_SCHEMA &&
     (!/^[0-9a-f]{32}$/u.test(record.controlNonce ?? '') ||
-      record.childLogFile !== `${record.recordId}.log`)
+      record.childStdoutLogFile !== `${record.recordId}.stdout.log` ||
+      record.childStderrLogFile !== `${record.recordId}.stderr.log`)
   ) {
     throw new Error('cleanup record control identity is invalid');
   }
   if (
-    record.schemaVersion === RECORD_SCHEMA &&
+    record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
     record.phase !== 'native-creating' &&
     !validProcessIdentity(record.supervisor)
   ) {
@@ -881,7 +937,8 @@ function validateRecord(record) {
       typeof entry.ownershipPrefix !== 'string' ||
       !entry.ownershipPrefix.startsWith(prefix) ||
       !/^[0-9a-f]{32}$/u.test(entry.ownershipPrefix.slice(prefix.length)) ||
-      (record.schemaVersion === RECORD_SCHEMA && !/^\d+:\d+$/u.test(entry.parentIdentity ?? '')) ||
+      (record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
+        !/^\d+:\d+$/u.test(entry.parentIdentity ?? '')) ||
       (entry.parentIdentity !== undefined && !/^\d+:\d+$/u.test(entry.parentIdentity)) ||
       !/^[0-9a-f]{32}$/u.test(entry.bindingNonce ?? '') ||
       entry.bindingFile !== `${record.recordId}.${entry.kind}.binding-v1` ||
@@ -889,11 +946,11 @@ function validateRecord(record) {
       (entry.identity === null && entry.adsSha256 !== null) ||
       (entry.identity !== null && entry.adsSha256 === null) ||
       (entry.identity === null &&
-        record.schemaVersion !== RECORD_SCHEMA &&
+        record.schemaVersion < NATIVE_SESSION_SCHEMA &&
         record.creatingRoot !== entry.kind &&
         !record.deletedRoots.includes(entry.kind)) ||
       (entry.identity === null &&
-        record.schemaVersion === RECORD_SCHEMA &&
+        record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
         record.phase !== 'native-creating' &&
         !record.deletedRoots.includes(entry.kind)) ||
       (entry.identity !== null && !/^\d+:\d+$/u.test(entry.identity))

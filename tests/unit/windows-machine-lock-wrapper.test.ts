@@ -170,14 +170,30 @@ run('Windows machine-lock wrapper teardown', () => {
   it('does not inherit the supervisor control handle into the child', () => {
     const result = runWrapper(
       `${nativeHelper} --assert-handle-not-inherited %TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE%`,
+      { TQ_MACHINE_LOCK_TEST_PROBE_CONTROL_HANDLE: '1' },
     );
     expect(result.status, result.stderr).toBe(0);
   }, 120_000);
 
-  it('isolates forged control frames and high-volume child output', () => {
-    const result = runWrapper('node tests/fixtures/machine-lock-test-control-forgery.mjs');
+  it('protects supervisor process authority and isolates forged control frames', () => {
+    const result = runWrapper('node tests/fixtures/machine-lock-test-control-forgery.mjs', {
+      TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE: '123456',
+    });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('TQNS:00000000000000000000000000000000');
+    const forgedPrefix =
+      'TQNS:00000000000000000000000000000000:{"event":"completed","childExitCode":0}';
+    const stdoutLines = result.stdout.split(/\r?\n/u).filter((line) => line.startsWith('TQNS:'));
+    const stderrLines = result.stderr
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith('child stderr'));
+    expect(stdoutLines).toEqual(
+      Array.from({ length: 256 }, () => `${forgedPrefix} ${'x'.repeat(1024)}`),
+    );
+    expect(stderrLines).toEqual(
+      Array.from({ length: 256 }, (_, index) => `child stderr ${index} ${'y'.repeat(256)}`),
+    );
+    expect(result.stdout).not.toContain('child stderr');
+    expect(result.stderr).not.toContain(forgedPrefix);
     expect(existsSync(records)).toBe(false);
   }, 120_000);
 
@@ -215,6 +231,56 @@ run('Windows machine-lock wrapper teardown', () => {
   it('retains namespace root and parent handles while the child runs', () => {
     const result = runWrapper('node tests/fixtures/machine-lock-test-retained-parent.mjs');
     expect(result.status, result.stderr).toBe(0);
+  }, 120_000);
+
+  it.each([
+    ['create-after-record-before-identity', 'cmd.exe /d /c exit 0'],
+    ['roots-created', 'cmd.exe /d /c exit 0'],
+    ['inventory-sealed', 'cmd.exe /d /c exit 0'],
+    ['deleted-root:helper', 'cmd.exe /d /c exit 0'],
+    ['registry-values-deleted', 'node tests/fixtures/machine-lock-test-registry-state.mjs'],
+    ['registry-namespace-deleted', 'node tests/fixtures/machine-lock-test-registry-state.mjs'],
+    ['registry-deleted', 'node tests/fixtures/machine-lock-test-registry-state.mjs'],
+  ])(
+    'migrates an authentic schema-3 native-session record at %s',
+    async (phase, childCommand) => {
+      const record = await leaveRecordAtPhase(phase, childCommand);
+      record.schemaVersion = 3;
+      delete record.controlNonce;
+      delete record.childStdoutLogFile;
+      delete record.childStderrLogFile;
+      writeFileSync(
+        resolve(records, `${record.recordId}.json`),
+        `${JSON.stringify(record)}\n`,
+        'utf8',
+      );
+      const recovered = runWrapper('cmd.exe /d /c exit 0');
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(existsSync(records)).toBe(false);
+    },
+    120_000,
+  );
+
+  it('rejects partial schema-3 control metadata without cleanup', async () => {
+    const record = await leaveSealedRecord();
+    record.schemaVersion = 3;
+    delete record.childStdoutLogFile;
+    delete record.childStderrLogFile;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    const rejected = runWrapper('cmd.exe /d /c exit 0');
+    expect(rejected.status).not.toBe(0);
+    expect(existsSync(resolve(records, `${record.recordId}.json`))).toBe(true);
+    delete record.controlNonce;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
   }, 120_000);
 
   it('recovers a legacy cleanup record without parent identities', async () => {
@@ -356,13 +422,17 @@ run('Windows machine-lock wrapper teardown', () => {
 });
 
 async function leaveSealedRecord() {
+  return leaveRecordAtPhase('inventory-sealed', 'cmd.exe /d /c exit 0');
+}
+
+async function leaveRecordAtPhase(phase: string, childCommand: string) {
   const token = randomBytes(16).toString('hex');
   const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-supervisor-failure`);
   mkdirSync(resolve(pause, '..'), { recursive: true });
-  const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
+  const child = spawn(process.execPath, [wrapper, '--', childCommand], {
     env: {
       ...process.env,
-      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
       TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
     },
     windowsHide: true,
