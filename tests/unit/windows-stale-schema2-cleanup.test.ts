@@ -32,12 +32,15 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       );
     }
     expect(testGuard).toContain('Global\\\\TalkingQuill.MachineLockTests.V1');
-    expect(testGuard).toContain("assertNoTestNamespaceLeftovers('before')");
-    expect(testGuard).toContain("assertNoTestNamespaceLeftovers('after')");
+    expect(testGuard).toContain('recoverRecordedNamespaces(deleter)');
+    expect(testGuard).toContain('assertNoUnknownNamespaces()');
     expect(testGuard).toContain('productionResidueSnapshot()');
-    expect(testGuard).toContain('removeKnownLeakedTestNamespace');
-    expect(testGuard).toContain('removeEmptyTestRegistryRoot');
-    expect(testGuard).toContain('HKEY_LOCAL_MACHINE\\Software\\Talking Quill Tests');
+    expect(testGuard).toContain("phase = 'inventory-sealed'");
+    expect(testGuard).toContain('handle-bound machine-lock test tree deletion failed');
+    expect(testGuard).not.toContain('takeown.exe');
+    expect(testGuard).not.toContain("'/t'");
+    expect(testGuard).not.toContain("'/r'");
+    expect(testGuard).not.toContain('KNOWN_LEAKED_TEST_NAMESPACE_IDS');
     for (const implementation of [source, helperSource]) {
       expect(implementation).toContain(
         '.expect("machine-lock tests require the wrapper namespace environment")',

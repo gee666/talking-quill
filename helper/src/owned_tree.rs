@@ -22,9 +22,41 @@ pub fn owned_tree_identity(path: &Path) -> Result<String, OwnedTreeError> {
     platform::identity(path)
 }
 
+#[cfg(windows)]
+pub fn flush_owned_directory(path: &Path) -> Result<(), OwnedTreeError> {
+    platform::flush_directory(path)
+}
+
 pub fn remove_owned_tree(path: &Path, expected_identity: &str) -> Result<(), OwnedTreeError> {
     let (device, inode) = parse_identity(expected_identity)?;
     platform::remove(path, device, inode)
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactOwnedTreeEntry {
+    pub relative_path: String,
+    pub directory: bool,
+    pub identity: String,
+}
+
+#[cfg(windows)]
+pub fn remove_exact_owned_tree(
+    path: &Path,
+    expected_identity: &str,
+    expected_entries: &[ExactOwnedTreeEntry],
+) -> Result<(), OwnedTreeError> {
+    let (device, inode) = parse_identity(expected_identity)?;
+    platform::remove_exact(path, device, inode, expected_entries, false)
+}
+
+#[cfg(windows)]
+pub fn remove_remaining_exact_owned_tree(
+    path: &Path,
+    expected_identity: &str,
+    expected_entries: &[ExactOwnedTreeEntry],
+) -> Result<(), OwnedTreeError> {
+    let (device, inode) = parse_identity(expected_identity)?;
+    platform::remove_exact(path, device, inode, expected_entries, true)
 }
 
 fn parse_identity(value: &str) -> Result<(u64, u64), OwnedTreeError> {
@@ -44,19 +76,35 @@ fn parse_identity(value: &str) -> Result<(u64, u64), OwnedTreeError> {
 
 #[cfg(windows)]
 mod platform {
-    use super::OwnedTreeError;
+    use super::{ExactOwnedTreeEntry, OwnedTreeError, parse_identity};
     use std::{
-        ffi::c_void, io, mem::zeroed, os::windows::ffi::OsStrExt, path::Path, ptr::null_mut,
+        collections::{BTreeMap, BTreeSet},
+        ffi::{OsString, c_void},
+        io,
+        mem::zeroed,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::Path,
+        ptr::null_mut,
     };
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
+        Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        },
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                SE_FILE_OBJECT, SetSecurityInfo,
+            },
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+            PROTECTED_DACL_SECURITY_INFORMATION,
+        },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
             FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
             FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING,
-            SYNCHRONIZE, SetFileInformationByHandle,
+            READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC,
         },
     };
 
@@ -126,6 +174,49 @@ mod platform {
         }
     }
 
+    struct VerifiedNode {
+        handle: Handle,
+        children: Vec<VerifiedNode>,
+    }
+
+    pub fn remove_exact(
+        path: &Path,
+        expected_device: u64,
+        expected_inode: u64,
+        expected_entries: &[ExactOwnedTreeEntry],
+        allow_missing: bool,
+    ) -> Result<(), OwnedTreeError> {
+        let expected = expected_entries
+            .iter()
+            .map(|entry| {
+                parse_identity(&entry.identity).map(|identity| {
+                    (
+                        entry.relative_path.clone(),
+                        (entry.directory, identity.0, identity.1),
+                    )
+                })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if expected.len() != expected_entries.len() {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        let parent_path = path.parent().ok_or(OwnedTreeError::InvalidPath)?;
+        let parent = open_barrier_directory(parent_path)?;
+        let root = open_exact_root(path, expected_device, expected_inode)?;
+        let info = information(root.0)?;
+        validate_root(&info, expected_device, expected_inode)?;
+        let mut seen = BTreeSet::new();
+        let tree = verify_exact_directory(root, "", expected_device, &expected, &mut seen)?;
+        if !allow_missing && seen.len() != expected.len() {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        delete_verified(tree)?;
+        if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     pub fn remove(
         path: &Path,
         expected_device: u64,
@@ -137,20 +228,19 @@ mod platform {
         // verified root while every descendant is enumerated/opened relative to this handle.
         let root = open_root(path)?;
         let info = information(root.0)?;
-        let device = u64::from(info.dwVolumeSerialNumber);
-        let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-        if device != expected_device || inode != expected_inode {
-            return Err(OwnedTreeError::IdentityMismatch);
-        }
-        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-            != FILE_ATTRIBUTE_DIRECTORY
-        {
-            return Err(OwnedTreeError::IdentityMismatch);
-        }
-        remove_directory_contents(root.0, device)?;
+        validate_root(&info, expected_device, expected_inode)?;
+        remove_directory_contents(root.0, expected_device)?;
         mark_deleted(root.0)?;
         drop(root);
         if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn flush_directory(path: &Path) -> Result<(), OwnedTreeError> {
+        let handle = open_barrier_directory(path)?;
+        if unsafe { FlushFileBuffers(handle.0) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
         Ok(())
@@ -164,6 +254,92 @@ mod platform {
             info.dwVolumeSerialNumber,
             (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)
         ))
+    }
+
+    fn validate_root(
+        info: &BY_HANDLE_FILE_INFORMATION,
+        expected_device: u64,
+        expected_inode: u64,
+    ) -> Result<(), OwnedTreeError> {
+        let device = u64::from(info.dwVolumeSerialNumber);
+        let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        if device != expected_device || inode != expected_inode {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            != FILE_ATTRIBUTE_DIRECTORY
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        Ok(())
+    }
+
+    fn verify_exact_directory(
+        handle: Handle,
+        prefix: &str,
+        root_device: u64,
+        expected: &BTreeMap<String, (bool, u64, u64)>,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<VerifiedNode, OwnedTreeError> {
+        let mut children = Vec::new();
+        for mut name in directory_names(handle.0)? {
+            let component = OsString::from_wide(&name)
+                .into_string()
+                .map_err(|_| OwnedTreeError::InvalidPath)?;
+            if component.contains('/')
+                || component.contains('\\')
+                || component == "."
+                || component == ".."
+            {
+                return Err(OwnedTreeError::InvalidPath);
+            }
+            let relative = if prefix.is_empty() {
+                component
+            } else {
+                format!("{prefix}/{component}")
+            };
+            let Some(&(expected_directory, expected_device, expected_inode)) =
+                expected.get(&relative)
+            else {
+                return Err(OwnedTreeError::IdentityMismatch);
+            };
+            let child = open_exact_relative(
+                handle.0,
+                &mut name,
+                expected_directory,
+                expected_device,
+                expected_inode,
+            )?;
+            let info = information(child.0)?;
+            let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let device = u64::from(info.dwVolumeSerialNumber);
+            let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+            if expected_directory != directory
+                || expected_device != device
+                || expected_inode != inode
+                || device != root_device
+                || !seen.insert(relative.clone())
+            {
+                return Err(OwnedTreeError::IdentityMismatch);
+            }
+            let node = if directory {
+                verify_exact_directory(child, &relative, root_device, expected, seen)?
+            } else {
+                VerifiedNode {
+                    handle: child,
+                    children: Vec::new(),
+                }
+            };
+            children.push(node);
+        }
+        Ok(VerifiedNode { handle, children })
+    }
+
+    fn delete_verified(node: VerifiedNode) -> Result<(), OwnedTreeError> {
+        for child in node.children {
+            delete_verified(child)?;
+        }
+        mark_deleted(node.handle.0)
     }
 
     fn remove_directory_contents(handle: HANDLE, root_device: u64) -> Result<(), OwnedTreeError> {
@@ -180,7 +356,10 @@ mod platform {
             }
             let directory = child_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
             let reparse = child_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-            if directory && !reparse {
+            if reparse || (!directory && child_info.nNumberOfLinks != 1) {
+                return Err(OwnedTreeError::IdentityMismatch);
+            }
+            if directory {
                 remove_directory_contents(child.0, root_device)?;
             }
             mark_deleted(child.0)?;
@@ -248,7 +427,106 @@ mod platform {
         Ok(names)
     }
 
+    fn open_exact_relative(
+        parent: HANDLE,
+        name: &mut [u16],
+        expected_directory: bool,
+        expected_device: u64,
+        expected_inode: u64,
+    ) -> Result<Handle, OwnedTreeError> {
+        let desired =
+            DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_LIST_DIRECTORY | SYNCHRONIZE;
+        if let Ok(child) = open_relative_access(parent, name, desired) {
+            return Ok(child);
+        }
+        let repair = open_relative_access(
+            parent,
+            name,
+            WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        )?;
+        let info = information(repair.0)?;
+        let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let reparse = info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        let device = u64::from(info.dwVolumeSerialNumber);
+        let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        if directory != expected_directory
+            || reparse
+            || (!directory && info.nNumberOfLinks != 1)
+            || device != expected_device
+            || inode != expected_inode
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        repair_exact_dacl(repair.0)?;
+        let child = open_relative_access(parent, name, desired)?;
+        let repaired = information(child.0)?;
+        let repaired_inode =
+            (u64::from(repaired.nFileIndexHigh) << 32) | u64::from(repaired.nFileIndexLow);
+        if u64::from(repaired.dwVolumeSerialNumber) != expected_device
+            || repaired_inode != expected_inode
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        drop(repair);
+        Ok(child)
+    }
+
+    fn repair_exact_dacl(handle: HANDLE) -> Result<(), OwnedTreeError> {
+        let sddl = wide(Path::new("D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)"))?;
+        let mut descriptor = null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        } == 0
+            || descriptor.is_null()
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = null_mut();
+        let read = unsafe {
+            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+        };
+        let status = if read == 0 || present == 0 || dacl.is_null() {
+            1
+        } else {
+            unsafe {
+                SetSecurityInfo(
+                    handle,
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    dacl,
+                    null_mut(),
+                )
+            }
+        };
+        unsafe { LocalFree(descriptor) };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32).into());
+        }
+        Ok(())
+    }
+
     fn open_relative(parent: HANDLE, name: &mut [u16]) -> Result<Handle, OwnedTreeError> {
+        open_relative_access(
+            parent,
+            name,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        )
+    }
+
+    fn open_relative_access(
+        parent: HANDLE,
+        name: &mut [u16],
+        desired_access: u32,
+    ) -> Result<Handle, OwnedTreeError> {
         let byte_length = name
             .len()
             .checked_mul(2)
@@ -275,7 +553,7 @@ mod platform {
         let status = unsafe {
             NtOpenFile(
                 &mut child,
-                DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                desired_access,
                 &mut attributes,
                 &mut io_status,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -291,12 +569,34 @@ mod platform {
         Ok(Handle(child))
     }
 
+    fn open_exact_root(
+        path: &Path,
+        expected_device: u64,
+        expected_inode: u64,
+    ) -> Result<Handle, OwnedTreeError> {
+        let desired = DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
+        if let Ok(root) = open_root_access(path, desired) {
+            return Ok(root);
+        }
+        let repair = open_root_access(path, WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+        validate_root(&information(repair.0)?, expected_device, expected_inode)?;
+        repair_exact_dacl(repair.0)?;
+        let root = open_root_access(path, desired)?;
+        validate_root(&information(root.0)?, expected_device, expected_inode)?;
+        drop(repair);
+        Ok(root)
+    }
+
     fn open_root(path: &Path) -> Result<Handle, OwnedTreeError> {
+        open_root_access(path, DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
+    }
+
+    fn open_root_access(path: &Path, desired_access: u32) -> Result<Handle, OwnedTreeError> {
         let wide = wide(path)?;
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+                desired_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 null_mut(),
                 OPEN_EXISTING,

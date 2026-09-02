@@ -74,6 +74,11 @@ name = "talking-quill-update-recovery-launcher"
 path = "src/bin/talking-quill-update-recovery-launcher.rs"
 required-features = ["windows-update-recovery-launcher"]
 
+[[bin]]
+name = "talking-quill-test-tree-delete"
+path = "src/bin/talking-quill-test-tree-delete.rs"
+required-features = ["machine-lock-test-namespace"]
+
 [dependencies]
 crossbeam-channel.workspace = true
 getrandom.workspace = true
@@ -104,6 +109,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
+  "Win32_System_JobObjects",
   "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
   "Win32_System_Registry",

@@ -10568,7 +10568,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("tmp/machine-lock-tests/windows-setup-unit")
-            .join(machine_lock_test_id().unwrap());
+            .join(machine_lock_test_id().unwrap())
+            .join("w");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let suffix = "44".repeat(16);
@@ -11680,7 +11681,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("tmp/machine-lock-tests/orphan-inventory")
-            .join(machine_lock_test_id().unwrap());
+            .join(machine_lock_test_id().unwrap())
+            .join("w");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let suffix = "11".repeat(16);
