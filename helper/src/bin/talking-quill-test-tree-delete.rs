@@ -31,6 +31,8 @@ struct NamespaceSessionRequest {
     command: String,
     namespace_id: String,
     record_path: std::path::PathBuf,
+    child_log_path: std::path::PathBuf,
+    control_nonce: String,
     roots: Vec<NamespaceSessionRoot>,
 }
 
@@ -57,7 +59,7 @@ fn main() {
             std::process::exit(65);
         };
         match run_namespace_session(request) {
-            Ok(code) => std::process::exit(code as i32),
+            Ok(()) => std::process::exit(0),
             Err(error) => {
                 eprintln!("namespace session failed: {error}");
                 std::process::exit(78)
@@ -77,6 +79,35 @@ fn main() {
             Ok(code) => std::process::exit(code as i32),
             Err(()) => std::process::exit(74),
         }
+    }
+    if let [mode, value] = arguments.as_slice()
+        && mode == "--assert-handle-not-inherited"
+    {
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let Some(value) = value.to_str().and_then(|value| value.parse::<usize>().ok()) else {
+            std::process::exit(64);
+        };
+        let process = unsafe { GetCurrentProcess() };
+        let mut duplicate: HANDLE = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                process,
+                value as HANDLE,
+                process,
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } != 0
+        {
+            unsafe { CloseHandle(duplicate) };
+            std::process::exit(79);
+        }
+        return;
     }
     if let [mode, path] = arguments.as_slice()
         && mode == "--consume-record-temp"
@@ -424,15 +455,33 @@ fn update_session_record(
 }
 
 #[cfg(windows)]
+fn emit_control(nonce: &str, value: serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    println!("TQNS:{nonce}:{value}");
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn run_namespace_session(
     request: NamespaceSessionRequest,
-) -> Result<u32, Box<dyn std::error::Error>> {
-    use std::io::{BufRead, Write};
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::BufRead;
     if request.roots.len() != 4 {
         return Err("namespace session requires four outer roots".into());
     }
-    println!("TQNS:{}", serde_json::json!({"event": "started"}));
-    std::io::stdout().flush()?;
+    if request.control_nonce.len() != 32
+        || !request
+            .control_nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("namespace session control nonce is invalid".into());
+    }
+    emit_control(
+        &request.control_nonce,
+        serde_json::json!({"event": "started"}),
+    )?;
     let mut start = String::new();
     std::io::BufReader::new(std::io::stdin()).read_line(&mut start)?;
     if start.trim() != "create" {
@@ -496,17 +545,31 @@ fn run_namespace_session(
             })
         })
         .collect::<Vec<_>>();
-    println!(
-        "TQNS:{}",
-        serde_json::json!({"event": "ready", "roots": setup})
-    );
-    std::io::stdout().flush()?;
+    emit_control(
+        &request.control_nonce,
+        serde_json::json!({"event": "ready", "roots": setup}),
+    )?;
     let mut line = String::new();
     std::io::BufReader::new(std::io::stdin()).read_line(&mut line)?;
     if line.trim() != "run" {
         return Err("namespace session did not receive run acknowledgement".into());
     }
-    let child_code = supervise_job(&request.command).map_err(|_| "job supervision failed")?;
+    if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok("roots-created") {
+        std::process::exit(197);
+    }
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    let control_handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } as usize;
+    unsafe {
+        std::env::set_var(
+            "TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE",
+            control_handle.to_string(),
+        );
+    }
+    let child_result = supervise_job(&request.command, Some(&request.child_log_path));
+    unsafe {
+        std::env::remove_var("TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE");
+    }
+    let child_code = child_result.map_err(|_| "job supervision failed")?;
     for (_, root) in &mut roots {
         root.restore_root_for_teardown()?;
     }
@@ -586,12 +649,11 @@ fn run_namespace_session(
     if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok("registry-deleted") {
         std::process::exit(197);
     }
-    println!(
-        "TQNS:{}",
-        serde_json::json!({"event": "completed", "code": child_code})
-    );
-    std::io::stdout().flush()?;
-    Ok(child_code)
+    emit_control(
+        &request.control_nonce,
+        serde_json::json!({"event": "completed", "childExitCode": child_code}),
+    )?;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -607,14 +669,21 @@ fn supervise(command: &str, namespaces: &[RetainedNamespace]) -> Result<u32, ()>
             .map_err(|_| ())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    supervise_job(command)
+    supervise_job(command, None)
 }
 
 #[cfg(windows)]
-fn supervise_job(command: &str) -> Result<u32, ()> {
+fn supervise_job(command: &str, child_log_path: Option<&std::path::Path>) -> Result<u32, ()> {
     use std::{mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
+        Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        },
+        Security::SECURITY_ATTRIBUTES,
+        Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
         System::{
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -623,8 +692,12 @@ fn supervise_job(command: &str) -> Result<u32, ()> {
                 QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
             },
             Threading::{
-                CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess, INFINITE,
-                PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, WaitForSingleObject,
+                CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
+                EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread,
+                STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+                WaitForSingleObject,
             },
         },
     };
@@ -632,8 +705,17 @@ fn supervise_job(command: &str) -> Result<u32, ()> {
     struct Handle(HANDLE);
     impl Drop for Handle {
         fn drop(&mut self) {
-            if !self.0.is_null() {
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
                 unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+
+    struct AttributeList(LPPROC_THREAD_ATTRIBUTE_LIST);
+    impl Drop for AttributeList {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { DeleteProcThreadAttributeList(self.0) };
             }
         }
     }
@@ -659,8 +741,93 @@ fn supervise_job(command: &str) -> Result<u32, ()> {
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
+    let mut inherited_handles = Vec::new();
+    let mut log_handle = None;
+    let mut input_handle = None;
+    let mut attribute_storage = Vec::<usize>::new();
+    let mut attribute_list = AttributeList(null_mut());
+    let mut startup_ex: STARTUPINFOEXW = unsafe { zeroed() };
     let mut startup: STARTUPINFOW = unsafe { zeroed() };
-    startup.cb = size_of::<STARTUPINFOW>() as u32;
+    let (startup_pointer, creation_flags) = if let Some(log_path) = child_log_path {
+        let security = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: null_mut(),
+            bInheritHandle: 1,
+        };
+        let log_path = log_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let log = Handle(unsafe {
+            CreateFileW(
+                log_path.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                &security,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        });
+        let nul = std::ffi::OsStr::new("NUL")
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let input = Handle(unsafe {
+            CreateFileW(
+                nul.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &security,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        });
+        if log.0 == INVALID_HANDLE_VALUE || input.0 == INVALID_HANDLE_VALUE {
+            return Err(());
+        }
+        inherited_handles.extend([input.0, log.0]);
+        let mut attribute_bytes = 0usize;
+        unsafe {
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
+        }
+        attribute_storage.resize(attribute_bytes.div_ceil(size_of::<usize>()), 0);
+        attribute_list.0 = attribute_storage.as_mut_ptr().cast();
+        if unsafe {
+            InitializeProcThreadAttributeList(attribute_list.0, 1, 0, &mut attribute_bytes)
+        } == 0
+            || unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list.0,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    inherited_handles.as_ptr().cast(),
+                    size_of_val(inherited_handles.as_slice()),
+                    null_mut(),
+                    null_mut(),
+                )
+            } == 0
+        {
+            return Err(());
+        }
+        startup_ex.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup_ex.StartupInfo.hStdInput = input.0;
+        startup_ex.StartupInfo.hStdOutput = log.0;
+        startup_ex.StartupInfo.hStdError = log.0;
+        startup_ex.lpAttributeList = attribute_list.0;
+        log_handle = Some(log);
+        input_handle = Some(input);
+        (
+            (&raw const startup_ex.StartupInfo),
+            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+        )
+    } else {
+        startup.cb = size_of::<STARTUPINFOW>() as u32;
+        (&raw const startup, CREATE_SUSPENDED)
+    };
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     if unsafe {
         CreateProcessW(
@@ -669,16 +836,20 @@ fn supervise_job(command: &str) -> Result<u32, ()> {
             null_mut(),
             null_mut(),
             1,
-            CREATE_SUSPENDED,
+            creation_flags,
             null_mut(),
             null_mut(),
-            &startup,
+            startup_pointer,
             &mut process,
         )
     } == 0
     {
         return Err(());
     }
+    drop(input_handle);
+    drop(log_handle);
+    drop(attribute_list);
+    drop(attribute_storage);
     let process_handle = Handle(process.hProcess);
     let thread_handle = Handle(process.hThread);
     if unsafe { AssignProcessToJobObject(job.0, process_handle.0) } == 0

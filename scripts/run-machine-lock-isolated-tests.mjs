@@ -9,6 +9,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmdirSync,
@@ -29,6 +30,13 @@ if (separator === -1 || separator === process.argv.length - 1) {
 }
 const command = process.argv.slice(separator + 1).join(' ');
 
+class SupervisorFailure extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
 if (process.platform !== 'win32') {
   const result = spawnSync(command, { shell: true, stdio: 'inherit' });
   process.exit(result.status ?? 1);
@@ -42,6 +50,8 @@ const serializer = await acquireSerializer();
 let status = 1;
 let productionBefore;
 let record;
+let primaryFailure;
+const finalFailures = [];
 try {
   recoverRecordedNamespaces(deleter);
   assertNoUnknownNamespaces();
@@ -54,24 +64,51 @@ try {
   fsyncDirectory(recordRoot);
   record = undefined;
   removeEmptyParents();
+} catch (error) {
+  primaryFailure = error;
+  status = error instanceof SupervisorFailure && error.code === 197 ? 197 : 1;
+  if (status === 197) {
+    delete process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER;
+    await supervisorFailureTestPause();
+  }
 } finally {
-  let productionFailure;
   try {
-    if (productionBefore !== undefined && productionResidueSnapshot() !== productionBefore) {
-      productionFailure = new Error('isolated tests changed production machine-lock residue');
+    if (record !== undefined) {
+      assertSupervisorExited(record);
+      recoverNativeRecordTemps();
+      record = reloadProtectedRecord(record.recordId);
+      cleanupRecord(record, deleter, true);
     }
   } catch (error) {
-    productionFailure = error;
+    finalFailures.push(error);
   }
   try {
-    if (record !== undefined) cleanupRecord(record, deleter, true);
     recoverRecordedNamespaces(deleter);
+  } catch (error) {
+    finalFailures.push(error);
+  }
+  try {
     assertNoUnknownNamespaces();
+  } catch (error) {
+    finalFailures.push(error);
+  }
+  try {
+    if (productionBefore !== undefined && productionResidueSnapshot() !== productionBefore) {
+      finalFailures.push(new Error('isolated tests changed production machine-lock residue'));
+    }
+  } catch (error) {
+    finalFailures.push(error);
   } finally {
     serializer.stdin.end('\n');
   }
-  if (productionFailure) throw productionFailure;
 }
+if (
+  primaryFailure &&
+  !(primaryFailure instanceof SupervisorFailure && primaryFailure.code === 197)
+) {
+  finalFailures.unshift(primaryFailure);
+}
+if (finalFailures.length > 0) throw new AggregateError(finalFailures, 'namespace wrapper failed');
 process.exit(status);
 
 function buildTreeDeleter() {
@@ -128,14 +165,17 @@ async function acquireSerializer() {
 function prepareNamespace(namespaceId) {
   assertNamespaceId(namespaceId);
   ensureProtectedRecordRoot();
+  const recordId = randomBytes(16).toString('hex');
   const record = {
     schemaVersion: RECORD_SCHEMA,
-    recordId: randomBytes(16).toString('hex'),
+    recordId,
     namespaceId,
     phase: 'native-creating',
     owner: processIdentity(process.pid),
     child: null,
     supervisor: null,
+    controlNonce: randomBytes(16).toString('hex'),
+    childLogFile: `${recordId}.log`,
     projectRootIdentity: fileIdentity(root),
     stateRootIdentity: fileIdentity(stateRoot),
     recordDirectoryIdentity: fileIdentity(recordRoot),
@@ -167,10 +207,14 @@ function prepareNamespace(namespaceId) {
 }
 
 async function runNamespaceSession(record) {
+  const childLogPath = resolve(recordRoot, record.childLogFile);
+  if (existsSync(childLogPath)) throw new Error('native namespace child log already exists');
   const request = {
     command,
     namespaceId: record.namespaceId,
     recordPath: recordPath(record.recordId),
+    childLogPath,
+    controlNonce: record.controlNonce,
     roots: record.roots.map((entry) => ({
       kind: entry.kind,
       path: namespaceRoot(entry.kind, record.namespaceId),
@@ -185,83 +229,151 @@ async function runNamespaceSession(record) {
     windowsHide: true,
     env: { ...process.env, TQ_MACHINE_LOCK_TEST_GUARD_EXE: deleter },
   });
+  const stopLogDrain = startChildLogDrain(childLogPath);
   const exited = new Promise((done, reject) => {
     supervisor.once('error', reject);
     supervisor.once('exit', (code, signal) => done({ code, signal }));
   });
-  const lines = createInterface({ input: supervisor.stdout, crlfDelay: Infinity });
-  const iterator = lines[Symbol.asyncIterator]();
-  const started = await nextNamespaceSessionEvent(iterator);
-  if (started === null) return handleNamespaceSessionExit(await exited);
-  if (started?.event !== 'started') {
-    throw new Error('native namespace supervisor returned an invalid startup event');
-  }
-  record.supervisor = requiredProcessIdentity(supervisor.pid);
-  writeRecord(record);
-  supervisor.stdin.write('create\n');
-  const setup = await nextNamespaceSessionEvent(iterator);
-  if (setup === null) return handleNamespaceSessionExit(await exited);
-  if (setup?.event !== 'ready' || !Array.isArray(setup.roots)) {
-    throw new Error('native namespace supervisor returned an invalid setup event');
-  }
-  const byKind = new Map(setup.roots.map((entry) => [entry.kind, entry]));
-  for (const rootRecord of record.roots) {
-    const created = byKind.get(rootRecord.kind);
-    if (
-      !created ||
-      !/^\d+:\d+$/u.test(created.identity ?? '') ||
-      !/^[0-9a-f]{64}$/u.test(created.adsSha256 ?? '')
-    ) {
-      throw new Error('native namespace supervisor returned an invalid root identity');
+  try {
+    const lines = createInterface({ input: supervisor.stdout, crlfDelay: Infinity });
+    const iterator = lines[Symbol.asyncIterator]();
+    const started = await nextNamespaceSessionEvent(iterator, record.controlNonce);
+    if (started === null) return handleNamespaceSessionExit(await exited, record);
+    if (started?.event !== 'started') {
+      throw new Error('native namespace supervisor returned an invalid startup event');
     }
-    rootRecord.identity = created.identity;
-    rootRecord.adsSha256 = created.adsSha256;
-  }
-  record.creatingRoot = null;
-  record.phase = 'roots-created';
-  writeRecord(record);
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'roots-created') process.exit(197);
-  supervisor.stdin.end('run\n');
-  const completed = await nextNamespaceSessionEvent(iterator);
-  const result = await exited;
-  if (result.code === 197) process.exit(197);
-  if (result.signal) throw new Error(`native namespace supervisor ended with ${result.signal}`);
-  if (completed === null) {
-    throw new Error(`native namespace supervisor exited before teardown: ${result.code}`);
-  }
-  if (completed?.event !== 'completed' || completed.code !== result.code) {
-    throw new Error('native namespace supervisor returned an invalid completion event');
-  }
-  for (const rootRecord of record.roots) {
-    if (existsSync(namespaceRoot(rootRecord.kind, record.namespaceId))) {
-      throw new Error(`native namespace supervisor left a root: ${rootRecord.kind}`);
+    record.supervisor = requiredProcessIdentity(supervisor.pid);
+    writeRecord(record);
+    supervisor.stdin.write('create\n');
+    const setup = await nextNamespaceSessionEvent(iterator, record.controlNonce);
+    if (setup === null) return handleNamespaceSessionExit(await exited, record);
+    if (setup?.event !== 'ready' || !Array.isArray(setup.roots)) {
+      throw new Error('native namespace supervisor returned an invalid setup event');
     }
-    if (
-      existsSync(resolve(recordRoot, rootRecord.bindingFile)) ||
-      existsSync(`${resolve(recordRoot, rootRecord.bindingFile)}.intent-v1`)
-    ) {
-      throw new Error(`native namespace supervisor left a binding: ${rootRecord.kind}`);
+    const byKind = new Map(setup.roots.map((entry) => [entry.kind, entry]));
+    for (const rootRecord of record.roots) {
+      const created = byKind.get(rootRecord.kind);
+      if (
+        !created ||
+        !/^\d+:\d+$/u.test(created.identity ?? '') ||
+        !/^[0-9a-f]{64}$/u.test(created.adsSha256 ?? '')
+      ) {
+        throw new Error('native namespace supervisor returned an invalid root identity');
+      }
+      rootRecord.identity = created.identity;
+      rootRecord.adsSha256 = created.adsSha256;
     }
+    record.creatingRoot = null;
+    record.phase = 'roots-created';
+    writeRecord(record);
+    supervisor.stdin.end('run\n');
+    const completed = await nextNamespaceSessionEvent(iterator, record.controlNonce);
+    const result = await exited;
+    if (result.signal) throw new Error(`native namespace supervisor ended with ${result.signal}`);
+    if (result.code !== 0 || completed?.event !== 'completed') {
+      assertSupervisorExited(record);
+      throw new SupervisorFailure(
+        result.code,
+        `native namespace supervisor exited before authenticated teardown: ${result.code}`,
+      );
+    }
+    if (!Number.isInteger(completed.childExitCode) || completed.childExitCode < 0) {
+      throw new Error('native namespace supervisor returned an invalid child exit code');
+    }
+    for (const rootRecord of record.roots) {
+      if (existsSync(namespaceRoot(rootRecord.kind, record.namespaceId))) {
+        throw new Error(`native namespace supervisor left a root: ${rootRecord.kind}`);
+      }
+      if (
+        existsSync(resolve(recordRoot, rootRecord.bindingFile)) ||
+        existsSync(`${resolve(recordRoot, rootRecord.bindingFile)}.intent-v1`)
+      ) {
+        throw new Error(`native namespace supervisor left a binding: ${rootRecord.kind}`);
+      }
+    }
+    if (registrySnapshot(record.namespaceId).present) {
+      throw new Error('native namespace supervisor left the registry namespace');
+    }
+    return { code: completed.childExitCode };
+  } catch (error) {
+    supervisor.stdin.destroy();
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill();
+    await exited.catch(() => undefined);
+    assertSupervisorExited(record);
+    throw error;
+  } finally {
+    stopLogDrain();
+    cleanupChildLog(childLogPath);
   }
-  if (registrySnapshot(record.namespaceId).present) {
-    throw new Error('native namespace supervisor left the registry namespace');
-  }
-  return { code: completed.code };
 }
 
-async function nextNamespaceSessionEvent(iterator) {
+async function supervisorFailureTestPause() {
+  const path = process.env.TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE;
+  if (!path) return;
+  writeFileSync(`${path}.ready`, 'ready\n', { flag: 'wx' });
+  while (!existsSync(`${path}.continue`)) {
+    await new Promise((done) => setTimeout(done, 10));
+  }
+}
+
+function startChildLogDrain(path) {
+  let offset = 0;
+  const drain = () => {
+    if (!existsSync(path)) return;
+    const handle = openSync(path, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      for (;;) {
+        const count = readSync(handle, buffer, 0, buffer.length, offset);
+        if (count === 0) break;
+        offset += count;
+        process.stdout.write(buffer.subarray(0, count));
+      }
+    } finally {
+      closeSync(handle);
+    }
+  };
+  const timer = setInterval(drain, 25);
+  return () => {
+    clearInterval(timer);
+    drain();
+  };
+}
+
+function cleanupChildLog(path) {
+  if (existsSync(path)) {
+    if (!isPlainPath(path, false) || lstatSync(path).nlink !== 1) {
+      throw new Error('native namespace child log is not an exact regular file');
+    }
+    unlinkSync(path);
+  }
+}
+
+async function nextNamespaceSessionEvent(iterator, nonce) {
+  const prefix = `TQNS:${nonce}:`;
   for (;;) {
     const line = await iterator.next();
     if (line.done) return null;
-    if (line.value.startsWith('TQNS:')) return JSON.parse(line.value.slice(5));
-    process.stdout.write(`${line.value}\n`);
+    if (!line.value.startsWith(prefix)) {
+      throw new Error('native namespace control channel returned unauthenticated data');
+    }
+    return JSON.parse(line.value.slice(prefix.length));
   }
 }
 
-function handleNamespaceSessionExit(result) {
-  if (result.code === 197) process.exit(197);
+function assertSupervisorExited(record) {
+  if (record.supervisor && processIdentityAlive(record.supervisor)) {
+    throw new Error('native namespace supervisor still has its recorded process identity');
+  }
+}
+
+function handleNamespaceSessionExit(result, record) {
+  assertSupervisorExited(record);
   if (result.signal) throw new Error(`native namespace supervisor ended with ${result.signal}`);
-  throw new Error(`native namespace supervisor failed during setup: ${result.code}`);
+  throw new SupervisorFailure(
+    result.code,
+    `native namespace supervisor failed during setup: ${result.code}`,
+  );
 }
 
 function ensureProtectedRecordRoot() {
@@ -339,7 +451,7 @@ function recoverRecordedNamespaces(deleter) {
   const files = readdirSync(recordRoot).sort();
   for (const name of files) {
     if (
-      !/^[0-9a-f]{32}\.json$/u.test(name) &&
+      !/^[0-9a-f]{32}\.(?:json|log)$/u.test(name) &&
       !/^[0-9a-f]{32}\.[a-z-]+\.binding-v1(?:\.intent-v1)?$/u.test(name)
     ) {
       throw new Error(`unknown machine-lock cleanup record: ${name}`);
@@ -353,6 +465,14 @@ function recoverRecordedNamespaces(deleter) {
       record.roots.flatMap((entry) => [entry.bindingFile, `${entry.bindingFile}.intent-v1`]),
     ),
   );
+  const expectedLogs = new Set(
+    records
+      .filter((record) => record.schemaVersion === RECORD_SCHEMA)
+      .map((record) => record.childLogFile),
+  );
+  for (const name of files.filter((entry) => entry.endsWith('.log'))) {
+    if (!expectedLogs.has(name)) throw new Error(`orphan machine-lock child log: ${name}`);
+  }
   for (const name of files.filter(
     (entry) => entry.endsWith('.binding-v1') || entry.endsWith('.intent-v1'),
   )) {
@@ -499,7 +619,9 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   record.registryInventory = registryInventory;
   record.phase = 'inventory-sealed';
   writeRecord(record);
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'inventory-sealed') process.exit(197);
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'inventory-sealed') {
+    throw new SupervisorFailure(197, 'injected inventory-sealed recovery crash');
+  }
 
   for (const rootRecord of record.roots) {
     if (record.deletedRoots.includes(rootRecord.kind)) continue;
@@ -525,7 +647,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     record.deletingRoot = null;
     writeRecord(record);
     if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === `deleted-root:${rootRecord.kind}`) {
-      process.exit(197);
+      throw new SupervisorFailure(197, 'injected root-deletion recovery crash');
     }
   }
   record.phase = 'filesystem-deleted';
@@ -547,9 +669,14 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     }
     deleteExactRegistry(record.namespaceId, expected);
   }
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'registry-deleted') process.exit(197);
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'registry-deleted') {
+    throw new SupervisorFailure(197, 'injected registry-deletion recovery crash');
+  }
   record.phase = 'registry-deleted';
   writeRecord(record);
+  if (record.schemaVersion === RECORD_SCHEMA) {
+    cleanupChildLog(resolve(recordRoot, record.childLogFile));
+  }
   const path = recordPath(record.recordId);
   if (!isPlainPath(path, false)) throw new Error('cleanup record changed before deletion');
   unlinkSync(path);
@@ -623,7 +750,9 @@ function deleteRootBinding(rootRecord) {
     ],
     { encoding: 'utf8', windowsHide: true },
   );
-  if (result.status === 197) process.exit(197);
+  if (result.status === 197) {
+    throw new SupervisorFailure(197, 'injected cleanup-binding recovery crash');
+  }
   if (result.status !== 0) throw new Error(`protected root binding deletion failed: ${path}`);
 }
 
@@ -713,6 +842,13 @@ function validateRecord(record) {
     (record.child !== null && !validProcessIdentity(record.child))
   ) {
     throw new Error('cleanup record process identity is invalid');
+  }
+  if (
+    record.schemaVersion === RECORD_SCHEMA &&
+    (!/^[0-9a-f]{32}$/u.test(record.controlNonce ?? '') ||
+      record.childLogFile !== `${record.recordId}.log`)
+  ) {
+    throw new Error('cleanup record control identity is invalid');
   }
   if (
     record.schemaVersion === RECORD_SCHEMA &&
@@ -940,6 +1076,17 @@ function namespaceRoot(kind, namespaceId) {
   if (!rootKinds.includes(kind)) throw new Error('unknown machine-lock root kind');
   assertNamespaceId(namespaceId);
   return resolve(stateRoot, kind, namespaceId);
+}
+
+function reloadProtectedRecord(recordId) {
+  const path = recordPath(recordId);
+  assertProtectedRecord(path);
+  const latest = JSON.parse(readFileSync(path, 'utf8'));
+  validateRecord(latest);
+  if (latest.recordId !== recordId) {
+    throw new Error('native namespace cleanup record identity changed');
+  }
+  return latest;
 }
 
 function recordPath(recordId) {

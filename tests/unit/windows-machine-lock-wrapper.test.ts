@@ -67,11 +67,7 @@ run('Windows machine-lock wrapper teardown', () => {
       const crashed = runWrapper(command, {
         TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
       });
-      expect(crashed.status).toBe(197);
-      expect(readdirSync(records).filter((entry) => entry.endsWith('.json'))).toHaveLength(1);
-
-      const recovered = runWrapper('cmd.exe /d /c exit 0');
-      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(crashed.status, crashed.stderr).toBe(197);
       expect(existsSync(records)).toBe(false);
     },
     120_000,
@@ -79,13 +75,8 @@ run('Windows machine-lock wrapper teardown', () => {
 
   it.each(['hardlink', 'reparse'] as const)(
     'rejects a post-seal %s and preserves its outside target',
-    (kind) => {
-      const crashed = runWrapper('cmd.exe /d /c exit 0', {
-        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
-      });
-      expect(crashed.status).toBe(197);
-      const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
-      const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+    async (kind) => {
+      const record = await leaveSealedRecord();
       const outside = resolve('tmp', 'machine-lock-wrapper-tests', `${record.namespaceId}-sealed`);
       const root = resolve('tmp', 'machine-lock-tests', 'helper', record.namespaceId);
       mkdirSync(outside, { recursive: true });
@@ -176,13 +167,58 @@ run('Windows machine-lock wrapper teardown', () => {
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   }, 120_000);
 
+  it('does not inherit the supervisor control handle into the child', () => {
+    const result = runWrapper(
+      `${nativeHelper} --assert-handle-not-inherited %TQ_MACHINE_LOCK_TEST_CONTROL_HANDLE_VALUE%`,
+    );
+    expect(result.status, result.stderr).toBe(0);
+  }, 120_000);
+
+  it('isolates forged control frames and high-volume child output', () => {
+    const result = runWrapper('node tests/fixtures/machine-lock-test-control-forgery.mjs');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('TQNS:00000000000000000000000000000000');
+    expect(existsSync(records)).toBe(false);
+  }, 120_000);
+
+  it('returns a legitimate child exit code 197 only after completed teardown', () => {
+    const result = runWrapper('cmd.exe /d /c exit 197');
+    expect(result.status, result.stderr).toBe(197);
+    expect(existsSync(records)).toBe(false);
+  }, 120_000);
+
+  it('fails closed when the latest native record changes before failure recovery', async () => {
+    const token = randomBytes(16).toString('hex');
+    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-stale-record`);
+    mkdirSync(resolve(pause, '..'), { recursive: true });
+    const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+      TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+    });
+    await waitForPath(`${pause}.ready`);
+    const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
+    const path = resolve(records, recordName);
+    const latest = readFileSync(path, 'utf8');
+    expect(JSON.parse(latest).phase).toBe('inventory-sealed');
+    writeFileSync(path, '{}\n', 'utf8');
+    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+    expect((await running).code).not.toBe(197);
+    expect(existsSync(path)).toBe(true);
+    writeFileSync(path, latest, 'utf8');
+    unlinkSync(`${pause}.ready`);
+    unlinkSync(`${pause}.continue`);
+    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+    const parent = resolve(pause, '..');
+    if (readdirSync(parent).length === 0) rmdirSync(parent);
+  }, 120_000);
+
   it('retains namespace root and parent handles while the child runs', () => {
     const result = runWrapper('node tests/fixtures/machine-lock-test-retained-parent.mjs');
     expect(result.status, result.stderr).toBe(0);
   }, 120_000);
 
-  it('recovers a legacy cleanup record without parent identities', () => {
-    const record = leaveSealedRecord();
+  it('recovers a legacy cleanup record without parent identities', async () => {
+    const record = await leaveSealedRecord();
     record.schemaVersion = 1;
     for (const root of record.roots) delete root.parentIdentity;
     writeFileSync(
@@ -193,8 +229,8 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
   }, 120_000);
 
-  it('rejects an ownership ADS mutation after sealing', () => {
-    const record = leaveSealedRecord();
+  it('rejects an ownership ADS mutation after sealing', async () => {
+    const record = await leaveSealedRecord();
     const rootRecord = record.roots.find((entry: { kind: string }) => entry.kind === 'helper');
     const root = resolve('tmp', 'machine-lock-tests', 'helper', record.namespaceId);
     const stream = `${root}:TalkingQuill.TestOwnership.V1`;
@@ -241,7 +277,7 @@ run('Windows machine-lock wrapper teardown', () => {
   }, 120_000);
 
   it('rejects a registry value raced after native handle validation', async () => {
-    const record = leaveSealedRecord();
+    const record = await leaveSealedRecord();
     const key = `HKCU\\Software\\Talking Quill Tests\\${record.namespaceId}`;
     const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${record.namespaceId}-registry`);
     mkdirSync(resolve(pause, '..'), { recursive: true });
@@ -264,8 +300,8 @@ run('Windows machine-lock wrapper teardown', () => {
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   }, 120_000);
 
-  it('rejects and preserves an unrecorded registry sibling', () => {
-    leaveSealedRecord();
+  it('rejects and preserves an unrecorded registry sibling', async () => {
+    await leaveSealedRecord();
     const sibling = randomBytes(16).toString('hex');
     expect(spawnSync(nativeHelper, ['--registry-create', sibling]).status).toBe(0);
     expect(runWrapper('cmd.exe /d /c exit 0').status).not.toBe(0);
@@ -319,13 +355,32 @@ run('Windows machine-lock wrapper teardown', () => {
   );
 });
 
-function leaveSealedRecord() {
-  const crashed = runWrapper('cmd.exe /d /c exit 0', {
-    TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+async function leaveSealedRecord() {
+  const token = randomBytes(16).toString('hex');
+  const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-supervisor-failure`);
+  mkdirSync(resolve(pause, '..'), { recursive: true });
+  const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
+    env: {
+      ...process.env,
+      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+      TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+    },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  expect(crashed.status).toBe(197);
+  const completed = new Promise<number | null>((done, reject) => {
+    child.once('error', reject);
+    child.once('exit', done);
+  });
+  await waitForPath(`${pause}.ready`);
   const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
-  return JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+  const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+  expect(child.kill()).toBe(true);
+  expect(await completed).not.toBe(0);
+  unlinkSync(`${pause}.ready`);
+  const parent = resolve(pause, '..');
+  if (readdirSync(parent).length === 0) rmdirSync(parent);
+  return record;
 }
 
 async function waitForPath(path: string) {
