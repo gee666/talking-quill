@@ -153,6 +153,8 @@ describe('packaged stale schema-2 diagnosis', () => {
     expect(e2e).toContain('expectedRejectionStage === undefined ? [0] : [78]');
     expect(e2e).toContain('last?.stageCode !== expectedRejectionStage');
     expect(source).toContain('"state": "exact-orphan-lock-only"');
+    expect(source).toContain('"publication-pending-v1".to_owned()');
+    expect(source).toContain('format!("{suffix}:{}", lock_root.identity)');
     expect(source).toContain('exact_stale_coordination_inventory(&program_data, &suffix, false)?');
     expect(e2e).toContain("'exact-orphan-lock-only'");
     expect(e2e).toContain('last?.evidence?.state !== expectedTopology');

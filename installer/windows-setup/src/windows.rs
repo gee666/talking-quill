@@ -140,20 +140,8 @@ const MACHINE_LOCK_TEST_ID_ENV: &str = "TQ_MACHINE_LOCK_TEST_NAMESPACE_ID";
 fn machine_lock_test_id() -> Result<&'static str> {
     static ID: OnceLock<String> = OnceLock::new();
     let value = ID.get_or_init(|| {
-        if let Ok(value) = std::env::var(MACHINE_LOCK_TEST_ID_ENV)
-            && value.len() == 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return value;
-        }
-        let mut bytes = [0_u8; 16];
-        getrandom::fill(&mut bytes).expect("test namespace randomness");
-        let value = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        // Child test processes inherit one opaque identifier and derive every name from it.
-        unsafe { std::env::set_var(MACHINE_LOCK_TEST_ID_ENV, &value) };
-        value
+        std::env::var(MACHINE_LOCK_TEST_ID_ENV)
+            .expect("machine-lock tests require the wrapper namespace environment")
     });
     validate_machine_lock_suffix(value)?;
     Ok(value)
@@ -3210,6 +3198,10 @@ fn validate_predecessor_arguments(package: &ParsedPackage, current: &Path) -> Re
 }
 
 fn protected_file_handle_acl_is_exact(file: &File) -> Result<bool> {
+    protected_handle_acl_is_exact(file, false)
+}
+
+fn protected_handle_acl_is_exact(file: &File, directory: bool) -> Result<bool> {
     let mut descriptor = ptr::null_mut();
     if unsafe {
         GetSecurityInfo(
@@ -3247,12 +3239,20 @@ fn protected_file_handle_acl_is_exact(file: &File) -> Result<bool> {
     }
     let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
     unsafe { LocalFree(text.cast()) };
-    Ok([
-        "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
-        "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)",
-    ]
-    .iter()
-    .any(|value| sddl.eq_ignore_ascii_case(value)))
+    let expected = if directory {
+        [
+            "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+            "O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)",
+        ]
+    } else {
+        [
+            "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+            "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)",
+        ]
+    };
+    Ok(expected
+        .iter()
+        .any(|value| sddl.eq_ignore_ascii_case(value)))
 }
 
 fn staged_path_is_protected(path: &Path, directory: bool) -> Result<bool> {
@@ -8239,6 +8239,16 @@ impl RetainedStaleObject {
         Ok(())
     }
 
+    fn verify_protected_acl(&self) -> Result<()> {
+        if !protected_handle_acl_is_exact(&self.file, self.directory)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "A retained stale fixture ACL is not exact.",
+            ));
+        }
+        Ok(())
+    }
+
     fn names(&self) -> Result<Vec<String>> {
         if !self.directory {
             return Err(fail(
@@ -9175,10 +9185,13 @@ fn run_direct_stale_schema2_diagnostic_inner(
     let lifecycle = diagnostic_stage(diagnostic, "lifecycle-lock.availability", || {
         let object =
             RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
+        object.verify_protected_acl()?;
         let evidence = serde_json::json!({ "fileIdentity": object.identity });
         Ok((object, evidence))
     })?;
-    let (lock_root, mut lock_tree_identity, mut lock_file_identity) =
+    let recovery = program_data.join("Talking Quill Update Recovery");
+    let orphan_lock_only = !path_present(&recovery)?;
+    let (lock_root, mut lock_tree_identity, mut lock_file_identity, mut publication_pending) =
         diagnostic_stage(diagnostic, "fixture.identity", || {
             for (path, directory) in [
                 (&lock_directory, true),
@@ -9200,14 +9213,44 @@ fn run_direct_stale_schema2_diagnostic_inner(
                 &lock_directory.join("recovery-state-v1.identity-v1"),
                 false,
             )?;
+            for object in [&lock_root, &lock_tree_identity, &lock_file_identity] {
+                object.verify_protected_acl()?;
+            }
+            let mut publication_pending = if orphan_lock_only {
+                let path = lock_directory.join("publication-pending-v1");
+                if !staged_path_is_protected(&path, false)? {
+                    return Err(fail(
+                        EXIT_REJECTED,
+                        "Published machine lock marker ACL is not exact.",
+                    ));
+                }
+                let object = RetainedStaleObject::open(&path, false)?;
+                object.verify_protected_acl()?;
+                Some(object)
+            } else {
+                None
+            };
+            let expected_names = if orphan_lock_only {
+                vec![
+                    "lock-tree-identity-v1".to_owned(),
+                    "publication-pending-v1".to_owned(),
+                    "recovery-state-v1.identity-v1".to_owned(),
+                    "recovery-state-v1.lock".to_owned(),
+                ]
+            } else {
+                vec![
+                    "lock-tree-identity-v1".to_owned(),
+                    "recovery-state-v1.identity-v1".to_owned(),
+                    "recovery-state-v1.lock".to_owned(),
+                ]
+            };
+            let expected_publication = format!("{suffix}:{}", lock_root.identity);
             if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
                 || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
-                || lock_root.names()?
-                    != [
-                        "lock-tree-identity-v1",
-                        "recovery-state-v1.identity-v1",
-                        "recovery-state-v1.lock",
-                    ]
+                || publication_pending.as_mut().is_some_and(|marker| {
+                    marker.read_all().ok().as_deref() != Some(expected_publication.as_bytes())
+                })
+                || lock_root.names()? != expected_names
             {
                 return Err(fail(
                     EXIT_REJECTED,
@@ -9215,26 +9258,56 @@ fn run_direct_stale_schema2_diagnostic_inner(
                 ));
             }
             Ok((
-                (lock_root, lock_tree_identity, lock_file_identity),
+                (
+                    lock_root,
+                    lock_tree_identity,
+                    lock_file_identity,
+                    publication_pending,
+                ),
                 serde_json::json!({
                     "lifecycle": lifecycle.identity,
                 }),
             ))
         })?;
-    let recovery = program_data.join("Talking Quill Update Recovery");
-    if !path_present(&recovery)? {
+    if orphan_lock_only {
         exact_stale_coordination_inventory(&program_data, &suffix, false)?;
-        let objects = [
-            &lifecycle,
-            &lock_root,
-            &lock_tree_identity,
-            &lock_file_identity,
-        ];
-        let binding = retained_binding(&objects, &suffix);
+        let publication_pending = publication_pending
+            .as_mut()
+            .expect("orphan topology retains the publication marker");
+        let expected_publication = format!("{suffix}:{}", lock_root.identity);
+        if publication_pending.read_all()? != expected_publication.as_bytes() {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Published machine lock marker content is not exact.",
+            ));
+        }
+        let binding = retained_binding(
+            &[
+                &lifecycle,
+                &lock_root,
+                &lock_tree_identity,
+                &lock_file_identity,
+                &*publication_pending,
+            ],
+            &suffix,
+        );
         diagnostic_stage(diagnostic, "image.stability", || {
             std::thread::sleep(Duration::from_millis(750));
-            for object in objects {
+            if publication_pending.read_all()? != expected_publication.as_bytes() {
+                return Err(fail(
+                    EXIT_REJECTED,
+                    "Published machine lock marker changed during inspection.",
+                ));
+            }
+            for object in [
+                &lifecycle,
+                &lock_root,
+                &lock_tree_identity,
+                &lock_file_identity,
+                &*publication_pending,
+            ] {
                 object.verify()?;
+                object.verify_protected_acl()?;
             }
             exact_stale_coordination_inventory(&program_data, &suffix, false)?;
             retained_image
@@ -9536,6 +9609,7 @@ fn reclaim_exact_schema2_orphan_v2(
     let lock_directory = program_data.join(format!("{MACHINE_LOCK_DIRECTORY_PREFIX}{suffix}"));
     let lifecycle =
         RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?;
+    lifecycle.verify_protected_acl()?;
     exact_cleanup_registry(&suffix)?;
 
     // The lifecycle file is retained before any process, role, service, task, Run, registration,
@@ -9555,14 +9629,29 @@ fn reclaim_exact_schema2_orphan_v2(
         RetainedStaleObject::open(&lock_directory.join("lock-tree-identity-v1"), false)?;
     let mut lock_file_identity =
         RetainedStaleObject::open(&lock_directory.join("recovery-state-v1.identity-v1"), false)?;
+    for object in [&lock_root, &lock_tree_identity, &lock_file_identity] {
+        object.verify_protected_acl()?;
+    }
     let recovery = program_data.join("Talking Quill Update Recovery");
     if !path_present(&recovery)? {
         exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        let publication_pending_path = lock_directory.join("publication-pending-v1");
+        if !staged_path_is_protected(&publication_pending_path, false)? {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Published machine lock marker ACL is not exact.",
+            ));
+        }
+        let mut publication_pending = RetainedStaleObject::open(&publication_pending_path, false)?;
+        publication_pending.verify_protected_acl()?;
+        let expected_publication = format!("{suffix}:{}", lock_root.identity);
         if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
             || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+            || publication_pending.read_all()? != expected_publication.as_bytes()
             || lock_root.names()?
                 != [
                     "lock-tree-identity-v1",
+                    "publication-pending-v1",
                     "recovery-state-v1.identity-v1",
                     "recovery-state-v1.lock",
                 ]
@@ -9579,28 +9668,52 @@ fn reclaim_exact_schema2_orphan_v2(
             true,
             authenticated_parent,
         )?;
-        let objects = [
+        for object in [
             &lifecycle,
             &lock_root,
             &lock_tree_identity,
             &lock_file_identity,
-        ];
-        for object in objects {
+            &publication_pending,
+        ] {
             object.verify()?;
+            object.verify_protected_acl()?;
         }
-        let binding = retained_binding(&objects, &suffix);
+        let binding = retained_binding(
+            &[
+                &lifecycle,
+                &lock_root,
+                &lock_tree_identity,
+                &lock_file_identity,
+                &publication_pending,
+            ],
+            &suffix,
+        );
         audit.record("inspected", &binding, &admission)?;
         #[cfg(feature = "stale-schema2-cleanup")]
         force_stale_cleanup_rejection("post-inspected")?;
         std::thread::sleep(Duration::from_millis(750));
-        for object in objects {
+        if publication_pending.read_all()? != expected_publication.as_bytes() {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Published machine lock marker changed during stability wait.",
+            ));
+        }
+        for object in [
+            &lifecycle,
+            &lock_root,
+            &lock_tree_identity,
+            &lock_file_identity,
+            &publication_pending,
+        ] {
             object.verify()?;
+            object.verify_protected_acl()?;
         }
         if lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
             || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
             || lock_root.names()?
                 != [
                     "lock-tree-identity-v1",
+                    "publication-pending-v1",
                     "recovery-state-v1.identity-v1",
                     "recovery-state-v1.lock",
                 ]
@@ -9639,6 +9752,33 @@ fn reclaim_exact_schema2_orphan_v2(
             ));
         }
         exact_stale_coordination_inventory(&program_data, &suffix, false)?;
+        if publication_pending.read_all()? != expected_publication.as_bytes()
+            || lock_tree_identity.read_all()? != lock_root.identity.as_bytes()
+            || lock_file_identity.read_all()? != lifecycle.identity.as_bytes()
+            || lock_root.names()?
+                != [
+                    "lock-tree-identity-v1",
+                    "publication-pending-v1",
+                    "recovery-state-v1.identity-v1",
+                    "recovery-state-v1.lock",
+                ]
+        {
+            return Err(fail(
+                EXIT_REJECTED,
+                "Retained orphan lock changed before mutation.",
+            ));
+        }
+        for object in [
+            &lifecycle,
+            &lock_root,
+            &lock_tree_identity,
+            &lock_file_identity,
+            &publication_pending,
+        ] {
+            object.verify()?;
+            object.verify_protected_acl()?;
+        }
+        publication_pending.delete()?;
         lock_tree_identity.delete()?;
         lock_file_identity.delete()?;
         let mut lifecycle = lifecycle;
@@ -10428,7 +10568,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("tmp/machine-lock-tests/windows-setup-unit")
-            .join(random_machine_lock_suffix().unwrap());
+            .join(machine_lock_test_id().unwrap());
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let suffix = "44".repeat(16);
@@ -11540,7 +11680,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("tmp/machine-lock-tests/orphan-inventory")
-            .join(random_machine_lock_suffix().unwrap());
+            .join(machine_lock_test_id().unwrap());
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let suffix = "11".repeat(16);

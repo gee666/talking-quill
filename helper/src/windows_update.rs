@@ -102,17 +102,8 @@ const MACHINE_LOCK_TEST_ID_ENV: &str = "TQ_MACHINE_LOCK_TEST_NAMESPACE_ID";
 fn machine_lock_test_id() -> Result<&'static str, i32> {
     static ID: OnceLock<String> = OnceLock::new();
     let value = ID.get_or_init(|| {
-        if let Ok(value) = std::env::var(MACHINE_LOCK_TEST_ID_ENV)
-            && value.len() == 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return value;
-        }
-        let value = new_recovery_generation().expect("test namespace randomness");
-        unsafe { std::env::set_var(MACHINE_LOCK_TEST_ID_ENV, &value) };
-        value
+        std::env::var(MACHINE_LOCK_TEST_ID_ENV)
+            .expect("machine-lock tests require the wrapper namespace environment")
     });
     validate_generation(value)?;
     Ok(value)
@@ -4950,6 +4941,68 @@ mod tests {
         recovery_value_name, remove_relaunch_record_directory, validate_generation,
         write_persisted_relaunch_record,
     };
+
+    #[cfg(feature = "machine-lock-test-namespace")]
+    #[test]
+    fn production_machine_lock_constructor_admits_and_retires_exact_published_tree() {
+        let root = super::machine_lock_program_data().unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        let seeded_lock = super::machine_lock_file(1).unwrap();
+        let state = super::RecoveryStateLock::acquire_for_epoch(3).unwrap();
+        assert_eq!(state.path, seeded_lock);
+        let directory = state.path.parent().unwrap().to_path_buf();
+        let suffix = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(super::MACHINE_LOCK_DIRECTORY_PREFIX))
+            .unwrap();
+        let directory_identity = super::owned_tree_identity(&directory).unwrap();
+        let expected_publication = format!("{suffix}:{directory_identity}");
+        assert_eq!(
+            std::fs::read_to_string(directory.join("publication-pending-v1")).unwrap(),
+            expected_publication
+        );
+        let mut names = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "lock-tree-identity-v1",
+                "publication-pending-v1",
+                "recovery-state-v1.identity-v1",
+                "recovery-state-v1.lock",
+            ]
+        );
+        assert!(super::has_exact_security(&directory, super::MACHINE_LOCK_DIRECTORY_SDDL).unwrap());
+        for name in &names {
+            assert!(
+                super::has_exact_security(&directory.join(name), super::MACHINE_LOCK_FILE_SDDL)
+                    .unwrap()
+            );
+        }
+        state.retire().unwrap();
+        assert!(!directory.exists());
+        let key_path = super::machine_lock_registry_key().unwrap();
+        let mut key = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                super::RegOpenKeyExW(
+                    super::machine_lock_registry_hive(),
+                    super::wide_nul(std::path::Path::new(&key_path))
+                        .unwrap()
+                        .as_ptr(),
+                    0,
+                    super::KEY_READ,
+                    &mut key,
+                )
+            },
+            2
+        );
+    }
+
     #[test]
     fn pending_delete_pairs_preserve_final_empty_destinations_and_terminators() {
         let encode = |values: &[&str], final_terminator: bool| {

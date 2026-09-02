@@ -32,13 +32,26 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       );
     }
     expect(testGuard).toContain('Global\\\\TalkingQuill.MachineLockTests.V1');
-    expect(testGuard).toContain("assertZeroProductionResidue('before')");
-    expect(testGuard).toContain("assertZeroProductionResidue('after')");
+    expect(testGuard).toContain("assertNoTestNamespaceLeftovers('before')");
+    expect(testGuard).toContain("assertNoTestNamespaceLeftovers('after')");
+    expect(testGuard).toContain('productionResidueSnapshot()');
+    expect(testGuard).toContain('removeKnownLeakedTestNamespace');
+    expect(testGuard).toContain('removeEmptyTestRegistryRoot');
+    expect(testGuard).toContain('HKEY_LOCAL_MACHINE\\Software\\Talking Quill Tests');
+    for (const implementation of [source, helperSource]) {
+      expect(implementation).toContain(
+        '.expect("machine-lock tests require the wrapper namespace environment")',
+      );
+      expect(implementation).not.toContain('test namespace randomness');
+    }
     expect(packageJson).toContain('run-machine-lock-isolated-tests.mjs');
     expect(productionBuild).toContain("'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID'");
     expect(productionBuild).toContain("'Talking Quill Tests'");
     expect(helperBuild).toContain("'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID'");
     expect(helperBuild).toContain('Windows helper contains machine-lock test marker');
+    expect(helperSource).toContain(
+      'production_machine_lock_constructor_admits_and_retires_exact_published_tree',
+    );
   });
 
   it('keeps medium cleanup on authenticated UAC and production builds closed', () => {
@@ -182,6 +195,9 @@ describe('Windows schema-2 stale coordination cleanup', () => {
 
   it('checks exact inventories, removes through owned-tree identities, and deletes registry last', () => {
     expect(source).toContain('Retained stale fixture inventory is not exact.');
+    expect(source).toContain('"publication-pending-v1"');
+    expect(source).toContain('Published machine lock marker changed during stability wait.');
+    expect(source).toContain('publication_pending.delete()?');
     expect(source).toContain('pending.delete()?');
     expect(source).toContain('lifecycle.finish_deleted()?');
     const reclaim = source.slice(index('fn reclaim_exact_schema2_orphan_v2('));
@@ -190,13 +206,14 @@ describe('Windows schema-2 stale coordination cleanup', () => {
       'stale machine lifecycle publication',
       schemaMutation,
     );
-    expect(schemaMutation).toBeLessThan(schemaRegistryDelete);
-    expect(reclaim.lastIndexOf('lifecycle.rename(&retained_lifecycle_path)?')).toBeLessThan(
-      schemaRegistryDelete,
+    const schemaRename = reclaim.indexOf(
+      'lifecycle.rename(&retained_lifecycle_path)?',
+      schemaMutation,
     );
-    expect(reclaim.lastIndexOf('lifecycle.finish_deleted()?')).toBeGreaterThan(
-      schemaRegistryDelete,
-    );
+    const schemaFinish = reclaim.indexOf('lifecycle.finish_deleted()?', schemaRegistryDelete);
+    expect(schemaMutation).toBeLessThan(schemaRename);
+    expect(schemaRename).toBeLessThan(schemaRegistryDelete);
+    expect(schemaFinish).toBeGreaterThan(schemaRegistryDelete);
     expect(source).toContain(
       'let zero = active_state_proof(\n        program_files,\n        program_data,\n        system,\n        false,\n        authenticated_parent,\n    )?;',
     );
