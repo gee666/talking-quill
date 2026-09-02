@@ -50,6 +50,24 @@ pub fn remove_exact_owned_tree(
 }
 
 #[cfg(windows)]
+pub fn inventory_exact_owned_tree_from_handle(
+    root: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<Vec<ExactOwnedTreeEntry>, OwnedTreeError> {
+    platform::inventory_from_handle(root)
+}
+
+#[cfg(windows)]
+pub fn remove_exact_owned_tree_from_handles(
+    parent: windows_sys::Win32::Foundation::HANDLE,
+    root: windows_sys::Win32::Foundation::HANDLE,
+    expected_identity: &str,
+    expected_entries: &[ExactOwnedTreeEntry],
+) -> Result<(), OwnedTreeError> {
+    let (device, inode) = parse_identity(expected_identity)?;
+    platform::remove_exact_from_handles(parent, root, device, inode, expected_entries)
+}
+
+#[cfg(windows)]
 pub fn remove_remaining_exact_owned_tree(
     path: &Path,
     expected_identity: &str,
@@ -88,7 +106,8 @@ mod platform {
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, GENERIC_WRITE,
+            HANDLE, INVALID_HANDLE_VALUE, LocalFree,
         },
         Security::{
             Authorization::{
@@ -106,6 +125,7 @@ mod platform {
             FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING,
             READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC,
         },
+        System::Threading::GetCurrentProcess,
     };
 
     const OBJ_CASE_INSENSITIVE: u32 = 0x40;
@@ -177,6 +197,116 @@ mod platform {
     struct VerifiedNode {
         handle: Handle,
         children: Vec<VerifiedNode>,
+    }
+
+    pub(super) fn inventory_from_handle(
+        root: HANDLE,
+    ) -> Result<Vec<ExactOwnedTreeEntry>, OwnedTreeError> {
+        let info = information(root)?;
+        let root_device = u64::from(info.dwVolumeSerialNumber);
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            != FILE_ATTRIBUTE_DIRECTORY
+            || info.nNumberOfLinks != 1
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        let mut entries = Vec::new();
+        inventory_directory(root, "", root_device, &mut entries)?;
+        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(entries)
+    }
+
+    fn inventory_directory(
+        directory_handle: HANDLE,
+        prefix: &str,
+        root_device: u64,
+        entries: &mut Vec<ExactOwnedTreeEntry>,
+    ) -> Result<(), OwnedTreeError> {
+        for mut name in directory_names(directory_handle)? {
+            let component = OsString::from_wide(&name)
+                .into_string()
+                .map_err(|_| OwnedTreeError::InvalidPath)?;
+            if component.contains('/')
+                || component.contains('\\')
+                || component == "."
+                || component == ".."
+            {
+                return Err(OwnedTreeError::InvalidPath);
+            }
+            let relative_path = if prefix.is_empty() {
+                component
+            } else {
+                format!("{prefix}/{component}")
+            };
+            let child = open_relative(directory_handle, &mut name)?;
+            let info = information(child.0)?;
+            let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let reparse = info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            let device = u64::from(info.dwVolumeSerialNumber);
+            if device != root_device || reparse || (!directory && info.nNumberOfLinks != 1) {
+                return Err(OwnedTreeError::IdentityMismatch);
+            }
+            entries.push(ExactOwnedTreeEntry {
+                relative_path: relative_path.clone(),
+                directory,
+                identity: identity_from_handle(child.0)?,
+            });
+            if directory {
+                inventory_directory(child.0, &relative_path, root_device, entries)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_exact_from_handles(
+        parent: HANDLE,
+        root: HANDLE,
+        expected_device: u64,
+        expected_inode: u64,
+        expected_entries: &[ExactOwnedTreeEntry],
+    ) -> Result<(), OwnedTreeError> {
+        let expected = expected_entries
+            .iter()
+            .map(|entry| {
+                parse_identity(&entry.identity).map(|identity| {
+                    (
+                        entry.relative_path.clone(),
+                        (entry.directory, identity.0, identity.1),
+                    )
+                })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if expected.len() != expected_entries.len() {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        let mut duplicate = null_mut();
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                root,
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let duplicate = Handle(duplicate);
+        let info = information(duplicate.0)?;
+        validate_root(&info, expected_device, expected_inode)?;
+        let mut seen = BTreeSet::new();
+        let tree = verify_exact_directory(duplicate, "", expected_device, &expected, &mut seen)?;
+        if seen.len() != expected.len() {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        delete_verified(tree)?;
+        if unsafe { FlushFileBuffers(parent) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
     }
 
     pub fn remove_exact(

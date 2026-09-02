@@ -28,6 +28,10 @@ const nativeHelper = resolve(
 
 run('Windows machine-lock wrapper teardown', () => {
   it.each([
+    'native-record-temp-created',
+    'native-record-temp-protected',
+    'native-record-temp-written',
+    'native-record-temp-flushed',
     'intent-partial-write',
     'intent-written-before-flush',
     'intent-file-flushed',
@@ -49,11 +53,18 @@ run('Windows machine-lock wrapper teardown', () => {
     'inventory-sealed',
     'deleted-root:helper',
     'binding-deleted-before-intent',
+    'registry-values-deleted',
+    'registry-recovery-deleted',
+    'registry-namespace-values-deleted',
+    'registry-namespace-deleted',
     'registry-deleted',
   ])(
     'recovers a durable record after a crash at %s',
     (phase) => {
-      const crashed = runWrapper('cmd.exe /d /c exit 0', {
+      const command = phase.startsWith('registry-')
+        ? 'node tests/fixtures/machine-lock-test-registry-state.mjs'
+        : 'cmd.exe /d /c exit 0';
+      const crashed = runWrapper(command, {
         TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
       });
       expect(crashed.status).toBe(197);
@@ -127,41 +138,40 @@ run('Windows machine-lock wrapper teardown', () => {
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   });
 
-  it('blocks root rename and replacement between identity and ADS publication', async () => {
+  it('blocks every outer root rename and replacement during native publication', async () => {
     const token = randomBytes(16).toString('hex');
     const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-root-publication`);
     mkdirSync(resolve(pause, '..'), { recursive: true });
     const running = runWrapperAsync('cmd.exe /d /c exit 0', {
       TQ_MACHINE_LOCK_TEST_ROOT_PUBLICATION_PAUSE_FILE: pause,
     });
-    await waitForPath(`${pause}.ready`);
-    const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
-    const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
-    const root = resolve('tmp', 'machine-lock-tests', record.creatingRoot, record.namespaceId);
-    const moved = `${root}-moved`;
-    const attacker = `${root}-replacement`;
-    mkdirSync(attacker);
-    let renameBlocked = false;
-    try {
-      renameSync(root, moved);
-    } catch {
-      renameBlocked = true;
+    for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
+      const seam = `${pause}.${kind}`;
+      await waitForPath(`${seam}.ready`);
+      const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
+      const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+      expect(record.creatingRoot).toBe(kind);
+      const root = resolve('tmp', 'machine-lock-tests', kind, record.namespaceId);
+      const moved = `${root}-moved`;
+      const attacker = `${root}-replacement`;
+      mkdirSync(attacker);
+      expect(() => renameSync(root, moved)).toThrow();
+      expect(() => rmdirSync(root)).toThrow();
+      expect(
+        spawnSync(nativeHelper, ['--force-directory-replacement', attacker, root]).status,
+      ).toBe(0);
+      expect(existsSync(root)).toBe(true);
+      expect(existsSync(moved)).toBe(false);
+      expect(existsSync(attacker)).toBe(true);
+      rmdirSync(attacker);
+      writeFileSync(`${seam}.continue`, 'continue\n', 'utf8');
     }
-    const replacement = spawnSync(nativeHelper, ['--force-directory-replacement', attacker, root]);
-    const attackerPreserved = existsSync(attacker);
-    const rootPreserved = existsSync(root);
-    if (existsSync(attacker)) rmdirSync(attacker);
-    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
     const completed = await running;
-    if (existsSync(moved) && !existsSync(root)) renameSync(moved, root);
-    unlinkSync(`${pause}.ready`);
-    unlinkSync(`${pause}.continue`);
-    expect(renameBlocked).toBe(true);
-    expect(existsSync(moved)).toBe(false);
-    expect(replacement.status, replacement.stderr?.toString()).toBe(0);
-    expect(attackerPreserved).toBe(true);
-    expect(rootPreserved).toBe(true);
     expect(completed.code, completed.stderr).toBe(0);
+    for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
+      unlinkSync(`${pause}.${kind}.ready`);
+      unlinkSync(`${pause}.${kind}.continue`);
+    }
     const parent = resolve(pause, '..');
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   }, 120_000);

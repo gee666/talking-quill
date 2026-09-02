@@ -20,7 +20,8 @@ use windows_sys::Win32::{
             SE_FILE_OBJECT, SE_REGISTRY_KEY,
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
     },
     Storage::FileSystem::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
@@ -138,6 +139,115 @@ impl Drop for Handle {
 pub struct RetainedNamespaceHandles {
     _parent: Handle,
     _root: Handle,
+}
+
+pub struct ProtectedRootSession {
+    parent_path: PathBuf,
+    ownership_prefix: String,
+    binding_path: PathBuf,
+    binding_nonce: String,
+    identity: String,
+    ads_sha256: String,
+    parent: Handle,
+    root: Handle,
+}
+
+impl ProtectedRootSession {
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn ads_sha256(&self) -> &str {
+        &self.ads_sha256
+    }
+
+    pub fn retain_low_access_guards(&mut self) -> io::Result<()> {
+        self.parent = open_directory_low_guard(&self.parent_path)?;
+        Ok(())
+    }
+
+    pub fn restore_root_for_teardown(&mut self) -> io::Result<()> {
+        validate_directory(self.root.0)?;
+        if identity(self.root.0)? != self.identity {
+            return Err(io::Error::other(
+                "outer namespace root identity changed before teardown",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn inventory(&self) -> io::Result<Vec<crate::owned_tree::ExactOwnedTreeEntry>> {
+        let stream = open_relative_ownership_stream(self.root.0)?;
+        validate_exact_security(stream.0, true)?;
+        let bytes = read_handle(stream.0)?;
+        let expected = format!("{}:{}", self.ownership_prefix, self.identity);
+        if hex_digest(&bytes) != self.ads_sha256 || bytes != expected.as_bytes() {
+            return Err(io::Error::other("protected root ownership stream changed"));
+        }
+        crate::owned_tree::inventory_exact_owned_tree_from_handle(self.root.0)
+            .map_err(io::Error::other)
+    }
+
+    pub fn delete_handle_bound(
+        self,
+        expected: &[crate::owned_tree::ExactOwnedTreeEntry],
+    ) -> io::Result<()> {
+        crate::owned_tree::remove_exact_owned_tree_from_handles(
+            self.parent.0,
+            self.root.0,
+            &self.identity,
+            expected,
+        )
+        .map_err(io::Error::other)?;
+        let Self {
+            parent_path: _,
+            ownership_prefix,
+            binding_path,
+            binding_nonce,
+            identity,
+            ads_sha256,
+            root,
+            parent,
+        } = self;
+        drop(root);
+        if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        drop(parent);
+        delete_cleanup_binding(
+            &binding_path,
+            &ownership_prefix,
+            &binding_nonce,
+            &identity,
+            &ads_sha256,
+        )
+    }
+}
+
+pub struct RegistryNamespaceSession {
+    namespace_id: String,
+    _software: Key,
+    test_root: Key,
+    namespace: Key,
+}
+
+impl RegistryNamespaceSession {
+    pub fn inventory(&self) -> io::Result<RegistryInventory> {
+        inventory_from_handles(&self.test_root, &self.namespace, None)
+    }
+
+    pub fn delete_handle_bound(self, expected: &RegistryInventory) -> io::Result<()> {
+        if self.inventory()? != *expected {
+            return Err(io::Error::other(
+                "registry namespace changed after inventory seal",
+            ));
+        }
+        delete_registry_exact_internal(
+            &self.namespace_id,
+            expected,
+            Some((&self.test_root, &self.namespace)),
+        )
+    }
 }
 
 struct Key(HKEY);
@@ -489,6 +599,72 @@ pub fn registry_root_inventory() -> io::Result<Option<KeyInventory>> {
     Ok(Some(inventory_key(&test_root)?))
 }
 
+pub fn consume_cleanup_record_temp(path: &Path) -> io::Result<Vec<u8>> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup-record temporary has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ | DELETE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(file.0, &mut information) } == 0
+        || information.dwFileAttributes
+            & (windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY
+                | FILE_ATTRIBUTE_REPARSE_POINT)
+            != 0
+        || information.nNumberOfLinks != 1
+    {
+        return Err(io::Error::other(
+            "cleanup-record temporary is not an exact regular file",
+        ));
+    }
+    let bytes = read_handle(file.0)?;
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.0,
+            FileDispositionInfo,
+            (&raw mut disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(bytes)
+}
+
+pub fn protect_cleanup_record(path: &Path) -> io::Result<()> {
+    let descriptor = exact_descriptor(false)?;
+    if unsafe {
+        SetFileSecurityW(
+            wide(path)?.as_ptr(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn create_protected_root(
     path: &Path,
     expected_parent_identity: &str,
@@ -496,6 +672,23 @@ pub fn create_protected_root(
     binding_path: &Path,
     binding_nonce: &str,
 ) -> io::Result<(String, String)> {
+    let session = create_protected_root_retained(
+        path,
+        expected_parent_identity,
+        ownership_prefix,
+        binding_path,
+        binding_nonce,
+    )?;
+    Ok((session.identity.clone(), session.ads_sha256.clone()))
+}
+
+pub fn create_protected_root_retained(
+    path: &Path,
+    expected_parent_identity: &str,
+    ownership_prefix: &str,
+    binding_path: &Path,
+    binding_nonce: &str,
+) -> io::Result<ProtectedRootSession> {
     validate_prefix(ownership_prefix)?;
     validate_nonce(binding_nonce)?;
     let intent = CreationIntent {
@@ -512,7 +705,7 @@ pub fn create_protected_root(
     let parent_path = path
         .parent()
         .ok_or_else(|| io::Error::other("protected root has no parent"))?;
-    let parent = open_directory(parent_path)?;
+    let parent = open_creation_parent(parent_path)?;
     validate_directory(parent.0)?;
     if identity(parent.0)? != expected_parent_identity {
         return Err(io::Error::other("protected root parent identity changed"));
@@ -550,7 +743,16 @@ pub fn create_protected_root(
         return Err(io::Error::last_os_error());
     }
     crash_at("ads-parent-flushed");
-    Ok((identity, ads_sha256))
+    Ok(ProtectedRootSession {
+        parent_path: parent_path.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+        binding_path: binding_path.to_owned(),
+        binding_nonce: binding_nonce.to_owned(),
+        identity,
+        ads_sha256,
+        parent,
+        root,
+    })
 }
 
 pub fn remove_interrupted_root(
@@ -680,6 +882,10 @@ pub fn delete_interrupted_creation_artifacts(
 }
 
 pub fn create_registry_namespace(namespace_id: &str) -> io::Result<()> {
+    create_registry_namespace_owned(namespace_id).map(drop)
+}
+
+pub fn create_registry_namespace_owned(namespace_id: &str) -> io::Result<RegistryNamespaceSession> {
     validate_namespace_id(namespace_id)?;
     let software = open_relative_key_raw(HKEY_CURRENT_USER, "Software", KEY_READ | KEY_WRITE)?
         .ok_or_else(|| io::Error::other("HKCU Software is absent"))?;
@@ -709,7 +915,12 @@ pub fn create_registry_namespace(namespace_id: &str) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    Ok(RegistryNamespaceSession {
+        namespace_id: namespace_id.to_owned(),
+        _software: software,
+        test_root,
+        namespace,
+    })
 }
 
 pub fn registry_inventory(namespace_id: &str) -> io::Result<RegistryInventory> {
@@ -725,6 +936,14 @@ pub fn registry_inventory(namespace_id: &str) -> io::Result<RegistryInventory> {
 }
 
 pub fn delete_registry_exact(namespace_id: &str, expected: &RegistryInventory) -> io::Result<()> {
+    delete_registry_exact_internal(namespace_id, expected, None)
+}
+
+fn delete_registry_exact_internal(
+    namespace_id: &str,
+    expected: &RegistryInventory,
+    retained: Option<(&Key, &Key)>,
+) -> io::Result<()> {
     validate_namespace_id(namespace_id)?;
     if !expected.present {
         return if registry_inventory(namespace_id)? == *expected {
@@ -846,6 +1065,27 @@ pub fn delete_registry_exact(namespace_id: &str, expected: &RegistryInventory) -
         if status != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
+    }
+    if let Some((retained_test_root, retained_namespace)) = retained {
+        verify_key_path(retained_test_root, &["Software", "Talking Quill Tests"])?;
+        verify_key_path(
+            retained_namespace,
+            &["Software", "Talking Quill Tests", namespace_id],
+        )?;
+        if inventory_from_handles(retained_test_root, retained_namespace, None)? != *expected {
+            return Err(io::Error::other(
+                "retained registry namespace changed before transaction commit",
+            ));
+        }
+    }
+    if matches!(
+        std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref(),
+        Ok("registry-values-deleted")
+            | Ok("registry-recovery-deleted")
+            | Ok("registry-namespace-values-deleted")
+            | Ok("registry-namespace-deleted")
+    ) {
+        std::process::exit(197);
     }
     if unsafe { CommitTransaction(transaction.0) } == 0 {
         return Err(io::Error::last_os_error());
@@ -1163,7 +1403,7 @@ fn create_relative_key(parent: &Key, name: &str) -> io::Result<Key> {
             0,
             null(),
             REG_OPTION_NON_VOLATILE,
-            KEY_READ | KEY_WRITE,
+            KEY_READ | KEY_WRITE | DELETE,
             &attributes,
             &mut key,
             &mut disposition,
@@ -1390,9 +1630,9 @@ fn open_relative_directory_for_validation(
     nt_create_relative(
         parent,
         name,
-        FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
         null_mut(),
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_OPEN,
         FILE_DIRECTORY_FILE
             | FILE_SYNCHRONOUS_IO_NONALERT
@@ -1416,6 +1656,21 @@ fn open_relative_directory_for_delete(
             | FILE_SYNCHRONOUS_IO_NONALERT
             | FILE_OPEN_FOR_BACKUP_INTENT
             | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn open_relative_ownership_stream(root: HANDLE) -> io::Result<Handle> {
+    nt_create_relative(
+        root,
+        std::ffi::OsStr::new(&format!(":{OWNERSHIP_STREAM}")),
+        windows_sys::Win32::Foundation::GENERIC_READ
+            | FILE_READ_ATTRIBUTES
+            | READ_CONTROL
+            | SYNCHRONIZE,
+        null_mut(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT_NT,
     )
 }
 
@@ -1494,6 +1749,24 @@ fn nt_create_relative(
     Ok(Handle(handle))
 }
 
+fn open_directory_low_guard(path: &Path) -> io::Result<Handle> {
+    let handle = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            SYNCHRONIZE | windows_sys::Win32::Foundation::GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if handle.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
 fn open_directory_guard(path: &Path) -> io::Result<Handle> {
     let handle = Handle(unsafe {
         CreateFileW(
@@ -1518,6 +1791,27 @@ fn open_directory_for_replacement(path: &Path) -> io::Result<Handle> {
             wide(path)?.as_ptr(),
             FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if handle.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
+fn open_creation_parent(path: &Path) -> io::Result<Handle> {
+    let handle = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            FILE_LIST_DIRECTORY
+                | FILE_READ_ATTRIBUTES
+                | READ_CONTROL
+                | windows_sys::Win32::Foundation::GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             null_mut(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,

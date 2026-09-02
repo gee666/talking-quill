@@ -8,18 +8,33 @@ const guard = process.env.TQ_MACHINE_LOCK_TEST_GUARD_EXE;
 if (!/^[0-9a-f]{32}$/u.test(namespaceId ?? '') || !guard) process.exit(64);
 
 const stateRoot = resolve('tmp', 'machine-lock-tests');
-const parent = resolve(stateRoot, 'helper');
-const root = resolve(parent, namespaceId);
-const token = randomBytes(8).toString('hex');
-const movedParent = `${parent}-rename-attempt`;
-const parentReplacement = resolve(stateRoot, `.parent-replacement-${token}`);
+for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
+  const parent = resolve(stateRoot, kind);
+  const root = resolve(parent, namespaceId);
+  const moved = `${root}-rename-attempt`;
+  const replacement = resolve(parent, `.root-replacement-${randomBytes(8).toString('hex')}`);
+  if (!renameIsBlocked(root, moved)) fail(`${kind} outer-root rename was not blocked`);
+  try {
+    rmdirSync(root);
+    fail(`${kind} outer-root deletion was not blocked`);
+  } catch {
+    if (!existsSync(root)) fail(`${kind} outer root disappeared`);
+  }
+  mkdirSync(replacement);
+  if (!forceReplacement(replacement, root)) fail(`${kind} outer-root replacement was not blocked`);
+  if (existsSync(replacement)) rmdirSync(replacement);
+}
 
-if (!renameIsBlocked(parent, movedParent)) fail('parent rename was not blocked');
+const parent = resolve(stateRoot, 'helper');
+const movedParent = `${parent}-rename-attempt`;
+const parentReplacement = resolve(
+  stateRoot,
+  `.parent-replacement-${randomBytes(8).toString('hex')}`,
+);
+if (!renameIsBlocked(parent, movedParent)) fail('outer parent rename was not blocked');
 mkdirSync(parentReplacement);
-const parentBlocked = forceReplacement(parentReplacement, parent);
+if (!forceReplacement(parentReplacement, parent)) fail('outer parent replacement was not blocked');
 if (existsSync(parentReplacement)) rmdirSync(parentReplacement);
-if (!parentBlocked) fail('parent replacement was not blocked');
-if (!existsSync(root) || !existsSync(parent)) fail('retained namespace path disappeared');
 process.exit(0);
 
 function renameIsBlocked(source, destination) {

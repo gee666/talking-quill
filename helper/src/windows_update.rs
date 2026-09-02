@@ -31,7 +31,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
+    FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers,
     GetFileInformationByHandle, MOVEFILE_DELAY_UNTIL_REBOOT, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, SYNCHRONIZE,
 };
@@ -136,7 +136,9 @@ fn machine_lock_program_data() -> Result<PathBuf, i32> {
         .join("..")
         .join("tmp/machine-lock-tests/helper")
         .join(machine_lock_test_id()?);
-    std::fs::create_dir_all(&root).map_err(|_| EXIT_LAUNCH_FAILED)?;
+    if !root.is_dir() {
+        return Err(EXIT_LAUNCH_FAILED);
+    }
     Ok(root)
 }
 #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
@@ -4023,11 +4025,16 @@ fn reclaim_machine_lock_pending(root: &Path) -> Result<(), i32> {
 }
 
 fn flush_directory(path: &Path) -> Result<(), i32> {
+    let mut share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    #[cfg(any(test, feature = "machine-lock-test-namespace"))]
+    {
+        share_mode |= FILE_SHARE_DELETE;
+    }
     let handle = unsafe {
         CreateFileW(
             wide_nul(path)?.as_ptr(),
             FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share_mode,
             std::ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,

@@ -186,7 +186,9 @@ fn machine_lock_program_data(_production: &Path) -> Result<PathBuf> {
         .join("../..")
         .join("tmp/machine-lock-tests/windows-setup")
         .join(machine_lock_test_id()?);
-    fs::create_dir_all(&root).map_err(io_failure)?;
+    if !root.is_dir() {
+        return Err(fail(EXIT_FAILURE, "machine-lock test outer root is absent"));
+    }
     Ok(root)
 }
 #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
