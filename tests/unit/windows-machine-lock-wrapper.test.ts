@@ -150,6 +150,212 @@ run('Windows machine-lock wrapper teardown', () => {
     120_000,
   );
 
+  it('migrates a schema-4 direct-log record to schema 5', async () => {
+    const record = await leaveRecordAtPhase('inventory-sealed', 'cmd.exe /d /c echo schema-four');
+    record.schemaVersion = 4;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    const recovered = runWrapper('cmd.exe /d /c exit 0');
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(recoveredLogFrames(recovered.stderr).some((frame) => frame.stream === 'stdout')).toBe(
+      true,
+    );
+    expect(existsSync(records)).toBe(false);
+  }, 120_000);
+
+  it.each(['logs-preserved', 'inventory-sealed', 'deleting-root'] as const)(
+    'authenticates and migrates a schema-4 logs-preserved record at %s',
+    async (phase) => {
+      const record = await leaveSchema4LogsPreservedRecord(phase);
+      const recovered = runWrapper('cmd.exe /d /c exit 0');
+      expect(recovered.status, recovered.stderr).toBe(0);
+      const frames = recoveredLogFrames(recovered.stderr);
+      expect(frames.map((frame) => frame.stream).sort()).toEqual(['stderr', 'stdout']);
+      for (const frame of frames) assertRecoveredLogFrame(frame);
+      expect(frames.every((frame) => frame.recordId === record.recordId)).toBe(true);
+      expect(existsSync(records)).toBe(false);
+      expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+    },
+    120_000,
+  );
+
+  it('rejects changed schema-4 evidence before migration', async () => {
+    const record = await leaveSchema4LogsPreservedRecord();
+    const path = resolve(
+      'tmp',
+      'machine-lock-log-evidence-v1',
+      `${record.recordId}.stdout.evidence-v1`,
+    );
+    const original = readFileSync(path);
+    writeFileSync(path, 'changed legacy evidence\n', 'utf8');
+    const rejected = runWrapper('cmd.exe /d /c exit 0');
+    expect(rejected.status).not.toBe(0);
+    expect(existsSync(resolve(records, `${record.recordId}.json`))).toBe(true);
+    writeFileSync(path, original);
+    const recovered = runWrapper('cmd.exe /d /c exit 0');
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(existsSync(records)).toBe(false);
+    expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+  }, 120_000);
+
+  it.each(['logs-preserved', 'deleting-root'] as const)(
+    'authenticates %s namespace bindings before retiring schema-4 evidence',
+    async (phase) => {
+      const record = await leaveSchema4LogsPreservedRecord(phase);
+      const bindingPath = resolve(records, record.roots[0].bindingFile);
+      const original = readFileSync(bindingPath);
+      writeFileSync(bindingPath, 'changed binding\n', 'utf8');
+      const rejected = runWrapper('cmd.exe /d /c exit 0');
+      expect(rejected.status).not.toBe(0);
+      expect(
+        existsSync(
+          resolve('tmp', 'machine-lock-log-evidence-v1', `${record.recordId}.stdout.evidence-v1`),
+        ),
+      ).toBe(true);
+      writeFileSync(bindingPath, original);
+      const recovered = runWrapper('cmd.exe /d /c exit 0');
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(existsSync(records)).toBe(false);
+    },
+    120_000,
+  );
+
+  it('rejects binding residue for a root recorded as deleted before evidence migration', async () => {
+    const record = await leaveSchema4LogsPreservedRecord('deleting-root');
+    const kind = record.deletingRoot;
+    record.deletedRoots.push(kind);
+    record.deletingRoot = null;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    const rejected = runWrapper('cmd.exe /d /c exit 0');
+    expect(rejected.status).not.toBe(0);
+    expect(
+      existsSync(
+        resolve('tmp', 'machine-lock-log-evidence-v1', `${record.recordId}.stdout.evidence-v1`),
+      ),
+    ).toBe(true);
+    record.deletedRoots = record.deletedRoots.filter((value: string) => value !== kind);
+    record.deletingRoot = kind;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    const recovered = runWrapper('cmd.exe /d /c exit 0');
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(existsSync(records)).toBe(false);
+  }, 120_000);
+
+  it.each([
+    'legacy-evidence-authenticated:stdout',
+    'legacy-evidence-emitted:stdout',
+    'legacy-evidence-retirement-intent:stdout',
+    'legacy-evidence-retired:stdout',
+    'legacy-evidence-directory-flushed:stdout',
+    'legacy-evidence-retirement-recorded:stdout',
+    'legacy-evidence-record-published',
+    'legacy-evidence-root-retired',
+  ])(
+    'recovers a schema-4 evidence retirement crash at %s',
+    async (phase) => {
+      await leaveSchema4LogsPreservedRecord();
+      const crashed = runWrapper('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
+      });
+      expect(crashed.status, crashed.stderr).toBe(197);
+      expect(existsSync(records)).toBe(false);
+      expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+    },
+    120_000,
+  );
+
+  it('recovers a schema-4 evidence migration publication crash', async () => {
+    await leaveSchema4LogsPreservedRecord();
+    const crashed = runWrapper('cmd.exe /d /c exit 0', {
+      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'native-record-temp-renamed',
+      TQ_MACHINE_LOCK_TEST_RECORD_CRASH_PHASE: 'logs-preserved',
+    });
+    expect(crashed.status, crashed.stderr).toBe(197);
+    expect(existsSync(records)).toBe(false);
+    expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+  }, 120_000);
+
+  it.each(['final', 'pending'] as const)(
+    'retires authenticated orphan %s evidence left after its record',
+    (state) => {
+      const recordId = randomBytes(16).toString('hex');
+      const evidenceRoot = resolve('tmp', 'machine-lock-log-evidence-v1');
+      mkdirSync(evidenceRoot, { recursive: true });
+      const protectedRoot = spawnSync(
+        nativeHelper,
+        ['--protect-legacy-evidence-root', evidenceRoot],
+        {
+          encoding: 'utf8',
+        },
+      );
+      expect(protectedRoot.status, protectedRoot.stderr).toBe(0);
+      const path = resolve(
+        evidenceRoot,
+        `${recordId}.stdout.evidence-v1${state === 'pending' ? '.pending-v1' : ''}`,
+      );
+      const created = spawnSync(
+        nativeHelper,
+        ['--create-legacy-evidence-fixture', path, recordId, 'stdout', state],
+        { input: 'orphan legacy diagnostic\n', encoding: 'utf8' },
+      );
+      expect(created.status, created.stderr).toBe(0);
+      const recovered = runWrapper('cmd.exe /d /c exit 0');
+      expect(recovered.status, recovered.stderr).toBe(0);
+      const frame = recoveredLogFrames(recovered.stderr)[0];
+      assertRecoveredLogFrame(frame);
+      expect(frame.recordId).toBe(recordId);
+      expect(existsSync(evidenceRoot)).toBe(false);
+    },
+    120_000,
+  );
+
+  it('hashes and retires a noisy child log larger than 128 MiB with bounded diagnostics', async () => {
+    const record = await leaveRecordAtPhase(
+      'inventory-sealed',
+      'node tests/fixtures/machine-lock-test-noisy-child.mjs',
+    );
+    const recovered = runWrapper('cmd.exe /d /c exit 0');
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(recovered.stderr.length).toBeLessThan(200_000);
+    const stdout = recoveredLogFrames(recovered.stderr).find((frame) => frame.stream === 'stdout')!;
+    assertRecoveredLogFrame(stdout);
+    expect(stdout.recordId).toBe(record.recordId);
+    expect(stdout.byteLength).toBe(129 * 1024 * 1024 + 1);
+    expect(stdout.prefixByteLength).toBe(64 * 1024);
+    expect(stdout.truncated).toBe(true);
+    const expected = createHash('sha256');
+    const chunk = Buffer.alloc(1024 * 1024, 0x61);
+    for (let index = 0; index < 129; index += 1) expected.update(chunk);
+    expected.update('z');
+    expect(stdout.hash).toBe(expected.digest('hex'));
+    expect(existsSync(records)).toBe(false);
+  }, 240_000);
+
+  it('retires an oversized noisy log when diagnostic emission fails', async () => {
+    await leaveRecordAtPhase(
+      'inventory-sealed',
+      'node tests/fixtures/machine-lock-test-noisy-child.mjs',
+    );
+    const recovered = runWrapper('cmd.exe /d /c exit 0', {
+      TQ_MACHINE_LOCK_TEST_DIAGNOSTIC_WRITE_FAIL: '1',
+    });
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(recoveredLogFrames(recovered.stderr)).toEqual([]);
+    expect(existsSync(records)).toBe(false);
+    expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+  }, 240_000);
+
   it('re-emits a deduplicable recovered-log frame after abrupt wrapper death', async () => {
     const record = await leaveRecordAtPhase(
       'inventory-sealed',
@@ -221,7 +427,7 @@ run('Windows machine-lock wrapper teardown', () => {
     );
     expect(combined).toBeDefined();
     assertRecoveredLogFrame(combined);
-    expect(Buffer.from(combined.content, 'base64').toString('utf8')).toBe(
+    expect(Buffer.from(combined.contentPrefix, 'base64').toString('utf8')).toBe(
       'legacy combined diagnostic\r\n',
     );
     expect(existsSync(records)).toBe(false);
@@ -686,6 +892,81 @@ async function leaveRecordAtPhase(phase: string, childCommand: string) {
   return record;
 }
 
+async function leaveSchema4LogsPreservedRecord(
+  currentPhase: 'logs-preserved' | 'inventory-sealed' | 'deleting-root' = 'logs-preserved',
+) {
+  const record = await leaveRecordAtPhase(
+    'inventory-sealed',
+    'cmd.exe /d /c echo legacy-evidence-stdout ^& echo legacy-evidence-stderr 1^>^&2',
+  );
+  const evidenceRoot = resolve('tmp', 'machine-lock-log-evidence-v1');
+  mkdirSync(evidenceRoot, { recursive: true });
+  const protectedRoot = spawnSync(nativeHelper, ['--protect-legacy-evidence-root', evidenceRoot], {
+    encoding: 'utf8',
+  });
+  expect(protectedRoot.status, protectedRoot.stderr).toBe(0);
+  const evidence = [];
+  for (const [channel, source] of [
+    ['stdout', record.childStdoutLogFile],
+    ['stderr', record.childStderrLogFile],
+  ] as const) {
+    const fileName = `${record.recordId}.${channel}.evidence-v1`;
+    const destination = resolve(evidenceRoot, fileName);
+    renameSync(resolve(records, source), destination);
+    const bytes = readFileSync(destination);
+    evidence.push({
+      channel,
+      fileName,
+      present: true,
+      byteLength: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    });
+  }
+  const rootInspection = spawnSync(nativeHelper, ['--inspect-legacy-evidence-root', evidenceRoot], {
+    encoding: 'utf8',
+  });
+  expect(rootInspection.status, rootInspection.stderr).toBe(0);
+  const acl = spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      '(Get-Acl -LiteralPath $env:TQ_EVIDENCE_ROOT -ErrorAction Stop).Sddl',
+    ],
+    {
+      env: { ...process.env, TQ_EVIDENCE_ROOT: evidenceRoot },
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  expect(acl.status, acl.stderr).toBe(0);
+  record.schemaVersion = 4;
+  record.phase = currentPhase;
+  if (currentPhase === 'deleting-root') {
+    const root = record.roots[0];
+    const removed = spawnSync(
+      nativeHelper,
+      [
+        '--exact',
+        resolve('tmp', 'machine-lock-tests', root.kind, record.namespaceId),
+        root.identity,
+      ],
+      { input: JSON.stringify(root.inventory), encoding: 'utf8' },
+    );
+    expect(removed.status, removed.stderr).toBe(0);
+    record.deletingRoot = root.kind;
+  }
+  record.logsPreserved = true;
+  record.logsPreservedFromPhase = 'inventory-sealed';
+  record.recoveredLogEvidence = evidence;
+  record.evidenceDirectoryIdentity = JSON.parse(rootInspection.stdout).identity;
+  record.evidenceDirectoryAcl = acl.stdout.trim();
+  delete record.logsRetired;
+  writeFileSync(resolve(records, `${record.recordId}.json`), `${JSON.stringify(record)}\n`, 'utf8');
+  return record;
+}
+
 async function waitForPath(path: string) {
   const deadline = Date.now() + 30_000;
   while (!existsSync(path)) {
@@ -728,13 +1009,35 @@ function assertRecoveredLogFrame(frame: {
   recordId: string;
   stream: string;
   hash: string;
-  content: string;
+  byteLength: number;
+  contentPrefix: string;
+  prefixByteLength: number;
+  truncated: boolean;
+  source: string;
+  version: number;
 }) {
-  expect(Object.keys(frame).sort()).toEqual(['content', 'hash', 'recordId', 'stream']);
+  expect(Object.keys(frame).sort()).toEqual([
+    'byteLength',
+    'contentPrefix',
+    'hash',
+    'prefixByteLength',
+    'recordId',
+    'source',
+    'stream',
+    'truncated',
+    'version',
+  ]);
+  expect(frame.version).toBe(2);
+  expect(['record-log', 'legacy-evidence', 'orphan-evidence']).toContain(frame.source);
   expect(frame.recordId).toMatch(/^[0-9a-f]{32}$/u);
   expect(['stdout', 'stderr', 'combined']).toContain(frame.stream);
-  const content = Buffer.from(frame.content, 'base64');
-  expect(createHash('sha256').update(content).digest('hex')).toBe(frame.hash);
+  const prefix = Buffer.from(frame.contentPrefix, 'base64');
+  expect(prefix).toHaveLength(frame.prefixByteLength);
+  expect(frame.prefixByteLength).toBeLessThanOrEqual(64 * 1024);
+  expect(frame.truncated).toBe(frame.byteLength > frame.prefixByteLength);
+  if (!frame.truncated) {
+    expect(createHash('sha256').update(prefix).digest('hex')).toBe(frame.hash);
+  }
 }
 
 function runWrapper(command: string, environment: NodeJS.ProcessEnv = {}) {

@@ -23,7 +23,7 @@ use windows_sys::Win32::{
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-        SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        SetFileSecurityW, SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
@@ -921,8 +921,12 @@ fn rename_file_handle(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveredCleanupLog {
+    pub byte_length: u64,
     pub sha256: String,
-    pub content: String,
+    pub content_prefix: String,
+    pub prefix_byte_length: u64,
+    pub truncated: bool,
+    pub file_identity: String,
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -946,6 +950,50 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     encoded
+}
+
+fn streamed_log_evidence(handle: HANDLE, prefix_limit: usize) -> io::Result<RecoveredCleanupLog> {
+    let mut digest = Sha256::new();
+    let mut prefix = Vec::with_capacity(prefix_limit);
+    let mut byte_length = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let mut read = 0;
+        if unsafe {
+            ReadFile(
+                handle,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut read,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if read == 0 {
+            break;
+        }
+        let bytes = &buffer[..read as usize];
+        digest.update(bytes);
+        byte_length = byte_length
+            .checked_add(read.into())
+            .ok_or_else(|| io::Error::other("cleanup log length overflow"))?;
+        let remaining = prefix_limit.saturating_sub(prefix.len());
+        prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+    Ok(RecoveredCleanupLog {
+        byte_length,
+        sha256: digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        content_prefix: base64_encode(&prefix),
+        prefix_byte_length: prefix.len() as u64,
+        truncated: byte_length > prefix.len() as u64,
+        file_identity: file_id_128(handle)?,
+    })
 }
 
 fn open_exact_protected_file(path: &Path) -> io::Result<Handle> {
@@ -1011,20 +1059,15 @@ pub fn inspect_cleanup_log(
         Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let bytes = read_handle(file.0)?;
-    Ok(Some(RecoveredCleanupLog {
-        sha256: Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        content: base64_encode(&bytes),
-    }))
+    streamed_log_evidence(file.0, 64 * 1024).map(Some)
 }
 
 pub fn delete_cleanup_log(
     path: &Path,
     record_id: &str,
     expected_sha256: Option<&str>,
+    expected_byte_length: Option<u64>,
+    expected_file_identity: Option<&str>,
     stream: &str,
     expected_parent_identity: &str,
 ) -> io::Result<()> {
@@ -1039,20 +1082,23 @@ pub fn delete_cleanup_log(
     }
     match open_exact_protected_file(path) {
         Ok(file) => {
-            let actual = Sha256::digest(&read_handle(file.0)?)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            if expected_sha256 != Some(actual.as_str()) {
+            let actual = streamed_log_evidence(file.0, 0)?;
+            if expected_sha256 != Some(actual.sha256.as_str())
+                || expected_byte_length != Some(actual.byte_length)
+                || expected_file_identity != Some(actual.file_identity.as_str())
+            {
                 return Err(io::Error::other(
-                    "cleanup log digest changed before deletion",
+                    "cleanup log identity or content changed before deletion",
                 ));
             }
             delete_file_handle(file.0)?;
             record_crash_at(&format!("recovered-log-retired:{stream}"));
         }
         Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
-            if expected_sha256.is_some() {
+            if expected_sha256.is_some()
+                || expected_byte_length.is_some()
+                || expected_file_identity.is_some()
+            {
                 return Err(io::Error::other("authenticated cleanup log disappeared"));
             }
         }
@@ -1064,6 +1110,191 @@ pub fn delete_cleanup_log(
     record_crash_at(&format!(
         "recovered-log-retirement-directory-flushed:{stream}"
     ));
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyEvidenceRoot {
+    pub identity: String,
+    pub names: Vec<String>,
+}
+
+fn validate_legacy_evidence_root_path(path: &Path) -> io::Result<()> {
+    if path.file_name().and_then(|value| value.to_str()) != Some("machine-lock-log-evidence-v1")
+        || path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            != Some("tmp")
+    {
+        return Err(io::Error::other("legacy evidence root path is invalid"));
+    }
+    Ok(())
+}
+
+fn open_legacy_evidence_root(path: &Path, expected_identity: Option<&str>) -> io::Result<Handle> {
+    validate_legacy_evidence_root_path(path)?;
+    let root = open_directory(path)?;
+    validate_directory(root.0)?;
+    validate_exact_security(root.0, true)?;
+    if let Some(expected) = expected_identity
+        && identity(root.0)? != expected
+    {
+        return Err(io::Error::other("legacy evidence root identity changed"));
+    }
+    Ok(root)
+}
+
+fn validate_legacy_evidence_path(
+    path: &Path,
+    record_id: &str,
+    stream: &str,
+    pending: bool,
+) -> io::Result<()> {
+    validate_namespace_id(record_id)?;
+    validate_legacy_evidence_root_path(
+        path.parent()
+            .ok_or_else(|| io::Error::other("legacy evidence file has no parent"))?,
+    )?;
+    if !matches!(stream, "stdout" | "stderr" | "combined") {
+        return Err(io::Error::other("legacy evidence stream is invalid"));
+    }
+    let pending_suffix = if pending { ".pending-v1" } else { "" };
+    let expected = format!("{record_id}.{stream}.evidence-v1{pending_suffix}");
+    if path.file_name().and_then(|value| value.to_str()) != Some(expected.as_str()) {
+        return Err(io::Error::other("legacy evidence path is not record-bound"));
+    }
+    Ok(())
+}
+
+pub fn protect_legacy_evidence_root(path: &Path) -> io::Result<()> {
+    validate_legacy_evidence_root_path(path)?;
+    let descriptor = exact_descriptor(true)?;
+    if unsafe {
+        SetFileSecurityW(
+            wide(path)?.as_ptr(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let root = open_legacy_evidence_root(path, None)?;
+    if unsafe { FlushFileBuffers(root.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn create_legacy_evidence_fixture(
+    path: &Path,
+    record_id: &str,
+    stream: &str,
+    pending: bool,
+    bytes: &[u8],
+) -> io::Result<()> {
+    validate_legacy_evidence_path(path, record_id, stream, pending)?;
+    let _root = open_legacy_evidence_root(path.parent().unwrap(), None)?;
+    write_new_protected_file(path, bytes, "legacy-evidence-fixture")
+}
+
+pub fn inspect_legacy_evidence_root(path: &Path) -> io::Result<LegacyEvidenceRoot> {
+    let root = open_legacy_evidence_root(path, None)?;
+    let mut names = std::fs::read_dir(path)?
+        .map(|entry| {
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| io::Error::other("legacy evidence directory entry name is invalid"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    names.sort();
+    Ok(LegacyEvidenceRoot {
+        identity: identity(root.0)?,
+        names,
+    })
+}
+
+pub fn inspect_legacy_evidence(
+    path: &Path,
+    record_id: &str,
+    stream: &str,
+    pending: bool,
+    expected_root_identity: &str,
+) -> io::Result<Option<RecoveredCleanupLog>> {
+    validate_legacy_evidence_path(path, record_id, stream, pending)?;
+    let _root = open_legacy_evidence_root(path.parent().unwrap(), Some(expected_root_identity))?;
+    let file = match open_exact_protected_file(path) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    streamed_log_evidence(file.0, 64 * 1024).map(Some)
+}
+
+pub struct ExpectedStreamedLog<'a> {
+    pub sha256: Option<&'a str>,
+    pub byte_length: Option<u64>,
+    pub file_identity: Option<&'a str>,
+}
+
+pub fn delete_legacy_evidence(
+    path: &Path,
+    record_id: &str,
+    stream: &str,
+    pending: bool,
+    expected_root_identity: &str,
+    expected: ExpectedStreamedLog<'_>,
+) -> io::Result<()> {
+    validate_legacy_evidence_path(path, record_id, stream, pending)?;
+    let root = open_legacy_evidence_root(path.parent().unwrap(), Some(expected_root_identity))?;
+    match open_exact_protected_file(path) {
+        Ok(file) => {
+            let actual = streamed_log_evidence(file.0, 0)?;
+            if expected.sha256 != Some(actual.sha256.as_str())
+                || expected.byte_length != Some(actual.byte_length)
+                || expected.file_identity != Some(actual.file_identity.as_str())
+            {
+                return Err(io::Error::other("legacy evidence changed before deletion"));
+            }
+            delete_file_handle(file.0)?;
+            record_crash_at(&format!("legacy-evidence-retired:{stream}"));
+        }
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+            if expected.sha256.is_some()
+                || expected.byte_length.is_some()
+                || expected.file_identity.is_some()
+            {
+                return Err(io::Error::other(
+                    "authenticated legacy evidence disappeared",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    if unsafe { FlushFileBuffers(root.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    record_crash_at(&format!("legacy-evidence-directory-flushed:{stream}"));
+    Ok(())
+}
+
+pub fn remove_empty_legacy_evidence_root(
+    path: &Path,
+    expected_root_identity: &str,
+) -> io::Result<()> {
+    let parent = open_directory(
+        path.parent()
+            .ok_or_else(|| io::Error::other("legacy evidence root has no parent"))?,
+    )?;
+    let root = open_legacy_evidence_root(path, Some(expected_root_identity))?;
+    if std::fs::read_dir(path)?.next().is_some() {
+        return Err(io::Error::other("legacy evidence root is not empty"));
+    }
+    handle_delete_empty_root(root, parent)?;
+    record_crash_at("legacy-evidence-root-retired");
     Ok(())
 }
 
@@ -1252,7 +1483,7 @@ pub fn retain_private_cleanup_record(
     {
         return Err(io::Error::last_os_error());
     }
-    if record["schemaVersion"].as_u64() != Some(4)
+    if record["schemaVersion"].as_u64() != Some(5)
         || record["recordId"].as_str() != Some(record_id)
         || record["controlNonce"].as_str() != Some(control_nonce)
     {
@@ -1861,6 +2092,39 @@ pub fn verify_root_binding(
     let ads = read_stream(&ownership_stream(path)?)?;
     if hex_digest(ads.as_bytes()) != ads_sha256 {
         return Err(io::Error::other("root ownership ADS changed"));
+    }
+    Ok(())
+}
+
+pub fn verify_deleted_root_binding(
+    binding_path: &Path,
+    ownership_prefix: &str,
+    binding_nonce: &str,
+    root_identity: &str,
+    ads_sha256: &str,
+) -> io::Result<()> {
+    let expected = CleanupBinding {
+        version: 1,
+        nonce: binding_nonce.to_owned(),
+        ownership_prefix: ownership_prefix.to_owned(),
+        root_identity: root_identity.to_owned(),
+        ads_sha256: ads_sha256.to_owned(),
+    };
+    let binding_present = binding_path.try_exists()?;
+    let intent_path = intent_path(binding_path);
+    let intent_present = intent_path.try_exists()?;
+    if binding_present && !intent_present {
+        return Err(io::Error::other(
+            "deleted root binding exists without its intent",
+        ));
+    }
+    if binding_present && read_binding(binding_path)? != expected {
+        return Err(io::Error::other("deleted root binding changed"));
+    }
+    if intent_present
+        && read_intent(&intent_path)? != expected_intent(ownership_prefix, binding_nonce)
+    {
+        return Err(io::Error::other("deleted root creation intent changed"));
     }
     Ok(())
 }

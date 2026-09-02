@@ -331,24 +331,223 @@ fn main() {
                 }
             }
         }
-        [mode, path, record_id, expected_sha256, stream, parent_identity]
-            if mode == "--delete-cleanup-log" =>
-        {
-            let (Some(record_id), Some(expected_sha256), Some(stream), Some(parent_identity)) = (
+        [
+            mode,
+            path,
+            record_id,
+            expected_sha256,
+            expected_byte_length,
+            expected_file_identity,
+            stream,
+            parent_identity,
+        ] if mode == "--delete-cleanup-log" => {
+            let (
+                Some(record_id),
+                Some(expected_sha256),
+                Some(expected_byte_length),
+                Some(expected_file_identity),
+                Some(stream),
+                Some(parent_identity),
+            ) = (
                 record_id.to_str(),
                 expected_sha256.to_str(),
+                expected_byte_length.to_str(),
+                expected_file_identity.to_str(),
                 stream.to_str(),
                 parent_identity.to_str(),
-            ) else {
+            )
+            else {
                 std::process::exit(64);
             };
             let expected_sha256 = (expected_sha256 != "-").then_some(expected_sha256);
+            let expected_byte_length = if expected_byte_length == "-" {
+                None
+            } else {
+                expected_byte_length.parse().ok()
+            };
+            let expected_file_identity =
+                (expected_file_identity != "-").then_some(expected_file_identity);
+            if expected_sha256.is_some()
+                != (expected_byte_length.is_some() && expected_file_identity.is_some())
+            {
+                std::process::exit(64);
+            }
             match talking_quill_helper::machine_lock_test_namespace::delete_cleanup_log(
                 std::path::Path::new(path),
                 record_id,
                 expected_sha256,
+                expected_byte_length,
+                expected_file_identity,
                 stream,
                 parent_identity,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path] if mode == "--protect-legacy-evidence-root" => {
+            match talking_quill_helper::machine_lock_test_namespace::protect_legacy_evidence_root(
+                std::path::Path::new(path),
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path, record_id, stream, pending] if mode == "--create-legacy-evidence-fixture" => {
+            let (Some(record_id), Some(stream), Some(pending)) =
+                (record_id.to_str(), stream.to_str(), pending.to_str())
+            else {
+                std::process::exit(64);
+            };
+            let pending = match pending {
+                "final" => false,
+                "pending" => true,
+                _ => std::process::exit(64),
+            };
+            let mut bytes = Vec::new();
+            if std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes).is_err() {
+                std::process::exit(74);
+            }
+            match talking_quill_helper::machine_lock_test_namespace::create_legacy_evidence_fixture(
+                std::path::Path::new(path),
+                record_id,
+                stream,
+                pending,
+                &bytes,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path] if mode == "--inspect-legacy-evidence-root" => {
+            match talking_quill_helper::machine_lock_test_namespace::inspect_legacy_evidence_root(
+                std::path::Path::new(path),
+            ) {
+                Ok(root) => {
+                    println!("{}", serde_json::to_string(&root).unwrap());
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path, record_id, stream, pending, root_identity]
+            if mode == "--inspect-legacy-evidence" =>
+        {
+            let (Some(record_id), Some(stream), Some(pending), Some(root_identity)) = (
+                record_id.to_str(),
+                stream.to_str(),
+                pending.to_str(),
+                root_identity.to_str(),
+            ) else {
+                std::process::exit(64);
+            };
+            let pending = match pending {
+                "final" => false,
+                "pending" => true,
+                _ => std::process::exit(64),
+            };
+            match talking_quill_helper::machine_lock_test_namespace::inspect_legacy_evidence(
+                std::path::Path::new(path),
+                record_id,
+                stream,
+                pending,
+                root_identity,
+            ) {
+                Ok(Some(log)) => {
+                    println!("{}", serde_json::to_string(&log).unwrap());
+                    return;
+                }
+                Ok(None) => std::process::exit(3),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [
+            mode,
+            path,
+            record_id,
+            stream,
+            pending,
+            root_identity,
+            sha256,
+            byte_length,
+            file_identity,
+        ] if mode == "--delete-legacy-evidence" => {
+            let (
+                Some(record_id),
+                Some(stream),
+                Some(pending),
+                Some(root_identity),
+                Some(sha256),
+                Some(byte_length),
+                Some(file_identity),
+            ) = (
+                record_id.to_str(),
+                stream.to_str(),
+                pending.to_str(),
+                root_identity.to_str(),
+                sha256.to_str(),
+                byte_length.to_str(),
+                file_identity.to_str(),
+            )
+            else {
+                std::process::exit(64);
+            };
+            let pending = match pending {
+                "final" => false,
+                "pending" => true,
+                _ => std::process::exit(64),
+            };
+            let sha256 = (sha256 != "-").then_some(sha256);
+            let byte_length = if byte_length == "-" {
+                None
+            } else {
+                byte_length.parse().ok()
+            };
+            let file_identity = (file_identity != "-").then_some(file_identity);
+            if sha256.is_some() != (byte_length.is_some() && file_identity.is_some()) {
+                std::process::exit(64);
+            }
+            match talking_quill_helper::machine_lock_test_namespace::delete_legacy_evidence(
+                std::path::Path::new(path),
+                record_id,
+                stream,
+                pending,
+                root_identity,
+                talking_quill_helper::machine_lock_test_namespace::ExpectedStreamedLog {
+                    sha256,
+                    byte_length,
+                    file_identity,
+                },
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path, root_identity] if mode == "--remove-empty-legacy-evidence-root" => {
+            let Some(root_identity) = root_identity.to_str() else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::remove_empty_legacy_evidence_root(
+                std::path::Path::new(path),
+                root_identity,
             ) {
                 Ok(()) => return,
                 Err(error) => {
@@ -440,6 +639,31 @@ fn main() {
             };
             match talking_quill_helper::machine_lock_test_namespace::verify_root_binding(
                 std::path::Path::new(path),
+                std::path::Path::new(binding),
+                prefix,
+                nonce,
+                identity,
+                hash,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, binding, prefix, nonce, identity, hash]
+            if mode == "--verify-deleted-root-binding" =>
+        {
+            let (Some(prefix), Some(nonce), Some(identity), Some(hash)) = (
+                prefix.to_str(),
+                nonce.to_str(),
+                identity.to_str(),
+                hash.to_str(),
+            ) else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::verify_deleted_root_binding(
                 std::path::Path::new(binding),
                 prefix,
                 nonce,

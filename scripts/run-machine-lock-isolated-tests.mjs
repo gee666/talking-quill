@@ -16,12 +16,13 @@ import {
 } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
-const RECORD_SCHEMA = 4;
+const RECORD_SCHEMA = 5;
 const NATIVE_SESSION_SCHEMA = 3;
-const LEGACY_RECORD_SCHEMAS = [1, 2, 3];
+const LEGACY_RECORD_SCHEMAS = [1, 2, 3, 4];
 const root = resolve(import.meta.dirname, '..');
 const stateRoot = resolve(root, 'tmp', 'machine-lock-tests');
 const recordRoot = resolve(stateRoot, '.cleanup-records-v1');
+const legacyEvidenceRoot = resolve(root, 'tmp', 'machine-lock-log-evidence-v1');
 const rootKinds = ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit'];
 const separator = process.argv.indexOf('--');
 if (separator === -1 || separator === process.argv.length - 1) {
@@ -395,6 +396,20 @@ function emitRecoveredLog(frame) {
   }
 }
 
+function emitStreamedRecoveredLog(recordId, stream, log, source = 'record-log') {
+  emitRecoveredLog({
+    version: 2,
+    source,
+    recordId,
+    stream,
+    hash: log.sha256,
+    byteLength: log.byteLength,
+    contentPrefix: log.contentPrefix,
+    prefixByteLength: log.prefixByteLength,
+    truncated: log.truncated,
+  });
+}
+
 function retireRecoveredLogs(record) {
   if (record.logsRetired === true) return;
   for (const plan of recoveredLogPlans(record)) {
@@ -405,7 +420,6 @@ function retireRecoveredLogs(record) {
       {
         encoding: 'utf8',
         windowsHide: true,
-        maxBuffer: 180 * 1024 * 1024,
       },
     );
     if (![0, 3].includes(inspected.status)) {
@@ -416,12 +430,7 @@ function retireRecoveredLogs(record) {
       recoveredLogCrashAt(`recovered-log-authenticated:${plan.stream}`);
       // Emission precedes deletion. A crash may repeat this frame; consumers deduplicate by
       // recordId, stream, and hash.
-      emitRecoveredLog({
-        recordId: record.recordId,
-        stream: plan.stream,
-        hash: log.sha256,
-        content: log.content,
-      });
+      emitStreamedRecoveredLog(record.recordId, plan.stream, log);
       recoveredLogCrashAt(`recovered-log-emitted:${plan.stream}`);
     }
     const deleted = spawnSync(
@@ -431,6 +440,8 @@ function retireRecoveredLogs(record) {
         path,
         record.recordId,
         log?.sha256 ?? '-',
+        log?.byteLength?.toString() ?? '-',
+        log?.fileIdentity ?? '-',
         plan.stream,
         record.recordDirectoryIdentity,
       ],
@@ -451,6 +462,311 @@ function retireRecoveredLogs(record) {
   record.logsRetired = true;
   writeRecord(record);
   recoveredLogCrashAt('logs-retired-record-published');
+}
+
+function inspectLegacyEvidenceRoot() {
+  if (!existsSync(legacyEvidenceRoot)) return null;
+  if (!isPlainPath(legacyEvidenceRoot, true)) {
+    throw new Error('legacy recovered-log evidence root is not plain');
+  }
+  const inspected = spawnSync(deleter, ['--inspect-legacy-evidence-root', legacyEvidenceRoot], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (inspected.status !== 0) {
+    throw new Error(`legacy evidence root authentication failed: ${inspected.stderr.trim()}`);
+  }
+  const root = JSON.parse(inspected.stdout);
+  if (!Array.isArray(root.names)) {
+    throw new Error('legacy evidence root inventory is invalid');
+  }
+  for (const name of root.names) {
+    if (!/^[0-9a-f]{32}\.(?:stdout|stderr|combined)\.evidence-v1(?:\.pending-v1)?$/u.test(name)) {
+      throw new Error(`unknown legacy recovered-log evidence: ${name}`);
+    }
+  }
+  return root;
+}
+
+function inspectLegacyEvidenceArtifact(rootIdentity, recordId, stream, pending) {
+  const suffix = pending ? '.pending-v1' : '';
+  const path = resolve(legacyEvidenceRoot, `${recordId}.${stream}.evidence-v1${suffix}`);
+  const inspected = spawnSync(
+    deleter,
+    [
+      '--inspect-legacy-evidence',
+      path,
+      recordId,
+      stream,
+      pending ? 'pending' : 'final',
+      rootIdentity,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (![0, 3].includes(inspected.status)) {
+    throw new Error(`legacy ${stream} evidence authentication failed: ${inspected.stderr.trim()}`);
+  }
+  return { path, log: inspected.status === 0 ? JSON.parse(inspected.stdout) : null };
+}
+
+function deleteLegacyEvidenceArtifact(rootIdentity, recordId, stream, pending, path, log) {
+  const deleted = spawnSync(
+    deleter,
+    [
+      '--delete-legacy-evidence',
+      path,
+      recordId,
+      stream,
+      pending ? 'pending' : 'final',
+      rootIdentity,
+      log?.sha256 ?? '-',
+      log?.byteLength?.toString() ?? '-',
+      log?.fileIdentity ?? '-',
+    ],
+    { encoding: 'utf8', windowsHide: true, env: process.env },
+  );
+  if (deleted.status === 197) {
+    throw new SupervisorFailure(197, `injected legacy ${stream} evidence retirement crash`);
+  }
+  if (deleted.status !== 0) {
+    throw new Error(`legacy ${stream} evidence deletion failed: ${deleted.stderr.trim()}`);
+  }
+}
+
+function removeLegacyEvidenceRootIfEmpty(rootIdentity) {
+  if (!existsSync(legacyEvidenceRoot) || readdirSync(legacyEvidenceRoot).length !== 0) return;
+  const removed = spawnSync(
+    deleter,
+    ['--remove-empty-legacy-evidence-root', legacyEvidenceRoot, rootIdentity],
+    { encoding: 'utf8', windowsHide: true, env: process.env },
+  );
+  if (removed.status === 197) {
+    throw new SupervisorFailure(197, 'injected legacy evidence root retirement crash');
+  }
+  if (removed.status !== 0) {
+    throw new Error(`legacy evidence root retirement failed: ${removed.stderr.trim()}`);
+  }
+}
+
+function authenticateLegacyEvidenceRecord(record, allowMissing) {
+  const root = inspectLegacyEvidenceRoot();
+  if (
+    root === null ||
+    root.identity !== record.evidenceDirectoryIdentity ||
+    pathAcl(legacyEvidenceRoot) !== record.evidenceDirectoryAcl
+  ) {
+    throw new Error('legacy evidence root identity or ACL changed');
+  }
+  const expected = new Set(
+    record.recoveredLogEvidence.filter((entry) => entry.present).map((entry) => entry.fileName),
+  );
+  for (const name of root.names) {
+    if (name.startsWith(`${record.recordId}.`) && !expected.has(name)) {
+      throw new Error(`unknown legacy evidence for cleanup record: ${name}`);
+    }
+  }
+  const artifacts = [];
+  for (const entry of record.recoveredLogEvidence) {
+    const inspected = inspectLegacyEvidenceArtifact(
+      root.identity,
+      record.recordId,
+      entry.channel,
+      false,
+    );
+    if (entry.present) {
+      if (
+        (inspected.log === null && !allowMissing) ||
+        (inspected.log !== null &&
+          (inspected.log.byteLength !== entry.byteLength || inspected.log.sha256 !== entry.sha256))
+      ) {
+        throw new Error(`legacy recovered-log evidence changed: ${entry.fileName}`);
+      }
+      if (inspected.log !== null) {
+        artifacts.push({
+          channel: entry.channel,
+          fileName: entry.fileName,
+          byteLength: inspected.log.byteLength,
+          sha256: inspected.log.sha256,
+          fileIdentity: inspected.log.fileIdentity,
+          status: 'pending',
+        });
+      }
+    } else if (inspected.log !== null) {
+      throw new Error(`unexpected legacy recovered-log evidence: ${entry.fileName}`);
+    }
+  }
+  return { ...root, artifacts };
+}
+
+function retireLegacyEvidence(record) {
+  const root = inspectLegacyEvidenceRoot();
+  if (
+    root === null ||
+    root.identity !== record.evidenceDirectoryIdentity ||
+    root.identity !== record.legacyEvidenceMigration.rootIdentity ||
+    pathAcl(legacyEvidenceRoot) !== record.evidenceDirectoryAcl
+  ) {
+    throw new Error('legacy evidence migration root changed');
+  }
+  const expectedNames = new Set(
+    record.recoveredLogEvidence.filter((entry) => entry.present).map((entry) => entry.fileName),
+  );
+  for (const name of root.names) {
+    if (name.startsWith(`${record.recordId}.`) && !expectedNames.has(name)) {
+      throw new Error(`unknown legacy evidence for cleanup record: ${name}`);
+    }
+  }
+  const remainingNames = new Set(root.names);
+  for (const artifact of record.legacyEvidenceMigration.artifacts) {
+    const currentRoot = inspectLegacyEvidenceRoot();
+    if (
+      currentRoot === null ||
+      currentRoot.identity !== root.identity ||
+      JSON.stringify(currentRoot.names) !== JSON.stringify([...remainingNames].sort())
+    ) {
+      throw new Error('legacy evidence migration inventory changed');
+    }
+    const inspected = inspectLegacyEvidenceArtifact(
+      root.identity,
+      record.recordId,
+      artifact.channel,
+      false,
+    );
+    if (
+      inspected.log !== null &&
+      (inspected.log.byteLength !== artifact.byteLength ||
+        inspected.log.sha256 !== artifact.sha256 ||
+        inspected.log.fileIdentity !== artifact.fileIdentity)
+    ) {
+      throw new Error(`legacy evidence migration artifact changed: ${artifact.fileName}`);
+    }
+    if (artifact.status === 'pending' && inspected.log === null) {
+      throw new Error(`legacy evidence disappeared before retirement intent: ${artifact.fileName}`);
+    }
+    if (artifact.status === 'retired' && inspected.log !== null) {
+      throw new Error(`retired legacy evidence reappeared: ${artifact.fileName}`);
+    }
+    if (artifact.status === 'retired') continue;
+    if (inspected.log !== null) {
+      recoveredLogCrashAt(`legacy-evidence-authenticated:${artifact.channel}`);
+      emitStreamedRecoveredLog(record.recordId, artifact.channel, inspected.log, 'legacy-evidence');
+      recoveredLogCrashAt(`legacy-evidence-emitted:${artifact.channel}`);
+    }
+    if (artifact.status === 'pending') {
+      artifact.status = 'retiring';
+      writeRecord(record);
+      recoveredLogCrashAt(`legacy-evidence-retirement-intent:${artifact.channel}`);
+    }
+    deleteLegacyEvidenceArtifact(
+      root.identity,
+      record.recordId,
+      artifact.channel,
+      false,
+      inspected.path,
+      inspected.log,
+    );
+    remainingNames.delete(artifact.fileName);
+    artifact.status = 'retired';
+    writeRecord(record);
+    recoveredLogCrashAt(`legacy-evidence-retirement-recorded:${artifact.channel}`);
+  }
+  const finalRoot = inspectLegacyEvidenceRoot();
+  if (
+    finalRoot === null ||
+    finalRoot.identity !== root.identity ||
+    JSON.stringify(finalRoot.names) !== JSON.stringify([...remainingNames].sort()) ||
+    finalRoot.names.some((name) => name.startsWith(`${record.recordId}.`))
+  ) {
+    throw new Error('legacy evidence retirement inventory is not empty');
+  }
+  record.phase = record.legacyEvidenceMigration.effectivePhase;
+  record.logsRetired = true;
+  delete record.logsPreserved;
+  delete record.logsPreservedFromPhase;
+  delete record.recoveredLogEvidence;
+  delete record.evidenceDirectoryIdentity;
+  delete record.evidenceDirectoryAcl;
+  delete record.legacyEvidenceMigration;
+  writeRecord(record);
+  recoveredLogCrashAt('legacy-evidence-record-published');
+  removeLegacyEvidenceRootIfEmpty(root.identity);
+}
+
+function retireOrphanLegacyEvidence() {
+  const root = inspectLegacyEvidenceRoot();
+  if (root === null) return;
+  const remainingNames = new Set(root.names);
+  const groups = new Map();
+  for (const name of root.names) {
+    const match = /^([0-9a-f]{32})\.(stdout|stderr|combined)\.evidence-v1(\.pending-v1)?$/u.exec(
+      name,
+    );
+    const [, recordId, stream, pendingSuffix] = match;
+    const key = `${recordId}:${stream}`;
+    const group = groups.get(key) ?? { recordId, stream, final: null, pending: null };
+    group[pendingSuffix ? 'pending' : 'final'] = name;
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    const current = inspectLegacyEvidenceRoot();
+    if (
+      current === null ||
+      current.identity !== root.identity ||
+      JSON.stringify(current.names) !== JSON.stringify([...remainingNames].sort())
+    ) {
+      throw new Error('legacy orphan evidence inventory changed');
+    }
+    const final = inspectLegacyEvidenceArtifact(root.identity, group.recordId, group.stream, false);
+    const pending = inspectLegacyEvidenceArtifact(
+      root.identity,
+      group.recordId,
+      group.stream,
+      true,
+    );
+    const diagnostic = final.log ?? pending.log;
+    if (
+      final.log !== null &&
+      pending.log !== null &&
+      (final.log.sha256 !== pending.log.sha256 || final.log.byteLength !== pending.log.byteLength)
+    ) {
+      throw new Error('conflicting final and pending legacy recovered-log evidence');
+    }
+    if (diagnostic !== null) {
+      emitStreamedRecoveredLog(group.recordId, group.stream, diagnostic, 'orphan-evidence');
+    }
+    if (final.log !== null) {
+      deleteLegacyEvidenceArtifact(
+        root.identity,
+        group.recordId,
+        group.stream,
+        false,
+        final.path,
+        final.log,
+      );
+      remainingNames.delete(`${group.recordId}.${group.stream}.evidence-v1`);
+    }
+    if (pending.log !== null) {
+      deleteLegacyEvidenceArtifact(
+        root.identity,
+        group.recordId,
+        group.stream,
+        true,
+        pending.path,
+        pending.log,
+      );
+      remainingNames.delete(`${group.recordId}.${group.stream}.evidence-v1.pending-v1`);
+    }
+  }
+  const final = inspectLegacyEvidenceRoot();
+  if (
+    final === null ||
+    final.identity !== root.identity ||
+    JSON.stringify(final.names) !== JSON.stringify([...remainingNames].sort()) ||
+    final.names.length !== 0
+  ) {
+    throw new Error('legacy orphan evidence retirement is incomplete');
+  }
+  removeLegacyEvidenceRootIfEmpty(root.identity);
 }
 
 async function drainChildLog(path, destination) {
@@ -482,7 +798,6 @@ function cleanupChildLog(path, recordId, stream, recordDirectoryIdentity) {
     {
       encoding: 'utf8',
       windowsHide: true,
-      maxBuffer: 180 * 1024 * 1024,
     },
   );
   if (![0, 3].includes(inspected.status)) {
@@ -491,7 +806,16 @@ function cleanupChildLog(path, recordId, stream, recordDirectoryIdentity) {
   const log = inspected.status === 0 ? JSON.parse(inspected.stdout) : null;
   const deleted = spawnSync(
     deleter,
-    ['--delete-cleanup-log', path, recordId, log?.sha256 ?? '-', stream, recordDirectoryIdentity],
+    [
+      '--delete-cleanup-log',
+      path,
+      recordId,
+      log?.sha256 ?? '-',
+      log?.byteLength?.toString() ?? '-',
+      log?.fileIdentity ?? '-',
+      stream,
+      recordDirectoryIdentity,
+    ],
     {
       encoding: 'utf8',
       windowsHide: true,
@@ -611,7 +935,25 @@ function writeRecord(record) {
   return record;
 }
 
-function migrateSchema3Record(record) {
+function effectiveLegacyEvidencePhase(record) {
+  return record.phase === 'logs-preserved' ? record.logsPreservedFromPhase : record.phase;
+}
+
+function migrateCleanupRecord(record) {
+  if (record.schemaVersion === 4) {
+    if (record.logsPreserved === true) {
+      const authenticated = authenticateLegacyEvidenceRecord(record, false);
+      record.legacyEvidenceMigration = {
+        rootIdentity: authenticated.identity,
+        effectivePhase: effectiveLegacyEvidencePhase(record),
+        artifacts: authenticated.artifacts,
+      };
+    }
+    record.schemaVersion = RECORD_SCHEMA;
+    record.logsRetired ??= false;
+    writeRecord(record);
+    return record;
+  }
   if (record.schemaVersion !== NATIVE_SESSION_SCHEMA) return record;
   // 73f4391 schema-3 records predate control metadata; eae25e3 records contain both fields.
   const hasControlNonce = record.controlNonce !== undefined;
@@ -640,7 +982,11 @@ function migrateSchema3Record(record) {
 }
 
 function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
-  if (!existsSync(recordRoot)) return;
+  inspectLegacyEvidenceRoot();
+  if (!existsSync(recordRoot)) {
+    retireOrphanLegacyEvidence();
+    return;
+  }
   if (!isPlainPath(recordRoot, true)) throw new Error('cleanup record root is not plain');
   recoverNativeRecordBackups();
   recoverNativeRecordTemps();
@@ -663,7 +1009,11 @@ function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
   );
   const expectedLogs = new Set(
     records.flatMap((record) => {
-      if (record.schemaVersion === RECORD_SCHEMA) {
+      if (
+        [4, RECORD_SCHEMA].includes(record.schemaVersion) &&
+        record.logsRetired !== true &&
+        record.logsPreserved !== true
+      ) {
         return [
           record.childStdoutLogFile,
           record.childStderrLogFile,
@@ -701,9 +1051,9 @@ function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
     ) {
       throw new Error(`machine-lock cleanup record is owned by a live process: ${value.recordId}`);
     }
-    value = migrateSchema3Record(value);
     cleanupRecord(value, deleter, ownerMayBeCurrent);
   }
+  retireOrphanLegacyEvidence();
   removeEmptyParents();
 }
 
@@ -780,7 +1130,12 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   ) {
     throw new Error('machine-lock cleanup record ancestor identity changed');
   }
-  retireRecoveredLogs(record);
+  if (record.logsPreserved === true || record.legacyEvidenceMigration !== undefined) {
+    authenticateLegacyEvidenceNamespaceRoots(record);
+  }
+  record = migrateCleanupRecord(record);
+  if (record.legacyEvidenceMigration !== undefined) retireLegacyEvidence(record);
+  else retireRecoveredLogs(record);
   if (record.roots.length !== rootKinds.length || record.supervisor === null) {
     record.partialCreation = true;
   }
@@ -977,6 +1332,69 @@ function deleteCreationArtifacts(rootRecord) {
   if (result.status !== 0) throw new Error('interrupted creation artifact deletion failed');
 }
 
+function authenticateLegacyEvidenceNamespaceRoots(record) {
+  const phase = effectiveLegacyEvidencePhase(record);
+  for (const rootRecord of record.roots) {
+    const path = namespaceRoot(rootRecord.kind, record.namespaceId);
+    if (record.deletedRoots.includes(rootRecord.kind)) {
+      const binding = resolve(recordRoot, rootRecord.bindingFile);
+      if (existsSync(path) || existsSync(binding) || existsSync(`${binding}.intent-v1`)) {
+        throw new Error(`retired legacy evidence namespace root has residue: ${rootRecord.kind}`);
+      }
+      continue;
+    }
+    if (!existsSync(path)) {
+      if (record.deletingRoot === rootRecord.kind) {
+        verifyDeletedRootBinding(rootRecord);
+        continue;
+      }
+      throw new Error(`legacy evidence namespace root is missing: ${rootRecord.kind}`);
+    }
+    if (rootRecord.identity === null) {
+      throw new Error(`legacy evidence namespace root identity is absent: ${rootRecord.kind}`);
+    }
+    verifyRootBinding(path, rootRecord);
+    if (ownedTreeIdentity(path) !== rootRecord.identity) {
+      throw new Error(`legacy evidence namespace root identity changed: ${rootRecord.kind}`);
+    }
+    const inventory = inspectTree(path);
+    if (
+      [
+        'inventory-sealed',
+        'deleting-root',
+        'filesystem-deleted',
+        'deleting-registry',
+        'registry-deleted',
+      ].includes(phase) &&
+      JSON.stringify(inventory) !== JSON.stringify(rootRecord.inventory) &&
+      !(
+        record.deletingRoot === rootRecord.kind &&
+        exactInventorySubset(inventory, rootRecord.inventory)
+      )
+    ) {
+      throw new Error(`legacy evidence namespace root inventory changed: ${rootRecord.kind}`);
+    }
+  }
+}
+
+function verifyDeletedRootBinding(rootRecord) {
+  const result = spawnSync(
+    deleter,
+    [
+      '--verify-deleted-root-binding',
+      resolve(recordRoot, rootRecord.bindingFile),
+      rootRecord.ownershipPrefix,
+      rootRecord.bindingNonce,
+      rootRecord.identity,
+      rootRecord.adsSha256,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status !== 0) {
+    throw new Error(`deleted protected root binding changed: ${rootRecord.kind}`);
+  }
+}
+
 function verifyRootBinding(path, rootRecord) {
   const result = spawnSync(
     deleter,
@@ -1092,7 +1510,7 @@ function validateRecord(record) {
   assertNamespaceId(record.namespaceId);
   assertNamespaceId(record.recordId);
   if (
-    (record.schemaVersion === RECORD_SCHEMA && record.revision === undefined) ||
+    (record.schemaVersion >= 4 && record.revision === undefined) ||
     (record.revision !== undefined &&
       (!Number.isSafeInteger(record.revision) || record.revision < 0))
   ) {
@@ -1124,7 +1542,7 @@ function validateRecord(record) {
     }
   }
   if (
-    record.schemaVersion === RECORD_SCHEMA &&
+    record.schemaVersion >= 4 &&
     (!/^[0-9a-f]{32}$/u.test(record.controlNonce ?? '') ||
       record.childStdoutLogFile !== `${record.recordId}.stdout.log` ||
       record.childStderrLogFile !== `${record.recordId}.stderr.log` ||
@@ -1144,15 +1562,93 @@ function validateRecord(record) {
   if (record.logsRetired !== undefined && typeof record.logsRetired !== 'boolean') {
     throw new Error('cleanup record log-retirement state is invalid');
   }
-  if (
+  const hasLegacyEvidence =
+    (record.schemaVersion === 4 && record.logsPreserved === true) ||
+    (record.schemaVersion === RECORD_SCHEMA && record.legacyEvidenceMigration !== undefined);
+  if (hasLegacyEvidence) {
+    if (
+      ![
+        'logs-preserved',
+        'inventory-sealed',
+        'deleting-root',
+        'filesystem-deleted',
+        'deleting-registry',
+        'registry-deleted',
+      ].includes(record.phase) ||
+      record.logsPreserved !== true ||
+      record.logsRetired === true ||
+      ![
+        'prepared',
+        'native-creating',
+        'roots-created',
+        'inventory-sealed',
+        'deleting-root',
+        'filesystem-deleted',
+        'deleting-registry',
+        'registry-deleted',
+      ].includes(record.logsPreservedFromPhase) ||
+      !Array.isArray(record.recoveredLogEvidence) ||
+      !/^\d+:\d+$/u.test(record.evidenceDirectoryIdentity ?? '') ||
+      typeof record.evidenceDirectoryAcl !== 'string'
+    ) {
+      throw new Error('legacy recovered-log evidence record is invalid');
+    }
+    const channels = recoveredLogPlans(record).map((entry) => entry.stream);
+    if (
+      record.recoveredLogEvidence.length !== channels.length ||
+      record.recoveredLogEvidence.some((entry, index) => entry.channel !== channels[index])
+    ) {
+      throw new Error('legacy recovered-log evidence channels are invalid');
+    }
+    for (const entry of record.recoveredLogEvidence) {
+      if (
+        entry.fileName !== `${record.recordId}.${entry.channel}.evidence-v1` ||
+        typeof entry.present !== 'boolean' ||
+        (entry.present &&
+          (!Number.isSafeInteger(entry.byteLength) ||
+            entry.byteLength < 0 ||
+            !/^[0-9a-f]{64}$/u.test(entry.sha256 ?? ''))) ||
+        (!entry.present && (entry.byteLength !== undefined || entry.sha256 !== undefined))
+      ) {
+        throw new Error('legacy recovered-log evidence metadata is invalid');
+      }
+    }
+    if (record.schemaVersion === RECORD_SCHEMA) {
+      const migration = record.legacyEvidenceMigration;
+      const present = record.recoveredLogEvidence.filter((entry) => entry.present);
+      if (
+        migration?.rootIdentity !== record.evidenceDirectoryIdentity ||
+        migration?.effectivePhase !== effectiveLegacyEvidencePhase(record) ||
+        !Array.isArray(migration?.artifacts) ||
+        migration.artifacts.length !== present.length
+      ) {
+        throw new Error('legacy evidence migration checkpoint is invalid');
+      }
+      for (let index = 0; index < present.length; index += 1) {
+        const artifact = migration.artifacts[index];
+        const expected = present[index];
+        if (
+          artifact.channel !== expected.channel ||
+          artifact.fileName !== expected.fileName ||
+          artifact.byteLength !== expected.byteLength ||
+          artifact.sha256 !== expected.sha256 ||
+          !/^[0-9a-f]{32}$/u.test(artifact.fileIdentity ?? '') ||
+          !['pending', 'retiring', 'retired'].includes(artifact.status)
+        ) {
+          throw new Error('legacy evidence migration artifact is invalid');
+        }
+      }
+    }
+  } else if (
     record.logsPreserved !== undefined ||
     record.logsPreservedFromPhase !== undefined ||
     record.recoveredLogEvidence !== undefined ||
     record.evidenceDirectoryIdentity !== undefined ||
     record.evidenceDirectoryAcl !== undefined ||
+    record.legacyEvidenceMigration !== undefined ||
     record.phase === 'logs-preserved'
   ) {
-    throw new Error('persistent recovered-log evidence is unsupported');
+    throw new Error('unexpected legacy recovered-log evidence metadata');
   }
   for (const identity of [
     record.projectRootIdentity,
