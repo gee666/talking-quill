@@ -127,6 +127,62 @@ run('Windows machine-lock wrapper teardown', () => {
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   });
 
+  it('blocks root rename and replacement between identity and ADS publication', async () => {
+    const token = randomBytes(16).toString('hex');
+    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-root-publication`);
+    mkdirSync(resolve(pause, '..'), { recursive: true });
+    const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+      TQ_MACHINE_LOCK_TEST_ROOT_PUBLICATION_PAUSE_FILE: pause,
+    });
+    await waitForPath(`${pause}.ready`);
+    const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
+    const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+    const root = resolve('tmp', 'machine-lock-tests', record.creatingRoot, record.namespaceId);
+    const moved = `${root}-moved`;
+    const attacker = `${root}-replacement`;
+    mkdirSync(attacker);
+    let renameBlocked = false;
+    try {
+      renameSync(root, moved);
+    } catch {
+      renameBlocked = true;
+    }
+    const replacement = spawnSync(nativeHelper, ['--force-directory-replacement', attacker, root]);
+    const attackerPreserved = existsSync(attacker);
+    const rootPreserved = existsSync(root);
+    if (existsSync(attacker)) rmdirSync(attacker);
+    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+    const completed = await running;
+    if (existsSync(moved) && !existsSync(root)) renameSync(moved, root);
+    unlinkSync(`${pause}.ready`);
+    unlinkSync(`${pause}.continue`);
+    expect(renameBlocked).toBe(true);
+    expect(existsSync(moved)).toBe(false);
+    expect(replacement.status, replacement.stderr?.toString()).toBe(0);
+    expect(attackerPreserved).toBe(true);
+    expect(rootPreserved).toBe(true);
+    expect(completed.code, completed.stderr).toBe(0);
+    const parent = resolve(pause, '..');
+    if (readdirSync(parent).length === 0) rmdirSync(parent);
+  }, 120_000);
+
+  it('retains namespace root and parent handles while the child runs', () => {
+    const result = runWrapper('node tests/fixtures/machine-lock-test-retained-parent.mjs');
+    expect(result.status, result.stderr).toBe(0);
+  }, 120_000);
+
+  it('recovers a legacy cleanup record without parent identities', () => {
+    const record = leaveSealedRecord();
+    record.schemaVersion = 1;
+    for (const root of record.roots) delete root.parentIdentity;
+    writeFileSync(
+      resolve(records, `${record.recordId}.json`),
+      `${JSON.stringify(record)}\n`,
+      'utf8',
+    );
+    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+  }, 120_000);
+
   it('rejects an ownership ADS mutation after sealing', () => {
     const record = leaveSealedRecord();
     const rootRecord = record.roots.find((entry: { kind: string }) => entry.kind === 'helper');
@@ -276,10 +332,16 @@ function runWrapperAsync(command: string, environment: NodeJS.ProcessEnv = {}) {
     env: { ...process.env, ...environment },
     windowsHide: true,
   });
-  return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => done({ code, signal }));
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => {
+    stderr += chunk.toString();
   });
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>(
+    (done, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => done({ code, signal, stderr }));
+    },
+  );
 }
 
 function runWrapper(command: string, environment: NodeJS.ProcessEnv = {}) {

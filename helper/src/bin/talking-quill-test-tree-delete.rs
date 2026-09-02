@@ -4,6 +4,15 @@ fn main() {
 }
 
 #[cfg(windows)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetainedNamespace {
+    path: std::path::PathBuf,
+    root_identity: String,
+    parent_identity: String,
+}
+
+#[cfg(windows)]
 fn main() {
     use std::io::Read;
 
@@ -16,24 +25,32 @@ fn main() {
     }
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if let [mode, command] = arguments.as_slice()
+    if let [mode, command, namespaces] = arguments.as_slice()
         && mode == "--supervise"
     {
-        let Some(command) = command.to_str() else {
+        let (Some(command), Some(namespaces)) = (command.to_str(), namespaces.to_str()) else {
             std::process::exit(64);
         };
-        match supervise(command) {
+        let Ok(namespaces) = serde_json::from_str::<Vec<RetainedNamespace>>(namespaces) else {
+            std::process::exit(65);
+        };
+        match supervise(command, &namespaces) {
             Ok(code) => std::process::exit(code as i32),
             Err(()) => std::process::exit(74),
         }
     }
     match arguments.as_slice() {
-        [mode, path, prefix, binding, nonce] if mode == "--create-protected-root" => {
-            let (Some(prefix), Some(nonce)) = (prefix.to_str(), nonce.to_str()) else {
+        [mode, path, parent_identity, prefix, binding, nonce]
+            if mode == "--create-protected-root" =>
+        {
+            let (Some(parent_identity), Some(prefix), Some(nonce)) =
+                (parent_identity.to_str(), prefix.to_str(), nonce.to_str())
+            else {
                 std::process::exit(64);
             };
             match talking_quill_helper::machine_lock_test_namespace::create_protected_root(
                 std::path::Path::new(path),
+                parent_identity,
                 prefix,
                 std::path::Path::new(binding),
                 nonce,
@@ -125,6 +142,19 @@ fn main() {
                 hash,
             ) {
                 Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, source, target] if mode == "--force-directory-replacement" => {
+            match talking_quill_helper::machine_lock_test_namespace::directory_replacement_is_blocked(
+                std::path::Path::new(source),
+                std::path::Path::new(target),
+            ) {
+                Ok(true) => return,
+                Ok(false) => std::process::exit(79),
                 Err(error) => {
                     eprintln!("{error}");
                     std::process::exit(78)
@@ -298,7 +328,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn supervise(command: &str) -> Result<u32, ()> {
+fn supervise(command: &str, namespaces: &[RetainedNamespace]) -> Result<u32, ()> {
     use std::{mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
@@ -324,6 +354,18 @@ fn supervise(command: &str) -> Result<u32, ()> {
             }
         }
     }
+
+    let _namespace_handles = namespaces
+        .iter()
+        .map(|namespace| {
+            talking_quill_helper::machine_lock_test_namespace::retain_namespace_handles(
+                &namespace.path,
+                &namespace.root_identity,
+                &namespace.parent_identity,
+            )
+            .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let job = Handle(unsafe { CreateJobObjectW(null_mut(), null_mut()) });
     if job.0.is_null() {

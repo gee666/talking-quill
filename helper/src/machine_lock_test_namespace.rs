@@ -12,7 +12,7 @@ use std::{
     ptr::{null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, LocalFree},
+    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION, HANDLE, LocalFree},
     Security::{
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
@@ -24,12 +24,12 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         BACKUP_ALTERNATE_DATA, BACKUP_DATA, BY_HANDLE_FILE_INFORMATION, BackupRead, CREATE_NEW,
-        CommitTransaction, CreateDirectoryW, CreateFileW, CreateTransaction, DELETE,
-        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING,
-        READ_CONTROL, ReadFile, SetFileInformationByHandle, WriteFile,
+        CommitTransaction, CreateFileW, CreateTransaction, DELETE, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FlushFileBuffers,
+        GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL, ReadFile,
+        SetFileInformationByHandle, WriteFile,
     },
     System::{
         Registry::{
@@ -49,9 +49,54 @@ const REG_OPTION_CREATE_LINK: u32 = 2;
 const KEY_CREATE_LINK: u32 = 0x0020;
 const ERROR_SUCCESS: u32 = 0;
 const KEY_NAME_INFORMATION: i32 = 3;
+const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+const FILE_CREATE: u32 = 2;
+const FILE_OPEN: u32 = 1;
+const FILE_DIRECTORY_FILE: u32 = 0x1;
+const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x4000;
+const FILE_OPEN_REPARSE_POINT_NT: u32 = 0x0020_0000;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32,
+    root_directory: HANDLE,
+    object_name: *mut UnicodeString,
+    attributes: u32,
+    security_descriptor: *mut c_void,
+    security_quality_of_service: *mut c_void,
+}
+
+#[repr(C)]
+struct IoStatusBlock {
+    status_or_pointer: usize,
+    information: usize,
+}
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut HANDLE,
+        desired_access: u32,
+        object_attributes: *mut ObjectAttributes,
+        io_status_block: *mut IoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut c_void,
+        ea_length: u32,
+    ) -> i32;
     fn NtDeleteKey(key_handle: HANDLE) -> i32;
     fn NtQueryKey(
         key_handle: HANDLE,
@@ -60,6 +105,7 @@ unsafe extern "system" {
         length: u32,
         result_length: *mut u32,
     ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,6 +133,11 @@ impl Drop for Handle {
             unsafe { CloseHandle(self.0) };
         }
     }
+}
+
+pub struct RetainedNamespaceHandles {
+    _parent: Handle,
+    _root: Handle,
 }
 
 struct Key(HKEY);
@@ -440,6 +491,7 @@ pub fn registry_root_inventory() -> io::Result<Option<KeyInventory>> {
 
 pub fn create_protected_root(
     path: &Path,
+    expected_parent_identity: &str,
     ownership_prefix: &str,
     binding_path: &Path,
     binding_nonce: &str,
@@ -457,18 +509,23 @@ pub fn create_protected_root(
         "intent",
     )?;
     crash_at("intent-flushed-before-root");
-    let directory_descriptor = exact_descriptor(true)?;
-    let attributes = security_attributes(&directory_descriptor);
-    let path_wide = wide(path)?;
-    if unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) } == 0 {
-        return Err(io::Error::last_os_error());
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("protected root has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    validate_directory(parent.0)?;
+    if identity(parent.0)? != expected_parent_identity {
+        return Err(io::Error::other("protected root parent identity changed"));
     }
-    let root = open_directory(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("protected root has no name"))?;
+    let directory_descriptor = exact_descriptor(true)?;
+    let root = create_relative_directory(parent.0, name, directory_descriptor.0)?;
     validate_directory(root.0)?;
     validate_exact_security(root.0, true)?;
     crash_at("create-before-binding");
     let identity = identity(root.0)?;
-    drop(root);
     let ads = format!("{ownership_prefix}:{identity}");
     let ads_sha256 = hex_digest(ads.as_bytes());
     let binding = CleanupBinding {
@@ -481,10 +538,18 @@ pub fn create_protected_root(
     let binding_bytes = serde_json::to_vec(&binding).map_err(io::Error::other)?;
     write_new_protected_file(binding_path, &binding_bytes, "binding")?;
     crash_at("binding-flushed-before-ads");
-    let stream = ownership_stream(path)?;
-    write_new_protected_file(&stream, ads.as_bytes(), "ads")?;
+    root_publication_test_pause()?;
+    let stream = create_relative_ownership_stream(root.0)?;
+    write_and_flush_handle(stream.0, ads.as_bytes(), "ads")?;
+    drop(stream);
+    if unsafe { FlushFileBuffers(root.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
     crash_at("ads-flushed-before-return");
-    flush_owned_directory(path).map_err(io::Error::other)?;
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    crash_at("ads-parent-flushed");
     Ok((identity, ads_sha256))
 }
 
@@ -792,7 +857,21 @@ pub fn delete_registry_exact(namespace_id: &str, expected: &RegistryInventory) -
 }
 
 fn registry_delete_test_pause() -> io::Result<()> {
-    let Some(path) = std::env::var_os("TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE") else {
+    test_pause(
+        "TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE",
+        "registry race",
+    )
+}
+
+fn root_publication_test_pause() -> io::Result<()> {
+    test_pause(
+        "TQ_MACHINE_LOCK_TEST_ROOT_PUBLICATION_PAUSE_FILE",
+        "root publication race",
+    )
+}
+
+fn test_pause(variable: &str, description: &str) -> io::Result<()> {
+    let Some(path) = std::env::var_os(variable) else {
         return Ok(());
     };
     let ready = PathBuf::from(format!("{}.ready", path.to_string_lossy()));
@@ -804,7 +883,7 @@ fn registry_delete_test_pause() -> io::Result<()> {
         if std::time::Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "registry race seam timed out",
+                format!("{description} seam timed out"),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1185,6 +1264,272 @@ fn open_relative_key_raw(parent: HKEY, name: &str, access: u32) -> io::Result<Op
     Ok(Some(Key(key)))
 }
 
+pub fn directory_replacement_is_blocked(source: &Path, target: &Path) -> io::Result<bool> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| io::Error::other("replacement source has no parent"))?;
+    if target.parent() != Some(source_parent) {
+        return Err(io::Error::other(
+            "replacement source and target do not share a parent",
+        ));
+    }
+    let parent = open_directory_for_replacement(source_parent)?;
+    validate_directory(parent.0)?;
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| io::Error::other("replacement source has no name"))?;
+    let target_name = target
+        .file_name()
+        .ok_or_else(|| io::Error::other("replacement target has no name"))?;
+    let source = open_relative_directory(parent.0, source_name)?;
+    validate_directory(source.0)?;
+    match open_relative_directory_for_delete(parent.0, target_name) {
+        Ok(target) => {
+            validate_directory(target.0)?;
+            let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+            if unsafe {
+                SetFileInformationByHandle(
+                    target.0,
+                    FileDispositionInfo,
+                    (&raw mut disposition).cast(),
+                    size_of::<FILE_DISPOSITION_INFO>() as u32,
+                )
+            } != 0
+            {
+                return Ok(false);
+            }
+            let error = io::Error::last_os_error();
+            match error.raw_os_error().map(|value| value as u32) {
+                Some(ERROR_SHARING_VIOLATION) => Ok(true),
+                _ => Err(error),
+            }
+        }
+        Err(error) => match error.raw_os_error().map(|value| value as u32) {
+            Some(ERROR_SHARING_VIOLATION) => Ok(true),
+            _ => Err(error),
+        },
+    }
+}
+
+pub fn retain_namespace_handles(
+    path: &Path,
+    expected_root_identity: &str,
+    expected_parent_identity: &str,
+) -> io::Result<RetainedNamespaceHandles> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("namespace root has no parent"))?;
+    let parent = open_directory_guard(parent_path)?;
+    validate_directory(parent.0)?;
+    if identity(parent.0)? != expected_parent_identity {
+        return Err(io::Error::other("namespace parent identity changed"));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("namespace root has no name"))?;
+    let root = open_relative_directory_for_validation(parent.0, name)?;
+    validate_directory(root.0)?;
+    validate_exact_security(root.0, true)?;
+    if identity(root.0)? != expected_root_identity {
+        return Err(io::Error::other("namespace root identity changed"));
+    }
+    Ok(RetainedNamespaceHandles {
+        _parent: parent,
+        _root: root,
+    })
+}
+
+fn create_relative_directory(
+    parent: HANDLE,
+    name: &std::ffi::OsStr,
+    security_descriptor: PSECURITY_DESCRIPTOR,
+) -> io::Result<Handle> {
+    nt_create_relative(
+        parent,
+        name,
+        DELETE
+            | FILE_LIST_DIRECTORY
+            | FILE_READ_ATTRIBUTES
+            | READ_CONTROL
+            | SYNCHRONIZE
+            | windows_sys::Win32::Foundation::GENERIC_WRITE,
+        security_descriptor.cast(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_CREATE,
+        FILE_DIRECTORY_FILE
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | FILE_OPEN_FOR_BACKUP_INTENT
+            | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn open_relative_directory(parent: HANDLE, name: &std::ffi::OsStr) -> io::Result<Handle> {
+    nt_create_relative(
+        parent,
+        name,
+        DELETE
+            | FILE_LIST_DIRECTORY
+            | FILE_READ_ATTRIBUTES
+            | READ_CONTROL
+            | SYNCHRONIZE
+            | windows_sys::Win32::Foundation::GENERIC_WRITE,
+        null_mut(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | FILE_OPEN_FOR_BACKUP_INTENT
+            | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn open_relative_directory_for_validation(
+    parent: HANDLE,
+    name: &std::ffi::OsStr,
+) -> io::Result<Handle> {
+    nt_create_relative(
+        parent,
+        name,
+        FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        null_mut(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | FILE_OPEN_FOR_BACKUP_INTENT
+            | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn open_relative_directory_for_delete(
+    parent: HANDLE,
+    name: &std::ffi::OsStr,
+) -> io::Result<Handle> {
+    nt_create_relative(
+        parent,
+        name,
+        DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        null_mut(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | FILE_OPEN_FOR_BACKUP_INTENT
+            | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn create_relative_ownership_stream(root: HANDLE) -> io::Result<Handle> {
+    let descriptor = exact_descriptor(false)?;
+    nt_create_relative(
+        root,
+        std::ffi::OsStr::new(&format!(":{OWNERSHIP_STREAM}")),
+        windows_sys::Win32::Foundation::GENERIC_READ
+            | windows_sys::Win32::Foundation::GENERIC_WRITE
+            | READ_CONTROL
+            | SYNCHRONIZE,
+        descriptor.0.cast(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_CREATE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT_NT,
+    )
+}
+
+fn nt_create_relative(
+    parent: HANDLE,
+    name: &std::ffi::OsStr,
+    desired_access: u32,
+    security_descriptor: *mut c_void,
+    share_access: u32,
+    disposition: u32,
+    options: u32,
+) -> io::Result<Handle> {
+    let mut name_wide = name.encode_wide().collect::<Vec<_>>();
+    if name_wide.is_empty()
+        || name_wide
+            .iter()
+            .any(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        || name_wide.len() > u16::MAX as usize / 2
+    {
+        return Err(io::Error::other("invalid handle-relative name"));
+    }
+    let mut name = UnicodeString {
+        length: (name_wide.len() * size_of::<u16>()) as u16,
+        maximum_length: (name_wide.len() * size_of::<u16>()) as u16,
+        buffer: name_wide.as_mut_ptr(),
+    };
+    let mut attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: parent,
+        object_name: &mut name,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor,
+        security_quality_of_service: null_mut(),
+    };
+    let mut io_status = IoStatusBlock {
+        status_or_pointer: 0,
+        information: 0,
+    };
+    let mut handle = null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attributes,
+            &mut io_status,
+            null_mut(),
+            FILE_ATTRIBUTE_NORMAL,
+            share_access,
+            disposition,
+            options,
+            null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    Ok(Handle(handle))
+}
+
+fn open_directory_guard(path: &Path) -> io::Result<Handle> {
+    let handle = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if handle.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
+fn open_directory_for_replacement(path: &Path) -> io::Result<Handle> {
+    let handle = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if handle.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
 fn open_directory(path: &Path) -> io::Result<Handle> {
     let handle = Handle(unsafe {
         CreateFileW(
@@ -1235,6 +1580,19 @@ fn identity(handle: HANDLE) -> io::Result<String> {
     ))
 }
 
+fn write_and_flush_handle(handle: HANDLE, bytes: &[u8], label: &str) -> io::Result<()> {
+    let split = bytes.len().div_ceil(2);
+    write_all_handle(handle, &bytes[..split])?;
+    crash_at(&format!("{label}-partial-write"));
+    write_all_handle(handle, &bytes[split..])?;
+    crash_at(&format!("{label}-written-before-flush"));
+    if unsafe { FlushFileBuffers(handle) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    crash_at(&format!("{label}-file-flushed"));
+    Ok(())
+}
+
 fn write_new_protected_file(path: &Path, bytes: &[u8], label: &str) -> io::Result<()> {
     let descriptor = exact_descriptor(false)?;
     let attributes = security_attributes(&descriptor);
@@ -1255,15 +1613,7 @@ fn write_new_protected_file(path: &Path, bytes: &[u8], label: &str) -> io::Resul
     if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
-    let split = bytes.len().div_ceil(2);
-    write_all_handle(file.0, &bytes[..split])?;
-    crash_at(&format!("{label}-partial-write"));
-    write_all_handle(file.0, &bytes[split..])?;
-    crash_at(&format!("{label}-written-before-flush"));
-    if unsafe { FlushFileBuffers(file.0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    crash_at(&format!("{label}-file-flushed"));
+    write_and_flush_handle(file.0, bytes, label)?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("protected file has no parent"))?;

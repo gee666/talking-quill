@@ -16,7 +16,8 @@ import {
 } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
-const RECORD_SCHEMA = 1;
+const RECORD_SCHEMA = 2;
+const LEGACY_RECORD_SCHEMA = 1;
 const root = resolve(import.meta.dirname, '..');
 const stateRoot = resolve(root, 'tmp', 'machine-lock-tests');
 const recordRoot = resolve(stateRoot, '.cleanup-records-v1');
@@ -47,11 +48,18 @@ try {
   record = prepareNamespace(randomBytes(16).toString('hex'));
   process.env.TQ_MACHINE_LOCK_TEST_NAMESPACE_ID = record.namespaceId;
   if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'roots-created') process.exit(197);
-  const child = spawn(deleter, ['--supervise', command], {
+  const retainedNamespaces = JSON.stringify(
+    record.roots.map((entry) => ({
+      path: namespaceRoot(entry.kind, record.namespaceId),
+      rootIdentity: entry.identity,
+      parentIdentity: entry.parentIdentity,
+    })),
+  );
+  const child = spawn(deleter, ['--supervise', command, retainedNamespaces], {
     shell: false,
     stdio: 'inherit',
     windowsHide: true,
-    env: process.env,
+    env: { ...process.env, TQ_MACHINE_LOCK_TEST_GUARD_EXE: deleter },
   });
   record.child = processIdentity(child.pid);
   record.phase = 'child-running';
@@ -163,6 +171,7 @@ function prepareNamespace(namespaceId) {
     if (existsSync(path)) throw new Error(`machine-lock test root already exists: ${path}`);
     const rootRecord = {
       kind,
+      parentIdentity: ownedTreeIdentity(dirname(path)),
       identity: null,
       inventory: [],
       ownershipPrefix: `v1.${record.recordId}.${namespaceId}.${kind}.${randomBytes(16).toString('hex')}`,
@@ -191,6 +200,7 @@ function createProtectedNamespaceRoot(path, rootRecord) {
     [
       '--create-protected-root',
       path,
+      rootRecord.parentIdentity,
       rootRecord.ownershipPrefix,
       resolve(recordRoot, rootRecord.bindingFile),
       rootRecord.bindingNonce,
@@ -579,7 +589,9 @@ function readRecord(path) {
 }
 
 function validateRecord(record) {
-  if (record?.schemaVersion !== RECORD_SCHEMA) throw new Error('cleanup record schema is invalid');
+  if (![LEGACY_RECORD_SCHEMA, RECORD_SCHEMA].includes(record?.schemaVersion)) {
+    throw new Error('cleanup record schema is invalid');
+  }
   assertNamespaceId(record.namespaceId);
   assertNamespaceId(record.recordId);
   for (const identity of [
@@ -606,6 +618,8 @@ function validateRecord(record) {
       typeof entry.ownershipPrefix !== 'string' ||
       !entry.ownershipPrefix.startsWith(prefix) ||
       !/^[0-9a-f]{32}$/u.test(entry.ownershipPrefix.slice(prefix.length)) ||
+      (record.schemaVersion === RECORD_SCHEMA && !/^\d+:\d+$/u.test(entry.parentIdentity ?? '')) ||
+      (entry.parentIdentity !== undefined && !/^\d+:\d+$/u.test(entry.parentIdentity)) ||
       !/^[0-9a-f]{32}$/u.test(entry.bindingNonce ?? '') ||
       entry.bindingFile !== `${record.recordId}.${entry.kind}.binding-v1` ||
       (entry.adsSha256 !== null && !/^[0-9a-f]{64}$/u.test(entry.adsSha256)) ||
