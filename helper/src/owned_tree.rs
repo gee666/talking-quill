@@ -247,8 +247,33 @@ mod platform {
     }
 
     pub(super) fn identity(path: &Path) -> Result<String, OwnedTreeError> {
-        let handle = open_root(path)?;
-        let info = information(handle.0)?;
+        let handle = open_identity(path)?;
+        identity_from_handle(handle.0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reparse_identity(path: &Path) -> Result<String, OwnedTreeError> {
+        let wide = wide(path)?;
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error().into());
+        }
+        let handle = Handle(handle);
+        identity_from_handle(handle.0)
+    }
+
+    fn identity_from_handle(handle: HANDLE) -> Result<String, OwnedTreeError> {
+        let info = information(handle)?;
         Ok(format!(
             "{}:{}",
             info.dwVolumeSerialNumber,
@@ -268,6 +293,7 @@ mod platform {
         }
         if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
             != FILE_ATTRIBUTE_DIRECTORY
+            || info.nNumberOfLinks != 1
         {
             return Err(OwnedTreeError::IdentityMismatch);
         }
@@ -437,6 +463,12 @@ mod platform {
         let desired =
             DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_LIST_DIRECTORY | SYNCHRONIZE;
         if let Ok(child) = open_relative_access(parent, name, desired) {
+            validate_exact_entry(
+                &information(child.0)?,
+                expected_directory,
+                expected_device,
+                expected_inode,
+            )?;
             return Ok(child);
         }
         let repair = open_relative_access(
@@ -444,31 +476,44 @@ mod platform {
             name,
             WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         )?;
-        let info = information(repair.0)?;
+        validate_exact_entry(
+            &information(repair.0)?,
+            expected_directory,
+            expected_device,
+            expected_inode,
+        )?;
+        repair_exact_dacl(repair.0)?;
+        let child = open_relative_access(parent, name, desired)?;
+        let repaired = information(child.0)?;
+        validate_exact_entry(
+            &repaired,
+            expected_directory,
+            expected_device,
+            expected_inode,
+        )?;
+        drop(repair);
+        Ok(child)
+    }
+
+    fn validate_exact_entry(
+        info: &BY_HANDLE_FILE_INFORMATION,
+        expected_directory: bool,
+        expected_device: u64,
+        expected_inode: u64,
+    ) -> Result<(), OwnedTreeError> {
         let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let reparse = info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
         let device = u64::from(info.dwVolumeSerialNumber);
         let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
         if directory != expected_directory
             || reparse
-            || (!directory && info.nNumberOfLinks != 1)
+            || info.nNumberOfLinks != 1
             || device != expected_device
             || inode != expected_inode
         {
             return Err(OwnedTreeError::IdentityMismatch);
         }
-        repair_exact_dacl(repair.0)?;
-        let child = open_relative_access(parent, name, desired)?;
-        let repaired = information(child.0)?;
-        let repaired_inode =
-            (u64::from(repaired.nFileIndexHigh) << 32) | u64::from(repaired.nFileIndexLow);
-        if u64::from(repaired.dwVolumeSerialNumber) != expected_device
-            || repaired_inode != expected_inode
-        {
-            return Err(OwnedTreeError::IdentityMismatch);
-        }
-        drop(repair);
-        Ok(child)
+        Ok(())
     }
 
     fn repair_exact_dacl(handle: HANDLE) -> Result<(), OwnedTreeError> {
@@ -515,11 +560,16 @@ mod platform {
     }
 
     fn open_relative(parent: HANDLE, name: &mut [u16]) -> Result<Handle, OwnedTreeError> {
-        open_relative_access(
+        let child = open_relative_access(
             parent,
             name,
             DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | FILE_LIST_DIRECTORY | SYNCHRONIZE,
-        )
+        )?;
+        let info = information(child.0)?;
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.nNumberOfLinks != 1 {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        Ok(child)
     }
 
     fn open_relative_access(
@@ -569,6 +619,30 @@ mod platform {
         Ok(Handle(child))
     }
 
+    fn open_identity(path: &Path) -> Result<Handle, OwnedTreeError> {
+        let wide = wide(path)?;
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error().into());
+        }
+        let handle = Handle(handle);
+        let info = information(handle.0)?;
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.nNumberOfLinks != 1 {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        Ok(handle)
+    }
+
     fn open_exact_root(
         path: &Path,
         expected_device: u64,
@@ -576,6 +650,7 @@ mod platform {
     ) -> Result<Handle, OwnedTreeError> {
         let desired = DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
         if let Ok(root) = open_root_access(path, desired) {
+            validate_root(&information(root.0)?, expected_device, expected_inode)?;
             return Ok(root);
         }
         let repair = open_root_access(path, WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -588,7 +663,15 @@ mod platform {
     }
 
     fn open_root(path: &Path) -> Result<Handle, OwnedTreeError> {
-        open_root_access(path, DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
+        let root = open_root_access(path, DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)?;
+        let info = information(root.0)?;
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            != FILE_ATTRIBUTE_DIRECTORY
+            || info.nNumberOfLinks != 1
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        Ok(root)
     }
 
     fn open_root_access(path: &Path, desired_access: u32) -> Result<Handle, OwnedTreeError> {
@@ -626,7 +709,15 @@ mod platform {
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error().into());
         }
-        Ok(Handle(handle))
+        let handle = Handle(handle);
+        let info = information(handle.0)?;
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            != FILE_ATTRIBUTE_DIRECTORY
+            || info.nNumberOfLinks != 1
+        {
+            return Err(OwnedTreeError::IdentityMismatch);
+        }
+        Ok(handle)
     }
 
     fn information(handle: HANDLE) -> Result<BY_HANDLE_FILE_INFORMATION, OwnedTreeError> {
@@ -864,6 +955,53 @@ mod tests {
         ));
         assert_eq!(fs::read(root.join("unrelated")).unwrap(), b"preserve");
         assert_eq!(fs::read(moved.join("nested/private")).unwrap(), b"private");
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn exact_open_rejects_a_recorded_hardlink_before_deletion() {
+        let parent = temporary("exact-hardlink");
+        let root = parent.join("owned");
+        let outside = parent.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, b"preserve").unwrap();
+        let file_identity = identity(&outside);
+        fs::hard_link(&outside, root.join("linked")).unwrap();
+        let expected = identity(&root);
+        let entries = [ExactOwnedTreeEntry {
+            relative_path: "linked".into(),
+            directory: false,
+            identity: file_identity,
+        }];
+
+        assert!(remove_exact_owned_tree(&root, &expected, &entries).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"preserve");
+        assert!(root.join("linked").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn exact_open_rejects_a_recorded_reparse_before_deletion() {
+        let parent = temporary("exact-reparse");
+        let root = parent.join("owned");
+        let outside = parent.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"preserve").unwrap();
+        let link = root.join("linked");
+        if std::os::windows::fs::symlink_dir(&outside, &link).is_err() {
+            fs::remove_dir_all(parent).unwrap();
+            return;
+        }
+        let expected = identity(&root);
+        let entries = [ExactOwnedTreeEntry {
+            relative_path: "linked".into(),
+            directory: true,
+            identity: platform::reparse_identity(&link).unwrap(),
+        }];
+
+        assert!(remove_exact_owned_tree(&root, &expected, &entries).is_err());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
         fs::remove_dir_all(parent).unwrap();
     }
 

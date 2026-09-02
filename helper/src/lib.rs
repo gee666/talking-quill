@@ -28,6 +28,8 @@ pub fn retain_source_identity() {
     std::hint::black_box(SOURCE_TREE_MARKER);
 }
 
+#[cfg(all(windows, feature = "machine-lock-test-namespace"))]
+pub mod machine_lock_test_namespace;
 pub mod owned_tree;
 pub mod owner;
 pub mod protocol;

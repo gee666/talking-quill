@@ -161,13 +161,16 @@ function prepareNamespace(namespaceId) {
     const path = namespaceRoot(kind, namespaceId);
     mkdirSync(dirname(path), { recursive: true });
     if (existsSync(path)) throw new Error(`machine-lock test root already exists: ${path}`);
-    const rootRecord = { kind, identity: null, inventory: [] };
+    const rootRecord = {
+      kind,
+      identity: null,
+      inventory: [],
+      ownershipPrefix: `v1.${record.recordId}.${namespaceId}.${kind}.${randomBytes(16).toString('hex')}`,
+    };
     record.roots.push(rootRecord);
     record.creatingRoot = kind;
     writeRecord(record);
-    mkdirSync(path);
-    if (!isPlainPath(path, true)) throw new Error(`machine-lock test root is not plain: ${path}`);
-    rootRecord.identity = ownedTreeIdentity(path);
+    rootRecord.identity = createProtectedNamespaceRoot(path, rootRecord.ownershipPrefix);
     record.creatingRoot = null;
     writeRecord(record);
   }
@@ -177,25 +180,28 @@ function prepareNamespace(namespaceId) {
   return record;
 }
 
+function createProtectedNamespaceRoot(path, ownershipPrefix) {
+  const result = spawnSync(deleter, ['--create-protected-root', path, ownershipPrefix], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: process.env,
+  });
+  if (result.status === 197) process.exit(197);
+  if (result.status !== 0) throw new Error(`native protected root creation failed: ${path}`);
+  const identity = result.stdout.trim();
+  if (!/^\d+:\d+$/u.test(identity)) throw new Error('native protected root identity is invalid');
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'create-after-record-before-identity') {
+    process.exit(197);
+  }
+  return identity;
+}
+
 function createTestRegistryNamespace(namespaceId) {
-  powershellText(
-    String.raw`
-    $id=$env:TQ_NAMESPACE_ID
-    $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Software\Talking Quill Tests\$id",$true)
-    try{
-      $security=New-Object Security.AccessControl.RegistrySecurity
-      $security.SetAccessRuleProtection($true,$false)
-      foreach($sid in @($env:TQ_CURRENT_USER_SID,'S-1-5-18','S-1-5-32-544','S-1-5-11')){
-        $identity=New-Object Security.Principal.SecurityIdentifier($sid)
-        $rule=New-Object Security.AccessControl.RegistryAccessRule($identity,'FullControl','None','None','Allow')
-        $security.AddAccessRule($rule)
-      }
-      $key.SetAccessControl($security)
-      $key.Flush()
-    }finally{$key.Dispose()}
-  `,
-    { TQ_NAMESPACE_ID: namespaceId, TQ_CURRENT_USER_SID: currentUserSid },
-  );
+  const result = spawnSync(deleter, ['--registry-create', namespaceId], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error('native test registry namespace creation failed');
 }
 
 function ensureProtectedRecordRoot() {
@@ -309,6 +315,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   ) {
     throw new Error('machine-lock cleanup record ancestor identity changed');
   }
+  if (record.roots.length !== rootKinds.length) record.partialCreation = true;
   const sealingInventory = ![
     'inventory-sealed',
     'deleting-root',
@@ -339,8 +346,13 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
       throw new Error(`recorded machine-lock root is missing: ${path}`);
     }
     if (rootRecord.identity === null && record.creatingRoot === rootRecord.kind) {
-      rootRecord.identity = ownedTreeIdentity(path);
+      removeInterruptedNamespaceRoot(path, rootRecord.ownershipPrefix);
+      record.deletedRoots.push(rootRecord.kind);
       record.creatingRoot = null;
+      continue;
+    }
+    if (rootRecord.identity === null) {
+      throw new Error(`recorded machine-lock root identity is absent: ${path}`);
     }
     if (ownedTreeIdentity(path) !== rootRecord.identity) {
       throw new Error(`recorded machine-lock root identity changed: ${path}`);
@@ -394,7 +406,7 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   record.phase = 'deleting-registry';
   writeRecord(record);
   const registryNow = registrySnapshot(record.namespaceId);
-  if (registryNow !== '{"Present":false}') {
+  if (registryNow.present) {
     deleteExactRegistry(record.namespaceId, registryInventory);
   }
   if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'registry-deleted') process.exit(197);
@@ -405,6 +417,16 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   unlinkSync(path);
   fsyncDirectory(recordRoot);
   removeEmptyParents();
+}
+
+function removeInterruptedNamespaceRoot(path, ownershipPrefix) {
+  const result = spawnSync(deleter, ['--remove-interrupted-root', path, ownershipPrefix], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    throw new Error(`interrupted protected root is not an exact authenticated orphan: ${path}`);
+  }
 }
 
 function exactInventorySubset(actual, expected) {
@@ -477,7 +499,25 @@ function validateRecord(record) {
   if (new Set(kinds).size !== kinds.length || kinds.some((kind) => !rootKinds.includes(kind))) {
     throw new Error('cleanup record root inventory is invalid');
   }
-  if (record.phase !== 'prepared' && kinds.length !== rootKinds.length) {
+  for (const entry of record.roots) {
+    const prefix = `v1.${record.recordId}.${record.namespaceId}.${entry.kind}.`;
+    if (
+      typeof entry.ownershipPrefix !== 'string' ||
+      !entry.ownershipPrefix.startsWith(prefix) ||
+      !/^[0-9a-f]{32}$/u.test(entry.ownershipPrefix.slice(prefix.length)) ||
+      (entry.identity === null &&
+        record.creatingRoot !== entry.kind &&
+        !record.deletedRoots.includes(entry.kind)) ||
+      (entry.identity !== null && !/^\d+:\d+$/u.test(entry.identity))
+    ) {
+      throw new Error('cleanup record root ownership is invalid');
+    }
+  }
+  if (
+    record.phase !== 'prepared' &&
+    record.partialCreation !== true &&
+    kinds.length !== rootKinds.length
+  ) {
     throw new Error('cleanup record root inventory is incomplete');
   }
 }
@@ -514,69 +554,34 @@ function assertNoUnknownNamespaces(recorded = new Set()) {
 }
 
 function registrySnapshot(namespaceId) {
-  return powershellText(
-    String.raw`
-    $id=$env:TQ_NAMESPACE_ID
-    function Values($key){@($key.GetValueNames()|Sort-Object|ForEach-Object {
-      $kind=$key.GetValueKind($_)
-      $value=$key.GetValue($_,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-      $data=if($value-is[byte[]]){[Convert]::ToBase64String($value)}elseif($value-is[string[]]){@($value|ForEach-Object {[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})}else{[string]$value}
-      [pscustomobject]@{Name=$_;Kind=[string]$kind;Data=$data}
-    })}
-    $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\Talking Quill Tests\$id",$false)
-    if($null-eq$key){[pscustomobject]@{Present=$false}|ConvertTo-Json -Compress;exit 0}
-    try{
-      $children=@($key.GetSubKeyNames()|Sort-Object)
-      if($children|Where-Object {$_-ne'RecoveryStateLockV1'}){throw 'registry namespace has an unexpected child'}
-      $child=$key.OpenSubKey('RecoveryStateLockV1',$false)
-      $childState=$null
-      if($null-ne$child){try{if($child.GetSubKeyNames().Count-ne0){throw 'registry child has subkeys'};$childState=[pscustomobject]@{Values=Values($child);Acl=$child.GetAccessControl().GetSecurityDescriptorSddlForm('All')}}finally{$child.Dispose()}}
-      [pscustomobject]@{Present=$true;Values=Values($key);Acl=$key.GetAccessControl().GetSecurityDescriptorSddlForm('All');Child=$childState}|ConvertTo-Json -Compress -Depth 6
-    }finally{$key.Dispose()}
-  `,
-    { TQ_NAMESPACE_ID: namespaceId },
-  );
+  const result = spawnSync(deleter, ['--registry-inventory', namespaceId], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error('native test registry inventory failed');
+  return JSON.parse(result.stdout);
 }
 
 function deleteExactRegistry(namespaceId, expected) {
-  if (registrySnapshot(namespaceId) !== expected)
-    throw new Error('test registry changed before deletion');
-  const result = powershellText(
-    String.raw`
-    $id=$env:TQ_NAMESPACE_ID
-    $base=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Talking Quill Tests',$true)
-    if($null-eq$base){exit 0}
-    try{
-      $namespace=$base.OpenSubKey($id,$true)
-      if($null-ne$namespace){
-        try{
-          if($namespace.GetSubKeyNames() -contains 'RecoveryStateLockV1'){
-            $child=$namespace.OpenSubKey('RecoveryStateLockV1',$true)
-            try{foreach($name in @($child.GetValueNames())){$child.DeleteValue($name,$true)}}finally{$child.Dispose()}
-            $namespace.DeleteSubKey('RecoveryStateLockV1',$false)
-          }
-          foreach($name in @($namespace.GetValueNames())){$namespace.DeleteValue($name,$true)}
-        }finally{$namespace.Dispose()}
-        $base.DeleteSubKey($id,$false)
-      }
-    }finally{$base.Dispose()}
-  `,
-    { TQ_NAMESPACE_ID: namespaceId },
-  );
-  void result;
-  if (registrySnapshot(namespaceId) !== '{"Present":false}') {
-    throw new Error('test registry namespace remains after deletion');
-  }
+  const result = spawnSync(deleter, ['--registry-delete-exact', namespaceId], {
+    input: JSON.stringify(expected),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error('native exact test registry deletion failed');
 }
 
 function registryNamespaceInventory() {
-  return powershellJson(String.raw`
-    $path='Registry::HKEY_CURRENT_USER\Software\Talking Quill Tests'
-    $key=Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
-    $ids=@(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue|ForEach-Object PSChildName)
-    $values=if($null-eq$key){@()}else{@($key.GetValueNames())}
-    [pscustomobject]@{Ids=@($ids);Values=@($values)}|ConvertTo-Json -Compress
-  `);
+  const result = spawnSync(deleter, ['--registry-root-inventory'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error('native test registry root inventory failed');
+  const inventory = JSON.parse(result.stdout);
+  return {
+    Ids: inventory?.subkeys ?? [],
+    Values: inventory?.values ?? [],
+  };
 }
 
 function assertNoRelevantTestProcesses() {
@@ -686,17 +691,11 @@ function removeEmptyParents() {
 }
 
 function removeEmptyRegistryRoot() {
-  powershellText(String.raw`
-    $software=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software',$true)
-    if($null-eq$software){exit 0}
-    try{
-      $root=$software.OpenSubKey('Talking Quill Tests',$true)
-      if($null-ne$root){
-        try{if($root.GetSubKeyNames().Count-ne0 -or $root.GetValueNames().Count-ne0){throw 'test registry root is not empty'}}finally{$root.Dispose()}
-        $software.DeleteSubKey('Talking Quill Tests',$false)
-      }
-    }finally{$software.Dispose()}
-  `);
+  const result = spawnSync(deleter, ['--registry-delete-empty-root'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error('native empty test registry root deletion failed');
 }
 
 function fsyncDirectory(path) {
@@ -713,10 +712,21 @@ function productionResidueSnapshot() {
     $roots=@(Get-ChildItem -LiteralPath $pd -Force -ErrorAction Stop|Where-Object {$_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.machine-lock-pending-*' -or $_.Name -like '.Talking Quill.machine-lifecycle-retained-*'})
     $items=@()
     foreach($root in $roots){$entries=@($root);if($root.PSIsContainer){$entries+=@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse -ErrorAction Stop)};foreach($entry in $entries){$items+=[pscustomobject]@{Path=$entry.FullName;Attributes=[string]$entry.Attributes;Length=$entry.Length;Sddl=(Get-Acl -LiteralPath $entry.FullName).Sddl;FileId=(& fsutil.exe file queryfileid $entry.FullName 2>&1|Out-String).Trim();Sha256=if($entry.PSIsContainer){$null}else{(Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256).Hash}}}}
-    $registry=& reg.exe query 'HKLM\Software\Talking Quill\RecoveryStateLockV1' /s 2>&1|Out-String
-    $parentAcl=if(Test-Path 'Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill'){(Get-Acl 'Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill').Sddl}else{$null}
-    $childAcl=if(Test-Path 'Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill\RecoveryStateLockV1'){(Get-Acl 'Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill\RecoveryStateLockV1').Sddl}else{$null}
-    [pscustomobject]@{Items=@($items|Sort-Object Path);Registry=$registry;ParentAcl=$parentAcl;ChildAcl=$childAcl}|ConvertTo-Json -Compress -Depth 6
+    $registryPath='Registry::HKEY_LOCAL_MACHINE\Software\Talking Quill'
+    $registry=& reg.exe query 'HKLM\Software\Talking Quill' /s 2>&1|Out-String
+    $registryKeys=@()
+    if(Test-Path -LiteralPath $registryPath){
+      $keys=@(Get-Item -LiteralPath $registryPath -ErrorAction Stop)+@(Get-ChildItem -LiteralPath $registryPath -Recurse -ErrorAction Stop)
+      $registryKeys=@($keys|ForEach-Object {
+        [pscustomobject]@{
+          Path=$_.Name
+          Acl=$_.GetAccessControl().GetSecurityDescriptorSddlForm('All')
+          Subkeys=@($_.GetSubKeyNames()|Sort-Object)
+          Values=@($_.GetValueNames()|Sort-Object)
+        }
+      }|Sort-Object Path)
+    }
+    [pscustomobject]@{Items=@($items|Sort-Object Path);Registry=$registry;RegistryKeys=$registryKeys}|ConvertTo-Json -Compress -Depth 8
   `);
 }
 

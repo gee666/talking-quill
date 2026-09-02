@@ -27,6 +27,98 @@ fn main() {
             Err(()) => std::process::exit(74),
         }
     }
+    match arguments.as_slice() {
+        [mode, path, prefix] if mode == "--create-protected-root" => {
+            let Some(prefix) = prefix.to_str() else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::create_protected_root(
+                std::path::Path::new(path),
+                prefix,
+            ) {
+                Ok(identity) => {
+                    println!("{identity}");
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path, prefix] if mode == "--remove-interrupted-root" => {
+            let Some(prefix) = prefix.to_str() else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::remove_interrupted_root(
+                std::path::Path::new(path),
+                prefix,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode] if mode == "--registry-delete-empty-root" => {
+            match talking_quill_helper::machine_lock_test_namespace::delete_empty_registry_root() {
+                Ok(()) => return,
+                Err(_) => std::process::exit(78),
+            }
+        }
+        [mode] if mode == "--registry-root-inventory" => {
+            match talking_quill_helper::machine_lock_test_namespace::registry_root_inventory() {
+                Ok(inventory) => {
+                    println!("{}", serde_json::to_string(&inventory).unwrap());
+                    return;
+                }
+                Err(_) => std::process::exit(78),
+            }
+        }
+        [mode, namespace] if mode == "--registry-create" => {
+            let Some(namespace) = namespace.to_str() else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::create_registry_namespace(
+                namespace,
+            ) {
+                Ok(()) => return,
+                Err(_) => std::process::exit(78),
+            }
+        }
+        [mode, namespace] if mode == "--registry-inventory" => {
+            let Some(namespace) = namespace.to_str() else {
+                std::process::exit(64);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::registry_inventory(namespace) {
+                Ok(inventory) => {
+                    println!("{}", serde_json::to_string(&inventory).unwrap());
+                    return;
+                }
+                Err(_) => std::process::exit(78),
+            }
+        }
+        [mode, namespace] if mode == "--registry-delete-exact" => {
+            let Some(namespace) = namespace.to_str() else {
+                std::process::exit(64);
+            };
+            let mut json = String::new();
+            if std::io::stdin().read_to_string(&mut json).is_err() {
+                std::process::exit(65);
+            }
+            let Ok(inventory) = serde_json::from_str(&json) else {
+                std::process::exit(65);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::delete_registry_exact(
+                namespace, &inventory,
+            ) {
+                Ok(()) => return,
+                Err(_) => std::process::exit(78),
+            }
+        }
+        _ => {}
+    }
     let result = match arguments.as_slice() {
         [mode, path] if mode == "--flush-directory" => {
             talking_quill_helper::owned_tree::flush_owned_directory(std::path::Path::new(path))
