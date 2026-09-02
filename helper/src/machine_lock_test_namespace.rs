@@ -412,13 +412,20 @@ impl NativeRecordPending {
         Ok(())
     }
 
-    pub fn replace(self) -> io::Result<()> {
+    pub fn flush_parent(&self) -> io::Result<()> {
+        if unsafe { FlushFileBuffers(self.parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn rename(&self, replace: bool) -> io::Result<()> {
         let name_bytes = self.destination.len() * size_of::<u16>();
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let mut buffer = vec![0_u8; size_of::<FILE_RENAME_INFO>() + name_bytes];
         let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
-            (*information).Anonymous.ReplaceIfExists = true;
+            (*information).Anonymous.ReplaceIfExists = replace;
             (*information).RootDirectory = self.parent.0;
             (*information).FileNameLength = name_bytes as u32;
             std::ptr::copy_nonoverlapping(
@@ -445,11 +452,812 @@ impl NativeRecordPending {
                 unsafe { RtlNtStatusToDosError(status) } as i32,
             ));
         }
-        if unsafe { FlushFileBuffers(self.parent.0) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
         Ok(())
     }
+
+    pub fn replace(self) -> io::Result<()> {
+        self.rename(true)?;
+        self.flush_parent()
+    }
+}
+
+fn record_crash_at(phase: &str) {
+    if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok(phase) {
+        std::process::exit(197);
+    }
+}
+
+fn cleanup_record_value(bytes: &[u8]) -> io::Result<serde_json::Value> {
+    serde_json::from_slice(bytes).map_err(|_| io::Error::other("cleanup record is not valid JSON"))
+}
+
+fn cleanup_record_revision(value: &serde_json::Value) -> io::Result<Option<u64>> {
+    match value.get("revision") {
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| io::Error::other("cleanup record revision is invalid")),
+        None => Ok(None),
+    }
+}
+
+fn validate_record_bytes_transition(
+    record_id: &str,
+    current_bytes: Option<&[u8]>,
+    candidate_bytes: &[u8],
+) -> io::Result<serde_json::Value> {
+    let candidate = cleanup_record_value(candidate_bytes)?;
+    validate_namespace_id(record_id)?;
+    if candidate["recordId"].as_str() != Some(record_id) {
+        return Err(io::Error::other("cleanup record identity changed"));
+    }
+    let candidate_revision = cleanup_record_revision(&candidate)?
+        .ok_or_else(|| io::Error::other("new cleanup record revision is absent"))?;
+    if let Some(current_bytes) = current_bytes {
+        let current = cleanup_record_value(current_bytes)?;
+        if current["recordId"].as_str() != Some(record_id) {
+            return Err(io::Error::other("current cleanup record identity changed"));
+        }
+        let expected = cleanup_record_revision(&current)?
+            .map_or(Some(0), |value| value.checked_add(1))
+            .ok_or_else(|| io::Error::other("cleanup record revision exhausted"))?;
+        if candidate_revision != expected {
+            return Err(io::Error::other(
+                "cleanup record revision is not contiguous",
+            ));
+        }
+        if let Some(nonce) = current.get("controlNonce").and_then(|value| value.as_str())
+            && candidate["controlNonce"].as_str() != Some(nonce)
+        {
+            return Err(io::Error::other("cleanup record control nonce changed"));
+        }
+    } else if candidate_revision != 0 {
+        return Err(io::Error::other(
+            "initial cleanup record revision is not zero",
+        ));
+    }
+    Ok(candidate)
+}
+
+fn validate_record_transition(
+    path: &Path,
+    candidate_bytes: &[u8],
+    expected_current_sha256: Option<&str>,
+) -> io::Result<serde_json::Value> {
+    let record_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record path has no identity"))?;
+    match read_protected_record(path)? {
+        Some(current_bytes) => {
+            let current_sha256 = Sha256::digest(&current_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if expected_current_sha256 != Some(current_sha256.as_str()) {
+                return Err(io::Error::other("current cleanup record digest changed"));
+            }
+            validate_record_bytes_transition(record_id, Some(&current_bytes), candidate_bytes)
+        }
+        None if expected_current_sha256.is_some() => {
+            Err(io::Error::other("expected cleanup record is absent"))
+        }
+        None => validate_record_bytes_transition(record_id, None, candidate_bytes),
+    }
+}
+
+fn read_protected_record(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    read_handle(file.0).map(Some)
+}
+
+fn cleanup_record_backup_path(path: &Path) -> io::Result<PathBuf> {
+    let record_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record path has no identity"))?;
+    validate_namespace_id(record_id)?;
+    Ok(path.with_file_name(format!("{record_id}.previous-v1")))
+}
+
+fn open_record_frozen(path: &Path, expected_sha256: &str) -> io::Result<(Handle, Vec<u8>)> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    let bytes = read_handle(file.0)?;
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected_sha256 {
+        return Err(io::Error::other("current cleanup record digest changed"));
+    }
+    Ok((file, bytes))
+}
+
+fn open_record_for_swap(path: &Path, expected_sha256: &str) -> io::Result<(Handle, Vec<u8>)> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    let bytes = read_handle(file.0)?;
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected_sha256 {
+        return Err(io::Error::other("current cleanup record digest changed"));
+    }
+    Ok((file, bytes))
+}
+
+pub fn publish_cleanup_record(
+    path: &Path,
+    bytes: &[u8],
+    expected_current_sha256: Option<&str>,
+) -> io::Result<()> {
+    let candidate = validate_record_transition(path, bytes, expected_current_sha256)?;
+    let crash_at = |seam: &str| {
+        let phase_matches = std::env::var("TQ_MACHINE_LOCK_TEST_RECORD_CRASH_PHASE")
+            .map(|phase| candidate["phase"].as_str() == Some(&phase))
+            .unwrap_or(true);
+        if phase_matches {
+            record_crash_at(seam);
+        }
+    };
+    let pending = create_native_record_pending(path)?;
+    crash_at("native-record-temp-created");
+    pending.flush_parent()?;
+    crash_at("native-record-temp-parent-flushed");
+    if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref()
+        == Ok("native-record-temp-partial-written")
+        && std::env::var("TQ_MACHINE_LOCK_TEST_RECORD_CRASH_PHASE")
+            .map(|phase| candidate["phase"].as_str() == Some(&phase))
+            .unwrap_or(true)
+    {
+        pending.write(&bytes[..bytes.len() / 2])?;
+        pending.flush()?;
+        std::process::exit(197);
+    }
+    pending.write(bytes)?;
+    crash_at("native-record-temp-written");
+    pending.flush()?;
+    crash_at("native-record-temp-file-flushed");
+    if let Some(expected_sha256) = expected_current_sha256 {
+        let backup_path = cleanup_record_backup_path(path)?;
+        if backup_path.exists() {
+            return Err(io::Error::other(
+                "cleanup record previous file already exists",
+            ));
+        }
+        let (current, current_bytes) = open_record_for_swap(path, expected_sha256)?;
+        let record_id = path.file_stem().and_then(|value| value.to_str()).unwrap();
+        validate_record_bytes_transition(record_id, Some(&current_bytes), bytes)?;
+        let backup_name = backup_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        rename_file_handle(current.0, pending.parent.0, backup_name, false)?;
+        crash_at("native-record-current-renamed");
+        pending.flush_parent()?;
+        crash_at("native-record-current-rename-parent-flushed");
+        pending.rename(false)?;
+        crash_at("native-record-temp-renamed");
+        pending.flush_parent()?;
+        crash_at("native-record-destination-parent-flushed");
+        delete_file_handle(current.0)?;
+        crash_at("native-record-previous-retired");
+        pending.flush_parent()?;
+        crash_at("native-record-previous-retirement-parent-flushed");
+    } else {
+        validate_record_transition(path, bytes, None)?;
+        pending.rename(false)?;
+        crash_at("native-record-temp-renamed");
+        pending.flush_parent()?;
+        crash_at("native-record-destination-parent-flushed");
+    }
+    Ok(())
+}
+
+pub fn recover_cleanup_record_backup(path: &Path) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record previous name is invalid"))?;
+    let record_id = name
+        .strip_suffix(".previous-v1")
+        .ok_or_else(|| io::Error::other("cleanup record previous suffix is invalid"))?;
+    validate_namespace_id(record_id)?;
+    let destination = path.with_file_name(format!("{record_id}.json"));
+    let parent = open_directory(
+        path.parent()
+            .ok_or_else(|| io::Error::other("cleanup record previous has no parent"))?,
+    )?;
+    let previous = open_evidence_file(path)?;
+    let previous_bytes = read_handle(previous.0)?;
+    if let Some(destination_bytes) = read_protected_record(&destination)? {
+        let destination_sha256 = Sha256::digest(&destination_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let (_destination, frozen_bytes) = open_record_frozen(&destination, &destination_sha256)?;
+        validate_record_bytes_transition(record_id, Some(&previous_bytes), &frozen_bytes)?;
+        delete_file_handle(previous.0)?;
+    } else {
+        rename_file_handle(previous.0, parent.0, &format!("{record_id}.json"), false)?;
+    }
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn inspect_cleanup_record_pending(path: &Path) -> io::Result<Vec<u8>> {
+    validate_cleanup_record_pending_name(path)?;
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    read_handle(file.0)
+}
+
+fn validate_cleanup_record_pending_name(path: &Path) -> io::Result<(&str, &str)> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record temporary name is invalid"))?;
+    let captures = name
+        .strip_suffix(".pending-v1")
+        .and_then(|value| value.rsplit_once(".native-"))
+        .ok_or_else(|| io::Error::other("cleanup record temporary name is invalid"))?;
+    validate_namespace_id(captures.0)?;
+    if captures.1.len() != 32 || !captures.1.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other(
+            "cleanup record temporary nonce is invalid",
+        ));
+    }
+    Ok(captures)
+}
+
+pub fn recover_cleanup_record_pending(
+    path: &Path,
+    expected_candidate_sha256: &str,
+) -> io::Result<bool> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup record temporary has no parent"))?;
+    let captures = validate_cleanup_record_pending_name(path)?;
+    let destination = parent_path.join(format!("{}.json", captures.0));
+    let parent = open_directory(parent_path)?;
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    let bytes = read_handle(file.0)?;
+    let candidate_sha256 = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if candidate_sha256 != expected_candidate_sha256 {
+        return Err(io::Error::other("cleanup record temporary digest changed"));
+    }
+    let current_bytes = read_protected_record(&destination)?;
+    let expected_sha256 = current_bytes.as_ref().map(|bytes| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    });
+    if validate_record_transition(&destination, &bytes, expected_sha256.as_deref()).is_err() {
+        if cleanup_record_value(&bytes).is_ok() {
+            return Err(io::Error::other(
+                "complete cleanup record temporary failed transition validation",
+            ));
+        }
+        delete_file_handle(file.0)?;
+        if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(false);
+    }
+    if let Some(expected_sha256) = expected_sha256.as_deref() {
+        let backup_path = cleanup_record_backup_path(&destination)?;
+        if backup_path.exists() {
+            return Err(io::Error::other(
+                "cleanup record previous file already exists",
+            ));
+        }
+        let (current, current_bytes) = open_record_for_swap(&destination, expected_sha256)?;
+        validate_record_bytes_transition(captures.0, Some(&current_bytes), &bytes)?;
+        let backup_name = backup_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        rename_file_handle(current.0, parent.0, backup_name, false)?;
+        if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        rename_file_handle(file.0, parent.0, &format!("{}.json", captures.0), false)?;
+        if unsafe { FlushFileBuffers(parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        delete_file_handle(current.0)?;
+    } else {
+        validate_record_transition(&destination, &bytes, None)?;
+        rename_file_handle(file.0, parent.0, &format!("{}.json", captures.0), false)?;
+    }
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
+fn rename_file_handle(
+    file: HANDLE,
+    destination_parent: HANDLE,
+    destination: &str,
+    replace: bool,
+) -> io::Result<()> {
+    let destination = destination.encode_utf16().collect::<Vec<_>>();
+    let name_bytes = destination.len() * size_of::<u16>();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let mut buffer = vec![0_u8; size_of::<FILE_RENAME_INFO>() + name_bytes];
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*information).Anonymous.ReplaceIfExists = replace;
+        (*information).RootDirectory = destination_parent;
+        (*information).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            destination.as_ptr(),
+            buffer.as_mut_ptr().add(header).cast(),
+            destination.len(),
+        );
+    }
+    let mut status_block = IoStatusBlock {
+        status_or_pointer: 0,
+        information: 0,
+    };
+    let status = unsafe {
+        NtSetInformationFile(
+            file,
+            &mut status_block,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            10,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreservedLogEvidence {
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+fn evidence_for_handle(file: HANDLE) -> io::Result<PreservedLogEvidence> {
+    validate_exact_security(file, false)?;
+    validate_regular_file(file)?;
+    let bytes = read_handle(file)?;
+    Ok(PreservedLogEvidence {
+        byte_length: bytes.len() as u64,
+        sha256: Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    })
+}
+
+pub fn preserve_cleanup_log(source: &Path, destination: &Path) -> io::Result<PreservedLogEvidence> {
+    let source_parent_path = source
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup log source has no parent"))?;
+    let destination_parent_path = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup log evidence has no parent"))?;
+    let destination_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup log evidence name is invalid"))?;
+    let destination_parent = open_directory(destination_parent_path)?;
+    if !source.exists() {
+        let file = open_evidence_file(destination)?;
+        if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return evidence_for_handle(file.0);
+    }
+    let source_parent = open_directory(source_parent_path)?;
+    let source_file = Handle(unsafe {
+        CreateFileW(
+            wide(source)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if source_file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(source_file.0, false)?;
+    validate_regular_file(source_file.0)?;
+    let bytes = read_handle(source_file.0)?;
+    let evidence = PreservedLogEvidence {
+        byte_length: bytes.len() as u64,
+        sha256: Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    };
+    if destination.exists() {
+        let existing = open_evidence_file(destination)?;
+        let existing_evidence = evidence_for_handle(existing.0)?;
+        if existing_evidence.byte_length != evidence.byte_length
+            || existing_evidence.sha256 != evidence.sha256
+        {
+            return Err(io::Error::other(
+                "cleanup log evidence conflicts with its source",
+            ));
+        }
+    } else {
+        let pending_path = destination.with_file_name(format!("{destination_name}.pending-v1"));
+        let pending = if pending_path.exists() {
+            let pending = open_evidence_file(&pending_path)?;
+            let pending_evidence = evidence_for_handle(pending.0)?;
+            if pending_evidence.byte_length != evidence.byte_length
+                || pending_evidence.sha256 != evidence.sha256
+            {
+                delete_file_handle(pending.0)?;
+                drop(pending);
+                if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                drop(source_file);
+                drop(source_parent);
+                drop(destination_parent);
+                return preserve_cleanup_log(source, destination);
+            }
+            pending
+        } else {
+            let descriptor = exact_descriptor(false)?;
+            let attributes = security_attributes(&descriptor);
+            let pending = Handle(unsafe {
+                CreateFileW(
+                    wide(&pending_path)?.as_ptr(),
+                    windows_sys::Win32::Foundation::GENERIC_READ
+                        | windows_sys::Win32::Foundation::GENERIC_WRITE
+                        | DELETE
+                        | READ_CONTROL
+                        | FILE_READ_ATTRIBUTES
+                        | SYNCHRONIZE,
+                    0,
+                    &attributes,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    null_mut(),
+                )
+            });
+            if pending.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            validate_exact_security(pending.0, false)?;
+            validate_regular_file(pending.0)?;
+            if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            record_crash_at("recovered-log-pending-parent-flushed");
+            write_all_handle(pending.0, &bytes)?;
+            record_crash_at("recovered-log-pending-written");
+            if unsafe { FlushFileBuffers(pending.0) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            record_crash_at("recovered-log-file-flushed");
+            pending
+        };
+        rename_file_handle(pending.0, destination_parent.0, destination_name, false)?;
+        record_crash_at("recovered-log-renamed");
+        if unsafe { FlushFileBuffers(destination_parent.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        record_crash_at("recovered-log-evidence-directory-flushed");
+    }
+    delete_file_handle(source_file.0)?;
+    record_crash_at("recovered-log-source-retired");
+    if unsafe { FlushFileBuffers(source_parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    record_crash_at("recovered-log-source-directory-flushed");
+    Ok(evidence)
+}
+
+pub fn inspect_cleanup_log_evidence(path: &Path) -> io::Result<PreservedLogEvidence> {
+    let file = open_evidence_file(path)?;
+    evidence_for_handle(file.0)
+}
+
+fn open_evidence_file(path: &Path) -> io::Result<Handle> {
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    Ok(file)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedLogEvidence {
+    pub file_name: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+pub fn verify_evidence_and_delete_cleanup_record(
+    record_path: &Path,
+    expected_record_sha256: &str,
+    evidence_root: &Path,
+    expected_root_identity: &str,
+    expected: &[ExpectedLogEvidence],
+) -> io::Result<()> {
+    let record_parent = open_directory(
+        record_path
+            .parent()
+            .ok_or_else(|| io::Error::other("cleanup record has no parent"))?,
+    )?;
+    let record = Handle(unsafe {
+        CreateFileW(
+            wide(record_path)?.as_ptr(),
+            windows_sys::Win32::Foundation::GENERIC_READ
+                | DELETE
+                | READ_CONTROL
+                | FILE_READ_ATTRIBUTES
+                | SYNCHRONIZE,
+            FILE_SHARE_READ,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if record.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(record.0, false)?;
+    validate_regular_file(record.0)?;
+    let record_sha256 = Sha256::digest(&read_handle(record.0)?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if record_sha256 != expected_record_sha256 {
+        return Err(io::Error::other(
+            "cleanup record digest changed before retirement",
+        ));
+    }
+    let evidence_directory = open_directory(evidence_root)?;
+    validate_exact_security(evidence_directory.0, true)?;
+    validate_directory(evidence_directory.0)?;
+    if identity(evidence_directory.0)? != expected_root_identity {
+        return Err(io::Error::other(
+            "recovered-log evidence directory identity changed",
+        ));
+    }
+    let record_id = record_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("cleanup record path has no identity"))?;
+    let expected_names = expected
+        .iter()
+        .map(|entry| entry.file_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let verify_inventory = || -> io::Result<()> {
+        for entry in std::fs::read_dir(evidence_root)? {
+            let name = entry?.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("recovered-log evidence name is invalid"))?;
+            if name.starts_with(&format!("{record_id}.")) && !expected_names.contains(name) {
+                return Err(io::Error::other("unknown recovered-log evidence entry"));
+            }
+        }
+        Ok(())
+    };
+    verify_inventory()?;
+    let mut guards = Vec::with_capacity(expected.len());
+    for entry in expected {
+        let file = open_evidence_file(&evidence_root.join(&entry.file_name))?;
+        let actual = evidence_for_handle(file.0)?;
+        if actual.byte_length != entry.byte_length || actual.sha256 != entry.sha256 {
+            return Err(io::Error::other("recovered-log evidence content changed"));
+        }
+        guards.push(file);
+    }
+    verify_inventory()?;
+    delete_file_handle(record.0)?;
+    record_crash_at("cleanup-record-retired");
+    if unsafe { FlushFileBuffers(record_parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    record_crash_at("cleanup-record-retirement-directory-flushed");
+    drop(guards);
+    drop(evidence_directory);
+    Ok(())
+}
+
+pub fn protect_cleanup_directory(path: &Path) -> io::Result<()> {
+    let descriptor = exact_descriptor(true)?;
+    if unsafe {
+        SetFileSecurityW(
+            wide(path)?.as_ptr(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = open_directory(path)?;
+    validate_exact_security(directory.0, true)?;
+    if unsafe { FlushFileBuffers(directory.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn delete_cleanup_record(path: &Path) -> io::Result<()> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup record has no parent"))?;
+    let parent = open_directory(parent_path)?;
+    let file = Handle(unsafe {
+        CreateFileW(
+            wide(path)?.as_ptr(),
+            DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    });
+    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    validate_exact_security(file.0, false)?;
+    validate_regular_file(file.0)?;
+    delete_file_handle(file.0)?;
+    record_crash_at("cleanup-record-retired");
+    if unsafe { FlushFileBuffers(parent.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    record_crash_at("cleanup-record-retirement-directory-flushed");
+    Ok(())
+}
+
+fn delete_file_handle(file: HANDLE) -> io::Result<()> {
+    let information = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file,
+            FileDispositionInfo,
+            (&raw const information).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub fn create_native_record_pending(path: &Path) -> io::Result<NativeRecordPending> {
@@ -1031,76 +1839,6 @@ pub fn harden_current_process_for_supervised_child() -> io::Result<()> {
         return Err(io::Error::other(format!(
             "supervisor process DACL verification failed: {actual_text} != {expected_text}"
         )));
-    }
-    Ok(())
-}
-
-pub fn consume_cleanup_record_temp(path: &Path) -> io::Result<Vec<u8>> {
-    let parent_path = path
-        .parent()
-        .ok_or_else(|| io::Error::other("cleanup-record temporary has no parent"))?;
-    let parent = open_directory(parent_path)?;
-    let file = Handle(unsafe {
-        CreateFileW(
-            wide(path)?.as_ptr(),
-            windows_sys::Win32::Foundation::GENERIC_READ
-                | DELETE
-                | FILE_READ_ATTRIBUTES
-                | READ_CONTROL,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            null_mut(),
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-            null_mut(),
-        )
-    });
-    if file.0 == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
-    if unsafe { GetFileInformationByHandle(file.0, &mut information) } == 0
-        || information.dwFileAttributes
-            & (windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY
-                | FILE_ATTRIBUTE_REPARSE_POINT)
-            != 0
-        || information.nNumberOfLinks != 1
-    {
-        return Err(io::Error::other(
-            "cleanup-record temporary is not an exact regular file",
-        ));
-    }
-    validate_exact_security(file.0, false)?;
-    let bytes = read_handle(file.0)?;
-    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-    if unsafe {
-        SetFileInformationByHandle(
-            file.0,
-            FileDispositionInfo,
-            (&raw mut disposition).cast(),
-            size_of::<FILE_DISPOSITION_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    drop(file);
-    if unsafe { FlushFileBuffers(parent.0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(bytes)
-}
-
-pub fn protect_cleanup_record(path: &Path) -> io::Result<()> {
-    let descriptor = exact_descriptor(false)?;
-    if unsafe {
-        SetFileSecurityW(
-            wide(path)?.as_ptr(),
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            descriptor.0,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -2531,22 +3269,33 @@ fn open_protected_file(path: &Path) -> io::Result<Handle> {
 }
 
 fn read_handle(handle: HANDLE) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0_u8; 4096];
-    let mut read = 0;
-    if unsafe {
-        ReadFile(
-            handle,
-            bytes.as_mut_ptr().cast(),
-            bytes.len() as u32,
-            &mut read,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
+    const MAX_BYTES: usize = 128 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let mut read = 0;
+        if unsafe {
+            ReadFile(
+                handle,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut read,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if read == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len() + read as usize > MAX_BYTES {
+            return Err(io::Error::other(
+                "protected file exceeds the native read limit",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read as usize]);
     }
-    bytes.truncate(read as usize);
-    Ok(bytes)
 }
 
 fn handle_delete_empty_root(root: Handle, parent: Handle) -> io::Result<()> {

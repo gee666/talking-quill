@@ -233,10 +233,46 @@ fn main() {
         }
         return;
     }
-    if let [mode, path] = arguments.as_slice()
-        && mode == "--consume-record-temp"
+    if let [mode, path, expected_sha256] = arguments.as_slice()
+        && mode == "--publish-record"
     {
-        match talking_quill_helper::machine_lock_test_namespace::consume_cleanup_record_temp(
+        let mut bytes = Vec::new();
+        if std::io::stdin().read_to_end(&mut bytes).is_err() {
+            std::process::exit(65);
+        }
+        let Some(expected_sha256) = expected_sha256.to_str() else {
+            std::process::exit(64);
+        };
+        let expected_sha256 = (expected_sha256 != "-").then_some(expected_sha256);
+        match talking_quill_helper::machine_lock_test_namespace::publish_cleanup_record(
+            std::path::Path::new(path),
+            &bytes,
+            expected_sha256,
+        ) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(78)
+            }
+        }
+    }
+    if let [mode, path] = arguments.as_slice()
+        && mode == "--recover-record-backup"
+    {
+        match talking_quill_helper::machine_lock_test_namespace::recover_cleanup_record_backup(
+            std::path::Path::new(path),
+        ) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(78)
+            }
+        }
+    }
+    if let [mode, path] = arguments.as_slice()
+        && mode == "--inspect-record-temp"
+    {
+        match talking_quill_helper::machine_lock_test_namespace::inspect_cleanup_record_pending(
             std::path::Path::new(path),
         ) {
             Ok(bytes) => {
@@ -252,7 +288,107 @@ fn main() {
             }
         }
     }
+    if let [mode, path, expected_sha256] = arguments.as_slice()
+        && mode == "--recover-record-temp"
+    {
+        let Some(expected_sha256) = expected_sha256.to_str() else {
+            std::process::exit(64);
+        };
+        match talking_quill_helper::machine_lock_test_namespace::recover_cleanup_record_pending(
+            std::path::Path::new(path),
+            expected_sha256,
+        ) {
+            Ok(_) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(78)
+            }
+        }
+    }
     match arguments.as_slice() {
+        [mode, path] if mode == "--protect-cleanup-directory" => {
+            match talking_quill_helper::machine_lock_test_namespace::protect_cleanup_directory(
+                std::path::Path::new(path),
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path] if mode == "--inspect-cleanup-log-evidence" => {
+            match talking_quill_helper::machine_lock_test_namespace::inspect_cleanup_log_evidence(
+                std::path::Path::new(path),
+            ) {
+                Ok(evidence) => {
+                    println!("{}", serde_json::to_string(&evidence).unwrap());
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, source, destination] if mode == "--preserve-cleanup-log" => {
+            match talking_quill_helper::machine_lock_test_namespace::preserve_cleanup_log(
+                std::path::Path::new(source),
+                std::path::Path::new(destination),
+            ) {
+                Ok(evidence) => {
+                    println!("{}", serde_json::to_string(&evidence).unwrap());
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, record_path, record_sha256, evidence_root, evidence_identity]
+            if mode == "--verify-evidence-and-delete-cleanup-record" =>
+        {
+            let (Some(record_sha256), Some(evidence_identity)) =
+                (record_sha256.to_str(), evidence_identity.to_str())
+            else {
+                std::process::exit(64);
+            };
+            let mut json = String::new();
+            if std::io::stdin().read_to_string(&mut json).is_err() {
+                std::process::exit(65);
+            }
+            let Ok(expected) = serde_json::from_str::<Vec<
+                talking_quill_helper::machine_lock_test_namespace::ExpectedLogEvidence,
+            >>(&json)
+            else {
+                std::process::exit(65);
+            };
+            match talking_quill_helper::machine_lock_test_namespace::verify_evidence_and_delete_cleanup_record(
+                std::path::Path::new(record_path),
+                record_sha256,
+                std::path::Path::new(evidence_root),
+                evidence_identity,
+                &expected,
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
+        [mode, path] if mode == "--delete-cleanup-record" => {
+            match talking_quill_helper::machine_lock_test_namespace::delete_cleanup_record(
+                std::path::Path::new(path),
+            ) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(78)
+                }
+            }
+        }
         [mode, path, parent_identity, prefix, binding, nonce]
             if mode == "--create-protected-root" =>
         {
@@ -542,7 +678,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn session_record_crash_at(phase: &str) {
+fn session_crash_at(phase: &str) {
     if std::env::var("TQ_MACHINE_LOCK_TEST_CRASH_AFTER").as_deref() == Ok(phase) {
         std::process::exit(197);
     }
@@ -553,7 +689,8 @@ fn update_session_record(
     path: &std::path::Path,
     update: impl FnOnce(&mut serde_json::Value) -> Result<(), &'static str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut record = serde_json::from_slice::<serde_json::Value>(&std::fs::read(path)?)?;
+    let current_bytes = std::fs::read(path)?;
+    let mut record = serde_json::from_slice::<serde_json::Value>(&current_bytes)?;
     update(&mut record).map_err(std::io::Error::other)?;
     let revision = record["revision"]
         .as_u64()
@@ -563,16 +700,16 @@ fn update_session_record(
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("cleanup record revision exhausted"))?,
     );
-    let pending =
-        talking_quill_helper::machine_lock_test_namespace::create_native_record_pending(path)?;
-    session_record_crash_at("native-record-temp-created");
-    session_record_crash_at("native-record-temp-protected");
-    pending.write(&serde_json::to_vec(&record)?)?;
-    session_record_crash_at("native-record-temp-written");
-    pending.flush()?;
-    session_record_crash_at("native-record-temp-flushed");
-    pending.replace()?;
-    session_record_crash_at("native-record-temp-replaced");
+    use sha2::{Digest, Sha256};
+    let expected_sha256 = Sha256::digest(&current_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    talking_quill_helper::machine_lock_test_namespace::publish_cleanup_record(
+        path,
+        &serde_json::to_vec(&record)?,
+        Some(&expected_sha256),
+    )?;
     Ok(())
 }
 
@@ -1007,7 +1144,14 @@ fn supervise_job(
             })
         };
         let output = create_log(stdout_log_path);
+        session_crash_at("child-stdout-log-created");
         let error = create_log(stderr_log_path);
+        session_crash_at("child-stderr-log-created");
+        talking_quill_helper::owned_tree::flush_owned_directory(
+            stdout_log_path.parent().ok_or(())?,
+        )
+        .map_err(|_| ())?;
+        session_crash_at("child-log-directory-flushed");
         let nul = std::ffi::OsStr::new("NUL")
             .encode_wide()
             .chain(Some(0))
@@ -1125,11 +1269,16 @@ fn supervise_job(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    for log in [&stdout_handle, &stderr_handle] {
-        if let Some(log) = log
-            && unsafe { FlushFileBuffers(log.0) } == 0
-        {
-            return Err(());
+    for (index, log) in [&stdout_handle, &stderr_handle].into_iter().enumerate() {
+        if let Some(log) = log {
+            if unsafe { FlushFileBuffers(log.0) } == 0 {
+                return Err(());
+            }
+            session_crash_at(if index == 0 {
+                "child-stdout-log-flushed"
+            } else {
+                "child-stderr-log-flushed"
+            });
         }
     }
     let stdout_guard = stdout_handle

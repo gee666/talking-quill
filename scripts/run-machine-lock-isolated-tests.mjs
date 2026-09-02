@@ -1,17 +1,15 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import {
   closeSync,
   existsSync,
-  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
-  renameSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -24,6 +22,7 @@ const LEGACY_RECORD_SCHEMAS = [1, 2, 3];
 const root = resolve(import.meta.dirname, '..');
 const stateRoot = resolve(root, 'tmp', 'machine-lock-tests');
 const recordRoot = resolve(stateRoot, '.cleanup-records-v1');
+const evidenceRoot = resolve(root, 'tmp', 'machine-lock-log-evidence-v1');
 const rootKinds = ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit'];
 const separator = process.argv.indexOf('--');
 if (separator === -1 || separator === process.argv.length - 1) {
@@ -61,8 +60,7 @@ try {
   process.env.TQ_MACHINE_LOCK_TEST_NAMESPACE_ID = record.namespaceId;
   const result = await runNamespaceSession(record);
   status = result.code;
-  unlinkSync(recordPath(record.recordId));
-  fsyncDirectory(recordRoot);
+  deleteCleanupRecord(record.recordId);
   record = undefined;
   removeEmptyParents();
 } catch (error) {
@@ -76,9 +74,16 @@ try {
   try {
     if (record !== undefined) {
       assertSupervisorExited(record);
+      recoverNativeRecordBackups();
       recoverNativeRecordTemps();
-      record = reloadProtectedRecord(record.recordId);
-      cleanupRecord(record, deleter, true);
+      if (existsSync(recordPath(record.recordId))) {
+        record = reloadProtectedRecord(record.recordId);
+        cleanupRecord(record, deleter, true);
+      } else {
+        assertRetiredRecordNamespaceIsGone(record);
+        record = undefined;
+        removeEmptyParents();
+      }
     }
   } catch (error) {
     finalFailures.push(error);
@@ -192,7 +197,12 @@ function prepareNamespace(namespaceId) {
   };
   for (const kind of rootKinds) {
     const path = namespaceRoot(kind, namespaceId);
-    mkdirSync(dirname(path), { recursive: true });
+    const parent = dirname(path);
+    if (!existsSync(parent)) {
+      mkdirSync(parent);
+      fsyncDirectory(parent);
+      fsyncDirectory(dirname(parent));
+    }
     if (existsSync(path)) throw new Error(`machine-lock test root already exists: ${path}`);
     record.roots.push({
       kind,
@@ -326,13 +336,19 @@ async function runNamespaceSession(record) {
     assertSupervisorExited(record);
     throw error;
   } finally {
-    if (!logsDrained) {
-      await drainChildLog(childStdoutLogPath, process.stdout);
-      await drainChildLog(childStderrLogPath, process.stderr);
+    if (logsDrained) {
+      cleanupChildLog(childStdoutLogPath);
+      cleanupChildLog(childStderrLogPath);
     }
-    cleanupChildLog(childStdoutLogPath);
-    cleanupChildLog(childStderrLogPath);
   }
+}
+
+function logsPreservedTestPause() {
+  const path = process.env.TQ_MACHINE_LOCK_TEST_LOGS_PRESERVED_PAUSE_FILE;
+  if (!path) return;
+  writeFileSync(`${path}.ready`, 'ready\n', { flag: 'wx' });
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(`${path}.continue`)) Atomics.wait(wait, 0, 0, 10);
 }
 
 async function supervisorFailureTestPause() {
@@ -344,23 +360,130 @@ async function supervisorFailureTestPause() {
   }
 }
 
-function drainRecoveredLog(path, destinationFd) {
-  if (!existsSync(path)) return;
-  if (!isPlainPath(path, false) || lstatSync(path).nlink !== 1) {
-    throw new Error('recovered child log is not an exact regular file');
+function ensureProtectedEvidenceRoot() {
+  mkdirSync(evidenceRoot, { recursive: true });
+  if (!isPlainPath(evidenceRoot, true)) {
+    throw new Error('recovered-log evidence root is not plain');
   }
-  assertProtectedRecord(path);
-  const source = openSync(path, 'r');
-  try {
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    for (;;) {
-      const count = readSync(source, buffer, 0, buffer.length, null);
-      if (count === 0) break;
-      writeFileSync(destinationFd, buffer.subarray(0, count));
+  applyExactRecordAcl(evidenceRoot, true);
+  const protectedDirectory = spawnSync(deleter, ['--protect-cleanup-directory', evidenceRoot], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (protectedDirectory.status !== 0) {
+    throw new Error('cannot apply native recovered-log evidence protection');
+  }
+  fsyncDirectory(evidenceRoot);
+  fsyncDirectory(dirname(evidenceRoot));
+}
+
+function recoveredLogPlans(record) {
+  const plans = [];
+  if (record.childStdoutLogFile !== undefined) {
+    plans.push({ channel: 'stdout', source: record.childStdoutLogFile });
+  }
+  if (record.childStderrLogFile !== undefined) {
+    plans.push({ channel: 'stderr', source: record.childStderrLogFile });
+  }
+  if (record.legacyChildLogFile !== undefined || record.childLogFile !== undefined) {
+    plans.push({ channel: 'combined', source: record.legacyChildLogFile ?? record.childLogFile });
+  }
+  return plans;
+}
+
+function verifyPreservedEvidence(record) {
+  if (
+    !existsSync(evidenceRoot) ||
+    ownedTreeIdentity(evidenceRoot) !== record.evidenceDirectoryIdentity ||
+    pathAcl(evidenceRoot) !== record.evidenceDirectoryAcl
+  ) {
+    throw new Error('recovered-log evidence directory identity changed');
+  }
+  const expected = new Set();
+  for (const entry of record.recoveredLogEvidence) {
+    if (!entry.present) continue;
+    expected.add(entry.fileName);
+    const path = resolve(evidenceRoot, entry.fileName);
+    const inspected = spawnSync(deleter, ['--inspect-cleanup-log-evidence', path], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (inspected.status !== 0) {
+      throw new Error(`recovered-log evidence verification failed: ${entry.fileName}`);
     }
-  } finally {
-    closeSync(source);
+    const actual = JSON.parse(inspected.stdout);
+    if (actual.byteLength !== entry.byteLength || actual.sha256 !== entry.sha256) {
+      throw new Error(`recovered-log evidence content changed: ${entry.fileName}`);
+    }
   }
+  for (const name of readdirSync(evidenceRoot)) {
+    if (name.startsWith(`${record.recordId}.`) && !expected.has(name)) {
+      throw new Error(`unknown recovered-log evidence entry: ${name}`);
+    }
+  }
+}
+
+function preserveRecoveredLogs(record) {
+  if (record.logsPreserved === true) {
+    verifyPreservedEvidence(record);
+    return false;
+  }
+  const plans = recoveredLogPlans(record);
+  if (plans.length === 0) return false;
+  ensureProtectedEvidenceRoot();
+  const evidence = [];
+  for (const plan of plans) {
+    const source = resolve(recordRoot, plan.source);
+    const fileName = `${record.recordId}.${plan.channel}.evidence-v1`;
+    const destination = resolve(evidenceRoot, fileName);
+    if (!existsSync(source) && !existsSync(destination)) {
+      evidence.push({ channel: plan.channel, fileName, present: false });
+      continue;
+    }
+    const preserved = spawnSync(deleter, ['--preserve-cleanup-log', source, destination], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: process.env,
+    });
+    if (preserved.status === 197) {
+      throw new SupervisorFailure(197, 'injected recovered-log preservation crash');
+    }
+    if (preserved.status !== 0) {
+      throw new Error(`recovered-log preservation failed: ${preserved.stderr.trim()}`);
+    }
+    evidence.push({
+      channel: plan.channel,
+      fileName,
+      present: true,
+      ...JSON.parse(preserved.stdout),
+    });
+  }
+  if (!evidence.some((entry) => entry.present)) return false;
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'recovered-logs-moved') {
+    throw new SupervisorFailure(197, 'injected crash after recovered logs moved');
+  }
+  record.logsPreservedFromPhase = record.phase;
+  record.logsPreserved = true;
+  record.recoveredLogEvidence = evidence;
+  record.evidenceDirectoryIdentity = ownedTreeIdentity(evidenceRoot);
+  record.evidenceDirectoryAcl = pathAcl(evidenceRoot);
+  record.phase = 'logs-preserved';
+  writeRecord(record);
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'logs-preserved') {
+    throw new SupervisorFailure(197, 'injected crash after logs-preserved publication');
+  }
+  logsPreservedTestPause();
+  const result = {
+    event: 'recovered-log-evidence',
+    recordId: record.recordId,
+    evidenceRoot,
+    files: evidence,
+  };
+  writeFileSync(process.stderr.fd, `TQ_MACHINE_LOCK_TEST_EVIDENCE:${JSON.stringify(result)}\n`);
+  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'recovered-log-evidence-emitted') {
+    throw new SupervisorFailure(197, 'injected crash after recovered-log evidence result');
+  }
+  return true;
 }
 
 async function drainChildLog(path, destination) {
@@ -422,7 +545,13 @@ function handleNamespaceSessionExit(result, record) {
 }
 
 function ensureProtectedRecordRoot() {
-  mkdirSync(recordRoot, { recursive: true });
+  for (const path of [resolve(root, 'tmp'), stateRoot, recordRoot]) {
+    if (!existsSync(path)) {
+      mkdirSync(path);
+      fsyncDirectory(path);
+      fsyncDirectory(dirname(path));
+    }
+  }
   for (const path of [root, resolve(root, 'tmp'), stateRoot, recordRoot]) {
     if (!isPlainPath(path, true)) {
       throw new Error(`machine-lock cleanup record ancestor is not plain: ${path}`);
@@ -471,204 +600,29 @@ function assertProtectedRecord(path) {
   }
 }
 
-function recordDigest(bytes) {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
-function pendingAuthenticationBytes(recordId, previousSha256, nextRevision, recordBytes) {
-  return Buffer.concat([
-    Buffer.from(`${recordId}\n${previousSha256 ?? '-'}\n${nextRevision}\n`, 'utf8'),
-    recordBytes,
-  ]);
-}
-
-function pendingAuthPath(pending) {
-  return `${pending}:TalkingQuill.PendingAuth.V1`;
-}
-
-function pendingIntentPath(recordId) {
-  return resolve(recordRoot, `${recordId}.pending-intent-v1`);
-}
-
-function recoverJsPendingRecord(recordId, ownerMayBeCurrent = false) {
-  const pending = resolve(recordRoot, `${recordId}.pending-v1`);
-  if (!existsSync(pending)) return;
-  if (!isPlainPath(pending, false) || lstatSync(pending).nlink !== 1) {
-    throw new Error('cleanup-record pending file is not an exact regular file');
-  }
-  assertProtectedRecord(pending);
-  const destination = recordPath(recordId);
-  const intentPath = pendingIntentPath(recordId);
-  if (
-    !existsSync(intentPath) ||
-    !isPlainPath(intentPath, false) ||
-    lstatSync(intentPath).nlink !== 1
-  ) {
-    throw new Error('cleanup-record pending intent is absent or invalid');
-  }
-  assertProtectedRecord(intentPath);
-  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
-  if (
-    intent.version !== 1 ||
-    intent.recordId !== recordId ||
-    intent.recordDirectoryIdentity !== fileIdentity(recordRoot) ||
-    !Number.isInteger(intent.owner?.Pid) ||
-    (processIdentityAlive(intent.owner) && !(ownerMayBeCurrent && intent.owner.Pid === process.pid))
-  ) {
-    throw new Error('cleanup-record pending intent identity changed');
-  }
-  const currentBytes = existsSync(destination) ? readFileSync(destination) : null;
-  const current = currentBytes === null ? null : JSON.parse(currentBytes.toString('utf8'));
-  if (current !== null) validateRecord(current);
-  let candidate;
-  let auth;
-  try {
-    const candidateBytes = readFileSync(pending);
-    candidate = JSON.parse(candidateBytes.toString('utf8'));
-    auth = JSON.parse(readFileSync(pendingAuthPath(pending), 'utf8'));
-    const keyRecord = current ?? candidate;
-    const expectedMac = createHmac('sha256', Buffer.from(keyRecord.controlNonce, 'hex'))
-      .update(
-        pendingAuthenticationBytes(
-          recordId,
-          currentBytes === null ? null : recordDigest(currentBytes),
-          candidate.revision,
-          candidateBytes,
-        ),
-      )
-      .digest();
-    const actualMac = Buffer.from(auth.mac ?? '', 'hex');
-    if (
-      auth.version !== 1 ||
-      auth.recordId !== recordId ||
-      candidate.recordId !== recordId ||
-      auth.previousSha256 !== (currentBytes === null ? null : recordDigest(currentBytes)) ||
-      auth.nextRevision !== (current?.revision ?? -1) + 1 ||
-      candidate.revision !== auth.nextRevision ||
-      actualMac.length !== expectedMac.length ||
-      !timingSafeEqual(actualMac, expectedMac)
-    ) {
-      throw new Error('cleanup-record pending authentication failed');
-    }
-    validateRecord(candidate);
-  } catch (error) {
-    if (!(error instanceof SyntaxError) && error?.code !== 'ENOENT') throw error;
-    unlinkSync(pending);
-    fsyncDirectory(recordRoot);
-    return;
-  }
-  renameSync(pending, destination);
-  unlinkSync(intentPath);
-  fsyncDirectory(recordRoot);
-}
-
-function recoverJsPendingRecords(ownerMayBeCurrent = false) {
-  if (!existsSync(recordRoot)) return;
-  for (const name of readdirSync(recordRoot).sort()) {
-    const match = /^([0-9a-f]{32})\.pending-v1$/u.exec(name);
-    if (match) recoverJsPendingRecord(match[1], ownerMayBeCurrent);
-  }
-  for (const name of readdirSync(recordRoot).sort()) {
-    const match = /^([0-9a-f]{32})\.pending-intent-v1$/u.exec(name);
-    if (!match) continue;
-    const intent = resolve(recordRoot, name);
-    if (!isPlainPath(intent, false) || lstatSync(intent).nlink !== 1) {
-      throw new Error('orphan cleanup-record pending intent is invalid');
-    }
-    assertProtectedRecord(intent);
-    const value = JSON.parse(readFileSync(intent, 'utf8'));
-    if (
-      value.version !== 1 ||
-      value.recordId !== match[1] ||
-      value.recordDirectoryIdentity !== fileIdentity(recordRoot) ||
-      !Number.isInteger(value.owner?.Pid) ||
-      (processIdentityAlive(value.owner) && !(ownerMayBeCurrent && value.owner.Pid === process.pid))
-    ) {
-      throw new Error('orphan cleanup-record pending intent identity changed');
-    }
-    unlinkSync(intent);
-    fsyncDirectory(recordRoot);
-  }
-}
-
-function jsRecordCrashAt(phase) {
-  if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === phase) {
-    throw new SupervisorFailure(197, `injected JS record crash at ${phase}`);
-  }
-}
-
 function writeRecord(record) {
   ensureProtectedRecordRoot();
   const path = recordPath(record.recordId);
-  const pending = resolve(recordRoot, `${record.recordId}.pending-v1`);
-  const intent = pendingIntentPath(record.recordId);
-  recoverJsPendingRecord(record.recordId, true);
-  if (existsSync(intent)) recoverJsPendingRecords(true);
   const previousBytes = existsSync(path) ? readFileSync(path) : null;
-  const previous = previousBytes === null ? null : JSON.parse(previousBytes.toString('utf8'));
-  if (previous !== null) validateRecord(previous);
+  const previous = previousBytes === null ? null : readRecord(path);
   record.revision = (previous?.revision ?? -1) + 1;
   validateRecord(record);
-  const recordBytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
-  const intentHandle = openSync(intent, 'wx');
-  applyExactRecordAcl(intent, false);
-  try {
-    writeFileSync(
-      intentHandle,
-      `${JSON.stringify({
-        version: 1,
-        recordId: record.recordId,
-        recordDirectoryIdentity: record.recordDirectoryIdentity,
-        owner: record.owner,
-      })}\n`,
-      'utf8',
-    );
-    fsyncSync(intentHandle);
-  } finally {
-    closeSync(intentHandle);
+  const previousSha256 =
+    previousBytes === null ? '-' : createHash('sha256').update(previousBytes).digest('hex');
+  const published = spawnSync(deleter, ['--publish-record', path, previousSha256], {
+    input: `${JSON.stringify(record)}\n`,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: process.env,
+  });
+  if (published.status === 197) {
+    throw new SupervisorFailure(197, 'injected native cleanup-record publication crash');
   }
-  fsyncDirectory(recordRoot);
-  const handle = openSync(pending, 'wx');
-  applyExactRecordAcl(pending, false);
-  jsRecordCrashAt('js-record-pending-created');
-  try {
-    writeFileSync(handle, recordBytes);
-    jsRecordCrashAt('js-record-pending-written');
-    fsyncSync(handle);
-    jsRecordCrashAt('js-record-pending-flushed');
-  } finally {
-    closeSync(handle);
+  if (published.status !== 0) {
+    throw new Error(`native cleanup-record publication failed: ${published.stderr.trim()}`);
   }
-  const previousSha256 = previousBytes === null ? null : recordDigest(previousBytes);
-  const auth = {
-    version: 1,
-    recordId: record.recordId,
-    previousSha256,
-    nextRevision: record.revision,
-    mac: createHmac('sha256', Buffer.from(record.controlNonce, 'hex'))
-      .update(
-        pendingAuthenticationBytes(record.recordId, previousSha256, record.revision, recordBytes),
-      )
-      .digest('hex'),
-  };
-  const authHandle = openSync(pendingAuthPath(pending), 'wx');
-  try {
-    const authBytes = `${JSON.stringify(auth)}\n`;
-    if (process.env.TQ_MACHINE_LOCK_TEST_CRASH_AFTER === 'js-record-auth-written') {
-      writeFileSync(authHandle, authBytes.slice(0, Math.floor(authBytes.length / 2)), 'utf8');
-      jsRecordCrashAt('js-record-auth-written');
-    }
-    writeFileSync(authHandle, authBytes, 'utf8');
-    fsyncSync(authHandle);
-    jsRecordCrashAt('js-record-auth-flushed');
-  } finally {
-    closeSync(authHandle);
-  }
-  fsyncDirectory(recordRoot);
-  renameSync(pending, path);
-  unlinkSync(intent);
-  jsRecordCrashAt('js-record-replaced');
-  fsyncDirectory(recordRoot);
+  Object.assign(record, readRecord(path));
+  return record;
 }
 
 function migrateSchema3Record(record) {
@@ -687,11 +641,11 @@ function migrateSchema3Record(record) {
     throw new Error('schema-3 cleanup record control fields are invalid');
   }
   if (record.childLogFile !== undefined) {
-    cleanupChildLog(resolve(recordRoot, record.childLogFile));
+    record.legacyChildLogFile = record.childLogFile;
   }
   delete record.childLogFile;
   record.schemaVersion = RECORD_SCHEMA;
-  record.controlNonce = randomBytes(16).toString('hex');
+  record.controlNonce ??= randomBytes(16).toString('hex');
   record.childStdoutLogFile = `${record.recordId}.stdout.log`;
   record.childStderrLogFile = `${record.recordId}.stderr.log`;
   writeRecord(record);
@@ -701,7 +655,7 @@ function migrateSchema3Record(record) {
 function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
   if (!existsSync(recordRoot)) return;
   if (!isPlainPath(recordRoot, true)) throw new Error('cleanup record root is not plain');
-  recoverJsPendingRecords(ownerMayBeCurrent);
+  recoverNativeRecordBackups();
   recoverNativeRecordTemps();
   const files = readdirSync(recordRoot).sort();
   for (const name of files) {
@@ -723,7 +677,11 @@ function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
   const expectedLogs = new Set(
     records.flatMap((record) => {
       if (record.schemaVersion === RECORD_SCHEMA) {
-        return [record.childStdoutLogFile, record.childStderrLogFile];
+        return [
+          record.childStdoutLogFile,
+          record.childStderrLogFile,
+          ...(record.legacyChildLogFile === undefined ? [] : [record.legacyChildLogFile]),
+        ];
       }
       if (record.schemaVersion === NATIVE_SESSION_SCHEMA && record.childLogFile !== undefined) {
         return [record.childLogFile];
@@ -757,48 +715,60 @@ function recoverRecordedNamespaces(deleter, ownerMayBeCurrent = false) {
       throw new Error(`machine-lock cleanup record is owned by a live process: ${value.recordId}`);
     }
     value = migrateSchema3Record(value);
-    if (value.schemaVersion === RECORD_SCHEMA) {
-      drainRecoveredLog(resolve(recordRoot, value.childStdoutLogFile), process.stdout.fd);
-      drainRecoveredLog(resolve(recordRoot, value.childStderrLogFile), process.stderr.fd);
-    }
     cleanupRecord(value, deleter, ownerMayBeCurrent);
   }
   removeEmptyParents();
 }
 
-function recoverNativeRecordTemps() {
+function recoverNativeRecordBackups() {
+  if (!existsSync(recordRoot)) return;
   for (const name of readdirSync(recordRoot).sort()) {
-    const match = /^([0-9a-f]{32})\.native-[0-9a-f]{32}\.pending-v1$/u.exec(name);
-    if (!match) continue;
-    const temporary = resolve(recordRoot, name);
-    const destination = recordPath(match[1]);
-    if (!existsSync(destination)) {
-      throw new Error(`native cleanup-record temporary has no main record: ${name}`);
-    }
-    assertProtectedRecord(destination);
-    const consumed = spawnSync(deleter, ['--consume-record-temp', temporary], {
+    if (!/^[0-9a-f]{32}\.previous-v1$/u.test(name)) continue;
+    const recovered = spawnSync(deleter, ['--recover-record-backup', resolve(recordRoot, name)], {
       encoding: 'utf8',
       windowsHide: true,
     });
-    if (consumed.status !== 0) {
-      throw new Error(`cannot consume native cleanup-record temporary: ${name}`);
+    if (recovered.status !== 0) {
+      throw new Error(`cannot recover native cleanup-record previous file ${name}`);
+    }
+  }
+}
+
+function recoverNativeRecordTemps() {
+  if (!existsSync(recordRoot)) return;
+  const pending = readdirSync(recordRoot)
+    .filter((name) => /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name))
+    .sort();
+  const ids = pending.map((name) => name.slice(0, 32));
+  if (new Set(ids).size !== ids.length) {
+    throw new Error('multiple native cleanup-record temporaries target one record');
+  }
+  for (const name of pending) {
+    const path = resolve(recordRoot, name);
+    const inspected = spawnSync(deleter, ['--inspect-record-temp', path], {
+      windowsHide: true,
+    });
+    if (inspected.status !== 0) {
+      throw new Error(`cannot inspect native cleanup-record temporary ${name}`);
     }
     try {
-      const candidate = JSON.parse(consumed.stdout);
+      const candidate = JSON.parse(inspected.stdout.toString('utf8'));
       validateRecord(candidate);
-      if (candidate.recordId !== match[1]) {
+      if (candidate.recordId !== name.slice(0, 32)) {
         throw new Error('native cleanup-record temporary identity changed');
       }
-      const current = readRecord(destination);
-      if (
-        candidate.controlNonce !== current.controlNonce ||
-        candidate.revision !== (current.revision ?? -1) + 1
-      ) {
-        throw new Error('native cleanup-record temporary revision changed');
-      }
-      writeRecord(candidate);
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
+    }
+    const candidateSha256 = createHash('sha256').update(inspected.stdout).digest('hex');
+    const recovered = spawnSync(deleter, ['--recover-record-temp', path, candidateSha256], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (recovered.status !== 0) {
+      throw new Error(
+        `cannot recover native cleanup-record temporary ${name}: ${recovered.stderr}`,
+      );
     }
   }
 }
@@ -823,16 +793,21 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
   ) {
     throw new Error('machine-lock cleanup record ancestor identity changed');
   }
+  preserveRecoveredLogs(record);
   if (record.roots.length !== rootKinds.length || record.supervisor === null) {
     record.partialCreation = true;
   }
+  const recordedNamespacePhase =
+    record.logsPreserved === true && record.phase === 'logs-preserved'
+      ? record.logsPreservedFromPhase
+      : record.phase;
   const sealingInventory = ![
     'inventory-sealed',
     'deleting-root',
     'filesystem-deleted',
     'deleting-registry',
     'registry-deleted',
-  ].includes(record.phase);
+  ].includes(recordedNamespacePhase);
   const registryInventory = sealingInventory
     ? registrySnapshot(record.namespaceId)
     : record.registryInventory;
@@ -954,11 +929,75 @@ function cleanupRecord(record, deleter, ownerMayBeCurrent) {
     cleanupChildLog(resolve(recordRoot, record.childStdoutLogFile));
     cleanupChildLog(resolve(recordRoot, record.childStderrLogFile));
   }
-  const path = recordPath(record.recordId);
-  if (!isPlainPath(path, false)) throw new Error('cleanup record changed before deletion');
-  unlinkSync(path);
-  fsyncDirectory(recordRoot);
+  if (record.logsPreserved === true) deleteCleanupRecordWithEvidence(record);
+  else deleteCleanupRecord(record.recordId);
   removeEmptyParents();
+}
+
+function assertRetiredRecordNamespaceIsGone(record) {
+  for (const rootRecord of record.roots) {
+    if (
+      existsSync(namespaceRoot(rootRecord.kind, record.namespaceId)) ||
+      existsSync(resolve(recordRoot, rootRecord.bindingFile)) ||
+      existsSync(`${resolve(recordRoot, rootRecord.bindingFile)}.intent-v1`)
+    ) {
+      throw new Error('cleanup record retired before its filesystem namespace');
+    }
+  }
+  if (registrySnapshot(record.namespaceId).present) {
+    throw new Error('cleanup record retired before its registry namespace');
+  }
+}
+
+function deleteCleanupRecordWithEvidence(record) {
+  verifyPreservedEvidence(record);
+  const expected = record.recoveredLogEvidence
+    .filter((entry) => entry.present)
+    .map((entry) => ({
+      fileName: entry.fileName,
+      byteLength: entry.byteLength,
+      sha256: entry.sha256,
+    }));
+  const recordFile = recordPath(record.recordId);
+  const recordSha256 = createHash('sha256').update(readFileSync(recordFile)).digest('hex');
+  const deleted = spawnSync(
+    deleter,
+    [
+      '--verify-evidence-and-delete-cleanup-record',
+      recordFile,
+      recordSha256,
+      evidenceRoot,
+      record.evidenceDirectoryIdentity,
+    ],
+    {
+      input: JSON.stringify(expected),
+      encoding: 'utf8',
+      windowsHide: true,
+      env: process.env,
+    },
+  );
+  if (deleted.status === 197) {
+    throw new SupervisorFailure(197, 'injected cleanup-record retirement crash');
+  }
+  if (deleted.status !== 0) {
+    throw new Error(`native evidence-bound record retirement failed: ${deleted.stderr.trim()}`);
+  }
+}
+
+function deleteCleanupRecord(recordId) {
+  const path = recordPath(recordId);
+  if (!isPlainPath(path, false)) throw new Error('cleanup record changed before deletion');
+  const deleted = spawnSync(deleter, ['--delete-cleanup-record', path], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: process.env,
+  });
+  if (deleted.status === 197) {
+    throw new SupervisorFailure(197, 'injected cleanup-record retirement crash');
+  }
+  if (deleted.status !== 0) {
+    throw new Error(`native cleanup-record retirement failed: ${deleted.stderr.trim()}`);
+  }
 }
 
 function removeInterruptedNamespaceRoot(path, rootRecord) {
@@ -1110,8 +1149,9 @@ function validateRecord(record) {
   assertNamespaceId(record.namespaceId);
   assertNamespaceId(record.recordId);
   if (
-    record.revision !== undefined &&
-    (!Number.isSafeInteger(record.revision) || record.revision < 0)
+    (record.schemaVersion === RECORD_SCHEMA && record.revision === undefined) ||
+    (record.revision !== undefined &&
+      (!Number.isSafeInteger(record.revision) || record.revision < 0))
   ) {
     throw new Error('cleanup record revision is invalid');
   }
@@ -1144,17 +1184,58 @@ function validateRecord(record) {
     record.schemaVersion === RECORD_SCHEMA &&
     (!/^[0-9a-f]{32}$/u.test(record.controlNonce ?? '') ||
       record.childStdoutLogFile !== `${record.recordId}.stdout.log` ||
-      record.childStderrLogFile !== `${record.recordId}.stderr.log`)
+      record.childStderrLogFile !== `${record.recordId}.stderr.log` ||
+      (record.legacyChildLogFile !== undefined &&
+        record.legacyChildLogFile !== `${record.recordId}.log`))
   ) {
     throw new Error('cleanup record control identity is invalid');
   }
   if (
     record.schemaVersion >= NATIVE_SESSION_SCHEMA &&
-    record.phase !== 'native-creating' &&
+    !['native-creating', 'logs-preserved'].includes(record.phase) &&
     record.partialCreation !== true &&
     !validProcessIdentity(record.supervisor)
   ) {
     throw new Error('cleanup record supervisor identity is invalid');
+  }
+  if (record.logsPreserved === true) {
+    if (
+      typeof record.logsPreservedFromPhase !== 'string' ||
+      !Array.isArray(record.recoveredLogEvidence) ||
+      !/^\d+:\d+$/u.test(record.evidenceDirectoryIdentity ?? '') ||
+      typeof record.evidenceDirectoryAcl !== 'string'
+    ) {
+      throw new Error('recovered-log evidence record is invalid');
+    }
+    const expectedChannels = recoveredLogPlans(record).map((entry) => entry.channel);
+    const actualChannels = record.recoveredLogEvidence.map((entry) => entry.channel);
+    if (
+      new Set(actualChannels).size !== actualChannels.length ||
+      JSON.stringify(actualChannels) !== JSON.stringify(expectedChannels)
+    ) {
+      throw new Error('recovered-log evidence channels are invalid');
+    }
+    for (const entry of record.recoveredLogEvidence) {
+      if (
+        !['stdout', 'stderr', 'combined'].includes(entry.channel) ||
+        entry.fileName !== `${record.recordId}.${entry.channel}.evidence-v1` ||
+        typeof entry.present !== 'boolean' ||
+        (entry.present &&
+          (!Number.isSafeInteger(entry.byteLength) ||
+            entry.byteLength < 0 ||
+            !/^[0-9a-f]{64}$/u.test(entry.sha256 ?? '')))
+      ) {
+        throw new Error('recovered-log evidence entry is invalid');
+      }
+    }
+  } else if (
+    record.logsPreserved !== undefined ||
+    record.logsPreservedFromPhase !== undefined ||
+    record.recoveredLogEvidence !== undefined ||
+    record.evidenceDirectoryIdentity !== undefined ||
+    record.evidenceDirectoryAcl !== undefined
+  ) {
+    throw new Error('unexpected recovered-log evidence metadata');
   }
   for (const identity of [
     record.projectRootIdentity,
@@ -1395,13 +1476,22 @@ function recordPath(recordId) {
 }
 
 function removeEmptyParents() {
-  if (existsSync(recordRoot) && readdirSync(recordRoot).length === 0) rmdirSync(recordRoot);
+  if (existsSync(recordRoot) && readdirSync(recordRoot).length === 0) {
+    rmdirSync(recordRoot);
+    fsyncDirectory(stateRoot);
+  }
   for (const kind of rootKinds) {
     const path = resolve(stateRoot, kind);
-    if (existsSync(path) && readdirSync(path).length === 0) rmdirSync(path);
+    if (existsSync(path) && readdirSync(path).length === 0) {
+      rmdirSync(path);
+      fsyncDirectory(stateRoot);
+    }
   }
   removeEmptyRegistryRoot();
-  if (existsSync(stateRoot) && readdirSync(stateRoot).length === 0) rmdirSync(stateRoot);
+  if (existsSync(stateRoot) && readdirSync(stateRoot).length === 0) {
+    rmdirSync(stateRoot);
+    fsyncDirectory(resolve(root, 'tmp'));
+  }
 }
 
 function removeEmptyRegistryRoot() {

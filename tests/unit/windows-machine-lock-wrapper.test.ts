@@ -13,11 +13,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const run = process.platform === 'win32' ? describe.sequential : describe.skip;
 const wrapper = resolve('scripts', 'run-machine-lock-isolated-tests.mjs');
 const records = resolve('tmp', 'machine-lock-tests', '.cleanup-records-v1');
+const evidence = resolve('tmp', 'machine-lock-log-evidence-v1');
 const nativeHelper = resolve(
   'tmp',
   'cargo-target',
@@ -27,18 +28,18 @@ const nativeHelper = resolve(
 );
 
 run('Windows machine-lock wrapper teardown', () => {
+  afterEach(() => removeEvidence());
+
   it.each([
-    'js-record-pending-created',
-    'js-record-pending-written',
-    'js-record-pending-flushed',
-    'js-record-auth-written',
-    'js-record-auth-flushed',
-    'js-record-replaced',
     'native-record-temp-created',
-    'native-record-temp-protected',
+    'native-record-temp-parent-flushed',
+    'native-record-temp-partial-written',
     'native-record-temp-written',
-    'native-record-temp-flushed',
-    'native-record-temp-replaced',
+    'native-record-temp-file-flushed',
+    'native-record-temp-renamed',
+    'native-record-destination-parent-flushed',
+    'cleanup-record-retired',
+    'cleanup-record-retirement-directory-flushed',
     'intent-partial-write',
     'intent-written-before-flush',
     'intent-file-flushed',
@@ -57,6 +58,11 @@ run('Windows machine-lock wrapper teardown', () => {
     'ads-flushed-before-return',
     'create-after-record-before-identity',
     'roots-created',
+    'child-stdout-log-created',
+    'child-stderr-log-created',
+    'child-log-directory-flushed',
+    'child-stdout-log-flushed',
+    'child-stderr-log-flushed',
     'inventory-sealed',
     'deleted-root:helper',
     'binding-deleted-before-intent',
@@ -79,6 +85,169 @@ run('Windows machine-lock wrapper teardown', () => {
     },
     120_000,
   );
+
+  it.each([
+    'recovered-log-pending-parent-flushed',
+    'recovered-log-pending-written',
+    'recovered-log-file-flushed',
+    'recovered-log-renamed',
+    'recovered-log-evidence-directory-flushed',
+    'recovered-log-source-retired',
+    'recovered-log-source-directory-flushed',
+    'recovered-logs-moved',
+    'logs-preserved',
+    'recovered-log-evidence-emitted',
+  ])(
+    'recovers without replay after a crash at recovered-log phase %s',
+    async (phase) => {
+      await leaveRecordAtPhase(
+        'inventory-sealed',
+        'cmd.exe /d /c echo durable-stdout ^& echo durable-stderr 1^>^&2',
+      );
+      const crashed = runWrapper('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
+      });
+      expect(crashed.status, crashed.stderr).toBe(197);
+      expect(existsSync(records)).toBe(false);
+      const emitted = crashed.stderr.match(/TQ_MACHINE_LOCK_TEST_EVIDENCE:/gu) ?? [];
+      expect(emitted.length).toBeLessThanOrEqual(1);
+      expect(readdirSync(evidence).filter((name) => name.endsWith('.evidence-v1')).length).toBe(2);
+      const retry = runWrapper('cmd.exe /d /c exit 0');
+      expect(retry.status, retry.stderr).toBe(0);
+      expect(retry.stdout).not.toContain('durable-stdout');
+      expect(retry.stderr).not.toContain('durable-stderr');
+      expect(retry.stderr).not.toContain('TQ_MACHINE_LOCK_TEST_EVIDENCE:');
+    },
+    120_000,
+  );
+
+  it.each([
+    'native-record-temp-created',
+    'native-record-temp-parent-flushed',
+    'native-record-temp-partial-written',
+    'native-record-temp-written',
+    'native-record-temp-file-flushed',
+    'native-record-current-renamed',
+    'native-record-current-rename-parent-flushed',
+    'native-record-temp-renamed',
+    'native-record-destination-parent-flushed',
+    'native-record-previous-retired',
+    'native-record-previous-retirement-parent-flushed',
+  ])(
+    'recovers a logs-preserved record publication crash at %s',
+    async (phase) => {
+      await leaveRecordAtPhase('inventory-sealed', 'cmd.exe /d /c echo durable-evidence');
+      const crashed = runWrapper('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
+        TQ_MACHINE_LOCK_TEST_RECORD_CRASH_PHASE: 'logs-preserved',
+      });
+      expect(crashed.status, crashed.stderr).toBe(197);
+      expect(existsSync(records)).toBe(false);
+      expect(readdirSync(evidence).filter((name) => name.endsWith('.evidence-v1')).length).toBe(2);
+    },
+    120_000,
+  );
+
+  it.each([
+    'native-record-temp-created',
+    'native-record-temp-parent-flushed',
+    'native-record-temp-partial-written',
+    'native-record-temp-written',
+    'native-record-temp-file-flushed',
+    'native-record-current-renamed',
+    'native-record-current-rename-parent-flushed',
+    'native-record-temp-renamed',
+    'native-record-destination-parent-flushed',
+    'native-record-previous-retired',
+    'native-record-previous-retirement-parent-flushed',
+  ])(
+    'recovers a schema-3 migration publication crash at %s',
+    async (phase) => {
+      const record = await leaveRecordAtPhase('inventory-sealed', 'cmd.exe /d /c exit 0');
+      cleanupFixtureLog(record.childStdoutLogFile);
+      cleanupFixtureLog(record.childStderrLogFile);
+      record.schemaVersion = 3;
+      delete record.controlNonce;
+      delete record.childStdoutLogFile;
+      delete record.childStderrLogFile;
+      writeFileSync(
+        resolve(records, `${record.recordId}.json`),
+        `${JSON.stringify(record)}\n`,
+        'utf8',
+      );
+      const crashed = runWrapper('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
+        TQ_MACHINE_LOCK_TEST_RECORD_CRASH_PHASE: 'inventory-sealed',
+      });
+      expect(crashed.status, crashed.stderr).toBe(197);
+      expect(existsSync(records)).toBe(false);
+    },
+    120_000,
+  );
+
+  it('does not replay a logs-preserved result after abrupt wrapper death', async () => {
+    const preserved = await leaveLogsPreservedRecord();
+    expect(preserved.stderr).not.toContain('TQ_MACHINE_LOCK_TEST_EVIDENCE:');
+    const retry = runWrapper('cmd.exe /d /c exit 0');
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.stdout).not.toContain('durable-wrapper-death-stdout');
+    expect(retry.stderr).not.toContain('durable-wrapper-death-stderr');
+    expect(retry.stderr).not.toContain('TQ_MACHINE_LOCK_TEST_EVIDENCE:');
+  }, 120_000);
+
+  it('keeps the no-replay marker through later cleanup crashes', async () => {
+    const preserved = await leaveLogsPreservedRecord();
+    const token = randomBytes(16).toString('hex');
+    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-later-cleanup`);
+    mkdirSync(resolve(pause, '..'), { recursive: true });
+    const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
+      env: {
+        ...process.env,
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+        TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+      },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    const completed = new Promise<number | null>((done, reject) => {
+      child.once('error', reject);
+      child.once('exit', done);
+    });
+    await waitForPath(`${pause}.ready`);
+    const current = JSON.parse(
+      readFileSync(resolve(records, `${preserved.record.recordId}.json`), 'utf8'),
+    );
+    expect(current.phase).toBe('inventory-sealed');
+    expect(current.logsPreserved).toBe(true);
+    expect(child.kill()).toBe(true);
+    expect(await completed).not.toBe(0);
+    expect(stderr).not.toContain('TQ_MACHINE_LOCK_TEST_EVIDENCE:');
+    unlinkSync(`${pause}.ready`);
+    const retry = runWrapper('cmd.exe /d /c exit 0');
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.stderr).not.toContain('TQ_MACHINE_LOCK_TEST_EVIDENCE:');
+    const parent = resolve(pause, '..');
+    if (readdirSync(parent).length === 0) rmdirSync(parent);
+  }, 120_000);
+
+  it('fails closed when logs-preserved evidence changes', async () => {
+    const preserved = await leaveLogsPreservedRecord();
+    const entry = preserved.record.recoveredLogEvidence.find(
+      (value: { present: boolean }) => value.present,
+    );
+    const path = resolve(evidence, entry.fileName);
+    const original = readFileSync(path);
+    writeFileSync(path, 'changed evidence\n', 'utf8');
+    const rejected = runWrapper('cmd.exe /d /c exit 0');
+    expect(rejected.status).not.toBe(0);
+    expect(existsSync(resolve(records, `${preserved.record.recordId}.json`))).toBe(true);
+    writeFileSync(path, original);
+    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+  }, 120_000);
 
   it.each(['hardlink', 'reparse'] as const)(
     'rejects a post-seal %s and preserves its outside target',
@@ -244,7 +413,7 @@ run('Windows machine-lock wrapper teardown', () => {
       const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-native-pending`);
       mkdirSync(resolve(pause, '..'), { recursive: true });
       const running = runWrapperAsync('cmd.exe /d /c exit 0', {
-        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'native-record-temp-flushed',
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'native-record-temp-file-flushed',
         TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
       });
       await waitForPath(`${pause}.ready`);
@@ -291,6 +460,8 @@ run('Windows machine-lock wrapper teardown', () => {
     'migrates an authentic schema-3 native-session record at %s',
     async (phase, childCommand) => {
       const record = await leaveRecordAtPhase(phase, childCommand);
+      cleanupFixtureLog(record.childStdoutLogFile);
+      cleanupFixtureLog(record.childStderrLogFile);
       record.schemaVersion = 3;
       delete record.controlNonce;
       delete record.childStdoutLogFile;
@@ -321,6 +492,8 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(rejected.status).not.toBe(0);
     expect(existsSync(resolve(records, `${record.recordId}.json`))).toBe(true);
     delete record.controlNonce;
+    cleanupFixtureLog(`${record.recordId}.stdout.log`);
+    cleanupFixtureLog(`${record.recordId}.stderr.log`);
     writeFileSync(
       resolve(records, `${record.recordId}.json`),
       `${JSON.stringify(record)}\n`,
@@ -331,8 +504,13 @@ run('Windows machine-lock wrapper teardown', () => {
 
   it('recovers a legacy cleanup record without parent identities', async () => {
     const record = await leaveSealedRecord();
+    cleanupFixtureLog(record.childStdoutLogFile);
+    cleanupFixtureLog(record.childStderrLogFile);
     record.schemaVersion = 1;
     for (const root of record.roots) delete root.parentIdentity;
+    delete record.controlNonce;
+    delete record.childStdoutLogFile;
+    delete record.childStderrLogFile;
     writeFileSync(
       resolve(records, `${record.recordId}.json`),
       `${JSON.stringify(record)}\n`,
@@ -499,6 +677,40 @@ async function leaveRecordAtPhase(phase: string, childCommand: string) {
   return record;
 }
 
+async function leaveLogsPreservedRecord() {
+  await leaveRecordAtPhase(
+    'inventory-sealed',
+    'cmd.exe /d /c echo durable-wrapper-death-stdout ^& echo durable-wrapper-death-stderr 1^>^&2',
+  );
+  const token = randomBytes(16).toString('hex');
+  const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-logs-preserved`);
+  mkdirSync(resolve(pause, '..'), { recursive: true });
+  const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
+    env: { ...process.env, TQ_MACHINE_LOCK_TEST_LOGS_PRESERVED_PAUSE_FILE: pause },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  const completed = new Promise<number | null>((done, reject) => {
+    child.once('error', reject);
+    child.once('exit', done);
+  });
+  await waitForPath(`${pause}.ready`);
+  const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
+  const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+  expect(record.logsPreserved).toBe(true);
+  expect(record.phase).toBe('logs-preserved');
+  expect(child.kill()).toBe(true);
+  expect(await completed).not.toBe(0);
+  unlinkSync(`${pause}.ready`);
+  const parent = resolve(pause, '..');
+  if (readdirSync(parent).length === 0) rmdirSync(parent);
+  return { record, stderr };
+}
+
 async function waitForPath(path: string) {
   const deadline = Date.now() + 30_000;
   while (!existsSync(path)) {
@@ -523,6 +735,19 @@ function runWrapperAsync(command: string, environment: NodeJS.ProcessEnv = {}) {
       child.once('exit', (code, signal) => done({ code, signal, stderr }));
     },
   );
+}
+
+function cleanupFixtureLog(name: string) {
+  const path = resolve(records, name);
+  if (existsSync(path)) unlinkSync(path);
+}
+
+function removeEvidence() {
+  if (!existsSync(evidence)) return;
+  for (const name of readdirSync(evidence)) {
+    unlinkSync(resolve(evidence, name));
+  }
+  rmdirSync(evidence);
 }
 
 function runWrapper(command: string, environment: NodeJS.ProcessEnv = {}) {
