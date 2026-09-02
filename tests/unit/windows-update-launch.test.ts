@@ -87,8 +87,18 @@ describe('Windows elevated updater launch', () => {
       expect(source).toContain('MACHINE_LOCK_PENDING_PREFIX');
       expect(source).toContain('publication-pending-v1');
       expect(source).toContain('LEGACY_LOCK_RETIREMENT_EPOCH');
-      expect(source.indexOf(String.raw`Global\\TalkingQuill.NativeSetup.V2`)).toBeLessThan(
-        source.indexOf(String.raw`Global\\TalkingQuill.UpdateRecovery.State.V1`),
+      const productionNamesStart = source.lastIndexOf(
+        '#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]\nfn machine_lock_mutex_names',
+      );
+      const productionNames = source.slice(
+        productionNamesStart,
+        source.indexOf('\n}\n', productionNamesStart) + 3,
+      );
+      expect(productionNamesStart).toBeGreaterThanOrEqual(0);
+      expect(productionNames).toContain('r"Global\\TalkingQuill.NativeSetup.V2"');
+      expect(productionNames).toContain('r"Global\\TalkingQuill.UpdateRecovery.State.V1"');
+      expect(productionNames.indexOf('NativeSetup.V2')).toBeLessThan(
+        productionNames.indexOf('UpdateRecovery.State.V1'),
       );
     }
   });
@@ -206,7 +216,23 @@ describe('Windows elevated updater launch', () => {
       setup.indexOf('fn retire_machine_lock_publication'),
       setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),
     );
-    expect(lockRetirement).toContain('delete_registry_tree_durable(');
+    expect(lockRetirement).toContain('delete_machine_lock_registry_durable(');
+    const machineRegistryDelegate = setup.slice(
+      setup.indexOf('fn delete_machine_lock_registry_durable'),
+      setup.indexOf('fn delete_registry_tree_durable('),
+    );
+    expect(machineRegistryDelegate.trim()).toBe(
+      'fn delete_machine_lock_registry_durable(path: &str, parent: &str, label: &str) -> Result<()> {\n' +
+        '    delete_registry_tree_durable_in_hive(machine_lock_registry_hive(), path, parent, label)\n' +
+        '}',
+    );
+    const durableRegistryDeletion = setup.slice(
+      setup.indexOf('fn delete_registry_tree_durable_in_hive'),
+      setup.indexOf('fn transaction_action'),
+    );
+    expect(durableRegistryDeletion).toContain('RegDeleteTreeW(hive');
+    expect(durableRegistryDeletion.match(/RegOpenKeyExW\(\n\s+hive,/gu)).toHaveLength(2);
+    expect(durableRegistryDeletion).toContain('RegFlushKey(parent_key)');
     expect(setup.indexOf('retire_machine_lock_publication(paths)?')).toBeLessThan(
       setup.indexOf('remove_machine_lock_residue(paths, &suffix)?'),
     );

@@ -289,6 +289,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
     expect(internal('talking-quill-windows-owner-ipc')).toEqual([]);
     expect(workspacePackage('talking-quill-helper').features).toEqual({
       default: [],
+      'machine-lock-test-namespace': [],
       'windows-installed-acceptance': [],
       'windows-update-recovery-launcher': [],
     });
@@ -394,6 +395,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
           'Win32_System_Console',
           'Win32_System_Diagnostics_ToolHelp',
           'Win32_System_IO',
+          'Win32_System_JobObjects',
           'Win32_System_Pipes',
           'Win32_System_Registry',
           'Win32_System_RemoteDesktop',

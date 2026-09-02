@@ -10,6 +10,12 @@ import {
   type Tqpkg2ProductionParseOptions,
 } from '../../scripts/tqpkg2.mjs';
 
+const invalidProductionCleanupOptions: Tqpkg2ProductionParseOptions = {
+  // @ts-expect-error Production parsing cannot opt into cleanup-build package modes.
+  allowStaleSchema2Cleanup: true,
+};
+void invalidProductionCleanupOptions;
+
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 function fixture(
   mode: 'fresh' | 'update' | 'repair' | 'stale-schema2-cleanup' = 'fresh',
@@ -94,7 +100,9 @@ describe('shared TQPKG2 parser', () => {
   });
   it('gates stale schema-2 cleanup packages to explicit cleanup-build inspection', () => {
     const bytes = fixture('stale-schema2-cleanup');
-    expectTypeOf<Tqpkg2ProductionParseOptions>().not.toHaveProperty('allowStaleSchema2Cleanup');
+    expectTypeOf<Tqpkg2ProductionParseOptions['allowStaleSchema2Cleanup']>().toEqualTypeOf<
+      false | undefined
+    >();
     expect(() => parseTqpkg2(bytes, 'x64')).toThrow();
     expect(() => parseTqpkg2(bytes, 'x64', { allowAcceptanceFaults: true })).toThrow();
     const cleanupBuild = parseTqpkg2(bytes, 'x64', { allowStaleSchema2Cleanup: true });
