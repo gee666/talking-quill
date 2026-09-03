@@ -61,6 +61,7 @@
     "release:verify-draft": "node scripts/verify-draft-release.mjs",
     "release:verify-tag": "node scripts/verify-release-tag.mjs",
     "release:stage": "node scripts/stage-unsigned-release.mjs",
+    "release:windows-update-key-ceremony": "node scripts/windows-update-key-ceremony.mjs",
     "rust:fetch-targets": "node scripts/fetch-rust-targets.mjs",
     "boundaries": "node scripts/verify-boundaries.mjs",
     "package:inspect": "node scripts/inspect-package.mjs",

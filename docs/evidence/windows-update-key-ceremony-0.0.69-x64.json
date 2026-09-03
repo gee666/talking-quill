@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "purpose": "talking-quill/windows-update-trust-root-key-ceremony",
+  "releaseVersion": "0.0.69",
+  "architecture": "x64",
+  "performedAtUtc": "2026-09-03T19:38:12.093Z",
+  "generator": "Node.js v24.15.0 crypto.generateKeyPairSync prime256v1",
+  "privateKeyEncoding": "PKCS8 DER",
+  "publicKeyEncoding": "SEC1 uncompressed",
+  "publicKeySha256": "74c86a3e2f0da44dbb094c3dc33165aa52751787ed7c3fa2cba23bdc5af60433",
+  "acl": {
+    "inheritance": "disabled",
+    "rights": "read",
+    "principals": ["SYSTEM", "Administrators", "current-user"]
+  },
+  "derivation": {
+    "implementation": "talking-quill native acceptance signer and verified-child broker",
+    "probeSignatureVerified": true,
+    "signer": {
+      "sha256": "43c9d4d00cbf02a7e769ec598e23dd1993b8cba2c71874b9268e6f1e02c8ca63",
+      "bytes": 242176
+    },
+    "broker": {
+      "sha256": "d3eb07dfb70f8a9590195cf02e9f5a415c48865fd3cf7c68afe14e979822bb56",
+      "bytes": 518144
+    },
+    "bootstrap": {
+      "sha256": "f72100056a34b78b708d3882d869acf78414a106ffa25e7f74b6fac48e5b1506",
+      "bytes": 5880320
+    }
+  },
+  "privateMaterialRecorded": false
+}

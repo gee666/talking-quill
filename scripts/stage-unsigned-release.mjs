@@ -13,11 +13,14 @@ import {
   validateArtifactProvenanceManifest,
   verifyArtifactProvenanceManifest,
 } from './artifact-provenance.mjs';
+import { createWindowsUpdateNativeSigner } from './windows-update-native-signer.mjs';
 
 async function main() {
   const [platform, arch] = process.argv.slice(2).filter((value) => value !== '--');
   if (!['win', 'mac'].includes(platform) || !['x64', 'arm64'].includes(arch)) {
-    throw new Error('Usage: stage-unsigned-release <win|mac> <x64|arm64>');
+    throw new Error(
+      'Usage: stage-unsigned-release <win|mac> <x64|arm64> [--update-private-key <protected-pkcs8-der> --native-signer <exe> --native-signer-sha256 <sha256> --native-broker <exe> --native-broker-sha256 <sha256> --native-bootstrap <exe> --native-bootstrap-sha256 <sha256>]',
+    );
   }
   const root = resolve(import.meta.dirname, '..');
   const release = resolve(root, 'release');
@@ -111,8 +114,46 @@ async function main() {
 
   const updateEvidence = await fileEvidence(resolve(release, updateName));
   const unsignedBinding = createUpdaterReleaseBinding(packageMetadata, updateEvidence.sha256);
-  const releaseBinding =
-    platform === 'win' ? authorizeWindowsUpdaterReleaseBinding(unsignedBinding) : unsignedBinding;
+  let releaseBinding = unsignedBinding;
+  if (platform === 'win') {
+    const privateKeyPath = valueAfter('--update-private-key');
+    const signerPath = valueAfter('--native-signer');
+    const signerSha256 = valueAfter('--native-signer-sha256');
+    const brokerPath = valueAfter('--native-broker');
+    const brokerSha256 = valueAfter('--native-broker-sha256');
+    const bootstrapPath = valueAfter('--native-bootstrap');
+    const bootstrapSha256 = valueAfter('--native-bootstrap-sha256');
+    if (
+      [
+        privateKeyPath,
+        signerPath,
+        signerSha256,
+        brokerPath,
+        brokerSha256,
+        bootstrapPath,
+        bootstrapSha256,
+      ].some((value) => !value)
+    ) {
+      throw new Error(
+        'Windows release staging requires a protected key path and native signer identities',
+      );
+    }
+    const nativeSigner = createWindowsUpdateNativeSigner({
+      privateKeyPath,
+      signerPath,
+      brokerPath,
+      bootstrapPath,
+      signerSha256,
+      brokerSha256,
+      bootstrapSha256,
+    });
+    releaseBinding = authorizeWindowsUpdaterReleaseBinding(
+      unsignedBinding,
+      process.env,
+      undefined,
+      nativeSigner.sign,
+    );
+  }
   const metadata = load(await readFile(resolve(release, rawMetadataName), 'utf8'));
   const channelMetadata = await canonicalizeUpdateMetadata(metadata, {
     expectedVersion: version,
@@ -196,6 +237,11 @@ export function packageRootForTarget(release, platform, architecture) {
     return resolve(release, architecture === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked');
   }
   return resolve(release, architecture === 'x64' ? 'mac' : 'mac-arm64');
+}
+
+function valueAfter(name) {
+  const index = process.argv.indexOf(name);
+  return index < 0 ? undefined : process.argv[index + 1];
 }
 
 export async function canonicalizeUpdateMetadata(

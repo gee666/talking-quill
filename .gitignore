@@ -27,6 +27,7 @@ app/native/
 # Logs and temporary files
 *.log
 tmp/
+/tmp/release-secrets/
 temp/
 
 # Editors and operating systems

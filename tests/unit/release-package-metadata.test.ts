@@ -1,4 +1,11 @@
-import { createHash, generateKeyPairSync, verify } from 'node:crypto';
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  type KeyObject,
+  sign,
+  verify,
+} from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -18,6 +25,17 @@ import {
 
 const root = resolve('tmp/release-package-metadata');
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+const nativeSignWith = (privateKey: KeyObject) => {
+  const publicJwk = createPublicKey(privateKey).export({ format: 'jwk' });
+  const publicKeySec1 = Buffer.from(
+    `04${Buffer.from(publicJwk.x ?? '', 'base64url').toString('hex')}${Buffer.from(publicJwk.y ?? '', 'base64url').toString('hex')}`,
+    'hex',
+  );
+  return (payload: Buffer) => ({
+    publicKeySec1,
+    signatureDer: sign('sha256', payload, privateKey),
+  });
+};
 const predecessorGatewayPath = resolve(root, 'predecessor-gateway.exe');
 const predecessorOwnerPath = resolve(root, 'predecessor-owner.exe');
 const outerIdentity = {
@@ -258,12 +276,8 @@ describe('owner-enabled serialized release package identity', () => {
     const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const jwk = publicKey.export({ format: 'jwk' });
     const publicSec1 = `04${Buffer.from(jwk.x ?? '', 'base64url').toString('hex')}${Buffer.from(jwk.y ?? '', 'base64url').toString('hex')}`;
-    const privateKeyBase64 = privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64');
-    const authorized = authorizeWindowsUpdaterReleaseBinding(
-      binding,
-      { TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: privateKeyBase64 },
-      publicSec1,
-    );
+    const nativeSign = nativeSignWith(privateKey);
+    const authorized = authorizeWindowsUpdaterReleaseBinding(binding, {}, publicSec1, nativeSign);
     const transcript = Buffer.concat([
       Buffer.from('talking-quill/windows-update-authorization/v1\0'),
       Buffer.from(binding.packageSha256, 'hex'),
@@ -298,12 +312,14 @@ describe('owner-enabled serialized release package identity', () => {
       ),
     ).toThrow('authorization is invalid');
     expect(() =>
-      authorizeWindowsUpdaterReleaseBinding(
-        binding,
-        { TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: privateKeyBase64 },
-        `04${'00'.repeat(64)}`,
-      ),
+      authorizeWindowsUpdaterReleaseBinding(binding, {}, `04${'00'.repeat(64)}`, nativeSign),
     ).toThrow('does not match pinned public key');
+    expect(() =>
+      authorizeWindowsUpdaterReleaseBinding(binding, {}, publicSec1, () => ({
+        publicKeySec1: Buffer.from(publicSec1, 'hex'),
+        signatureDer: Buffer.from('3006020101020101', 'hex'),
+      })),
+    ).toThrow('native signer signature is invalid');
   });
 
   it('lets the exact predecessor key authorize a successor that embeds only its new primary', async () => {
@@ -324,12 +340,12 @@ describe('owner-enabled serialized release package identity', () => {
       },
     });
     const binding = createUpdaterReleaseBinding(metadata, digest('bridge installer'));
-    const authorized = authorizeWindowsUpdaterReleaseBinding(binding, {
-      TALKING_QUILL_PREDECESSOR_GATEWAY_PATH: artifact,
-      TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: old.privateKey
-        .export({ format: 'der', type: 'pkcs8' })
-        .toString('base64'),
-    });
+    const authorized = authorizeWindowsUpdaterReleaseBinding(
+      binding,
+      { TALKING_QUILL_PREDECESSOR_GATEWAY_PATH: artifact },
+      undefined,
+      nativeSignWith(old.privateKey),
+    );
     expect(authorized.authorization.verificationKeySha256).toBe(
       createHash('sha256').update(Buffer.from(oldSec1, 'hex')).digest('hex'),
     );
@@ -345,13 +361,9 @@ describe('owner-enabled serialized release package identity', () => {
       predecessor: predecessor('win', 'arm64'),
     });
     const binding = createUpdaterReleaseBinding(metadata, digest('installer'));
-    const key = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     expect(() =>
       authorizeWindowsUpdaterReleaseBinding(binding, {
         TALKING_QUILL_PREDECESSOR_GATEWAY_PATH: predecessorGatewayPath,
-        TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: key.privateKey
-          .export({ format: 'der', type: 'pkcs8' })
-          .toString('base64'),
       }),
     ).toThrow('does not match release binding');
   });

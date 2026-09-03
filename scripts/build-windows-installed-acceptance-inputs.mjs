@@ -335,7 +335,7 @@ function valueAfter(name) {
 }
 
 const usage =
-  'Usage: node scripts/build-windows-installed-acceptance-inputs.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --request-private-key <pkcs8-der> --signer <native-signer> --signer-sha256 <sha256> --manifest-private-key <pkcs8-der> --update-private-key <pkcs8-der> --validation-private-key <pkcs8-der> --not-before-ms <ms> --expires-at-ms <ms> [--build-id <hex>] [--output tmp/path] [--kit-output tmp/path] [--bundle tmp/path.zip]';
+  'Usage: node scripts/build-windows-installed-acceptance-inputs.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --request-private-key <pkcs8-der> --signer <native-signer> --signer-sha256 <sha256> --manifest-private-key <pkcs8-der> --update-private-key <protected-p256-pkcs8-der> --validation-private-key <pkcs8-der> --not-before-ms <ms> --expires-at-ms <ms> [--build-id <hex>] [--output tmp/path] [--kit-output tmp/path] [--bundle tmp/path.zip]';
 
 async function main() {
   if (process.argv.includes('--help') || process.argv.includes('-h')) {

@@ -124,6 +124,10 @@ export function authorizeWindowsUpdaterReleaseBinding<
   binding: T,
   environment?: Record<string, string | undefined>,
   expectedPublicForTest?: string,
+  nativeSign?: (payload: Buffer) => {
+    readonly publicKeySec1: Buffer;
+    readonly signatureDer: Buffer;
+  },
 ): T & {
   readonly authorization: {
     readonly scheme: 'p256-sha256-v1';

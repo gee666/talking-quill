@@ -13,7 +13,7 @@ The installed-acceptance kit is nonpromotable test material for Windows 0.0.69. 
 - the directory containing the exact canonical installer named by `RELEASE.json`;
 - a Git object database containing the descriptor's full source commit and tree;
 - a kit input JSON with the frozen candidate update, canonical predecessor and reinstall, acceptance repair, trusted launcher, synthetic sender, and ten fault packages;
-- a P-256 request-signing key in PKCS8 DER form, with one link and no linked/reparse ancestors;
+- protected P-256 request, manifest, update, and validation signing keys in PKCS8 DER form, each with one link and no linked or reparse-point ancestors;
 - the native signer, acceptance broker, and source-bound verified-child bootstrap.
 
 The builder accepts only version 0.0.69, a canonical fresh RELEASE, and x64 or ARM64. It verifies the descriptor hash, installer size and hash, full TQPKG2 identity, source commit/tree, builder provenance inventory, and exact canonical installer reuse. The predecessor and fresh entries must name those same canonical bytes. The builder does not install or launch any package.

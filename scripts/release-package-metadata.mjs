@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
@@ -465,9 +465,9 @@ export function authorizeWindowsUpdaterReleaseBinding(
   binding,
   environment = process.env,
   expectedPublicForTest,
+  nativeSign,
 ) {
   if (binding.platform !== 'win') return binding;
-  const privateKeyBase64 = environment.TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64;
   const predecessorArtifact = environment.TALKING_QUILL_PREDECESSOR_GATEWAY_PATH;
   let expectedPublic = expectedPublicForTest;
   if (expectedPublic === undefined) {
@@ -480,23 +480,38 @@ export function authorizeWindowsUpdaterReleaseBinding(
     }
     expectedPublic = inspected.sec1;
   }
-  if (typeof privateKeyBase64 !== 'string') {
-    throw new Error('Windows updater policy signing key is required');
+  if (typeof nativeSign !== 'function') {
+    throw new Error('Protected Windows updater native signer is required');
   }
-  const privateKey = createPrivateKey({
-    key: Buffer.from(privateKeyBase64, 'base64'),
-    format: 'der',
-    type: 'pkcs8',
-  });
-  const actualPublic = createPublicKey(privateKey).export({ format: 'jwk' });
-  const sec1 = `04${Buffer.from(actualPublic.x, 'base64url').toString('hex')}${Buffer.from(actualPublic.y, 'base64url').toString('hex')}`;
-  if (sec1 !== expectedPublic)
-    throw new Error('Windows updater signing key does not match pinned public key');
   const transcript = Buffer.concat([
     Buffer.from('talking-quill/windows-update-authorization/v1\0', 'utf8'),
     Buffer.from(binding.packageSha256, 'hex'),
     Buffer.from(binding.packageLayoutDigest, 'hex'),
   ]);
+  const signed = nativeSign(transcript);
+  if (
+    !Buffer.isBuffer(signed?.publicKeySec1) ||
+    !/^04[0-9a-f]{128}$/u.test(signed.publicKeySec1.toString('hex')) ||
+    !Buffer.isBuffer(signed?.signatureDer) ||
+    signed.signatureDer.length === 0
+  ) {
+    throw new Error('Windows updater native signer result is invalid');
+  }
+  const sec1 = signed.publicKeySec1.toString('hex');
+  if (sec1 !== expectedPublic) {
+    throw new Error('Windows updater signing key does not match pinned public key');
+  }
+  const publicKey = createPublicKey({
+    key: Buffer.concat([
+      Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+      signed.publicKeySec1,
+    ]),
+    format: 'der',
+    type: 'spki',
+  });
+  if (!verify('sha256', transcript, publicKey, signed.signatureDer)) {
+    throw new Error('Windows updater native signer signature is invalid');
+  }
   return {
     ...binding,
     authorization: {
@@ -504,7 +519,7 @@ export function authorizeWindowsUpdaterReleaseBinding(
       verificationKeySha256: createHash('sha256')
         .update(Buffer.from(expectedPublic, 'hex'))
         .digest('hex'),
-      signature: sign('sha256', transcript, privateKey).toString('base64'),
+      signature: signed.signatureDer.toString('base64'),
     },
   };
 }
