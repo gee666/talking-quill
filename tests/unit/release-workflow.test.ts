@@ -7,7 +7,7 @@ const producerWorkflow = readFileSync(
   'utf8',
 );
 const acceptanceProducer = readFileSync(
-  'scripts/build-windows-installed-acceptance-inputs.mjs',
+  'scripts/windows-installed-acceptance-native-build.mjs',
   'utf8',
 );
 const publishWorkflow = readFileSync('.github/workflows/publish-local-owner.yml', 'utf8');
@@ -77,12 +77,10 @@ describe('Windows native release workflow', () => {
     expect(producerWorkflow).toContain('key-import --key-path $key --descriptor $descriptor');
     expect(producerWorkflow).toContain('force_producer_failure');
     expect(acceptanceProducer).toContain('Forced installed-acceptance producer build failure');
-    expect(acceptanceProducer.indexOf('const workspace =')).toBeLessThan(
+    expect(acceptanceProducer.indexOf('await runStage(stage')).toBeLessThan(
       acceptanceProducer.indexOf('TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE'),
     );
-    expect(acceptanceProducer.indexOf('TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE')).toBeLessThan(
-      acceptanceProducer.indexOf('const produceArtifacts ='),
-    );
+    expect(acceptanceProducer).toContain("stage === 'native-signer'");
     expect(producerWorkflow).toContain(
       "TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}",
     );

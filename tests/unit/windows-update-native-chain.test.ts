@@ -54,6 +54,11 @@ describe('reviewed Windows update native chain', () => {
     expect(chain).toContain(
       'copyFileSync(chain.keyTool.path, fallbackPath, constants.COPYFILE_EXCL)',
     );
+    expect(chain.indexOf('prepareProtectedKeyDescriptor(chain, keyPath')).toBeLessThan(
+      chain.indexOf("'--import-protected-key-v1'"),
+    );
+    expect(chain).toContain("'prepared',");
+    expect(chain).toContain('finalizeProtectedKeyDescriptor');
     const deletion = chain.slice(
       chain.indexOf('export function deleteProtectedWindowsUpdateKey'),
       chain.indexOf('function runKeyTool'),

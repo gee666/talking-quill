@@ -32,6 +32,9 @@ export async function buildWindowsInstalledAcceptanceArtifacts(
   for (const stage of stages) {
     const result = await runStage(stage, options, context, Object.freeze({ ...outputs }));
     if (result !== undefined) outputs[stage] = result;
+    if (stage === 'native-signer' && process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE === '1') {
+      throw new Error('Forced installed-acceptance producer build failure');
+    }
   }
   const artifactSet = outputs['seal-artifact-set'];
   if (artifactSet === null || typeof artifactSet !== 'object') {

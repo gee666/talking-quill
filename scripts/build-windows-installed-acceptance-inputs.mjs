@@ -77,9 +77,6 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
       runWindow,
       predecessorEnvironment: predecessorEnvironment(canonicalMetadata, canonicalRoot),
     });
-    if (process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE === '1') {
-      throw new Error('Forced installed-acceptance producer build failure');
-    }
     const produceArtifacts =
       dependencies.produceArtifacts ??
       ((producerOptions, producerContext) =>

@@ -176,6 +176,28 @@ describe('Windows installed-acceptance input producer', () => {
     expect(result).toBe(sealed);
   });
 
+  it('forces failure only after the first real producer stage has started', async () => {
+    const stages: string[] = [];
+    process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE = '1';
+    try {
+      await expect(
+        buildWindowsInstalledAcceptanceArtifacts(
+          {},
+          {},
+          {
+            runStage: (stage: string) => {
+              stages.push(stage);
+              return Promise.resolve({ result: 'passed' });
+            },
+          },
+        ),
+      ).rejects.toThrow('Forced installed-acceptance producer build failure');
+      expect(stages).toEqual(['native-signer']);
+    } finally {
+      delete process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE;
+    }
+  });
+
   it('does not inherit signing material into build subprocess environments', () => {
     expect(
       installedAcceptanceBuildEnvironment({
