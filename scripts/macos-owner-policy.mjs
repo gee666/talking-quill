@@ -2,7 +2,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, X509Certificate } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const hex32 = (value, name) => {
   if (!/^[0-9a-f]{64}$/u.test(value ?? ''))
     throw new Error(`${name} must be 64 lowercase hex characters`);
@@ -123,6 +125,7 @@ export function encodeReleasePolicy({
 export function codesignObservation(path, mode, certificate = {}) {
   const result = spawnSync('/usr/bin/codesign', ['-dvvv', '--requirements', '-', path], {
     encoding: 'utf8',
+    env: subprocessEnvironment,
   });
   if (result.status !== 0) throw new Error(`codesign inspection failed for ${path}`);
   const combined = `${result.stdout}${result.stderr}`;
@@ -335,6 +338,7 @@ export function createInstalledPolicy({
 function observedCertificate(identity) {
   const identities = execFileSync('/usr/bin/security', ['find-identity', '-v'], {
     encoding: 'utf8',
+    env: subprocessEnvironment,
   })
     .split(/\r?\n/u)
     .map((line) => /^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/u.exec(line))
@@ -344,6 +348,7 @@ function observedCertificate(identity) {
   const selector = identities[0][1].toLowerCase();
   const pem = execFileSync('/usr/bin/security', ['find-certificate', '-a', '-p'], {
     encoding: 'utf8',
+    env: subprocessEnvironment,
   });
   const certificates =
     pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/gu) ?? [];
@@ -369,10 +374,11 @@ function signAndVerifyCms(directory, name, policy, selector, expectedCertificate
   execFileSync(
     '/usr/bin/security',
     ['cms', '-S', '-N', selector, '-i', policyPath, '-o', signaturePath],
-    { stdio: 'inherit' },
+    { stdio: 'inherit', env: subprocessEnvironment },
   );
   execFileSync('/usr/bin/security', ['cms', '-D', '-i', signaturePath, '-c', policyPath], {
     stdio: 'ignore',
+    env: subprocessEnvironment,
   });
   execFileSync(
     '/usr/bin/openssl',
@@ -392,7 +398,7 @@ function signAndVerifyCms(directory, name, policy, selector, expectedCertificate
       '-out',
       '/dev/null',
     ],
-    { stdio: 'ignore' },
+    { stdio: 'ignore', env: subprocessEnvironment },
   );
   writeFileSync(exactSignerPath, new X509Certificate(expectedCertificate.raw).toString());
   // `-nointern` ignores every embedded certificate. Verification can succeed
@@ -416,7 +422,7 @@ function signAndVerifyCms(directory, name, policy, selector, expectedCertificate
       '-out',
       '/dev/null',
     ],
-    { stdio: 'ignore' },
+    { stdio: 'ignore', env: subprocessEnvironment },
   );
   const signerPem = readFileSync(certificatePath, 'utf8');
   const signerCertificates =
@@ -435,6 +441,7 @@ function compareCodesignCertificate(path, expectedCertificate) {
     const prefix = join(directory, 'certificate');
     execFileSync('/usr/bin/codesign', ['-d', '--extract-certificates', prefix, path], {
       stdio: 'ignore',
+      env: subprocessEnvironment,
     });
     const leaf = readFileSync(`${prefix}0`);
     if (

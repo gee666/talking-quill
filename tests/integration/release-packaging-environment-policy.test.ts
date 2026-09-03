@@ -1,12 +1,15 @@
 import { spawnSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createFreshEnvironment,
+  detectPhysicalMacArchitecture,
   PERSONAL_TARGETS,
   sanitizePersonalConsumerEnvironment,
 } from '../../scripts/personal-use.mjs';
 import { createPackagePlan, createProductionEnvironment } from '../../scripts/run-package.mjs';
+import { currentSourceIdentity } from '../../scripts/source-identity.mjs';
 
 const poisonedProducerEnvironment = {
   Path: '/discarded/path',
@@ -49,6 +52,26 @@ function runEnvironmentChild(source: string) {
 function expectNoCaseVariantDuplicates(environment: Record<string, unknown>) {
   const names = Object.keys(environment).map((name) => name.toUpperCase());
   expect(new Set(names).size).toBe(names.length);
+}
+
+const captureRoot = resolve('tmp/environment-capture-tests');
+const captureTool = resolve('tests/fixtures/environment-capture-tool.mjs');
+const mixedCaseSecrets = {
+  Talking_Quill_Package_Mode: 'repair',
+  talking_quill_predecessor_version: '0.0.68',
+  Talking_Quill_Native_Fault_Phase: 'terminalAcceptance',
+  talking_quill_acceptance_build: '1',
+  Talking_Quill_Windows_Update_Signing_Key: 'private',
+  GITHUB_TOKEN: 'unrelated-secret',
+  GIT_DIR: 'hostile-repository',
+  NODE_OPTIONS: '--require hostile-module',
+};
+
+async function capturedEnvironments(path: string) {
+  const lines = (await readFile(path, 'utf8')).trim().split('\n');
+  return lines.map(
+    (line) => (JSON.parse(line) as { environment: Record<string, string> }).environment,
+  );
 }
 
 describe('release packaging environment policy', () => {
@@ -136,6 +159,64 @@ describe('release packaging environment policy', () => {
       ),
     ).toBe(false);
     expectNoCaseVariantDuplicates(environment);
+  });
+
+  it('gives source identity Git only the minimal sanitized environment', async () => {
+    await mkdir(captureRoot, { recursive: true });
+    const capture = resolve(captureRoot, 'source-identity.jsonl');
+    await rm(capture, { force: true });
+    const identity = currentSourceIdentity({
+      environment: { PATH: process.env.PATH, ...mixedCaseSecrets },
+      requireClean: true,
+      gitCommand: {
+        executable: process.execPath,
+        arguments: [captureTool, capture, 'git'],
+      },
+    });
+    expect(identity).toEqual({ sourceCommit: 'a'.repeat(40), sourceTree: 'b'.repeat(40) });
+    const environments = await capturedEnvironments(capture);
+    expect(environments).toHaveLength(3);
+    for (const environment of environments) {
+      expect(
+        Object.keys(environment).some((name) =>
+          /TALKING_QUILL|TOKEN|GIT_DIR|NODE_OPTIONS/iu.test(name),
+        ),
+      ).toBe(false);
+      expectNoCaseVariantDuplicates(environment);
+    }
+  });
+
+  it('gives personal macOS host checks only the consumer environment', async () => {
+    await mkdir(captureRoot, { recursive: true });
+    const capture = resolve(captureRoot, 'personal-host.jsonl');
+    await rm(capture, { force: true });
+    const environment = sanitizePersonalConsumerEnvironment({
+      PATH: process.env.PATH,
+      ...mixedCaseSecrets,
+    });
+    expect(
+      detectPhysicalMacArchitecture({
+        environment,
+        sysctlCommand: {
+          executable: process.execPath,
+          arguments: [captureTool, capture, 'sysctl'],
+        },
+        unameCommand: {
+          executable: process.execPath,
+          arguments: [captureTool, capture, 'uname'],
+        },
+      }),
+    ).toBe('arm64');
+    const environments = await capturedEnvironments(capture);
+    expect(environments).toHaveLength(2);
+    for (const captured of environments) {
+      expect(
+        Object.keys(captured).some((name) =>
+          /TALKING_QUILL|TOKEN|GIT_DIR|NODE_OPTIONS/iu.test(name),
+        ),
+      ).toBe(false);
+      expectNoCaseVariantDuplicates(captured);
+    }
   });
 
   it('binds Windows installer mode to validated artifact metadata, not caller environment', async () => {

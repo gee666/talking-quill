@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const pnpmCli = process.env.npm_execpath;
 if (pnpmCli === undefined) {
   throw new Error('Run through the pinned package script so npm_execpath identifies pnpm.');
@@ -10,6 +12,7 @@ if (pnpmCli === undefined) {
 const version = spawnSync(process.execPath, [pnpmCli, '--version'], {
   cwd: ROOT,
   encoding: 'utf8',
+  env: subprocessEnvironment,
 });
 if (version.status !== 0 || version.stdout.trim() !== '11.17.0') {
   throw new Error(`Production audit requires pnpm 11.17.0; received ${version.stdout.trim()}.`);
@@ -21,6 +24,7 @@ const result = spawnSync(
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: subprocessEnvironment,
   },
 );
 let report;

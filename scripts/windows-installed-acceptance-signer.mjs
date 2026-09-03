@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { fileURLToPath } from 'node:url';
 
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/u;
@@ -44,11 +45,10 @@ export function signAcceptancePayload({
     }
     result = spawnProcess(snapshotPath, ['--private-key', resolve(privateKeyPath)], {
       cwd: resolve('.'),
-      env: Object.fromEntries(
-        Object.entries({ SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }).filter(
-          ([, value]) => value !== undefined,
-        ),
-      ),
+      env: sanitizedSubprocessEnvironment({
+        SystemRoot: process.env.SystemRoot,
+        WINDIR: process.env.WINDIR,
+      }),
       input: payloadBytes,
       encoding: 'utf8',
       windowsHide: true,

@@ -62,6 +62,6 @@ describe('Windows installed-acceptance helper feature gate', () => {
   it('rejects and strips the acceptance build variable from canonical production packaging', () => {
     expect(prepackage).toContain(`const ACCEPTANCE_BUILD_ENV = '${environment}'`);
     expect(prepackage).toContain('normalizedName === ACCEPTANCE_BUILD_ENV');
-    expect(prepackage).toContain('normalizedName !== ACCEPTANCE_BUILD_ENV');
+    expect(prepackage).toContain('env: sanitizedSubprocessEnvironment(environment)');
   });
 });

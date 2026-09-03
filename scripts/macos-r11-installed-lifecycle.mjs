@@ -23,6 +23,7 @@ import { basename, relative, resolve, sep } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { hostname, userInfo } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import {
   MACOS_R11_CHECKPOINTS,
   canonicalJson,
@@ -220,6 +221,7 @@ async function main() {
       ['-W', '-a', APP, '--args', `--update-local-owner=${candidateZip}`],
       {
         stdio: 'ignore',
+        env: sanitizedSubprocessEnvironment(),
       },
     );
     await delay(20_000); // exceeds the selected 15-second neutral grace
@@ -700,7 +702,11 @@ function treeSha256(root) {
   return hash.digest('hex');
 }
 function run(command, args, statuses, timeout = 300_000) {
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout, env: process.env });
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+    timeout,
+    env: sanitizedSubprocessEnvironment(),
+  });
   if (!statuses.includes(result.status)) {
     throw new Error(`${command} ${args.join(' ')} exited ${result.status}: ${result.stderr}`);
   }

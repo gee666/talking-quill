@@ -54,6 +54,7 @@ import {
   verifyMatchingPackageReleaseMetadataBytes,
   verifySerializedPackageReleaseMetadata,
 } from './release-package-metadata.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
 
 const require = createRequire(import.meta.url);
@@ -63,6 +64,7 @@ const {
 } = require('./forbidden-production-markers.cjs');
 const invocationDirectory = process.cwd();
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const packageArgument = process.argv
   .slice(2)
   .find((argument) => argument !== '--' && !argument.startsWith('--'));
@@ -197,6 +199,7 @@ const artifactEvidence = await inspectFinalArtifacts(
 );
 const noticeCheck = spawnSync(process.execPath, ['scripts/generate-notices.mjs', '--check'], {
   stdio: 'inherit',
+  env: subprocessEnvironment,
 });
 if (noticeCheck.status !== 0)
   throw new Error('Generated notice content failed current inventory validation.');
@@ -481,7 +484,10 @@ async function inspectFinalArtifacts(
       extracted = { status: 0 };
       methods.add('tqpkg2');
     } else if (/\.zip$/iu.test(artifact) && ditto !== null) {
-      extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], { stdio: 'pipe' });
+      extracted = spawnSync(ditto, ['-x', '-k', artifact, extractionRoot], {
+        stdio: 'pipe',
+        env: subprocessEnvironment,
+      });
       methods.add('ditto');
     } else if (/\.dmg$/iu.test(artifact) && hdiutil !== null) {
       inspectionRoot = resolve(extractionRoot, 'mounted');
@@ -489,9 +495,13 @@ async function inspectFinalArtifacts(
       extracted = spawnSync(
         hdiutil,
         ['attach', '-readonly', '-nobrowse', '-mountpoint', inspectionRoot, artifact],
-        { stdio: 'pipe' },
+        { stdio: 'pipe', env: subprocessEnvironment },
       );
-      detach = () => spawnSync(hdiutil, ['detach', inspectionRoot], { stdio: 'pipe' });
+      detach = () =>
+        spawnSync(hdiutil, ['detach', inspectionRoot], {
+          stdio: 'pipe',
+          env: subprocessEnvironment,
+        });
       methods.add('hdiutil');
     } else if (sevenZip !== null) {
       extracted = await extractArchiveWithRetry(
@@ -938,7 +948,10 @@ async function extractArchiveWithRetry(command, arguments_, extractionRoot) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     await rm(extractionRoot, { recursive: true, force: true });
     await mkdir(extractionRoot, { recursive: true });
-    result = spawnSync(command, arguments_, { stdio: 'pipe' });
+    result = spawnSync(command, arguments_, {
+      stdio: 'pipe',
+      env: subprocessEnvironment,
+    });
     if (result.status === 0) return result;
     if (attempt < attempts) await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   }
@@ -970,6 +983,7 @@ function findCommand(commands) {
   for (const command of commands) {
     const result = spawnSync(process.platform === 'win32' ? 'where' : 'which', [command], {
       stdio: 'ignore',
+      env: subprocessEnvironment,
     });
     if (result.status === 0) return command;
   }

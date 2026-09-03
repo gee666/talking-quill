@@ -4,7 +4,9 @@ import { access, mkdir, readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 if (process.platform !== 'win32') throw new Error('Windows lifecycle requires Windows');
 const architecture = valueAfter('--arch');
 if (!['x64', 'arm64'].includes(architecture) || process.arch !== architecture) {
@@ -231,7 +233,7 @@ function launch(arguments_) {
     {
       stdio: 'ignore',
       windowsHide: true,
-      env: process.env,
+      env: subprocessEnvironment,
     },
   );
 }
@@ -249,6 +251,7 @@ function roleProcesses() {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 15_000,
+      env: subprocessEnvironment,
     },
   );
   if (result.status !== 0) throw new Error('Could not enumerate package processes');

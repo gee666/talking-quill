@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const config = JSON.parse(readFileSync(resolve(root, 'release.config.json'), 'utf8'));
@@ -115,5 +116,9 @@ console.log(
 );
 
 function git(args) {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+  return execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    env: sanitizedSubprocessEnvironment(),
+  });
 }

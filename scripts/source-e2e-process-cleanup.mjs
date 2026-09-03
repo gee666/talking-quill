@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const profileRoot = resolve(repositoryRoot, 'tmp', 'e2e').toLowerCase();
 const electronRoot = resolve(repositoryRoot, 'node_modules').toLowerCase();
@@ -20,7 +22,12 @@ function cleanupWindows() {
       '-Command',
       "$items=@(Get-CimInstance Win32_Process | Where-Object {$_.Name -eq 'electron.exe'} | Select-Object ProcessId,CommandLine); ConvertTo-Json -Compress -InputObject $items",
     ],
-    { encoding: 'utf8', windowsHide: true, timeout: 15_000 },
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000,
+      env: subprocessEnvironment,
+    },
   );
   if (query.status !== 0) throw new Error('Could not enumerate source E2E Electron processes');
   const parsed = JSON.parse(query.stdout.trim() || '[]');
@@ -37,6 +44,7 @@ function cleanupWindows() {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 15_000,
+      env: subprocessEnvironment,
     });
     if (killed.status !== 0 && !/not found|no running instance/iu.test(killed.stderr)) {
       throw new Error(`Could not stop stale source E2E Electron process ${String(pid)}`);
@@ -49,6 +57,7 @@ function cleanupPosix() {
   const query = spawnSync('ps', ['-axo', 'pid=,command='], {
     encoding: 'utf8',
     timeout: 15_000,
+    env: subprocessEnvironment,
   });
   if (query.status !== 0) throw new Error('Could not enumerate source E2E Electron processes');
   const processIds = query.stdout.split(/\r?\n/u).flatMap((line) => {

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 
@@ -65,7 +66,13 @@ async function main() {
       '-TimeoutSeconds',
       '30',
     ],
-    { cwd: root, stdio: 'inherit', windowsHide: true, timeout: 180_000 },
+    {
+      cwd: root,
+      stdio: 'inherit',
+      windowsHide: true,
+      timeout: 180_000,
+      env: sanitizedSubprocessEnvironment(),
+    },
   );
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0)

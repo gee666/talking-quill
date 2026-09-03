@@ -8,6 +8,7 @@ import {
   validateArtifactProvenanceManifest,
 } from './artifact-provenance.mjs';
 import { parseReleaseTag, releaseConfig, repositoryRoot } from './release-config.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { sealReleaseManifest } from './release-manifest.mjs';
 
 const args = process.argv.slice(2).filter((argument) => argument !== '--');
@@ -232,5 +233,9 @@ function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 function git(arguments_) {
-  return execFileSync('git', arguments_, { cwd: repositoryRoot, encoding: 'utf8' });
+  return execFileSync('git', arguments_, {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    env: sanitizedSubprocessEnvironment(),
+  });
 }

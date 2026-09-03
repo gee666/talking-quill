@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 
 import { restoreNodeAbi } from './source-e2e-abi-restoration.mjs';
 import { cleanupSourceE2EProcesses } from './source-e2e-process-cleanup.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const pnpmCli = process.env.npm_execpath;
 if (pnpmCli === undefined) throw new Error('pnpm CLI path is unavailable');
@@ -27,6 +28,13 @@ try {
 if (failure !== null) throw failure;
 
 function run(args) {
-  const result = spawnSync(process.execPath, [pnpmCli, ...args], { stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [pnpmCli, ...args], {
+    stdio: 'inherit',
+    env: sanitizedSubprocessEnvironment(process.env, {
+      TALKING_QUILL_TASK6_TEST_HARNESS: '1',
+      TALKING_QUILL_VOCABULARY_TEST_HARNESS: '1',
+      TALKING_QUILL_PI_TEST_HARNESS: '1',
+    }),
+  });
   if (result.status !== 0) throw new Error(`pnpm ${args.join(' ')} failed`);
 }

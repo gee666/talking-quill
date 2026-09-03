@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeEnvironment } from './environment-policy.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import {
   assertNoLinkPath,
   createDeterministicAcceptanceZip,
@@ -34,14 +34,8 @@ import {
 } from './windows-installed-acceptance.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const PRIVATE_ENVIRONMENT = /(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u;
-
 export function sanitizedBuildEnvironment(environment = process.env) {
-  return Object.fromEntries(
-    Object.entries(normalizeEnvironment(environment)).filter(
-      ([name]) => !PRIVATE_ENVIRONMENT.test(name.toUpperCase()),
-    ),
-  );
+  return sanitizedSubprocessEnvironment(environment);
 }
 
 export async function validateCanonicalRelease({ descriptorPath, descriptorSha256, sourceRoot }) {

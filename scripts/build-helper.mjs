@@ -10,6 +10,7 @@ import {
   verifyNativeSourceIdentity,
   verifyStagedNativeRoleSet,
 } from './helper-build-contract.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { replaceNativeRoleDirectory } from './native-staging.mjs';
 import { windowsUpdatePublicKeyIdentity } from './release-package-metadata.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
@@ -20,6 +21,7 @@ const options = parseOptions(process.argv.slice(2));
 const sourceIdentity = currentSourceIdentity({ repositoryRoot });
 process.env.TALKING_QUILL_SOURCE_COMMIT = sourceIdentity.sourceCommit;
 process.env.TALKING_QUILL_SOURCE_TREE = sourceIdentity.sourceTree;
+const hostEnvironment = sanitizedSubprocessEnvironment();
 const platform = normalizePlatform(options.platform ?? process.platform);
 const architecture = normalizeArchitecture(options.architecture ?? process.arch);
 const acceptanceBuildEnvironment = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
@@ -44,8 +46,12 @@ if (platform !== process.platform) {
 if (platform === 'darwin') {
   const translated = spawnSync('/usr/sbin/sysctl', ['-in', 'sysctl.proc_translated'], {
     encoding: 'utf8',
+    env: hostEnvironment,
   });
-  const machine = spawnSync('/usr/bin/uname', ['-m'], { encoding: 'utf8' });
+  const machine = spawnSync('/usr/bin/uname', ['-m'], {
+    encoding: 'utf8',
+    env: hostEnvironment,
+  });
   if (machine.status !== 0) throw new Error('Cannot determine physical Mac architecture');
   const physical =
     translated.status === 0 && translated.stdout.trim() === '1'
@@ -197,9 +203,18 @@ function resolveRustTool(name) {
 }
 
 function run(command, arguments_) {
+  const environment = sanitizedSubprocessEnvironment(process.env, {
+    TALKING_QUILL_SOURCE_COMMIT: sourceIdentity.sourceCommit,
+    TALKING_QUILL_SOURCE_TREE: sourceIdentity.sourceTree,
+    ...(acceptanceBuildValue === '1' ? { [acceptanceBuildEnvironment]: '1' } : {}),
+    ...(options.macosLifecycleFixture === true &&
+    process.env.TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE === 'permissioned-ci-v1'
+      ? { TALKING_QUILL_MACOS_REMOVAL_RETRY_FIXTURE: 'permissioned-ci-v1' }
+      : {}),
+  });
   const result = spawnSync(command, arguments_, {
     cwd: repositoryRoot,
-    env: process.env,
+    env: environment,
     stdio: 'inherit',
     windowsHide: true,
   });

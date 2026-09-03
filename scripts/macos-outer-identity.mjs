@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/u;
 const TEAM_IDENTIFIER = /^[A-Z0-9]{10}$/u;
 const MAX_OUTPUT_BYTES = 64 * 1024;
@@ -12,6 +14,7 @@ export function inspectMacosOuterIdentity(path) {
   const result = spawnSync('/usr/bin/codesign', ['-d', '-r-', '--verbose=4', path], {
     encoding: 'utf8',
     maxBuffer: MAX_OUTPUT_BYTES,
+    env: subprocessEnvironment,
   });
   if (result.status !== 0 || result.error !== undefined) {
     throw new Error(`codesign outer identity inspection failed: ${path}`);
@@ -24,7 +27,7 @@ export function inspectMacosOuterIdentity(path) {
     const certificate = spawnSync(
       '/usr/bin/codesign',
       ['-d', '--extract-certificates', prefix, path],
-      { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES },
+      { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES, env: subprocessEnvironment },
     );
     if (certificate.status !== 0 || certificate.error !== undefined) {
       throw new Error(`codesign outer certificate extraction failed: ${path}`);

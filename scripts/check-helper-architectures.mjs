@@ -1,11 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { basename, resolve } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const architectureTest = resolve(root, 'tests/native/rust-workspace-architectures.test.mjs');
 const result = spawnSync(process.execPath, ['--test', architectureTest], {
   cwd: root,
-  env: process.env,
+  env: sanitizedSubprocessEnvironment(),
   stdio: 'inherit',
   timeout: 21 * 60_000,
   windowsHide: true,

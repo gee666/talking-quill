@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeEnvironment } from './environment-policy.mjs';
+import { normalizeEnvironment, sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
 
 export const CANONICAL_PACKAGE_TARGETS = Object.freeze(['win', 'win-arm64']);
@@ -149,35 +149,14 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
     directoryTest || normalizedSourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1';
   const sourceIdentity = currentSourceIdentity({
     environment: normalizedSourceEnvironment,
+    subprocessEnvironment: sanitizedSubprocessEnvironment(),
     requireClean: process.env.NODE_ENV !== 'test',
   });
-  return Object.fromEntries(
-    Object.entries({
-      ...normalizedSourceEnvironment,
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false',
-      TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
-      TALKING_QUILL_REQUIRE_CLEAN_SOURCE: '1',
-      TALKING_QUILL_RELEASE_COMMIT: sourceIdentity.sourceCommit,
-      TALKING_QUILL_RELEASE_TREE: sourceIdentity.sourceTree,
-      TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: plan.artifactRequirement,
-      TALKING_QUILL_PACKAGE_TARGET: plan.platform,
-      TALKING_QUILL_PACKAGE_ARCH: plan.architecture,
-      TALKING_QUILL_PACKAGE_VARIANT: acceptance
-        ? 'installed-acceptance'
-        : directoryTest
-          ? 'directory-test'
-          : 'canonical',
-      TALKING_QUILL_PACKAGE_MODE: fresh ? 'fresh' : plan.mode,
-      ...(fresh ? { TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1' } : {}),
-      ...(acceptance
-        ? {
-            TALKING_QUILL_ACCEPTANCE_BUILD: '1',
-            TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
-          }
-        : {}),
-    }).filter(([name]) => {
+  const packageInputs = Object.fromEntries(
+    Object.entries(normalizedSourceEnvironment).filter(([name]) => {
       const normalizedName = name.toUpperCase();
       return (
+        normalizedName.startsWith('TALKING_QUILL_') &&
         !FORBIDDEN_INHERITED_PACKAGE_ENVIRONMENT.has(normalizedName) &&
         !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE)/u.test(normalizedName) &&
         !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(normalizedName) &&
@@ -186,6 +165,33 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
       );
     }),
   );
+  return sanitizedSubprocessEnvironment(normalizedSourceEnvironment, {
+    ...packageInputs,
+    ...(normalizedSourceEnvironment.GITHUB_OUTPUT === undefined
+      ? {}
+      : { GITHUB_OUTPUT: normalizedSourceEnvironment.GITHUB_OUTPUT }),
+    CSC_IDENTITY_AUTO_DISCOVERY: 'false',
+    TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
+    TALKING_QUILL_REQUIRE_CLEAN_SOURCE: '1',
+    TALKING_QUILL_RELEASE_COMMIT: sourceIdentity.sourceCommit,
+    TALKING_QUILL_RELEASE_TREE: sourceIdentity.sourceTree,
+    TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: plan.artifactRequirement,
+    TALKING_QUILL_PACKAGE_TARGET: plan.platform,
+    TALKING_QUILL_PACKAGE_ARCH: plan.architecture,
+    TALKING_QUILL_PACKAGE_VARIANT: acceptance
+      ? 'installed-acceptance'
+      : directoryTest
+        ? 'directory-test'
+        : 'canonical',
+    TALKING_QUILL_PACKAGE_MODE: fresh ? 'fresh' : plan.mode,
+    ...(fresh ? { TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1' } : {}),
+    ...(acceptance
+      ? {
+          TALKING_QUILL_ACCEPTANCE_BUILD: '1',
+          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
+        }
+      : {}),
+  });
 }
 
 function runNode(script, environment) {

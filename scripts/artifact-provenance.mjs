@@ -14,6 +14,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -330,11 +331,13 @@ function compareEntries(left, right) {
 }
 
 export async function currentSourceTreeHash() {
+  const environment = sanitizedSubprocessEnvironment();
   if (process.env.TALKING_QUILL_REQUIRE_CLEAN_SOURCE === '1') {
     const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
       cwd: repositoryRoot,
       encoding: 'utf8',
       timeout: 30_000,
+      env: environment,
     });
     if (status.status !== 0 || status.stdout.trim().length > 0) {
       throw new Error('Release provenance requires a clean source tree.');
@@ -345,6 +348,7 @@ export async function currentSourceTreeHash() {
     encoding: null,
     timeout: 30_000,
     maxBuffer: 64 * 1024 * 1024,
+    env: environment,
   };
   const tree = spawnSync('git', ['ls-tree', '-rz', '--full-tree', 'HEAD'], options);
   const diff = spawnSync('git', ['diff', '--binary', '--no-ext-diff', 'HEAD', '--', '.'], options);

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, copyFile, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const architecture = process.argv[2];
@@ -26,6 +27,7 @@ const result = spawnSync('cargo', cargoArguments, {
   cwd: repositoryRoot,
   stdio: 'inherit',
   windowsHide: true,
+  env: sanitizedSubprocessEnvironment(),
 });
 if (result.status !== 0)
   throw new Error(`native Windows bootstrap build failed for ${architecture}`);

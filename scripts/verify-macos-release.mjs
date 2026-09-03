@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const [appInput, dmgInput, zipInput, teamId, architecture, version] = process.argv
   .slice(2)
   .filter((value) => value !== '--');
@@ -104,7 +106,10 @@ function assertIdentity(path, requireRuntime) {
 function entitlements(path, label) {
   const plist = resolve(tmp, `${label}.plist`);
   const json = resolve(tmp, `${label}.json`);
-  const result = spawnSync('codesign', ['-d', '--entitlements', plist, path], { encoding: 'utf8' });
+  const result = spawnSync('codesign', ['-d', '--entitlements', plist, path], {
+    encoding: 'utf8',
+    env: subprocessEnvironment,
+  });
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Entitlement extraction failed for ${path}: ${result.stderr}`);
@@ -123,7 +128,11 @@ function assertPlist(path, key, expected) {
     throw new Error(`${key} mismatch.`);
 }
 function run(command, args, captureStderr = false) {
-  const result = spawnSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: subprocessEnvironment,
+  });
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed: ${result.stderr}`);
   if (!captureStderr && result.stderr.length > 0) process.stderr.write(result.stderr);
   return `${result.stdout}${captureStderr ? result.stderr : ''}`;

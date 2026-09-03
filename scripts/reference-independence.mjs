@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const allowlistPath = resolve(root, 'scripts/reference-independence-allowlist.json');
@@ -48,7 +49,12 @@ export function compareBlobInventory(current, reference, allowlist) {
 }
 
 function git(args) {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+  return execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    env: sanitizedSubprocessEnvironment(),
+  });
 }
 
 function main() {

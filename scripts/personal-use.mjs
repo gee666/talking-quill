@@ -7,7 +7,7 @@ import { basename, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { normalizeEnvironment } from './environment-policy.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import {
   RELEASE_PACKAGE_METADATA_NAME,
   verifyMatchingPackageReleaseMetadataBytes,
@@ -23,13 +23,6 @@ const target = process.argv[3];
 const WINDOWS_STAGED_PATH_ENV = 'TALKING_QUILL_PERSONAL_STAGED_INSTALLER';
 const WINDOWS_STAGED_SHA256_ENV = 'TALKING_QUILL_PERSONAL_STAGED_SHA256';
 const WINDOWS_STAGING_CLEANUP_ATTEMPTS = 10;
-const PERSONAL_PRODUCER_ENVIRONMENT = new Set([
-  'TALKING_QUILL_NATIVE_FAULT_PHASE',
-  'TALKING_QUILL_PACKAGE_MODE',
-  'TALKING_QUILL_PACKAGE_VARIANT',
-  'TALKING_QUILL_PERSONAL_FRESH_INSTALL',
-  'TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT',
-]);
 
 export const WINDOWS_ELEVATION_WRAPPER = [
   '$ErrorActionPreference="Stop"',
@@ -63,17 +56,7 @@ export const PERSONAL_TARGETS = Object.freeze({
 });
 
 export function sanitizePersonalConsumerEnvironment(source = process.env) {
-  return Object.fromEntries(
-    Object.entries(normalizeEnvironment(source)).filter(([name]) => {
-      const normalizedName = name.toUpperCase();
-      return (
-        !PERSONAL_PRODUCER_ENVIRONMENT.has(normalizedName) &&
-        !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(normalizedName) &&
-        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE|ACCEPTANCE)/u.test(normalizedName) &&
-        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(normalizedName)
-      );
-    }),
-  );
+  return sanitizedSubprocessEnvironment(source);
 }
 
 export function createFreshEnvironment(configuration, source = process.env) {
@@ -555,6 +538,29 @@ function waitForExactMacProcesses(paths, environment) {
   throw new Error(`Timed out waiting for exact installed processes: ${paths.join(', ')}`);
 }
 
+export function detectPhysicalMacArchitecture({
+  environment = sanitizePersonalConsumerEnvironment(),
+  spawnProcess = spawnSync,
+  sysctlCommand = { executable: '/usr/sbin/sysctl', arguments: [] },
+  unameCommand = { executable: '/usr/bin/uname', arguments: [] },
+} = {}) {
+  const translated = spawnProcess(
+    sysctlCommand.executable,
+    [...sysctlCommand.arguments, '-in', 'sysctl.proc_translated'],
+    { encoding: 'utf8', env: environment },
+  );
+  const machine = spawnProcess(unameCommand.executable, [...unameCommand.arguments, '-m'], {
+    encoding: 'utf8',
+    env: environment,
+  });
+  if (machine.status !== 0) throw new Error('Cannot determine physical Mac architecture');
+  return translated.status === 0 && translated.stdout.trim() === '1'
+    ? 'arm64'
+    : machine.stdout.trim() === 'x86_64'
+      ? 'x64'
+      : machine.stdout.trim();
+}
+
 function requireHost(configuration, requireNativeArchitecture) {
   const expected = configuration.platform === 'win' ? 'win32' : 'darwin';
   if (process.platform !== expected)
@@ -570,17 +576,7 @@ function requireHost(configuration, requireNativeArchitecture) {
     return;
   }
   if (configuration.platform === 'mac') {
-    const translated = spawnSync('/usr/sbin/sysctl', ['-in', 'sysctl.proc_translated'], {
-      encoding: 'utf8',
-    });
-    const machine = spawnSync('/usr/bin/uname', ['-m'], { encoding: 'utf8' });
-    if (machine.status !== 0) throw new Error('Cannot determine physical Mac architecture');
-    const physical =
-      translated.status === 0 && translated.stdout.trim() === '1'
-        ? 'arm64'
-        : machine.stdout.trim() === 'x86_64'
-          ? 'x64'
-          : machine.stdout.trim();
+    const physical = detectPhysicalMacArchitecture();
     if (physical !== configuration.architecture) {
       throw new Error(
         `${configuration.architecture} personal-use command requires matching physical hardware; this Mac is ${physical}`,
@@ -592,7 +588,7 @@ function requireHost(configuration, requireNativeArchitecture) {
 function run(executable, arguments_, options = {}) {
   const result = spawnSync(executable, arguments_, {
     cwd: root,
-    env: process.env,
+    env: sanitizePersonalConsumerEnvironment(),
     stdio: 'inherit',
     ...options,
   });

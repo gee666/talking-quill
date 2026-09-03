@@ -14,6 +14,14 @@ export const PERSONAL_TARGETS: Readonly<{
 }>;
 
 export function sanitizePersonalConsumerEnvironment(source?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+export function detectPhysicalMacArchitecture(
+  options?: Readonly<{
+    environment?: NodeJS.ProcessEnv;
+    spawnProcess?: typeof import('node:child_process').spawnSync;
+    sysctlCommand?: Readonly<{ executable: string; arguments: readonly string[] }>;
+    unameCommand?: Readonly<{ executable: string; arguments: readonly string[] }>;
+  }>,
+): string;
 export function createFreshEnvironment(
   configuration: PersonalTarget,
   source?: NodeJS.ProcessEnv,

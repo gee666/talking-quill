@@ -1,6 +1,7 @@
 import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 if (process.platform !== 'win32') {
   throw new Error('Instrumented packaged fake-media evidence currently requires Windows');
@@ -10,8 +11,7 @@ if (pnpmCli === undefined) throw new Error('pnpm CLI path is unavailable');
 
 const output = resolve('tmp', 'packaged-media-build');
 rmSync(output, { recursive: true, force: true });
-const buildEnvironment = {
-  ...process.env,
+const buildEnvironment = sanitizedSubprocessEnvironment(process.env, {
   TALKING_QUILL_TASK6_TEST_HARNESS: '1',
   TALKING_QUILL_PACKAGE_VARIANT: 'packaged-test',
   // This isolated, non-release package still exercises the canonical metadata writer.
@@ -20,7 +20,7 @@ const buildEnvironment = {
   TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: '11'.repeat(32),
   TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: '22'.repeat(32),
   TALKING_QUILL_PREDECESSOR_OWNER_SHA256: '33'.repeat(32),
-};
+});
 let failure = null;
 try {
   run(['--filter', '@talking-quill/app', 'build:test'], buildEnvironment);
@@ -49,12 +49,11 @@ try {
       '--grep',
       'packaged fake media',
     ],
-    {
-      ...process.env,
+    sanitizedSubprocessEnvironment(process.env, {
       TALKING_QUILL_PACKAGED_MEDIA_HARNESS: '1',
       TALKING_QUILL_PACKAGE_ROOT: resolve(output, 'win-unpacked'),
       TALKING_QUILL_PACKAGE_EXECUTABLE: 'Talking Quill Packaged Test.exe',
-    },
+    }),
   );
 } catch (error) {
   failure = error;
@@ -71,7 +70,7 @@ console.log(
   'Instrumented packaged-test composition passed fake media through production capture/worklet/session/widget code. This is not a release artifact.',
 );
 
-function run(args, environment = process.env) {
+function run(args, environment = sanitizedSubprocessEnvironment()) {
   const result = spawnSync(process.execPath, [pnpmCli, ...args], {
     cwd: process.cwd(),
     env: environment,

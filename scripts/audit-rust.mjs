@@ -1,10 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { CARGO_AUDIT_VERSION, isExpectedCargoAuditVersion } from './security-tool-versions.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const version = spawnSync('cargo', ['audit', '--version'], { cwd: ROOT, encoding: 'utf8' });
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
+const version = spawnSync('cargo', ['audit', '--version'], {
+  cwd: ROOT,
+  encoding: 'utf8',
+  env: subprocessEnvironment,
+});
 if (version.status !== 0 || !isExpectedCargoAuditVersion(version.stdout)) {
   throw new Error(
     `RustSec audit requires cargo-audit ${CARGO_AUDIT_VERSION}. Install with: cargo install cargo-audit --version ${CARGO_AUDIT_VERSION} --locked`,
@@ -22,6 +28,7 @@ function auditLockfile(lockfile) {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: subprocessEnvironment,
   });
   let report;
   try {

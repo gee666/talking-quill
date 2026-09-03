@@ -7,6 +7,7 @@ import {
   releaseNotesPath,
   repositoryRoot,
 } from './release-config.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const arguments_ = process.argv.slice(2).filter((argument) => argument !== '--');
 const dryRun = arguments_.includes('--dry-run');
@@ -73,7 +74,11 @@ console.log(
 );
 
 function git(args, includeStderr = false) {
-  const result = spawnSync('git', args, { cwd: repositoryRoot, encoding: 'utf8' });
+  const result = spawnSync('git', args, {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    env: sanitizedSubprocessEnvironment(),
+  });
   if (result.status !== 0) throw new Error(`Release tag ${tag} is unavailable or invalid.`);
   return `${result.stdout}${includeStderr ? result.stderr : ''}`;
 }

@@ -13,6 +13,7 @@ import {
   range,
   summarizeProcesses,
 } from './performance-metrics.mjs';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 const PRIVATE_WORKING_SET_BUDGET = 400 * MIB;
@@ -34,6 +35,7 @@ if (packageInfo === null) {
 const sourceCommit = execFileSync('git.exe', ['rev-parse', 'HEAD'], {
   encoding: 'utf8',
   timeout: 10_000,
+  env: sanitizedSubprocessEnvironment(),
 }).trim();
 
 const runs = [];
@@ -104,12 +106,7 @@ async function measureRun(run) {
   await rm(runRoot, { recursive: true, force: true, maxRetries: 3 });
   await mkdir(applicationProfile, { recursive: true });
 
-  const env = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'appdata'),
-    ),
-    APPDATA: appData,
-  };
+  const env = sanitizedSubprocessEnvironment(process.env, { APPDATA: appData });
   let child = null;
   let browser = null;
   let diagnostics = '';
@@ -222,11 +219,13 @@ async function terminateOwnedTree(rootPid, ownedPids, marker) {
   await execFileAsync('taskkill.exe', ['/PID', String(rootPid), '/T', '/F'], {
     timeout: 10_000,
     windowsHide: true,
+    env: sanitizedSubprocessEnvironment(),
   }).catch(() => undefined);
   for (const pid of ownedPids) {
     await execFileAsync('taskkill.exe', ['/PID', String(pid), '/F'], {
       timeout: 5_000,
       windowsHide: true,
+      env: sanitizedSubprocessEnvironment(),
     }).catch(() => undefined);
   }
   const ids = [...ownedPids];
@@ -237,6 +236,7 @@ async function terminateOwnedTree(rootPid, ownedPids, marker) {
       await execFileAsync('taskkill.exe', ['/PID', String(pid), '/F'], {
         timeout: 5_000,
         windowsHide: true,
+        env: sanitizedSubprocessEnvironment(),
       }).catch(() => undefined);
     }
     await delay(100);
@@ -278,7 +278,13 @@ async function runPowerShell(script, timeout) {
   const { stdout } = await execFileAsync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', maxBuffer: 10 * MIB, timeout, windowsHide: true },
+    {
+      encoding: 'utf8',
+      maxBuffer: 10 * MIB,
+      timeout,
+      windowsHide: true,
+      env: sanitizedSubprocessEnvironment(),
+    },
   );
   return stdout;
 }

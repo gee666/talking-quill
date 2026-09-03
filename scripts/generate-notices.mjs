@@ -4,9 +4,11 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { assertAllowedDependencyLicenses } from './notices-policy.mjs';
 
 const root = resolve('.');
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 const output = resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt');
 const lockPath = resolve(root, 'pnpm-lock.yaml');
 const cargoLockPaths = [resolve(root, 'helper/Cargo.lock')];
@@ -47,6 +49,7 @@ const licenseReport = JSON.parse(
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
+    env: subprocessEnvironment,
   }),
 );
 const licenseIndex = new Map();
@@ -77,6 +80,7 @@ const deployment = JSON.parse(
       cwd: root,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
+      env: subprocessEnvironment,
     },
   ),
 )[0];
@@ -121,7 +125,12 @@ for (const target of rustTargets) {
         '--format',
         '{p}|{l}',
       ],
-      { cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+      {
+        cwd: root,
+        encoding: 'utf8',
+        maxBuffer: 4 * 1024 * 1024,
+        env: subprocessEnvironment,
+      },
     );
     for (const line of tree.split(/\r?\n/u)) {
       if (line.trim().length === 0) continue;

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const architecture = process.argv[2];
@@ -35,7 +36,12 @@ const result = spawnSync(
     '--features',
     'installed-acceptance-repair,acceptance-faults',
   ],
-  { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true },
+  {
+    cwd: repositoryRoot,
+    stdio: 'inherit',
+    windowsHide: true,
+    env: sanitizedSubprocessEnvironment(),
+  },
 );
 if (result.status !== 0) {
   throw new Error(`acceptance-fault Windows setup build failed for ${architecture}`);

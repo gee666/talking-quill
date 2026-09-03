@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { SECRET_SCAN_OVERLAP_BYTES, findSecretRuleIds } from './secret-rules.mjs';
 import {
   computeSecretEvidence,
@@ -11,6 +12,7 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ALLOWLIST_PATH = resolve(ROOT, 'scripts/secret-history-allowlist.json');
+const subprocessEnvironment = sanitizedSubprocessEnvironment();
 process.chdir(ROOT);
 
 if ((await gitText(['rev-parse', '--is-shallow-repository'])).trim() !== 'false') {
@@ -65,6 +67,7 @@ async function readObjectInventory() {
   const child = spawn('git', ['rev-list', '--objects', '--all'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: subprocessEnvironment,
   });
   const objects = new Map();
   let pending = '';
@@ -105,6 +108,7 @@ async function scanBatch(objects, consume) {
   const child = spawn('git', ['cat-file', '--batch'], {
     cwd: ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: subprocessEnvironment,
   });
   let stderr = '';
   child.stderr.setEncoding('utf8');
@@ -176,6 +180,7 @@ async function gitBlob(oid) {
   const child = spawn('git', ['cat-file', 'blob', oid], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: subprocessEnvironment,
   });
   const chunks = [];
   let size = 0;
@@ -190,7 +195,11 @@ async function gitBlob(oid) {
 }
 
 async function gitText(args) {
-  const child = spawn('git', args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('git', args, {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: subprocessEnvironment,
+  });
   const chunks = [];
   let size = 0;
   let stderr = '';

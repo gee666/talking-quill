@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { parseTqpkg2 } from './tqpkg2.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -69,11 +70,10 @@ await writeFile(auditPath, '');
 await writeFile(diagnosticPath, '');
 for (const path of [diagnostic, auditPath, diagnosticPath]) protect(path, false);
 
-const environment = {
-  ...process.env,
+const environment = sanitizedSubprocessEnvironment(process.env, {
   TQ_STALE_SCHEMA2_AUDIT_PATH: auditPath,
   TQ_STALE_SCHEMA2_DIAGNOSTIC_PATH: diagnosticPath,
-};
+});
 const invoke = (path, arguments_, env = environment) =>
   spawnSync(path, arguments_, {
     env,
@@ -126,7 +126,11 @@ async function acquireProductionNamespaceLock() {
       '-Command',
       "$m=[Threading.Mutex]::new($false,'Global\\TalkingQuill.MachineLockTests.V1');try{if(-not $m.WaitOne(300000)){exit 2};[Console]::Out.WriteLine('ready');[Console]::Out.Flush();[Console]::In.ReadLine()|Out-Null}finally{try{$m.ReleaseMutex()}catch{};$m.Dispose()}",
     ],
-    { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true },
+    {
+      stdio: ['pipe', 'pipe', 'inherit'],
+      windowsHide: true,
+      env: sanitizedSubprocessEnvironment(),
+    },
   );
   let output = '';
   for await (const chunk of owner.stdout) {
@@ -150,25 +154,37 @@ async function rebuildCurrentArtifacts() {
     rm(packagedDiagnostic, { force: true }),
     rm(`${packagedDiagnostic}.nonpromotable.json`, { force: true }),
   ]);
-  const sourceEnvironment = {
-    ...process.env,
+  const sourceOverrides = {
     TALKING_QUILL_RELEASE_COMMIT: sourceCommit,
     TALKING_QUILL_RELEASE_TREE: sourceTree,
   };
+  const sourceEnvironment = sanitizedSubprocessEnvironment(process.env, sourceOverrides);
   runNode('scripts/build-windows-setup.mjs', [architecture], sourceEnvironment);
-  runNode('scripts/build-windows-stale-schema2-cleanup-setup.mjs', [architecture], {
-    ...sourceEnvironment,
-    TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
-  });
-  runNode('scripts/pack-windows-native.mjs', [architecture, 'release'], {
-    ...sourceEnvironment,
-    TALKING_QUILL_PACKAGE_MODE: 'fresh',
-  });
-  runNode('scripts/pack-windows-native.mjs', [architecture, 'release'], {
-    ...sourceEnvironment,
-    TALKING_QUILL_PACKAGE_MODE: 'stale-schema2-cleanup',
-    TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
-  });
+  runNode(
+    'scripts/build-windows-stale-schema2-cleanup-setup.mjs',
+    [architecture],
+    sanitizedSubprocessEnvironment(process.env, {
+      ...sourceOverrides,
+      TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
+    }),
+  );
+  runNode(
+    'scripts/pack-windows-native.mjs',
+    [architecture, 'release'],
+    sanitizedSubprocessEnvironment(process.env, {
+      ...sourceOverrides,
+      TALKING_QUILL_PACKAGE_MODE: 'fresh',
+    }),
+  );
+  runNode(
+    'scripts/pack-windows-native.mjs',
+    [architecture, 'release'],
+    sanitizedSubprocessEnvironment(process.env, {
+      ...sourceOverrides,
+      TALKING_QUILL_PACKAGE_MODE: 'stale-schema2-cleanup',
+      TALKING_QUILL_STALE_SCHEMA2_CLEANUP_BUILD: '1',
+    }),
+  );
 }
 
 function runNode(script, arguments_, environment) {
@@ -186,6 +202,7 @@ function git(arguments_) {
     cwd: root,
     encoding: 'utf8',
     windowsHide: true,
+    env: sanitizedSubprocessEnvironment(),
   });
   if (result.status !== 0) throw new Error(result.stderr || `git ${arguments_.join(' ')} failed`);
   return result.stdout.trim();
@@ -225,7 +242,10 @@ public static class TqProtectedAcl {
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', command],
     {
-      env: { ...process.env, TQ_E2E_PATH: path, TQ_E2E_SDDL: sddl },
+      env: sanitizedSubprocessEnvironment(process.env, {
+        TQ_E2E_PATH: path,
+        TQ_E2E_SDDL: sddl,
+      }),
       encoding: 'utf8',
       windowsHide: true,
     },
@@ -305,7 +325,7 @@ function powershellText(command, extraEnvironment = {}) {
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', command],
     {
-      env: { ...process.env, ...extraEnvironment },
+      env: sanitizedSubprocessEnvironment(process.env, extraEnvironment),
       encoding: 'utf8',
       windowsHide: true,
     },

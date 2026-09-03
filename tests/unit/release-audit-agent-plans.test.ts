@@ -6,11 +6,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 const root = resolve('.');
 const fixture = resolve(root, 'tmp/release-audit-agent-plans');
 const auditScript = resolve(root, 'scripts/release-audit.mjs');
+const environmentPolicy = resolve(root, 'scripts/environment-policy.mjs');
 
 beforeEach(() => {
   rmSync(fixture, { recursive: true, force: true });
   mkdirSync(resolve(fixture, 'scripts'), { recursive: true });
   copyFileSync(auditScript, resolve(fixture, 'scripts/release-audit.mjs'));
+  copyFileSync(environmentPolicy, resolve(fixture, 'scripts/environment-policy.mjs'));
   writeFileSync(
     resolve(fixture, 'release.config.json'),
     JSON.stringify({
@@ -22,7 +24,12 @@ beforeEach(() => {
     }),
   );
   git(['init', '--quiet']);
-  git(['add', 'release.config.json', 'scripts/release-audit.mjs']);
+  git([
+    'add',
+    'release.config.json',
+    'scripts/release-audit.mjs',
+    'scripts/environment-policy.mjs',
+  ]);
 });
 
 describe('release audit agent-plan handling', () => {

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeEnvironment } from './environment-policy.mjs';
+import { normalizeEnvironment, sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { validatePackageElectronBuilderConfigs } from './electron-builder-config-policy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -93,15 +93,7 @@ function run(script, args) {
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd: root,
     stdio: 'inherit',
-    env: Object.fromEntries(
-      Object.entries(environment).filter(([name]) => {
-        const normalizedName = name.toUpperCase();
-        return (
-          (acceptanceVariant || normalizedName !== ACCEPTANCE_BUILD_ENV) &&
-          !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(normalizedName)
-        );
-      }),
-    ),
+    env: sanitizedSubprocessEnvironment(environment),
   });
   if (result.status !== 0) throw new Error(`${script} ${args.join(' ')} failed`);
 }
