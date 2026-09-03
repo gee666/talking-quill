@@ -62,15 +62,23 @@ export async function verifyAcceptancePreflight(input) {
       );
     }
   }
-  const reservation = await input.reserveReplayNonces(sequence.requests);
-  if (reservation?.reservedCount !== sequence.requests.length) {
-    throw new Error('Acceptance replay reservation count is invalid');
+  let reservedNonceCount = 0;
+  if (input.reserveNonces === true) {
+    if (typeof input.reserveReplayNonces !== 'function') {
+      throw new Error('Acceptance replay reservation is unavailable');
+    }
+    const reservation = await input.reserveReplayNonces(sequence.requests);
+    if (reservation?.reservedCount !== sequence.requests.length) {
+      throw new Error('Acceptance replay reservation count is invalid');
+    }
+    reservedNonceCount = reservation.reservedCount;
   }
   return Object.freeze({
     buildId: sequence.buildId,
     manifestBuildId: payload.buildId,
     requestCount: sequence.requests.length,
-    reservedNonceCount: reservation.reservedCount,
+    signaturesVerified: sequence.requests.length + 1,
+    reservedNonceCount,
   });
 }
 

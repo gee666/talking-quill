@@ -1,4 +1,18 @@
 export const MAX_ACCEPTANCE_RUN_MS = 80 * 60 * 1_000;
+export const MAX_ACCEPTANCE_REQUEST_MS = 5 * 60 * 1_000;
+
+export const ACCEPTANCE_FAULT_PHASES = Object.freeze([
+  'staged',
+  'prepared',
+  'predecessorMoved',
+  'publishing',
+  'publishedBeforePersist',
+  'published',
+  'registered',
+  'committed',
+  'legacyRetiring',
+  'legacyRetired',
+]);
 
 export const ACCEPTANCE_PHASE_SCHEDULE = Object.freeze([
   phase('upgrade', 2 * 60_000, 10 * 60_000),
@@ -14,13 +28,17 @@ export const ACCEPTANCE_PHASE_SCHEDULE = Object.freeze([
   phase('login-marker', 30 * 60_000, 31 * 60_000),
   phase('running-silent-repair', 32 * 60_000, 36 * 60_000),
   phase('injected-repair-failure-recovery', 36 * 60_000, 41 * 60_000),
-  phase('uninstall-preserving-data', 41 * 60_000, 46 * 60_000),
-  phase('reinstall', 46 * 60_000, 52 * 60_000),
-  phase('diagnostics-disabled-failure', 53 * 60_000, 55 * 60_000),
-  phase('manual-physical-observation', 57 * 60_000, 59 * 60_000),
-  phase('supplemental-synthetic-observation', 60 * 60_000, 62 * 60_000),
+  phase('diagnostics-disabled-failure', 42 * 60_000, 44 * 60_000),
+  phase('manual-physical-observation', 45 * 60_000, 47 * 60_000),
+  phase('supplemental-synthetic-observation', 47 * 60_000, 49 * 60_000),
+  phase('uninstall-preserving-data', 49 * 60_000, 54 * 60_000),
+  phase('reinstall', 54 * 60_000, 61 * 60_000),
   phase('residue', 62 * 60_000, 70 * 60_000),
 ]);
+
+export const ACCEPTANCE_MATRIX = Object.freeze(
+  ACCEPTANCE_PHASE_SCHEDULE.map(({ phase: phaseName }) => phaseName),
+);
 
 export const ACCEPTANCE_REQUEST_SCHEDULE = Object.freeze([
   request(
@@ -68,28 +86,28 @@ export const ACCEPTANCE_REQUEST_SCHEDULE = Object.freeze([
     32 * 60_000,
     33 * 60_000,
   ),
-  request('reinstall-normal-readiness', 'reinstall', 'normal-readiness', 50 * 60_000, 52 * 60_000),
   request(
     'diagnostics-disabled-failure',
     'diagnostics-disabled-failure',
     'diagnostics-disabled-failure',
-    53 * 60_000,
-    54 * 60_000,
+    42 * 60_000,
+    44 * 60_000,
   ),
   request(
     'manual-physical-observation',
     'manual-physical-observation',
     'manual-physical-observation',
-    57 * 60_000,
-    59 * 60_000,
+    45 * 60_000,
+    47 * 60_000,
   ),
   request(
     'supplemental-synthetic-observation',
     'supplemental-synthetic-observation',
     'supplemental-synthetic-observation',
-    60 * 60_000,
-    61 * 60_000,
+    47 * 60_000,
+    49 * 60_000,
   ),
+  request('reinstall-normal-readiness', 'reinstall', 'normal-readiness', 59 * 60_000, 61 * 60_000),
 ]);
 
 function phase(phaseName, latestStartOffsetMs, deadlineOffsetMs) {

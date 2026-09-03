@@ -255,11 +255,10 @@ fn validate_manifest(
         || !valid_version(&manifest.version)
         || !git_object_id(&manifest.source_commit)
         || !git_object_id(&manifest.source_tree)
-        || !(matches!(
-            manifest.package_mode.as_str(),
-            "fresh" | "update" | "repair"
-        ) || (cfg!(feature = "stale-schema2-cleanup")
-            && manifest.package_mode == "stale-schema2-cleanup"))
+        || !(matches!(manifest.package_mode.as_str(), "fresh" | "update")
+            || (cfg!(feature = "installed-acceptance-repair") && manifest.package_mode == "repair")
+            || (cfg!(feature = "stale-schema2-cleanup")
+                && manifest.package_mode == "stale-schema2-cleanup"))
         || !hex_digest(&manifest.target.release_build_digest)
         || !hex_digest(&manifest.target.gateway_sha256)
         || !hex_digest(&manifest.target.owner_sha256)

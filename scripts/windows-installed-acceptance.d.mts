@@ -3,6 +3,8 @@ export const PHYSICAL_TEARDOWN_ALLOWANCE_MS: 20000;
 export const PHYSICAL_TOTAL_BOUND_MS: 80000;
 export const HEARTBEAT_READINESS_WINDOW_MS: 120000;
 export const MAX_ACCEPTANCE_RUN_MS: number;
+export const MAX_ACCEPTANCE_REQUEST_MS: number;
+export const ACCEPTANCE_FAULT_PHASES: readonly string[];
 export const ACCEPTANCE_MATRIX: readonly string[];
 export interface AcceptancePhaseScheduleEntry {
   readonly phase: string;
@@ -44,6 +46,7 @@ export function createInstalledAcceptancePlan(
       fresh: FrozenArtifactInput;
       repair: FrozenArtifactInput;
       fault: FrozenArtifactInput;
+      faults?: Readonly<Record<string, FrozenArtifactInput>>;
     }>;
     readonly acceptance: {
       readonly buildId: string;
@@ -86,6 +89,7 @@ export function validateAcceptancePhaseStart(
   phase: string,
   nowMs: number,
 ): Readonly<Record<string, unknown>>;
+export function resolveInstalledAcceptanceInputPaths(input: any, evidencePath: string): any;
 export function nodeFileSystem(): unknown;
 export function redactEvidence(
   value: Readonly<Record<string, unknown>>,
@@ -96,6 +100,7 @@ export function createWindowsAcceptanceRunner(
   osAdapter?: unknown,
   adapterFactory?: (acceptance: unknown) => unknown,
 ): unknown;
+export function authenticatedUpdateBootstrapArgument(artifact: unknown): string;
 export function createWindowsOsAdapter(acceptance?: unknown): unknown;
 export function startTrustedAcceptanceBroker(
   launcher: Readonly<{ path: string; bytes: number; sha256: string }>,

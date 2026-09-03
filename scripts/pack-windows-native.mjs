@@ -36,14 +36,17 @@ const output = resolve(
   `Talking-Quill-${packageJson.version}-win-${architecture}-${artifactKind}.exe`,
 );
 const acceptanceFaultPackage = faultPhase !== null;
+const acceptanceRepairPackage = packageMode === 'repair';
 const staleSchema2CleanupPackage = packageMode === 'stale-schema2-cleanup';
 const stub = resolve(
   root,
   acceptanceFaultPackage
     ? 'tmp/windows-setup-acceptance-faults'
-    : staleSchema2CleanupPackage
-      ? 'tmp/windows-setup-stale-schema2-cleanup'
-      : 'tmp/windows-setup',
+    : acceptanceRepairPackage
+      ? 'tmp/windows-setup-acceptance-repair'
+      : staleSchema2CleanupPackage
+        ? 'tmp/windows-setup-stale-schema2-cleanup'
+        : 'tmp/windows-setup',
   architecture,
   'talking-quill-windows-setup.exe',
 );
@@ -54,7 +57,7 @@ if (staleSchema2CleanupPackage && (faultPhase !== null || packageMode === 'updat
   throw new Error('stale schema-2 cleanup package cannot carry a predecessor or fault phase');
 }
 if (
-  acceptanceFaultPackage &&
+  acceptanceRepairPackage &&
   process.env.TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD !== '1'
 ) {
   throw new Error('native fault phase is permitted only in an installed-acceptance build');
@@ -90,10 +93,18 @@ if (staleSchema2CleanupPackage) {
     throw new Error('stale schema-2 cleanup setup metadata is invalid');
   }
 }
-if (acceptanceFaultPackage) {
+if (acceptanceRepairPackage) {
   const metadata = JSON.parse(
     await readFile(
-      resolve(root, 'tmp', 'windows-setup-acceptance-faults', architecture, 'nonpromotable.json'),
+      resolve(
+        root,
+        'tmp',
+        acceptanceFaultPackage
+          ? 'windows-setup-acceptance-faults'
+          : 'windows-setup-acceptance-repair',
+        architecture,
+        'nonpromotable.json',
+      ),
       'utf8',
     ),
   );
@@ -102,10 +113,11 @@ if (acceptanceFaultPackage) {
     .digest('hex');
   if (
     Object.keys(metadata).sort().join(',') !==
-      'acceptanceFaults,architecture,promotable,schemaVersion,setupSha256' ||
+      'acceptanceFaults,architecture,installedAcceptanceRepair,promotable,schemaVersion,setupSha256' ||
     metadata.schemaVersion !== 1 ||
     metadata.architecture !== architecture ||
-    metadata.acceptanceFaults !== true ||
+    metadata.installedAcceptanceRepair !== true ||
+    metadata.acceptanceFaults !== acceptanceFaultPackage ||
     metadata.promotable !== false ||
     metadata.setupSha256 !== stubSha256
   ) {

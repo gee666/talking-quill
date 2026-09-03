@@ -89,7 +89,7 @@ function fixture(
       deadlineOffsetMs: invocation.deadlineOffsetMs,
       runWindow: RUN_WINDOW,
       requestNonce: index.toString(16).padStart(64, '0'),
-      issuedAtMs: NOW - 1_000,
+      issuedAtMs: NOW + invocation.deadlineOffsetMs - 5 * 60_000,
       expiresAtMs: NOW + invocation.deadlineOffsetMs,
     };
     let encoded = envelope(payload, requestKeys.privateKey);
@@ -228,6 +228,23 @@ describe('Windows acceptance cryptographic preflight', () => {
       expect(controlled.fileSystem.writeFile).not.toHaveBeenCalled();
     },
   );
+
+  it('verifies every signature without reserving a nonce during dry run', async () => {
+    const reserve = vi.fn(reserveAll);
+    const controlled = adapters(reserve);
+    const result = await executeInstalledAcceptance(fixture(), controlled, {
+      nowMs: NOW,
+    });
+    expect(result).toMatchObject({
+      result: 'dry-run',
+      validation: {
+        requestCount: ACCEPTANCE_REQUEST_SCHEDULE.length,
+        reservedNonceCount: 0,
+      },
+    });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(controlled.runner.initialize).not.toHaveBeenCalled();
+  });
 
   it('rolls back reservations made before a later nonce conflict', async () => {
     const root = resolve('tmp', `acceptance-rollback-${randomBytes(8).toString('hex')}`);

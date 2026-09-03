@@ -10,7 +10,10 @@ import {
 } from './windows-installed-acceptance-probe.mjs';
 import { verifyAcceptancePreflight } from './windows-acceptance-preflight.mjs';
 import { reserveAcceptanceRequestNonces } from './windows-acceptance-replay-ledger.mjs';
-import { ACCEPTANCE_REQUEST_SCHEDULE } from './windows-installed-acceptance-schedule.mjs';
+import {
+  ACCEPTANCE_FAULT_PHASES,
+  ACCEPTANCE_REQUEST_SCHEDULE,
+} from './windows-installed-acceptance-schedule.mjs';
 
 const LEGACY_SERVICE = 'TalkingQuillKeyboardAuthority';
 const LEGACY_TASK = 'TalkingQuillKeyboardAuthority';
@@ -254,8 +257,12 @@ export async function runProductionPhase(phase, input, state, os) {
     const before = observe('fault-before', await installed());
     const machineBefore = observe('fault-machine-before', await os.observeMachineResidue());
     const faults = input.artifacts.faults ?? { published: input.artifacts.fault };
+    const faultPhases =
+      input.artifacts.faults === undefined ? ['published'] : ACCEPTANCE_FAULT_PHASES;
     const crashPhases = [];
-    for (const [phaseName, artifact] of Object.entries(faults)) {
+    for (const phaseName of faultPhases) {
+      const artifact = faults[phaseName];
+      requireValue(artifact !== undefined, `${phaseName} fault artifact is missing`);
       requireValue(
         artifact.isolatedValidation === true,
         `${phaseName} fault artifact is not an authenticated isolated-validation build`,
@@ -682,6 +689,46 @@ export async function startTrustedAcceptanceBroker(launcher, dependencies = {}) 
   };
 }
 
+export function authenticatedUpdateBootstrapArgument(artifact) {
+  const identity = artifact.releaseIdentity;
+  requireValue(
+    identity?.authorization !== undefined,
+    'Validated candidate release identity is unavailable',
+  );
+  const candidate = Object.fromEntries(
+    [
+      'version',
+      'platform',
+      'architecture',
+      'ownerMode',
+      'packageMode',
+      'sourceCommit',
+      'sourceTree',
+      'releaseBuildDigest',
+      'packageLayoutDigest',
+      'packageSha256',
+      'channel',
+      'transactionBinding',
+      'roles',
+      'predecessor',
+      'authorization',
+    ].map((key) => [key, identity[key]]),
+  );
+  requireValue(
+    Object.values(candidate).every((value) => value !== undefined),
+    'Validated candidate release identity is incomplete',
+  );
+  return Buffer.from(
+    JSON.stringify({
+      version: 2,
+      installerPath: artifact.installer.path,
+      sha256: artifact.installer.sha256,
+      candidate,
+    }),
+    'utf8',
+  ).toString('base64');
+}
+
 export function createWindowsOsAdapter(acceptance = {}) {
   const programFiles = process.env.ProgramW6432 ?? process.env.ProgramFiles ?? '';
   const appData = process.env.APPDATA ?? '';
@@ -732,8 +779,14 @@ export function createWindowsOsAdapter(acceptance = {}) {
     preflightAcceptance: (request) =>
       verifyAcceptancePreflight({
         ...request,
-        reserveReplayNonces: (requests) =>
-          reserveAcceptanceRequestNonces(process.env.TEMP ?? process.env.TMP ?? tmpdir(), requests),
+        reserveReplayNonces:
+          request.reserveNonces === true
+            ? (requests) =>
+                reserveAcceptanceRequestNonces(
+                  process.env.TEMP ?? process.env.TMP ?? tmpdir(),
+                  requests,
+                )
+            : undefined,
       }),
     mkdir: (path) => mkdir(path, { recursive: true }),
     writeFile,
@@ -793,15 +846,7 @@ export function createWindowsOsAdapter(acceptance = {}) {
       return evidence;
     },
     spawnAuthenticatedUpdate: async (artifact) => {
-      const request = Buffer.from(
-        JSON.stringify({
-          version: 2,
-          installerPath: artifact.installer.path,
-          sha256: artifact.installer.sha256,
-          candidate: artifact.metadata,
-        }),
-        'utf8',
-      ).toString('base64');
+      const request = authenticatedUpdateBootstrapArgument(artifact);
       return spawnObserved({
         executable: resolve(installedRoot, 'resources/helper/talking-quill-helper.exe'),
         arguments: [`--windows-update-bootstrap-v2=${request}`],

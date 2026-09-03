@@ -67,16 +67,21 @@ describe('package orchestration', () => {
       acceptance: true,
     });
     expect(CANONICAL_PACKAGE_TARGETS).not.toContain('win-installed-acceptance');
-    expect(
-      createProductionEnvironment(acceptance, {
-        TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
-      }),
-    ).toMatchObject({
+    const acceptanceEnvironment = createProductionEnvironment(acceptance, {
+      TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
+      TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: 'private',
+    });
+    expect(acceptanceEnvironment).toMatchObject({
       TALKING_QUILL_ACCEPTANCE_BUILD: '1',
       TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
       TALKING_QUILL_PACKAGE_VARIANT: 'installed-acceptance',
-      TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
     });
+    expect(acceptanceEnvironment).not.toHaveProperty(
+      'TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM',
+    );
+    expect(acceptanceEnvironment).not.toHaveProperty(
+      'TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64',
+    );
     const canonical = createProductionEnvironment(createPackagePlan('win'), {
       TALKING_QUILL_ACCEPTANCE_BUILD: '1',
       TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'private',
@@ -121,13 +126,16 @@ describe('package orchestration', () => {
         (source) => JSON.parse(source) as { scripts: Record<string, string> },
       ),
     ]);
-    const [orchestrator, prepackage] = await Promise.all([
+    const [orchestrator, prepackage, afterPack] = await Promise.all([
       readFile(resolve('scripts/run-package.mjs'), 'utf8'),
       readFile(resolve('scripts/prepackage-check.mjs'), 'utf8'),
+      readFile(resolve('app/after-pack.cjs'), 'utf8'),
     ]);
     expect(orchestrator).not.toContain('prepackage-check.mjs');
     expect(orchestrator).not.toContain('package:inspect');
     expect(orchestrator).toContain("runNode('scripts/run-windows-installer-ui-smoke.mjs'");
+    expect(afterPack).not.toContain('ACCEPTANCE_MANIFEST_PRIVATE_KEY');
+    expect(afterPack).toContain('external narrow signing subprocess');
     expect(orchestrator.indexOf('runNode(')).toBeGreaterThan(orchestrator.indexOf('runPnpm('));
     for (const [command] of Object.values(expectedPlans)) {
       expect(appManifest.scripts[command]).toContain('scripts/prepackage-check.mjs');

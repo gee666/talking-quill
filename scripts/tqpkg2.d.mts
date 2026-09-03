@@ -46,6 +46,7 @@ export function zstdFrameLength(bytes: Buffer): number;
 export function tqpkg2TreeDigest(files: readonly Tqpkg2File[]): string;
 export interface Tqpkg2ProductionParseOptions {
   readonly allowAcceptanceFaults?: boolean;
+  readonly allowAcceptanceRepair?: boolean;
   readonly allowStaleSchema2Cleanup?: false;
 }
 export interface Tqpkg2CleanupBuildParseOptions {

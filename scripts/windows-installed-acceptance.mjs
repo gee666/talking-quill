@@ -1,16 +1,26 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePackageReleaseMetadata } from './release-package-metadata.mjs';
-import { parseTqpkg2 } from './tqpkg2.mjs';
+import { verifyNativeSourceIdentity } from './helper-build-contract.mjs';
+import { readNativeArchitectures } from './native-architecture.mjs';
+import {
+  inspectWindowsUpdaterKey,
+  validatePackageReleaseMetadata,
+  verifyWindowsUpdaterReleaseBinding,
+} from './release-package-metadata.mjs';
+import { bindTqpkg2OwnerManifest, parseTqpkg2 } from './tqpkg2.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import {
+  ACCEPTANCE_FAULT_PHASES,
+  ACCEPTANCE_MATRIX,
   ACCEPTANCE_PHASE_SCHEDULE,
   ACCEPTANCE_REQUEST_SCHEDULE,
+  MAX_ACCEPTANCE_REQUEST_MS,
   MAX_ACCEPTANCE_RUN_MS,
 } from './windows-installed-acceptance-schedule.mjs';
 import {
+  authenticatedUpdateBootstrapArgument,
   createProductionRunner,
   createWindowsOsAdapter,
   externalTimeout,
@@ -19,6 +29,7 @@ import {
 } from './windows-installed-acceptance-runner.mjs';
 
 export {
+  authenticatedUpdateBootstrapArgument,
   createWindowsOsAdapter,
   externalTimeout,
   runProductionPhase,
@@ -30,28 +41,14 @@ export const PHYSICAL_TEARDOWN_ALLOWANCE_MS = 20_000;
 export const PHYSICAL_TOTAL_BOUND_MS =
   PHYSICAL_OBSERVATION_WINDOW_MS + PHYSICAL_TEARDOWN_ALLOWANCE_MS;
 export const HEARTBEAT_READINESS_WINDOW_MS = 120_000;
-export { ACCEPTANCE_PHASE_SCHEDULE, ACCEPTANCE_REQUEST_SCHEDULE, MAX_ACCEPTANCE_RUN_MS };
-export const ACCEPTANCE_MATRIX = Object.freeze([
-  'upgrade',
-  'artifact-layout-inspection',
-  'legacy-cleanup',
-  'persisted-profile-sentinel-normal-launch',
-  'v2-endpoint-peer-checks',
-  'heartbeat-readiness-120s',
-  'neutral-gateway-crash-same-owner-reconnect',
-  'lease-expiry',
-  'electron-crash-relaunch',
-  'normal-quit',
-  'login-marker',
-  'running-silent-repair',
-  'injected-repair-failure-recovery',
-  'uninstall-preserving-data',
-  'reinstall',
-  'diagnostics-disabled-failure',
-  'manual-physical-observation',
-  'supplemental-synthetic-observation',
-  'residue',
-]);
+export {
+  ACCEPTANCE_FAULT_PHASES,
+  ACCEPTANCE_MATRIX,
+  ACCEPTANCE_PHASE_SCHEDULE,
+  ACCEPTANCE_REQUEST_SCHEDULE,
+  MAX_ACCEPTANCE_REQUEST_MS,
+  MAX_ACCEPTANCE_RUN_MS,
+};
 
 export class AcceptanceStoppedError extends Error {
   constructor(message, evidence) {
@@ -76,18 +73,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
   }
   if (input.artifacts?.faults !== undefined) {
     artifacts.faults = {};
-    for (const phase of [
-      'staged',
-      'prepared',
-      'predecessorMoved',
-      'publishing',
-      'publishedBeforePersist',
-      'published',
-      'registered',
-      'committed',
-      'legacyRetiring',
-      'legacyRetired',
-    ]) {
+    for (const phase of ACCEPTANCE_FAULT_PHASES) {
       const faultInput = input.artifacts.faults[phase];
       if (faultInput === undefined)
         throw new Error(`Acceptance fault artifact is missing for ${phase}`);
@@ -101,6 +87,14 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
   }
   const predecessor = artifacts.predecessor.metadata;
   const candidate = artifacts.candidate.metadata;
+  const predecessorUpdaterKey = inspectWindowsUpdaterKey(
+    resolve(artifacts.predecessor.unpackedRoot, role(predecessor, 'gateway').path),
+    input.architecture,
+  );
+  verifyWindowsUpdaterReleaseBinding(
+    artifacts.candidate.releaseIdentity,
+    predecessorUpdaterKey.sec1,
+  );
   const fresh = artifacts.fresh.metadata;
   const repair = artifacts.repair.metadata;
   if (
@@ -111,29 +105,41 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     candidate.predecessor.ownerSha256 !== role(predecessor, 'owner').sha256
   )
     throw new Error('Candidate does not authenticate the exact frozen predecessor');
-  if (fresh.packageMode !== 'fresh' || fresh.freshInstall !== true || fresh.predecessor !== null) {
-    throw new Error('Reinstall artifact is not a fresh installer');
+  if (
+    fresh.packageMode !== 'fresh' ||
+    fresh.freshInstall !== true ||
+    fresh.predecessor !== null ||
+    predecessor.packageMode !== 'fresh' ||
+    predecessor.freshInstall !== true ||
+    predecessor.predecessor !== null ||
+    artifacts.fresh.installer.sha256 !== artifacts.predecessor.installer.sha256 ||
+    artifacts.fresh.installer.bytes !== artifacts.predecessor.installer.bytes ||
+    canonicalAcceptanceJson(fresh) !== canonicalAcceptanceJson(predecessor)
+  ) {
+    throw new Error('Canonical predecessor and reinstall artifacts are not exactly equal');
+  }
+  if (canonicalTargetIdentity(fresh) !== canonicalTargetIdentity(candidate)) {
+    throw new Error('Canonical reinstall target does not equal the acceptance candidate target');
   }
   if (
-    repair.packageMode !== 'repair' ||
-    repair.predecessor !== null ||
-    repair.version !== candidate.version ||
-    repair.sourceCommit !== candidate.sourceCommit ||
-    repair.sourceTree !== candidate.sourceTree ||
-    artifacts.repair.packageManifest?.target.releaseBuildDigest !== candidate.releaseBuildDigest ||
-    artifacts.repair.packageManifest?.target.gatewaySha256 !== role(candidate, 'gateway').sha256 ||
-    artifacts.repair.packageManifest?.target.ownerSha256 !== role(candidate, 'owner').sha256 ||
-    role(repair, 'gateway').sha256 !== role(candidate, 'gateway').sha256 ||
-    role(repair, 'owner').sha256 !== role(candidate, 'owner').sha256
+    artifacts.repair.packageManifest?.packageMode !== 'repair' ||
+    artifacts.repair.packageManifest.predecessor !== null ||
+    canonicalTargetIdentity(repair) !== canonicalTargetIdentity(candidate) ||
+    artifacts.repair.packageManifest.target.releaseBuildDigest !== candidate.releaseBuildDigest ||
+    artifacts.repair.packageManifest.target.gatewaySha256 !== role(candidate, 'gateway').sha256 ||
+    artifacts.repair.packageManifest.target.ownerSha256 !== role(candidate, 'owner').sha256
   ) {
     throw new Error('Repair artifact is not bound to the exact candidate identity');
   }
-  if (
-    artifacts.fault.metadata.version !== candidate.version ||
-    artifacts.fault.metadata.packageLayoutDigest !== candidate.packageLayoutDigest ||
-    artifacts.fault.metadata.releaseBuildDigest !== candidate.releaseBuildDigest
-  )
-    throw new Error('Fault-injection artifact is not bound to the exact candidate layout');
+  const faultArtifacts = artifacts.faults ?? { published: artifacts.fault };
+  for (const [phase, artifact] of Object.entries(faultArtifacts)) {
+    if (
+      artifact.packageManifest?.faultPhase !== phase ||
+      canonicalTargetIdentity(artifact.metadata) !== canonicalTargetIdentity(candidate)
+    ) {
+      throw new Error(`Fault-injection artifact is not bound to the exact candidate: ${phase}`);
+    }
+  }
   const embeddedBuildManifestPath = resolve(
     artifacts.candidate.unpackedRoot,
     'resources/windows-installed-acceptance-v1.txt',
@@ -181,14 +187,20 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     runWindow,
     signedRequests: freezeSignedRequests(signedRequests),
     signedRequestsIdentity: requestsFile,
-    syntheticSender: await regularIdentity(
+    syntheticSender: await freezeAcceptanceExecutable(
+      'Synthetic sender',
       input.acceptance?.syntheticSenderPath,
       input.acceptance?.syntheticSenderSha256,
+      input.architecture,
+      candidate,
       fileSystem,
     ),
-    trustedLauncher: await regularIdentity(
+    trustedLauncher: await freezeAcceptanceExecutable(
+      'Trusted launcher',
       input.acceptance?.trustedLauncherPath,
       input.acceptance?.trustedLauncherSha256,
+      input.architecture,
+      candidate,
       fileSystem,
     ),
     syntheticSenderArguments: Object.freeze(input.acceptance?.syntheticSenderArguments ?? []),
@@ -210,10 +222,6 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
 
 export async function executeInstalledAcceptance(plan, adapters, options = {}) {
   const { runner, fileSystem } = adapters;
-  if (options.dryRun !== false) return Object.freeze({ result: 'dry-run', plan });
-  if (runner.platform !== 'win32' || runner.architecture !== plan.architecture) {
-    throw new Error('Installed acceptance requires an exact native Windows host');
-  }
   const now =
     typeof options.nowMs === 'function' ? options.nowMs : () => options.nowMs ?? Date.now();
   const preflightNowMs = now();
@@ -221,7 +229,25 @@ export async function executeInstalledAcceptance(plan, adapters, options = {}) {
   if (typeof runner.preflightAcceptance !== 'function') {
     throw new Error('Acceptance runner preflight is unavailable');
   }
-  const preflight = await runner.preflightAcceptance({ plan, sequence, nowMs: preflightNowMs });
+  const dryRun = options.dryRun !== false;
+  if (!dryRun && (runner.platform !== 'win32' || runner.architecture !== plan.architecture)) {
+    throw new Error('Installed acceptance requires an exact native Windows host');
+  }
+  const preflight = await runner.preflightAcceptance({
+    plan,
+    sequence,
+    nowMs: preflightNowMs,
+    reserveNonces: !dryRun,
+  });
+  if (dryRun) {
+    return Object.freeze({
+      result: 'dry-run',
+      validation: redactEvidence(preflight),
+      architecture: plan.architecture,
+      matrix: plan.matrix,
+      artifactHashes: artifactEvidence(plan.artifacts),
+    });
+  }
   const evidence = {
     schemaVersion: 2,
     result: 'running',
@@ -401,6 +427,20 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     }
     appAsar = await regularIdentity(input.appAsarPath, input.appAsarSha256, fileSystem);
   }
+  const nativePackage = parseTqpkg2(
+    await fileSystem.readFile(installer.path),
+    metadata.architecture,
+    {
+      allowAcceptanceFaults: name === 'fault',
+      allowAcceptanceRepair: name === 'repair' || name === 'fault',
+    },
+  );
+  if (name === 'repair' || name === 'fault') {
+    bindAcceptanceRepairTarget(nativePackage.manifest, metadata);
+  } else {
+    bindTqpkg2OwnerManifest(nativePackage.manifest, metadata);
+  }
+  await bindTqpkg2UnpackedTree(name, nativePackage, unpackedRoot, fileSystem);
   for (const current of metadata.roles) {
     const identity = await regularIdentity(
       resolve(unpackedRoot, current.path),
@@ -422,18 +462,27 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     if (
       releaseIdentity.packageSha256 !== installer.sha256 ||
       releaseIdentity.packageLayoutDigest !== metadata.packageLayoutDigest ||
-      JSON.stringify(releaseIdentity.roles) !== JSON.stringify(metadata.roles)
-    )
+      releaseIdentity.version !== metadata.version ||
+      releaseIdentity.platform !== metadata.platform ||
+      releaseIdentity.architecture !== metadata.architecture ||
+      releaseIdentity.packageMode !== metadata.packageMode ||
+      releaseIdentity.sourceCommit !== metadata.sourceCommit ||
+      releaseIdentity.sourceTree !== metadata.sourceTree ||
+      releaseIdentity.releaseBuildDigest !== metadata.releaseBuildDigest ||
+      canonicalAcceptanceJson(releaseIdentity.roles) !== canonicalAcceptanceJson(metadata.roles) ||
+      canonicalAcceptanceJson(releaseIdentity.predecessor) !==
+        canonicalAcceptanceJson(metadata.predecessor)
+    ) {
       throw new Error(`${name} release identity does not bind installer and unpacked layout`);
-  } else if (name === 'candidate' || name === 'predecessor') {
-    throw new Error(`${name} release identity is required`);
+    }
+  } else if (name === 'candidate') {
+    throw new Error('candidate release identity is required');
   }
-  const nativePackage = /\.exe$/iu.test(installer.path)
-    ? parseTqpkg2(await fileSystem.readFile(installer.path), metadata.architecture, {
-        allowAcceptanceFaults: name === 'fault',
-      })
-    : null;
-  if (nativePackage !== null && nativePackage.manifest.packageMode !== metadata.packageMode) {
+  if (
+    name !== 'repair' &&
+    name !== 'fault' &&
+    nativePackage.manifest.packageMode !== metadata.packageMode
+  ) {
     throw new Error(`${name} TQPKG2 mode does not match release metadata`);
   }
   let isolatedValidation = false;
@@ -448,7 +497,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     );
     if (
       validation.isolatedInstallValidation !== true ||
-      validation.failurePoint !== nativePackage?.manifest.faultPhase ||
+      validation.failurePoint !== nativePackage.manifest.faultPhase ||
       ![
         'staged',
         'prepared',
@@ -477,8 +526,60 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     electron,
     appAsar,
     isolatedValidation,
-    packageManifest: nativePackage?.manifest ?? null,
+    packageManifest: nativePackage.manifest,
   });
+}
+
+function bindAcceptanceRepairTarget(manifest, metadata) {
+  if (
+    manifest.packageMode !== 'repair' ||
+    manifest.predecessor !== null ||
+    manifest.version !== metadata.version ||
+    manifest.architecture !== metadata.architecture ||
+    manifest.sourceCommit !== metadata.sourceCommit ||
+    manifest.sourceTree !== metadata.sourceTree ||
+    manifest.target.releaseBuildDigest !== metadata.releaseBuildDigest ||
+    manifest.target.gatewaySha256 !== role(metadata, 'gateway').sha256 ||
+    manifest.target.ownerSha256 !== role(metadata, 'owner').sha256 ||
+    manifest.target.recoveryLauncherSha256 !== role(metadata, 'recovery-launcher').sha256
+  ) {
+    throw new Error('Acceptance repair wrapper is not bound to its exact candidate tree');
+  }
+}
+
+async function bindTqpkg2UnpackedTree(name, nativePackage, unpackedRoot, fileSystem) {
+  if (typeof fileSystem.readdir !== 'function') {
+    throw new Error(`${name} unpacked tree enumeration is unavailable`);
+  }
+  const actual = [];
+  const visit = async (directory) => {
+    const entries = await fileSystem.readdir(directory);
+    for (const entry of entries) {
+      const path = resolve(directory, entry.name);
+      const identity = await fileSystem.lstat(path);
+      if (identity.isSymbolicLink()) throw new Error(`${name} unpacked tree contains a link`);
+      if (identity.isDirectory()) await visit(path);
+      else if (identity.isFile()) {
+        actual.push(relative(unpackedRoot, path).split(sep).join('/'));
+      } else {
+        throw new Error(`${name} unpacked tree contains a non-regular entry`);
+      }
+    }
+  };
+  await visit(unpackedRoot);
+  actual.sort((left, right) => left.localeCompare(right, 'en'));
+  const expected = [...nativePackage.contents.keys()].sort((left, right) =>
+    left.localeCompare(right, 'en'),
+  );
+  if (canonicalAcceptanceJson(actual) !== canonicalAcceptanceJson(expected)) {
+    throw new Error(`${name} TQPKG2 and unpacked path sets differ`);
+  }
+  for (const path of expected) {
+    const unpacked = await fileSystem.readFile(resolve(unpackedRoot, path));
+    if (!unpacked.equals(nativePackage.contents.get(path))) {
+      throw new Error(`${name} TQPKG2 and unpacked bytes differ: ${path}`);
+    }
+  }
 }
 
 export function validateAcceptanceRunSequence(acceptance, nowMs) {
@@ -534,7 +635,7 @@ export function validateAcceptanceRunSequence(acceptance, nowMs) {
       !Number.isSafeInteger(payload.issuedAtMs) ||
       !Number.isSafeInteger(payload.expiresAtMs) ||
       payload.issuedAtMs >= payload.expiresAtMs ||
-      payload.expiresAtMs - payload.issuedAtMs > MAX_ACCEPTANCE_RUN_MS ||
+      payload.expiresAtMs - payload.issuedAtMs > MAX_ACCEPTANCE_REQUEST_MS ||
       (nowMs !== undefined && nowMs > payload.expiresAtMs) ||
       payload.expiresAtMs < invocationDeadline ||
       payload.expiresAtMs > runWindow.expiresAtMs
@@ -654,6 +755,34 @@ function requireHex(value, label) {
   return value;
 }
 
+async function freezeAcceptanceExecutable(
+  label,
+  path,
+  expectedSha256,
+  architecture,
+  sourceIdentity,
+  fileSystem,
+) {
+  const identity = await regularIdentity(path, expectedSha256, fileSystem);
+  const native = await readNativeArchitectures(identity.path);
+  if (
+    native?.format !== 'pe' ||
+    canonicalAcceptanceJson(native.architectures) !== `[${JSON.stringify(architecture)}]`
+  ) {
+    throw new Error(`${label} architecture is not exact`);
+  }
+  await verifyNativeSourceIdentity(identity.path, sourceIdentity);
+  if (
+    label === 'Trusted launcher' &&
+    !(await fileSystem.readFile(identity.path)).includes(
+      Buffer.from('--windows-installed-acceptance-broker-v1', 'ascii'),
+    )
+  ) {
+    throw new Error('Trusted launcher acceptance broker marker is missing');
+  }
+  return identity;
+}
+
 async function regularIdentity(path, expectedSha256, fileSystem) {
   if (!/^[0-9a-f]{64}$/u.test(expectedSha256 ?? ''))
     throw new Error(`Invalid expected SHA-256: ${basename(path ?? '')}`);
@@ -669,6 +798,15 @@ async function regularIdentity(path, expectedSha256, fileSystem) {
     throw new Error(`Frozen input SHA-256 mismatch: ${basename(absolute)}`);
   return Object.freeze({ path: absolute, bytes: stat.size, sha256 });
 }
+function canonicalTargetIdentity(metadata) {
+  return canonicalAcceptanceJson({
+    architecture: metadata.architecture,
+    roles: metadata.roles,
+    sourceCommit: metadata.sourceCommit,
+    sourceTree: metadata.sourceTree,
+    version: metadata.version,
+  });
+}
 function role(metadata, name) {
   const value = metadata.roles.find((entry) => entry.role === name);
   if (!value) throw new Error(`Missing ${name} role`);
@@ -683,17 +821,19 @@ function artifactEvidence(artifacts) {
   return Object.fromEntries(
     Object.entries(artifacts).map(([name, value]) => [
       name,
-      {
-        installer: identityEvidence(value.installer),
-        metadata: identityEvidence(value.metadataIdentity),
-        ...(value.electron === null || value.electron === undefined
-          ? {}
-          : { electron: identityEvidence(value.electron) }),
-        ...(value.appAsar === null || value.appAsar === undefined
-          ? {}
-          : { appAsar: identityEvidence(value.appAsar) }),
-        packageLayoutDigest: value.metadata.packageLayoutDigest,
-      },
+      value?.installer === undefined
+        ? artifactEvidence(value)
+        : {
+            installer: identityEvidence(value.installer),
+            metadata: identityEvidence(value.metadataIdentity),
+            ...(value.electron === null || value.electron === undefined
+              ? {}
+              : { electron: identityEvidence(value.electron) }),
+            ...(value.appAsar === null || value.appAsar === undefined
+              ? {}
+              : { appAsar: identityEvidence(value.appAsar) }),
+            packageLayoutDigest: value.metadata.packageLayoutDigest,
+          },
     ]),
   );
 }
@@ -717,7 +857,7 @@ export function redactEvidence(value, key = '') {
   }
   if (typeof value !== 'string') return value;
   const sensitiveKey =
-    /(?:path|root|directory|executable|arguments?|output|pipe|credential|secret|private)/iu.test(
+    /(?:path|root|directory|executable|arguments?|output|pipe|credential|secret|private|signedRequests?|requestNonce|launchCorrelation|authorization|bearer)/iu.test(
       key,
     );
   const sensitiveValue =
@@ -740,6 +880,7 @@ export function nodeFileSystem() {
   return {
     readFile,
     lstat,
+    readdir: (path) => readdir(path, { withFileTypes: true }),
     mkdir: (path) => mkdir(path, { recursive: true }),
     writeFile: (path, value) => writeFile(path, value, { encoding: 'utf8', mode: 0o600 }),
   };
@@ -753,9 +894,51 @@ export function createWindowsAcceptanceRunner(
   return createProductionRunner(plan, osAdapter ?? adapterFactory(plan.acceptance));
 }
 
+export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
+  const base = resolve(evidencePath, '..');
+  const copy = structuredClone(input);
+  const pathFields = [
+    'installerPath',
+    'metadataPath',
+    'releaseIdentityPath',
+    'validationEvidencePath',
+    'unpackedRoot',
+    'electronPath',
+    'appAsarPath',
+  ];
+  const artifacts = [
+    copy.artifacts?.predecessor,
+    copy.artifacts?.candidate,
+    copy.artifacts?.fresh,
+    copy.artifacts?.repair,
+    copy.artifacts?.fault,
+    ...Object.values(copy.artifacts?.faults ?? {}),
+  ];
+  for (const artifact of artifacts) {
+    if (artifact === undefined) continue;
+    for (const field of pathFields) {
+      if (typeof artifact[field] === 'string' && !isAbsolute(artifact[field])) {
+        artifact[field] = resolve(base, artifact[field]);
+      }
+    }
+  }
+  for (const field of [
+    'buildManifestPath',
+    'signedRequestsPath',
+    'syntheticSenderPath',
+    'trustedLauncherPath',
+  ]) {
+    if (typeof copy.acceptance?.[field] === 'string') {
+      copy.acceptance[field] = resolve(base, copy.acceptance[field]);
+    }
+  }
+  return copy;
+}
+
 async function main() {
-  const evidencePath = required('--evidence');
-  const input = JSON.parse(await readFile(resolve(evidencePath), 'utf8'));
+  const evidencePath = resolve(required('--evidence'));
+  const rawInput = JSON.parse(await readFile(evidencePath, 'utf8'));
+  const input = resolveInstalledAcceptanceInputPaths(rawInput, evidencePath);
   const plan = await createInstalledAcceptancePlan(input);
   const execute = process.argv.includes('--execute');
   const result = await executeInstalledAcceptance(

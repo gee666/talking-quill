@@ -8,6 +8,10 @@ const gateway = readFileSync('helper/src/owner/platform_client.rs', 'utf8');
 const ownerClient = readFileSync('helper/src/owner/client.rs', 'utf8');
 const helperMain = readFileSync('helper/src/main.rs', 'utf8');
 const acceptanceLauncher = readFileSync('helper/src/windows_acceptance_launcher.rs', 'utf8');
+const installerCargo = readFileSync('installer/windows-setup/Cargo.toml', 'utf8');
+const installerPackage = readFileSync('installer/windows-setup/src/package.rs', 'utf8');
+const faultSetup = readFileSync('scripts/build-windows-acceptance-fault-setup.mjs', 'utf8');
+const repairSetup = readFileSync('scripts/build-windows-acceptance-repair-setup.mjs', 'utf8');
 
 const environment = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
 
@@ -22,6 +26,16 @@ describe('Windows installed-acceptance helper feature gate', () => {
     expect(buildHelper).toContain(
       "buildCargoRole('talking-quill-helper', 'talking-quill-helper', gatewayFeatures)",
     );
+  });
+
+  it('requires an explicit nonpromotable installer feature for acceptance repair packages', () => {
+    expect(installerCargo).toContain('installed-acceptance-repair = []');
+    expect(installerCargo).toContain('acceptance-faults = ["installed-acceptance-repair"]');
+    expect(installerPackage).toContain('cfg!(feature = "installed-acceptance-repair")');
+    expect(faultSetup).toContain('installed-acceptance-repair,acceptance-faults');
+    expect(faultSetup).toContain('installedAcceptanceRepair: true');
+    expect(repairSetup).toContain("'installed-acceptance-repair'");
+    expect(repairSetup).toContain('acceptanceFaults: false');
   });
 
   it('keeps the long-lived broker CLI inside the acceptance feature gate', () => {

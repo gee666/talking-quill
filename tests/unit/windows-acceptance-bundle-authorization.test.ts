@@ -22,6 +22,7 @@ describe('Windows acceptance bundle authorization', () => {
     expect(workflow).toContain('git checkout --detach $sourceRevision');
     expect(workflow).toContain('if ($head -cne $sourceRevision)');
     expect(workflow).toContain('$env:ACCEPTANCE_SOURCE_REVISION = $head');
+    expect(workflow).toContain('ref: ${{ github.workflow_sha }}');
     expect(workflow.match(/verify-windows-acceptance-authorization\.mjs/gu)).toHaveLength(3);
   });
   it('requires a pinned P-256 signature bound to URL, digest, architecture, and time', () => {

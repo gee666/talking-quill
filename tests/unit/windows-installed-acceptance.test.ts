@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_MATRIX,
   ACCEPTANCE_PHASE_SCHEDULE,
   ACCEPTANCE_REQUEST_SCHEDULE,
@@ -10,6 +11,7 @@ import {
   PHYSICAL_OBSERVATION_WINDOW_MS,
   PHYSICAL_TEARDOWN_ALLOWANCE_MS,
   PHYSICAL_TOTAL_BOUND_MS,
+  authenticatedUpdateBootstrapArgument,
   createWindowsAcceptanceRunner,
   executeInstalledAcceptance,
   externalTimeout,
@@ -39,7 +41,7 @@ function frozenSignedRequests() {
       deadlineOffsetMs: invocation.deadlineOffsetMs,
       runWindow: RUN_WINDOW,
       requestNonce: index.toString(16).padStart(64, '0'),
-      issuedAtMs: RUN_NOT_BEFORE_MS - 1_000,
+      issuedAtMs: RUN_NOT_BEFORE_MS + invocation.deadlineOffsetMs - 5 * 60_000,
       expiresAtMs: RUN_NOT_BEFORE_MS + invocation.deadlineOffsetMs,
     };
     const envelope = Buffer.from(
@@ -55,16 +57,28 @@ function frozenSignedRequests() {
 
 const plan = {
   architecture: 'x64',
-  artifacts: Object.fromEntries(
-    ['predecessor', 'candidate', 'fresh', 'repair', 'fault'].map((name) => [
-      name,
-      {
-        installer: { path: `${name}.exe`, bytes: 1, sha256: name.padEnd(64, '0') },
-        metadataIdentity: { path: `${name}.json`, bytes: 1, sha256: name.padEnd(64, '1') },
-        metadata: { packageLayoutDigest: name.padEnd(64, '2') },
-      },
-    ]),
-  ),
+  artifacts: {
+    ...Object.fromEntries(
+      ['predecessor', 'candidate', 'fresh', 'repair', 'fault'].map((name) => [
+        name,
+        {
+          installer: { path: `${name}.exe`, bytes: 1, sha256: name.padEnd(64, '0') },
+          metadataIdentity: { path: `${name}.json`, bytes: 1, sha256: name.padEnd(64, '1') },
+          metadata: { packageLayoutDigest: name.padEnd(64, '2') },
+        },
+      ]),
+    ),
+    faults: Object.fromEntries(
+      ACCEPTANCE_FAULT_PHASES.map((phase) => [
+        phase,
+        {
+          installer: { path: `${phase}.exe`, bytes: 1, sha256: phase.padEnd(64, '0') },
+          metadataIdentity: { path: `${phase}.json`, bytes: 1, sha256: phase.padEnd(64, '1') },
+          metadata: { packageLayoutDigest: phase.padEnd(64, '2') },
+        },
+      ]),
+    ),
+  },
   acceptance: {
     buildId: 'aa'.repeat(32),
     runWindow: RUN_WINDOW,
@@ -194,6 +208,30 @@ function adapters(overrides: Record<string, unknown> = {}) {
 }
 
 describe('installed Windows acceptance executor', () => {
+  it('runs acceptance candidate probes before canonical reinstall and external readiness', () => {
+    expect(ACCEPTANCE_MATRIX).toEqual([
+      'upgrade',
+      'artifact-layout-inspection',
+      'legacy-cleanup',
+      'persisted-profile-sentinel-normal-launch',
+      'v2-endpoint-peer-checks',
+      'heartbeat-readiness-120s',
+      'neutral-gateway-crash-same-owner-reconnect',
+      'lease-expiry',
+      'electron-crash-relaunch',
+      'normal-quit',
+      'login-marker',
+      'running-silent-repair',
+      'injected-repair-failure-recovery',
+      'diagnostics-disabled-failure',
+      'manual-physical-observation',
+      'supplemental-synthetic-observation',
+      'uninstall-preserving-data',
+      'reinstall',
+      'residue',
+    ]);
+  });
+
   it('validates the complete frozen invocation sequence with a fake clock', () => {
     const validated = validateAcceptanceRunSequence(plan.acceptance, RUN_NOT_BEFORE_MS);
     expect(validated.requests).toHaveLength(ACCEPTANCE_REQUEST_SCHEDULE.length);
@@ -215,7 +253,7 @@ describe('installed Windows acceptance executor', () => {
       validateAcceptancePhaseStart(
         RUN_WINDOW,
         'manual-physical-observation',
-        RUN_NOT_BEFORE_MS + 57 * 60_000 + 1,
+        RUN_NOT_BEFORE_MS + 45 * 60_000 + 1,
       ),
     ).toThrow('missed its latest start');
   });
@@ -414,6 +452,43 @@ describe('installed Windows acceptance executor', () => {
     });
     expect(os.processSnapshot).toHaveBeenCalledTimes(2);
     expect(os.scanEvidenceForForbidden).toHaveBeenCalledOnce();
+  });
+
+  it('dispatches the validated outer release identity to the update bootstrap', () => {
+    const releaseIdentity = {
+      schemaVersion: 1,
+      version: '0.0.69',
+      platform: 'win',
+      architecture: 'x64',
+      ownerMode: 'local-unsigned-enabled',
+      packageMode: 'update',
+      sourceCommit: '11'.repeat(20),
+      sourceTree: '22'.repeat(20),
+      releaseBuildDigest: '33'.repeat(32),
+      packageLayoutDigest: '33'.repeat(32),
+      packageSha256: '44'.repeat(32),
+      channel: 'latest-x64',
+      transactionBinding: 'source-target-package-sha256-v1',
+      roles: [],
+      predecessor: {},
+      authorization: { scheme: 'p256-sha256-v1', signature: 'signed' },
+      acceptancePayload: { schemaVersion: 1 },
+    };
+    const argument = authenticatedUpdateBootstrapArgument({
+      installer: { path: 'candidate.exe', sha256: '44'.repeat(32) },
+      metadata: { version: 'forged-inner-value' },
+      releaseIdentity,
+    });
+    const request = JSON.parse(Buffer.from(argument, 'base64').toString('utf8')) as {
+      candidate: unknown;
+    };
+    expect(request.candidate).toMatchObject({
+      version: releaseIdentity.version,
+      authorization: releaseIdentity.authorization,
+    });
+    expect(request.candidate).not.toHaveProperty('schemaVersion');
+    expect(request.candidate).not.toHaveProperty('acceptancePayload');
+    expect(request.candidate).not.toEqual({ version: 'forged-inner-value' });
   });
 
   it('rehashes each frozen installer immediately before the production upgrade spawns it', async () => {
@@ -662,11 +737,16 @@ describe('installed Windows acceptance executor', () => {
     expect(redacted).toMatchObject({ result: 'passed' });
   });
 
-  it('defaults to a non-mutating dry run', async () => {
+  it('cryptographically validates but does not reserve or expose bearer values in dry run', async () => {
     const controlled = adapters();
-    await expect(executeInstalledAcceptance(plan, controlled)).resolves.toMatchObject({
-      result: 'dry-run',
-    });
+    const result = await executeInstalledAcceptance(plan, controlled);
+    expect(result).toMatchObject({ result: 'dry-run' });
+    expect(controlled.runner.preflightAcceptance).toHaveBeenCalledWith(
+      expect.objectContaining({ reserveNonces: false }),
+    );
+    expect(JSON.stringify(result)).not.toContain(
+      plan.acceptance.signedRequests['endpoint-peer'] as string,
+    );
     expect(controlled.runner.initialize).not.toHaveBeenCalled();
     expect(controlled.runner.machineQuit).not.toHaveBeenCalled();
     expect(controlled.runner.runPhase).not.toHaveBeenCalled();

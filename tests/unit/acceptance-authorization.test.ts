@@ -63,8 +63,8 @@ function fixture(overrides: Partial<AcceptanceRunRequestPayload> = {}) {
     command: 'normal-readiness',
     buildId: BUILD_ID,
     invocationId: 'profile-normal-readiness',
-    latestStartOffsetMs: 15 * 60_000,
-    deadlineOffsetMs: 16 * 60_000,
+    latestStartOffsetMs: 2 * 60_000,
+    deadlineOffsetMs: 3 * 60_000,
     runWindow: {
       notBeforeMs: NOW - 1_000,
       expiresAtMs: NOW - 1_000 + 80 * 60_000,
@@ -72,7 +72,7 @@ function fixture(overrides: Partial<AcceptanceRunRequestPayload> = {}) {
     },
     requestNonce: '44'.repeat(32),
     issuedAtMs: NOW - 1_000,
-    expiresAtMs: NOW - 1_000 + 16 * 60_000,
+    expiresAtMs: NOW - 1_000 + 3 * 60_000,
     readinessPipe,
     launchCorrelation: correlation,
     physicalObservation: false,
@@ -216,7 +216,7 @@ describe('installed acceptance authorization', () => {
 
     const overlong = fixture({
       issuedAtMs: NOW - 2_000,
-      expiresAtMs: NOW - 2_000 + 80 * 60_000 + 1,
+      expiresAtMs: NOW - 2_000 + 5 * 60_000 + 1,
     });
     expect(() => authorizeInstalledAcceptance(overlong.options)).toThrow('validity interval');
 

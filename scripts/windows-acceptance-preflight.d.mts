@@ -4,9 +4,12 @@ export interface AcceptancePreflightInput {
   readonly plan: any;
   readonly sequence: any;
   readonly nowMs: number;
-  readonly reserveReplayNonces: (
-    requests: readonly AcceptanceReservationRequest[],
-  ) => Promise<Readonly<{ reservedCount: number }>>;
+  readonly reserveNonces?: boolean;
+  readonly reserveReplayNonces?:
+    | ((
+        requests: readonly AcceptanceReservationRequest[],
+      ) => Promise<Readonly<{ reservedCount: number }>>)
+    | undefined;
 }
 
 export function verifyAcceptancePreflight(

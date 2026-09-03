@@ -1,8 +1,8 @@
 const { existsSync, readdirSync } = require('node:fs');
 const { chmod, lstat, readFile, writeFile } = require('node:fs/promises');
-const { createHash, createPrivateKey, sign } = require('node:crypto');
+const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const { extname, join } = require('node:path');
+const { extname, join, relative, resolve, sep } = require('node:path');
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 const {
   assertNoForbiddenProductionMarkers,
@@ -118,14 +118,9 @@ async function writeWindowsAcceptanceManifest(context, executable) {
   if (context.electronPlatformName !== 'win32') {
     throw new Error('Installed acceptance builds are Windows-only');
   }
-  const privateKey = createPrivateKey(
-    process.env.TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM ?? '',
-  );
-  if (
-    privateKey.asymmetricKeyType !== 'ec' ||
-    privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
-  ) {
-    throw new Error('Acceptance manifest signing key must be P-256');
+  const unsignedPayloadPath = process.env.TALKING_QUILL_ACCEPTANCE_UNSIGNED_MANIFEST_PAYLOAD_PATH;
+  if (unsignedPayloadPath === undefined) {
+    throw new Error('Acceptance builds require an external narrow signing subprocess');
   }
   const requestPublicKeySpkiBase64url =
     process.env.TALKING_QUILL_ACCEPTANCE_REQUEST_PUBLIC_KEY_SPKI_BASE64URL ?? '';
@@ -169,15 +164,21 @@ async function writeWindowsAcceptanceManifest(context, executable) {
     validFromMs,
     validUntilMs,
   };
-  const signatureBase64url = sign('sha256', Buffer.from(canonicalJson(payload)), {
-    key: privateKey,
-    dsaEncoding: 'ieee-p1363',
-  }).toString('base64url');
-  await writeFile(
-    output,
-    Buffer.from(canonicalJson({ payload, signatureBase64url })).toString('base64url'),
-    { mode: 0o600 },
-  );
+  const payloadPath = resolve(unsignedPayloadPath);
+  const isolatedRoot = resolve(process.cwd(), 'tmp');
+  const payloadRelative = relative(isolatedRoot, payloadPath);
+  if (
+    payloadRelative === '' ||
+    payloadRelative === '..' ||
+    payloadRelative.startsWith(`..${sep}`) ||
+    payloadRelative.includes(':')
+  ) {
+    throw new Error('Unsigned acceptance payload must stay below the isolated build root');
+  }
+  await writeFile(payloadPath, `${canonicalJson(payload)}\n`, { mode: 0o600 });
+  if (existsSync(output)) {
+    throw new Error('Unsigned acceptance build retained a signed bearer from an earlier build');
+  }
 }
 
 function canonicalJson(value) {

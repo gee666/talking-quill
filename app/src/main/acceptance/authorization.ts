@@ -10,7 +10,7 @@ import {
 } from './authorization-schema';
 
 const MAX_ENVELOPE_BYTES = 16 * 1024;
-export const MAX_ACCEPTANCE_REQUEST_LIFETIME_MS = 80 * 60 * 1_000;
+export const MAX_ACCEPTANCE_REQUEST_LIFETIME_MS = 5 * 60 * 1_000;
 const CLOCK_SKEW_MS = 30_000;
 const REQUEST_PREFIX = '--talking-quill-acceptance-request=';
 

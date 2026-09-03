@@ -12,6 +12,7 @@ import {
   validatePackageReleaseMetadata,
   verifyMatchingPackageReleaseMetadataBytes,
   verifySerializedPackageReleaseMetadata,
+  verifyWindowsUpdaterReleaseBinding,
   windowsUpdatePublicKeyIdentity,
 } from '../../scripts/release-package-metadata.mjs';
 
@@ -280,6 +281,22 @@ describe('owner-enabled serialized release package identity', () => {
         Buffer.from(authorized.authorization.signature, 'base64'),
       ),
     ).toBe(true);
+    expect(verifyWindowsUpdaterReleaseBinding(authorized, publicSec1)).toBe(authorized);
+    expect(() =>
+      verifyWindowsUpdaterReleaseBinding(
+        { ...authorized, packageSha256: digest('tampered installer') },
+        publicSec1,
+      ),
+    ).toThrow('signature is invalid');
+    expect(() =>
+      verifyWindowsUpdaterReleaseBinding(
+        {
+          ...authorized,
+          authorization: { ...authorized.authorization, verificationKeySha256: digest('wrong') },
+        },
+        publicSec1,
+      ),
+    ).toThrow('authorization is invalid');
     expect(() =>
       authorizeWindowsUpdaterReleaseBinding(
         binding,

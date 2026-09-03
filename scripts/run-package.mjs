@@ -162,6 +162,7 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
     }).filter(
       ([name]) =>
         !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE)/u.test(name) &&
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name) &&
         (acceptance || !/^TALKING_QUILL_.*ACCEPTANCE/u.test(name)),
     ),
   );

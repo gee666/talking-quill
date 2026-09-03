@@ -95,8 +95,15 @@ function fixture(
 }
 
 describe('shared TQPKG2 parser', () => {
-  it.each(['fresh', 'update', 'repair'] as const)('parses strict %s policy', (mode) => {
+  it.each(['fresh', 'update'] as const)('parses strict %s policy', (mode) => {
     expect(parseTqpkg2(fixture(mode), 'x64').manifest.packageMode).toBe(mode);
+  });
+  it('gates nonpromotable repair packages to explicit acceptance inspection', () => {
+    const bytes = fixture('repair');
+    expect(() => parseTqpkg2(bytes, 'x64')).toThrow();
+    expect(parseTqpkg2(bytes, 'x64', { allowAcceptanceRepair: true }).manifest.packageMode).toBe(
+      'repair',
+    );
   });
   it('gates stale schema-2 cleanup packages to explicit cleanup-build inspection', () => {
     const bytes = fixture('stale-schema2-cleanup');

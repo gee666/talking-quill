@@ -9,7 +9,9 @@ license = "MIT"
 [workspace]
 
 [features]
-acceptance-faults = []
+# Nonpromotable installed-acceptance repair packages only. Canonical setup builds omit it.
+installed-acceptance-repair = []
+acceptance-faults = ["installed-acceptance-repair"]
 stale-schema2-cleanup = []
 # Test/process harnesses only. Production builds must never enable this feature.
 machine-lock-test-namespace = []

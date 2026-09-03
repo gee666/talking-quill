@@ -101,7 +101,11 @@ export function zstdFrameLength(bytes) {
 export function parseTqpkg2(
   bytes,
   expectedArchitecture,
-  { allowAcceptanceFaults = false, allowStaleSchema2Cleanup = false } = {},
+  {
+    allowAcceptanceFaults = false,
+    allowAcceptanceRepair = allowAcceptanceFaults,
+    allowStaleSchema2Cleanup = false,
+  } = {},
 ) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 384 || bytes.readUInt16LE(0) !== 0x5a4d)
     throw new Error('TQPKG2 image is not PE');
@@ -184,7 +188,7 @@ export function parseTqpkg2(
     ![
       'fresh',
       'update',
-      'repair',
+      ...(allowAcceptanceRepair ? ['repair'] : []),
       ...(allowStaleSchema2Cleanup ? ['stale-schema2-cleanup'] : []),
     ].includes(manifest.packageMode) ||
     (manifest.packageMode === 'update') !== (manifest.predecessor !== null) ||

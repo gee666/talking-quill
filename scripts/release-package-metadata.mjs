@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
@@ -423,6 +423,42 @@ export function createUpdaterReleaseBinding(metadata, packageSha256) {
     channel: metadata.update.channel,
     transactionBinding: metadata.update.transactionBinding,
   };
+}
+
+export function verifyWindowsUpdaterReleaseBinding(
+  binding,
+  expectedPublic = windowsUpdatePublicKeyIdentity().sec1,
+) {
+  if (
+    binding?.platform !== 'win' ||
+    !HEX_32.test(binding.packageSha256 ?? '') ||
+    !HEX_32.test(binding.packageLayoutDigest ?? '') ||
+    binding.authorization?.scheme !== 'p256-sha256-v1' ||
+    binding.authorization.verificationKeySha256 !==
+      createHash('sha256').update(Buffer.from(expectedPublic, 'hex')).digest('hex') ||
+    typeof binding.authorization.signature !== 'string'
+  ) {
+    throw new Error('Windows updater release authorization is invalid');
+  }
+  const transcript = Buffer.concat([
+    Buffer.from('talking-quill/windows-update-authorization/v1\0', 'utf8'),
+    Buffer.from(binding.packageSha256, 'hex'),
+    Buffer.from(binding.packageLayoutDigest, 'hex'),
+  ]);
+  const publicKey = createPublicKey({
+    key: Buffer.concat([
+      Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+      Buffer.from(expectedPublic, 'hex'),
+    ]),
+    format: 'der',
+    type: 'spki',
+  });
+  if (
+    !verify('sha256', transcript, publicKey, Buffer.from(binding.authorization.signature, 'base64'))
+  ) {
+    throw new Error('Windows updater release authorization signature is invalid');
+  }
+  return binding;
 }
 
 export function authorizeWindowsUpdaterReleaseBinding(
