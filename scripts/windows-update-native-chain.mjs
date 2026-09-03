@@ -268,7 +268,9 @@ foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.A
     { encoding: 'utf8', windowsHide: true, timeout: 30_000 },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
-    throw new Error('Reviewed native-chain protected publication failed');
+    throw new Error(
+      `Reviewed native-chain protected publication failed (${String(result.status)}): ${result.stderr.trim()}`,
+    );
   }
 }
 
