@@ -1,6 +1,6 @@
 Talking Quill — Production Third-Party Notices
 
-This inventory is generated from the production @talking-quill/app deployment graph, the shipped Electron runtime, and Cargo's offline normal-dependency trees for the Windows and macOS helper targets. Development-only and test-only dependencies are excluded.
+This inventory is generated from the production @talking-quill/app deployment graph, the shipped Electron runtime, and Cargo's offline normal-dependency trees for the Windows and macOS helper and distributed acceptance signer targets. Development-only and test-only dependencies are excluded.
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: 2f01485d2680096427badf8ea04fa25c0e37b14a0fdd745045be1a2acd67578c
@@ -227,7 +227,7 @@ yallist@5.0.0 — SPDX: BlueOak-1.0.0
 zod@4.4.3 — SPDX: MIT
   https://zod.dev
 
-Shipped Rust helper dependencies (67 records)
+Shipped Rust helper and acceptance signer dependencies (69 records)
 base16ct@1.0.0 — SPDX: Apache-2.0 OR MIT
   https://crates.io/crates/base16ct/1.0.0
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
@@ -327,6 +327,9 @@ num-traits@0.2.19 — SPDX: MIT OR Apache-2.0
 p256@0.14.0 — SPDX: Apache-2.0 OR MIT
   https://crates.io/crates/p256/0.14.0
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
+pkcs8@0.11.0 — SPDX: Apache-2.0 OR MIT
+  https://crates.io/crates/pkcs8/0.11.0
+  Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
 primefield@0.14.0 — SPDX: Apache-2.0 OR MIT
   https://crates.io/crates/primefield/0.14.0
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
@@ -383,6 +386,9 @@ syn@2.0.119 — SPDX: MIT OR Apache-2.0
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
 syn@3.0.4 — SPDX: MIT OR Apache-2.0
   https://crates.io/crates/syn/3.0.4
+  Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
+talking-quill-acceptance-signer@0.0.69 — SPDX: MIT
+  https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
 talking-quill-helper@0.0.69 — SPDX: MIT
   https://github.com/gee666/talking-quill
@@ -8849,7 +8855,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 706e281ee8b8fdb3cbeb92d1dff6937ac4086ab46b1ce54d9c2ead922d24deab
-Applies to: talking-quill-helper@0.0.69/LICENSE, talking-quill-keyboard-core@0.0.69/LICENSE, talking-quill-keyboard-owner@0.0.69/LICENSE, talking-quill-owner-protocol@0.0.69/LICENSE, talking-quill-windows-owner-ipc@0.0.69/LICENSE
+Applies to: talking-quill-acceptance-signer@0.0.69/LICENSE, talking-quill-helper@0.0.69/LICENSE, talking-quill-keyboard-core@0.0.69/LICENSE, talking-quill-keyboard-owner@0.0.69/LICENSE, talking-quill-owner-protocol@0.0.69/LICENSE, talking-quill-windows-owner-ipc@0.0.69/LICENSE
 
 The MIT License
 
@@ -17872,7 +17878,7 @@ will be liable to anyone for any damages related to this
 software or this license, under any kind of legal claim.***
 
 --- SHA-256 e8541ea93f027a6c2cf077362f74492bdf0bb8354f63029962d84f1c130937a4
-Applies to: base16ct@1.0.0/LICENSE-APACHE, block-buffer@0.10.4/LICENSE-APACHE, block-buffer@0.12.1/LICENSE-APACHE, const-oid@0.10.2/LICENSE-APACHE, cpubits@0.1.1/LICENSE-APACHE, cpufeatures@0.2.17/LICENSE-APACHE, cpufeatures@0.3.1/LICENSE-APACHE, crypto-bigint@0.7.5/LICENSE-APACHE, crypto-common@0.1.7/LICENSE-APACHE, crypto-common@0.2.2/LICENSE-APACHE, der@0.8.1/LICENSE-APACHE, digest@0.10.7/LICENSE-APACHE, digest@0.11.3/LICENSE-APACHE, elliptic-curve@0.14.1/LICENSE-APACHE, hkdf@0.13.0/LICENSE-APACHE, hmac@0.13.0/LICENSE-APACHE, hybrid-array@0.4.14/LICENSE-APACHE, p256@0.14.0/LICENSE-APACHE, primefield@0.14.0/LICENSE-APACHE, primeorder@0.14.0/LICENSE-APACHE, sec1@0.8.1/LICENSE-APACHE, sha1@0.10.6/LICENSE-APACHE, sha2@0.11.0/LICENSE-APACHE, signature@3.0.0/LICENSE-APACHE, spki@0.8.0/LICENSE-APACHE, wnaf@0.14.0/LICENSE-APACHE
+Applies to: base16ct@1.0.0/LICENSE-APACHE, block-buffer@0.10.4/LICENSE-APACHE, block-buffer@0.12.1/LICENSE-APACHE, const-oid@0.10.2/LICENSE-APACHE, cpubits@0.1.1/LICENSE-APACHE, cpufeatures@0.2.17/LICENSE-APACHE, cpufeatures@0.3.1/LICENSE-APACHE, crypto-bigint@0.7.5/LICENSE-APACHE, crypto-common@0.1.7/LICENSE-APACHE, crypto-common@0.2.2/LICENSE-APACHE, der@0.8.1/LICENSE-APACHE, digest@0.10.7/LICENSE-APACHE, digest@0.11.3/LICENSE-APACHE, elliptic-curve@0.14.1/LICENSE-APACHE, hkdf@0.13.0/LICENSE-APACHE, hmac@0.13.0/LICENSE-APACHE, hybrid-array@0.4.14/LICENSE-APACHE, p256@0.14.0/LICENSE-APACHE, pkcs8@0.11.0/LICENSE-APACHE, primefield@0.14.0/LICENSE-APACHE, primeorder@0.14.0/LICENSE-APACHE, sec1@0.8.1/LICENSE-APACHE, sha1@0.10.6/LICENSE-APACHE, sha2@0.11.0/LICENSE-APACHE, signature@3.0.0/LICENSE-APACHE, spki@0.8.0/LICENSE-APACHE, wnaf@0.14.0/LICENSE-APACHE
 
 Apache License
                         Version 2.0, January 2004
@@ -18127,7 +18133,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --- SHA-256 ea753cf1e3ec3e02b9f8fdb7876d2a82e881209eb54fdb0df52997e3a14e40d7
-Applies to: const-oid@0.10.2/LICENSE-MIT, cpufeatures@0.3.1/LICENSE-MIT, der@0.8.1/LICENSE-MIT
+Applies to: const-oid@0.10.2/LICENSE-MIT, cpufeatures@0.3.1/LICENSE-MIT, der@0.8.1/LICENSE-MIT, pkcs8@0.11.0/LICENSE-MIT
 
 Copyright (c) 2020-2026 The RustCrypto Project Developers
 

@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NoticesService } from '../../app/src/main/info/notices-service';
+import { assertAllowedDependencyLicenses } from '../../scripts/notices-policy.mjs';
 import { createTestDirectory, removeTestDirectory } from '../helpers/temp';
 
 describe('third-party notices', () => {
@@ -15,6 +16,9 @@ describe('third-party notices', () => {
     expect(text).toContain('react@19.2.7 — SPDX: MIT');
     expect(text).toContain('zod@4.4.3 — SPDX: MIT');
     expect(text).toContain('crossbeam-channel@');
+    expect(text).toContain('pkcs8@0.11.0 — SPDX: Apache-2.0 OR MIT');
+    expect(text).toContain('pkcs8@0.11.0/LICENSE-APACHE');
+    expect(text).toContain('pkcs8@0.11.0/LICENSE-MIT');
     expect(text).not.toContain('aws4@');
     expect(text).not.toContain('proptest@');
     expect(text).not.toMatch(/unknown|unlicensed|see exact|license declared|placeholder/iu);
@@ -35,6 +39,18 @@ describe('third-party notices', () => {
     expect(text).not.toContain('absence requires legal review');
     expect(await readFile(path, 'utf8')).toBe(text);
   });
+
+  it.each(['GPL-3.0-only', 'AGPL-3.0-only', 'MIT AND GPL-3.0-only'])(
+    'rejects the forbidden dependency license %s',
+    (license) => {
+      expect(() =>
+        assertAllowedDependencyLicenses(
+          [{ name: 'forbidden-dependency', version: '1.0.0', license }],
+          'Test',
+        ),
+      ).toThrow(`Test dependency has an unapproved license: forbidden-dependency@1.0.0`);
+    },
+  );
 
   it('deduplicates and caches concurrent reads of the immutable notices resource', async () => {
     const directory = await createTestDirectory('notices-cache');

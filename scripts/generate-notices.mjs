@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { assertAllowedDependencyLicenses } from './notices-policy.mjs';
 
 const root = resolve('.');
 const output = resolve(root, 'app/assets/THIRD_PARTY_NOTICES.txt');
@@ -86,12 +87,13 @@ collectNpmDependencies(deployment.dependencies ?? {}, npmPackages, licenseIndex)
 // electron-builder ships the Electron runtime itself outside app node_modules.
 await addNpmPackage(resolve(root, 'node_modules/electron'), npmPackages);
 const npmRecords = [...npmPackages.values()].sort(compareRecord);
-assertCompleteLicenses(npmRecords, 'JavaScript');
+assertAllowedDependencyLicenses(npmRecords, 'JavaScript');
 
 const cargo = resolveRustTool('cargo');
 const rustTargets = ['x86_64-pc-windows-msvc', 'x86_64-apple-darwin', 'aarch64-apple-darwin'];
 const cargoPackages = new Map();
 const workspaceCargoPackages = new Set([
+  'talking-quill-acceptance-signer',
   'talking-quill-helper',
   'talking-quill-keyboard-core',
   'talking-quill-keyboard-owner',
@@ -99,7 +101,7 @@ const workspaceCargoPackages = new Set([
   'talking-quill-windows-owner-ipc',
 ]);
 for (const target of rustTargets) {
-  for (const manifestPath of ['helper/Cargo.toml']) {
+  for (const manifestPath of ['helper/Cargo.toml', 'helper/acceptance-signer/Cargo.toml']) {
     const tree = execFileSync(
       cargo,
       [
@@ -153,7 +155,7 @@ for (const target of rustTargets) {
   }
 }
 const cargoRecords = [...cargoPackages.values()].sort(compareRecord);
-assertCompleteLicenses(cargoRecords, 'Rust');
+assertAllowedDependencyLicenses(cargoRecords, 'Rust');
 const embeddedLicenseTexts = collectLicenseTexts([...npmRecords, ...cargoRecords]);
 
 const manifest = JSON.parse(modelSource);
@@ -200,7 +202,7 @@ const cargoInventory = cargoRecords
   .join('\n');
 const content = `Talking Quill — Production Third-Party Notices
 
-This inventory is generated from the production @talking-quill/app deployment graph, the shipped Electron runtime, and Cargo's offline normal-dependency trees for the Windows and macOS helper targets. Development-only and test-only dependencies are excluded.
+This inventory is generated from the production @talking-quill/app deployment graph, the shipped Electron runtime, and Cargo's offline normal-dependency trees for the Windows and macOS helper and distributed acceptance signer targets. Development-only and test-only dependencies are excluded.
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: ${sha256(lock)}
@@ -210,7 +212,7 @@ scripts/model-manifest.json SHA-256: ${sha256(modelSource)}
 Production JavaScript/native dependencies (${npmRecords.length} records)
 ${npmInventory}
 
-Shipped Rust helper dependencies (${cargoRecords.length} records)
+Shipped Rust helper and acceptance signer dependencies (${cargoRecords.length} records)
 ${cargoInventory}
 
 Embedded LICENSE/NOTICE/copyright texts (content-hash deduplicated)
@@ -377,16 +379,6 @@ function collectLicenseTexts(records) {
     .join('\n\n');
 }
 
-function assertCompleteLicenses(records, kind) {
-  if (records.length === 0) throw new Error(`${kind} production inventory is empty.`);
-  for (const record of records) {
-    if (/^(?:unknown|unlicensed|see |n\/a|none|)$/iu.test(record.license)) {
-      throw new Error(
-        `${kind} dependency has missing or placeholder license: ${record.name}@${record.version}`,
-      );
-    }
-  }
-}
 function findCargoDirectory(name, version) {
   const sourceRoot = join(process.env.CARGO_HOME ?? join(homedir(), '.cargo'), 'registry', 'src');
   if (!existsSync(sourceRoot)) return undefined;
