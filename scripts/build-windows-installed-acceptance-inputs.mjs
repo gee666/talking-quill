@@ -1,0 +1,379 @@
+import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { parseTqpkg2 } from './tqpkg2.mjs';
+import {
+  validateCanonicalRelease,
+  buildInstalledAcceptanceKit,
+} from './build-windows-installed-acceptance-kit.mjs';
+import {
+  ACCEPTANCE_FAULT_PHASES,
+  ACCEPTANCE_REQUEST_SCHEDULE,
+  MAX_ACCEPTANCE_RUN_MS,
+} from './windows-installed-acceptance.mjs';
+import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
+
+const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const HEX_32 = /^[0-9a-f]{64}$/u;
+
+export function installedAcceptanceBuildEnvironment(environment = process.env, additions = {}) {
+  return sanitizedSubprocessEnvironment(environment, additions);
+}
+
+export async function buildWindowsInstalledAcceptanceInputs(options, dependencies = {}) {
+  if (options.architecture !== 'x64') {
+    throw new Error('The first-party installed-acceptance producer requires Windows x64');
+  }
+  const outputRoot = resolve(options.outputRoot ?? 'tmp/windows-installed-acceptance/producer');
+  requireBelowTmp(outputRoot);
+  await requireAbsent(outputRoot);
+  await mkdir(outputRoot, { recursive: true, mode: 0o700 });
+  try {
+    const validateRelease = dependencies.validateCanonicalRelease ?? validateCanonicalRelease;
+    const canonical = await validateRelease(options);
+    if (canonical.descriptor.architecture !== options.architecture) {
+      throw new Error('Canonical RELEASE architecture differs from the producer target');
+    }
+    const parseCanonicalPackage = dependencies.parseTqpkg2 ?? parseTqpkg2;
+    const parsed = parseCanonicalPackage(canonical.installerBytes, options.architecture);
+    const canonicalRoot = resolve(outputRoot, 'canonical-unpacked');
+    await extractCanonicalContents(parsed.contents, canonicalRoot);
+    const canonicalMetadataPath = resolve(
+      canonicalRoot,
+      'resources/keyboard-owner-release-v1.json',
+    );
+    const canonicalMetadataBytes = await readFile(canonicalMetadataPath);
+    const canonicalMetadata = JSON.parse(canonicalMetadataBytes.toString('utf8'));
+    assertCanonicalMetadata(canonicalMetadata, canonical.descriptor);
+
+    const buildId = requireHex(options.buildId ?? randomBytes(32).toString('hex'), 'build ID');
+    const runWindow = createRunWindow(options);
+    const workspace = Object.freeze({
+      repositoryRoot,
+      outputRoot,
+      canonicalRoot,
+      canonical,
+      canonicalMetadata,
+      buildId,
+      runWindow,
+      predecessorEnvironment: predecessorEnvironment(canonicalMetadata, canonicalRoot),
+    });
+    const produceArtifacts = dependencies.produceArtifacts ?? produceFirstPartyArtifacts;
+    const produced = await produceArtifacts(options, workspace, dependencies);
+    validateProducedArtifacts(produced);
+
+    const requestPayloads = {};
+    const requestNonces = {};
+    for (const invocation of ACCEPTANCE_REQUEST_SCHEDULE) {
+      const secret = randomBytes(16).toString('hex');
+      requestNonces[invocation.invocationId] = randomBytes(32).toString('hex');
+      requestPayloads[invocation.invocationId] = {
+        readinessPipe: `\\\\.\\pipe\\TalkingQuill.InstalledReadiness.${secret}`,
+        launchCorrelation: randomBytes(32).toString('hex'),
+        physicalObservation: invocation.command === 'manual-physical-observation',
+        automationValidation: [
+          'gateway-reconnect-arm',
+          'electron-crash-arm',
+          'supplemental-synthetic-observation',
+        ].includes(invocation.command),
+        automationArmedPipe: needsArmedPipe(invocation.command)
+          ? `\\\\.\\pipe\\TalkingQuill.AutomationArmed.${randomBytes(16).toString('hex')}`
+          : null,
+        automationCase:
+          invocation.command === 'supplemental-synthetic-observation'
+            ? 'general'
+            : ['gateway-reconnect-arm', 'electron-crash-arm'].includes(invocation.command)
+              ? 'lifecycle'
+              : null,
+        lifecycleUserData: null,
+        heartbeatDurationMs: invocation.command === 'heartbeat-120s' ? 120_000 : 6_250,
+      };
+    }
+    const config = {
+      architecture: options.architecture,
+      artifacts: {
+        predecessor: produced.predecessor,
+        candidate: produced.candidate,
+        fresh: produced.predecessor,
+        repair: produced.repair,
+        fault: produced.faults.published,
+        faults: produced.faults,
+      },
+      acceptance: {
+        buildId,
+        sourceRevision: canonical.descriptor.sourceCommit.slice(0, 12),
+        runWindow,
+        requestPayloads,
+        requestNonces,
+        buildManifestPath: produced.buildManifestPath,
+        buildManifestSha256: await fileHash(produced.buildManifestPath),
+        manifestPublicKeySpkiBase64url: produced.manifestPublicKeySpkiBase64url,
+        syntheticSenderPath: produced.syntheticSenderPath,
+        syntheticSenderSha256: await fileHash(produced.syntheticSenderPath),
+        trustedLauncherPath: produced.trustedLauncherPath,
+        trustedLauncherSha256: await fileHash(produced.trustedLauncherPath),
+        syntheticSenderArguments: produced.syntheticSenderArguments ?? [],
+      },
+      outputPath: '../evidence.json',
+    };
+    const configPath = resolve(outputRoot, 'kit-input.json');
+    await writeFile(configPath, `${JSON.stringify(config)}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    const assembler = dependencies.buildInstalledAcceptanceKit ?? buildInstalledAcceptanceKit;
+    const kit =
+      options.assemble === false
+        ? null
+        : await assembler({
+            ...options,
+            configPath,
+            outputRoot: options.kitOutputRoot,
+            bundlePath: options.bundlePath,
+          });
+    return Object.freeze({ configPath, config, kit, outputRoot });
+  } catch (error) {
+    await rm(outputRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function produceFirstPartyArtifacts(options, workspace, dependencies) {
+  const runBuildStep = dependencies.runBuildStep ?? runBuildStepProcess;
+  const stages = [
+    'native-signer',
+    'source-bound-synthetic-sender',
+    'acceptance-candidate',
+    'nonpromotable-repair',
+    ...ACCEPTANCE_FAULT_PHASES.map((phase) => `fault-${phase}`),
+    ...ACCEPTANCE_FAULT_PHASES.map((phase) => `validate-${phase}`),
+  ];
+  let result;
+  for (const stage of stages) {
+    result = await runBuildStep(stage, options, workspace);
+  }
+  if (result?.artifactSetPath === undefined) {
+    throw new Error('First-party heavy build did not return its frozen artifact inventory');
+  }
+  return JSON.parse(await readFile(result.artifactSetPath, 'utf8'));
+}
+
+function runBuildStepProcess(stage, options, workspace) {
+  const command = resolve(
+    options.heavyBuildDriverPath ?? 'scripts/windows-installed-acceptance-native-build.ps1',
+  );
+  const result = spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      command,
+      '-Stage',
+      stage,
+      '-Architecture',
+      options.architecture,
+      '-OutputRoot',
+      workspace.outputRoot,
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30 * 60 * 1_000,
+      env: installedAcceptanceBuildEnvironment(process.env, {
+        TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
+        TALKING_QUILL_ACCEPTANCE_BUILD: '1',
+        TALKING_QUILL_ACCEPTANCE_BUILD_ID: workspace.buildId,
+        TALKING_QUILL_ACCEPTANCE_VALID_UNTIL_MS: String(workspace.runWindow.expiresAtMs),
+        ...workspace.predecessorEnvironment,
+      }),
+    },
+  );
+  if (result.status !== 0 || result.signal !== null || result.error !== undefined) {
+    throw new Error(`Installed-acceptance heavy build stage failed: ${stage}`);
+  }
+  const line = result.stdout.trim();
+  return line === '' ? {} : JSON.parse(line);
+}
+
+function predecessorEnvironment(metadata, root) {
+  const role = (name) => metadata.roles.find((entry) => entry.role === name);
+  return Object.freeze({
+    TALKING_QUILL_PACKAGE_MODE: 'update',
+    TALKING_QUILL_PREDECESSOR_VERSION: metadata.version,
+    TALKING_QUILL_PREDECESSOR_RELEASE_BUILD: metadata.releaseBuildDigest,
+    TALKING_QUILL_PREDECESSOR_GATEWAY_SHA256: role('gateway').sha256,
+    TALKING_QUILL_PREDECESSOR_OWNER_SHA256: role('owner').sha256,
+    TALKING_QUILL_PREDECESSOR_GATEWAY_PATH: resolve(root, role('gateway').path),
+    TALKING_QUILL_PREDECESSOR_OWNER_PATH: resolve(root, role('owner').path),
+  });
+}
+
+function assertCanonicalMetadata(metadata, descriptor) {
+  if (
+    metadata.version !== descriptor.version ||
+    metadata.architecture !== descriptor.architecture ||
+    metadata.platform !== 'win' ||
+    metadata.packageMode !== 'fresh' ||
+    metadata.sourceCommit !== descriptor.sourceCommit ||
+    metadata.sourceTree !== descriptor.sourceTree ||
+    metadata.freshInstall !== true ||
+    metadata.predecessor !== null
+  ) {
+    throw new Error('Canonical extracted owner metadata is invalid');
+  }
+}
+
+function validateProducedArtifacts(value) {
+  if (value === null || typeof value !== 'object')
+    throw new Error('Produced artifacts are missing');
+  const faultNames = Object.keys(value.faults ?? {});
+  if (canonicalAcceptanceJson(faultNames) !== canonicalAcceptanceJson(ACCEPTANCE_FAULT_PHASES)) {
+    throw new Error('Heavy build must produce all ten ordered fault artifacts');
+  }
+  for (const name of [
+    'predecessor',
+    'candidate',
+    'repair',
+    'buildManifestPath',
+    'manifestPublicKeySpkiBase64url',
+    'syntheticSenderPath',
+    'trustedLauncherPath',
+  ]) {
+    if (value[name] === undefined) throw new Error(`Produced acceptance input is missing: ${name}`);
+  }
+  for (const [phase, artifact] of Object.entries(value.faults)) {
+    if (artifact.validationEvidencePath === undefined) {
+      throw new Error(`Fault ${phase} lacks isolated namespace validation evidence`);
+    }
+  }
+}
+
+async function extractCanonicalContents(contents, root) {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  for (const [name, bytes] of contents) {
+    const output = resolve(root, ...name.split('/'));
+    const local = relative(root, output);
+    if (local === '' || local === '..' || local.startsWith(`..${sep}`) || local.includes(':')) {
+      throw new Error('Canonical package extraction path escaped its root');
+    }
+    await mkdir(resolve(output, '..'), { recursive: true, mode: 0o700 });
+    await writeFile(output, bytes, { flag: 'wx', mode: 0o600 });
+  }
+}
+
+function createRunWindow(options) {
+  const notBeforeMs = Number(options.notBeforeMs ?? Date.now() + 5 * 60_000);
+  const expiresAtMs = Number(options.expiresAtMs ?? notBeforeMs + MAX_ACCEPTANCE_RUN_MS);
+  if (
+    !Number.isSafeInteger(notBeforeMs) ||
+    !Number.isSafeInteger(expiresAtMs) ||
+    expiresAtMs - notBeforeMs !== MAX_ACCEPTANCE_RUN_MS
+  ) {
+    throw new Error('Acceptance run window must equal the fixed maximum run duration');
+  }
+  return Object.freeze({ notBeforeMs, expiresAtMs, maxTotalRunMs: MAX_ACCEPTANCE_RUN_MS });
+}
+
+function needsArmedPipe(command) {
+  return [
+    'gateway-reconnect-arm',
+    'electron-crash-arm',
+    'supplemental-synthetic-observation',
+    'login-marker',
+    'manual-physical-observation',
+  ].includes(command);
+}
+
+async function fileHash(path) {
+  const metadata = await lstat(resolve(path));
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    throw new Error('Acceptance producer input is not a one-link regular file');
+  }
+  return createHash('sha256')
+    .update(await readFile(resolve(path)))
+    .digest('hex');
+}
+
+function requireHex(value, label) {
+  if (!HEX_32.test(value ?? '')) throw new Error(`Acceptance ${label} is invalid`);
+  return value;
+}
+
+function requireBelowTmp(path) {
+  const local = relative(resolve(repositoryRoot, 'tmp'), path);
+  if (local === '' || local === '..' || local.startsWith(`..${sep}`) || local.includes(':')) {
+    throw new Error('Acceptance producer output must stay below tmp');
+  }
+}
+
+async function requireAbsent(path) {
+  try {
+    await lstat(path);
+    throw new Error('Acceptance producer output already exists');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+function valueAfter(name) {
+  const index = process.argv.indexOf(name);
+  return index < 0 ? undefined : process.argv[index + 1];
+}
+
+const usage =
+  'Usage: node scripts/build-windows-installed-acceptance-inputs.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --request-private-key <pkcs8-der> --signer <native-signer> --signer-sha256 <sha256> --manifest-private-key <pkcs8-der> --update-private-key <pkcs8-der> --not-before-ms <ms> --expires-at-ms <ms> [--build-id <hex>] [--output tmp/path] [--kit-output tmp/path] [--bundle tmp/path.zip]';
+
+async function main() {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(usage);
+    return;
+  }
+  const options = {
+    architecture: 'x64',
+    descriptorPath: valueAfter('--release'),
+    descriptorSha256: valueAfter('--release-sha256'),
+    provenancePath: valueAfter('--provenance'),
+    provenanceSha256: valueAfter('--provenance-sha256'),
+    sourceRoot: valueAfter('--source'),
+    requestPrivateKeyPath: valueAfter('--request-private-key'),
+    signerPath: valueAfter('--signer'),
+    signerSha256: valueAfter('--signer-sha256'),
+    manifestPrivateKeyPath: valueAfter('--manifest-private-key'),
+    updatePrivateKeyPath: valueAfter('--update-private-key'),
+    notBeforeMs: valueAfter('--not-before-ms'),
+    expiresAtMs: valueAfter('--expires-at-ms'),
+    buildId: valueAfter('--build-id'),
+    outputRoot: valueAfter('--output'),
+    kitOutputRoot: valueAfter('--kit-output'),
+    bundlePath: valueAfter('--bundle'),
+  };
+  if (
+    [
+      options.descriptorPath,
+      options.descriptorSha256,
+      options.provenancePath,
+      options.provenanceSha256,
+      options.sourceRoot,
+      options.requestPrivateKeyPath,
+      options.signerPath,
+      options.signerSha256,
+      options.manifestPrivateKeyPath,
+      options.updatePrivateKeyPath,
+      options.notBeforeMs,
+      options.expiresAtMs,
+    ].some((value) => !value)
+  ) {
+    throw new Error('Run build-windows-installed-acceptance-inputs.mjs --help for usage.');
+  }
+  const result = await buildWindowsInstalledAcceptanceInputs(options);
+  console.log(canonicalAcceptanceJson(result));
+}
+
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) await main();

@@ -19,6 +19,7 @@ export function spawnPackagedProcess(
   executable: string,
   arguments_: readonly string[],
   timeoutMs: number,
+  startupFrame?: Buffer,
 ): {
   readonly pid: number | undefined;
   readonly exited: Promise<number>;

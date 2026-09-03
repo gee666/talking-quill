@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
 import { SOURCE_COMMIT_MARKER, SOURCE_TREE_MARKER } from './helper-build-contract.mjs';
 import {
   assertNoLinkPath,
@@ -129,9 +130,7 @@ export async function createInstalledAcceptancePlan(
   ) {
     throw new Error('Canonical predecessor and reinstall artifacts are not exactly equal');
   }
-  if (canonicalTargetIdentity(fresh) !== canonicalTargetIdentity(candidate)) {
-    throw new Error('Canonical reinstall target does not equal the acceptance candidate target');
-  }
+  assertAcceptanceCandidateLineage(predecessor, candidate);
   if (
     artifacts.repair.packageManifest?.packageMode !== 'repair' ||
     artifacts.repair.packageManifest.predecessor !== null ||
@@ -221,6 +220,10 @@ export async function createInstalledAcceptancePlan(
     architecture: input.architecture,
     artifacts: Object.freeze(artifacts),
     acceptance,
+    canonicalRelease:
+      input.canonicalRelease === undefined
+        ? undefined
+        : await freezeCanonicalRelease(input.canonicalRelease, artifacts, fileSystem),
     matrix: ACCEPTANCE_MATRIX,
     outputPath: resolve(input.outputPath ?? 'tmp/windows-installed-acceptance/evidence.json'),
     physicalObservationWindowMs: PHYSICAL_OBSERVATION_WINDOW_MS,
@@ -839,6 +842,95 @@ async function regularIdentity(path, expectedSha256, fileSystem) {
     throw new Error(`Frozen input SHA-256 mismatch: ${basename(absolute)}`);
   return Object.freeze({ path: absolute, bytes: metadata.size, sha256, content: bytes });
 }
+function assertAcceptanceCandidateLineage(predecessor, candidate) {
+  for (const field of ['version', 'architecture', 'sourceCommit', 'sourceTree']) {
+    if (candidate[field] !== predecessor[field]) {
+      throw new Error(`Acceptance candidate differs from the canonical predecessor ${field}`);
+    }
+  }
+  if (candidate.platform !== 'win' || predecessor.platform !== 'win') {
+    throw new Error('Acceptance candidate lineage must be Windows');
+  }
+  for (const name of ['owner', 'recovery-launcher']) {
+    if (
+      canonicalAcceptanceJson(role(candidate, name)) !==
+      canonicalAcceptanceJson(role(predecessor, name))
+    ) {
+      throw new Error(`Acceptance candidate changed the canonical ${name} role`);
+    }
+  }
+  const candidateGateway = role(candidate, 'gateway');
+  const predecessorGateway = role(predecessor, 'gateway');
+  if (
+    candidateGateway.sha256 === predecessorGateway.sha256 ||
+    canonicalAcceptanceJson({ ...candidateGateway, sha256: null }) !==
+      canonicalAcceptanceJson({ ...predecessorGateway, sha256: null })
+  ) {
+    throw new Error('Acceptance candidate must contain only the distinct acceptance gateway');
+  }
+}
+
+async function freezeCanonicalRelease(input, artifacts, fileSystem) {
+  const descriptorFile = await regularIdentity(
+    input.descriptorPath,
+    input.descriptorSha256,
+    fileSystem,
+  );
+  const provenanceFile = await regularIdentity(
+    input.provenancePath,
+    input.provenanceSha256,
+    fileSystem,
+  );
+  const descriptor = JSON.parse(descriptorFile.content.toString('utf8'));
+  const provenance = JSON.parse(provenanceFile.content.toString('utf8'));
+  validateArtifactProvenanceManifest(provenance);
+  const predecessor = artifacts.predecessor;
+  if (
+    descriptor.architecture !== predecessor.metadata.architecture ||
+    descriptor.sourceCommit !== predecessor.metadata.sourceCommit ||
+    descriptor.sourceTree !== predecessor.metadata.sourceTree ||
+    descriptor.sha256 !== predecessor.installer.sha256 ||
+    provenance.sourceCommit !== descriptor.sourceCommit ||
+    provenance.sourceTree !== descriptor.sourceTree ||
+    provenance.package?.version !== descriptor.version ||
+    provenance.package?.platform !== 'win' ||
+    provenance.package?.arch !== descriptor.architecture ||
+    artifacts.fresh.installer.sha256 !== descriptor.sha256
+  ) {
+    throw new Error('Canonical release builder provenance does not bind the frozen predecessor');
+  }
+  const final = provenance.entries?.filter(
+    (entry) => entry.role === 'final-artifact' && basename(entry.path) === descriptor.installer,
+  );
+  if (
+    final?.length !== 1 ||
+    final[0].kind !== 'file' ||
+    final[0].size !== predecessor.installer.bytes ||
+    final[0].sha256 !== predecessor.installer.sha256
+  ) {
+    throw new Error('Canonical release builder provenance does not bind the installer');
+  }
+  const prefix = `${provenance.package.root}/`;
+  const entries = provenance.entries.filter((entry) => entry.role === 'package-file');
+  const files = predecessor.packageManifest.files;
+  const byPath = new Map(
+    entries.map((entry) => [
+      entry.path.startsWith(prefix) ? entry.path.slice(prefix.length) : '',
+      entry,
+    ]),
+  );
+  if (byPath.has('') || byPath.size !== entries.length || byPath.size !== files.length) {
+    throw new Error('Canonical release builder provenance package inventory is invalid');
+  }
+  for (const file of files) {
+    const entry = byPath.get(file.path);
+    if (entry?.kind !== 'file' || entry.size !== file.size || entry.sha256 !== file.sha256) {
+      throw new Error(`Canonical release builder provenance package file differs: ${file.path}`);
+    }
+  }
+  return Object.freeze({ descriptor: descriptorFile, provenance: provenanceFile });
+}
+
 function canonicalTargetIdentity(metadata) {
   return canonicalAcceptanceJson({
     architecture: metadata.architecture,
@@ -971,6 +1063,11 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
       if (typeof artifact[field] === 'string') {
         artifact[field] = resolveBundlePath(base, artifact[field]);
       }
+    }
+  }
+  for (const field of ['descriptorPath', 'provenancePath']) {
+    if (typeof copy.canonicalRelease?.[field] === 'string') {
+      copy.canonicalRelease[field] = resolveBundlePath(base, copy.canonicalRelease[field]);
     }
   }
   for (const field of [

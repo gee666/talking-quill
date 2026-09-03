@@ -1,6 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { fileURLToPath } from 'node:url';
@@ -24,15 +34,34 @@ export function signAcceptancePayload({
   }
   const executable = resolve(signerPath);
   const metadata = lstatSync(executable);
-  const executableBytes = readFileSync(executable);
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.nlink !== 1 ||
-    !/^[0-9a-f]{64}$/u.test(signerSha256 ?? '') ||
-    createHash('sha256').update(executableBytes).digest('hex') !== signerSha256
-  ) {
-    throw new Error('Native acceptance signer identity is invalid');
+  const descriptor = openSync(executable, 'r');
+  let executableBytes;
+  try {
+    const opened = fstatSync(descriptor);
+    executableBytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    const pathAfter = lstatSync(executable);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      metadata.nlink !== 1 ||
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      after.size !== opened.size ||
+      pathAfter.dev !== opened.dev ||
+      pathAfter.ino !== opened.ino ||
+      pathAfter.size !== executableBytes.length ||
+      !/^[0-9a-f]{64}$/u.test(signerSha256 ?? '') ||
+      createHash('sha256').update(executableBytes).digest('hex') !== signerSha256
+    ) {
+      throw new Error('Native acceptance signer identity is invalid');
+    }
+  } finally {
+    closeSync(descriptor);
   }
   mkdirSync(resolve('tmp'), { recursive: true, mode: 0o700 });
   const snapshotRoot = mkdtempSync(resolve('tmp/acceptance-signer-'));
@@ -58,7 +87,15 @@ export function signAcceptancePayload({
   } finally {
     rmSync(snapshotRoot, { recursive: true, force: true });
   }
-  if (result?.status !== 0 || result.stderr !== '') {
+  if (
+    result?.error !== undefined ||
+    (result?.signal !== null && result?.signal !== undefined) ||
+    result?.status !== 0 ||
+    typeof result.stderr !== 'string' ||
+    result.stderr !== '' ||
+    typeof result.stdout !== 'string' ||
+    result.stdout.length > 512
+  ) {
     throw new Error('Narrow native acceptance signer failed');
   }
   const lines = result.stdout.split('\n');

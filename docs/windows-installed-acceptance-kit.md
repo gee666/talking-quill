@@ -4,16 +4,19 @@ The installed-acceptance kit is nonpromotable test material for Windows 0.0.69. 
 
 ## Inputs
 
+`scripts/build-windows-installed-acceptance-inputs.mjs` produces the complete x64 input set. It imports and extracts the canonical package, runs the acceptance candidate, repair, fault, native sender, launcher, and isolated-validation build stages, creates the fixed run window and ordered request nonces, then calls the kit assembler. Use `--help` to list its required protected-key paths and output options.
+
 `scripts/build-windows-installed-acceptance-kit.mjs` requires:
 
 - the canonical `RELEASE.json` and its independently recorded SHA-256;
+- the canonical `artifact-provenance.json` and its independently recorded SHA-256;
 - the directory containing the exact canonical installer named by `RELEASE.json`;
 - a Git object database containing the descriptor's full source commit and tree;
 - a kit input JSON with the frozen candidate update, canonical predecessor and reinstall, acceptance repair, trusted launcher, synthetic sender, and ten fault packages;
 - a P-256 request-signing key in PKCS8 DER form, with one link and no linked/reparse ancestors;
 - the native `talking-quill-acceptance-signer` executable.
 
-The builder accepts only version 0.0.69, a canonical fresh RELEASE, and x64 or ARM64. It verifies the descriptor hash, installer size and hash, full TQPKG2 identity, source commit/tree, and exact canonical installer reuse. The predecessor and fresh entries must name those same canonical bytes. The builder does not install or launch any package.
+The builder accepts only version 0.0.69, a canonical fresh RELEASE, and x64 or ARM64. It verifies the descriptor hash, installer size and hash, full TQPKG2 identity, source commit/tree, builder provenance inventory, and exact canonical installer reuse. The predecessor and fresh entries must name those same canonical bytes. The builder does not install or launch any package.
 
 Run it from the repository root:
 
@@ -21,6 +24,8 @@ Run it from the repository root:
 pnpm acceptance:win:installed:build-kit -- `
   --release C:\release\RELEASE.json `
   --release-sha256 <sha256> `
+  --provenance C:\release\artifact-provenance.json `
+  --provenance-sha256 <sha256> `
   --source C:\source\talking-quill `
   --config tmp\windows-installed-acceptance\kit-input.json `
   --request-private-key C:\keys\acceptance-request.pkcs8 `

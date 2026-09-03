@@ -4,12 +4,16 @@ export function sanitizedBuildEnvironment(
 export function validateCanonicalRelease(options: {
   readonly descriptorPath: string;
   readonly descriptorSha256: string;
+  readonly provenancePath: string;
+  readonly provenanceSha256: string;
   readonly sourceRoot: string;
 }): Promise<Readonly<Record<string, unknown>>>;
 export function buildInstalledAcceptanceKit(
   options: {
     readonly descriptorPath: string;
     readonly descriptorSha256: string;
+    readonly provenancePath?: string;
+    readonly provenanceSha256?: string;
     readonly sourceRoot: string;
     readonly configPath: string;
     readonly requestPrivateKeyPath: string;

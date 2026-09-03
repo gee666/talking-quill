@@ -40,6 +40,15 @@ export interface FrozenCandidateArtifactInput extends FrozenArtifactInput {
 export function createInstalledAcceptancePlan(
   input: {
     readonly architecture: 'x64' | 'arm64';
+    readonly canonicalRelease?: Readonly<{
+      readonly descriptorPath: string;
+      readonly descriptorSha256: string;
+      readonly provenancePath: string;
+      readonly provenanceSha256: string;
+      readonly installerSha256: string;
+      readonly sourceCommit: string;
+      readonly sourceTree: string;
+    }>;
     readonly artifacts: Readonly<{
       predecessor: FrozenArtifactInput;
       candidate: FrozenCandidateArtifactInput;

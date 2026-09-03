@@ -46,9 +46,9 @@ fn run() -> Result<(), String> {
         key_bytes.zeroize();
         return Err("private key changed while it was read".into());
     }
-    let signing_key = SigningKey::from_pkcs8_der(&key_bytes)
-        .map_err(|_| "private key is not canonical P-256 PKCS8")?;
+    let parsed_key = SigningKey::from_pkcs8_der(&key_bytes);
     key_bytes.zeroize();
+    let signing_key = parsed_key.map_err(|_| "private key is not canonical P-256 PKCS8")?;
 
     let message = read_bounded_stdin()?;
     let signature: Signature = signing_key.sign(&message);
@@ -80,6 +80,14 @@ fn validate_regular_no_link_path(path: &Path) -> Result<(), String> {
             .map_err(|_| "private key path metadata is unavailable")?;
         if metadata.file_type().is_symlink() {
             return Err("private key path contains a link".into());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err("private key path contains a reparse point".into());
+            }
         }
         current = component.parent();
     }

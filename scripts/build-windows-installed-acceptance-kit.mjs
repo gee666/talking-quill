@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateArtifactProvenanceManifest } from './artifact-provenance.mjs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import {
   assertNoLinkPath,
@@ -38,7 +39,13 @@ export function sanitizedBuildEnvironment(environment = process.env) {
   return sanitizedSubprocessEnvironment(environment);
 }
 
-export async function validateCanonicalRelease({ descriptorPath, descriptorSha256, sourceRoot }) {
+export async function validateCanonicalRelease({
+  descriptorPath,
+  descriptorSha256,
+  provenancePath,
+  provenanceSha256,
+  sourceRoot,
+}) {
   const descriptorBytes = await readRegular(descriptorPath);
   if (sha256(descriptorBytes) !== descriptorSha256) {
     throw new Error('Canonical RELEASE descriptor SHA-256 does not match');
@@ -75,12 +82,26 @@ export async function validateCanonicalRelease({ descriptorPath, descriptorSha25
   ) {
     throw new Error('Canonical RELEASE does not bind the complete TQPKG2 package');
   }
+  const provenanceBytes = await readRegular(provenancePath);
+  if (sha256(provenanceBytes) !== provenanceSha256) {
+    throw new Error('Canonical artifact provenance SHA-256 does not match');
+  }
+  const provenance = JSON.parse(provenanceBytes.toString('utf8'));
+  validateArtifactProvenanceManifest(provenance);
+  validateCanonicalBuilderProvenance(provenance, descriptor, parsed, installerBytes);
   const commit = git(sourceRoot, ['rev-parse', `${descriptor.sourceCommit}^{commit}`]);
   const tree = git(sourceRoot, ['rev-parse', `${descriptor.sourceCommit}^{tree}`]);
   if (commit !== descriptor.sourceCommit || tree !== descriptor.sourceTree) {
     throw new Error('Canonical RELEASE source commit/tree is unavailable or mismatched');
   }
-  return Object.freeze({ descriptor, descriptorBytes, installerPath, installerBytes });
+  return Object.freeze({
+    descriptor,
+    descriptorBytes,
+    installerPath,
+    installerBytes,
+    provenance,
+    provenanceBytes,
+  });
 }
 
 export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
@@ -234,12 +255,19 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   }
   const evidenceInput = {
     ...stagedConfig,
-    canonicalRelease: {
-      descriptorSha256: sha256(imported.descriptorBytes),
-      installerSha256: imported.descriptor.sha256,
-      sourceCommit: imported.descriptor.sourceCommit,
-      sourceTree: imported.descriptor.sourceTree,
-    },
+    ...(imported.provenanceBytes === undefined
+      ? {}
+      : {
+          canonicalRelease: {
+            descriptorPath: resolve(outputRoot, 'imported', 'RELEASE.json'),
+            descriptorSha256: sha256(imported.descriptorBytes),
+            provenancePath: resolve(outputRoot, 'imported', 'artifact-provenance.json'),
+            provenanceSha256: sha256(imported.provenanceBytes),
+            installerSha256: imported.descriptor.sha256,
+            sourceCommit: imported.descriptor.sourceCommit,
+            sourceTree: imported.descriptor.sourceTree,
+          },
+        }),
     acceptance: {
       ...stagedConfig.acceptance,
       signedRequestsPath: '',
@@ -259,12 +287,18 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   const evidencePath = resolve(outputRoot, 'evidence-input.json');
   await writeFile(evidencePath, evidenceBytes, { mode: 0o600 });
   const releaseCopy = resolve(outputRoot, 'imported', 'RELEASE.json');
+  const provenanceCopy = resolve(outputRoot, 'imported', 'artifact-provenance.json');
   const installerCopy = resolve(outputRoot, 'imported', imported.descriptor.installer);
   await writeFile(releaseCopy, imported.descriptorBytes, { flag: 'wx', mode: 0o600 });
+  if (imported.provenanceBytes !== undefined) {
+    await writeFile(provenanceCopy, imported.provenanceBytes, { flag: 'wx', mode: 0o600 });
+  }
   await writeFile(installerCopy, imported.installerBytes, { flag: 'wx', mode: 0o600 });
   const before = sha256(imported.installerBytes);
   if (
     sha256(await readFile(releaseCopy)) !== sha256(imported.descriptorBytes) ||
+    (imported.provenanceBytes !== undefined &&
+      sha256(await readFile(provenanceCopy)) !== sha256(imported.provenanceBytes)) ||
     sha256(await readFile(installerCopy)) !== before
   ) {
     throw new Error('Canonical installer bytes changed while assembling the kit');
@@ -325,6 +359,50 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
     bundleSha256: bundle.sha256,
     manifest,
   });
+}
+
+function validateCanonicalBuilderProvenance(provenance, descriptor, parsed, installerBytes) {
+  if (
+    provenance.sourceCommit !== descriptor.sourceCommit ||
+    provenance.sourceTree !== descriptor.sourceTree ||
+    provenance.package?.version !== descriptor.version ||
+    provenance.package?.platform !== 'win' ||
+    provenance.package?.arch !== descriptor.architecture
+  ) {
+    throw new Error('Canonical RELEASE and builder provenance identities differ');
+  }
+  const finalEntries = provenance.entries.filter((entry) => entry.role === 'final-artifact');
+  if (
+    finalEntries.length !== 1 ||
+    basename(finalEntries[0].path) !== descriptor.installer ||
+    finalEntries[0].kind !== 'file' ||
+    finalEntries[0].size !== installerBytes.length ||
+    finalEntries[0].sha256 !== descriptor.sha256
+  ) {
+    throw new Error('Canonical builder provenance does not bind the RELEASE installer');
+  }
+  const prefix = `${provenance.package.root}/`;
+  const packageEntries = provenance.entries
+    .filter((entry) => entry.role === 'package-file')
+    .map((entry) => ({ ...entry, relativePath: entry.path.slice(prefix.length) }));
+  if (
+    packageEntries.some(
+      (entry) =>
+        entry.kind !== 'file' || !entry.path.startsWith(prefix) || entry.relativePath.length === 0,
+    )
+  ) {
+    throw new Error('Canonical builder provenance package root is invalid');
+  }
+  const declared = new Map(packageEntries.map((entry) => [entry.relativePath, entry]));
+  if (declared.size !== packageEntries.length || declared.size !== parsed.manifest.files.length) {
+    throw new Error('Canonical builder provenance package inventory differs from TQPKG2');
+  }
+  for (const file of parsed.manifest.files) {
+    const entry = declared.get(file.path);
+    if (entry?.size !== file.size || entry.sha256 !== file.sha256) {
+      throw new Error(`Canonical builder provenance package file differs: ${file.path}`);
+    }
+  }
 }
 
 function signInNarrowSubprocess(payload, options, signPayload) {
@@ -430,6 +508,15 @@ function portablePaths(input, outputRoot) {
   }
   return Object.freeze({
     ...input,
+    ...(input.canonicalRelease === undefined
+      ? {}
+      : {
+          canonicalRelease: Object.freeze({
+            ...input.canonicalRelease,
+            descriptorPath: portablePath(input.canonicalRelease.descriptorPath, outputRoot),
+            provenancePath: portablePath(input.canonicalRelease.provenancePath, outputRoot),
+          }),
+        }),
     artifacts: Object.freeze({
       predecessor: portableArtifact(input.artifacts.predecessor),
       candidate: portableArtifact(input.artifacts.candidate),
@@ -517,9 +604,17 @@ function valueAfter(name) {
 }
 
 async function main() {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(
+      'Usage: node scripts/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> --signer <native-rfc6979-signer> --signer-sha256 <sha256> [--output tmp/path] [--bundle tmp/path.zip]',
+    );
+    return;
+  }
   const options = {
     descriptorPath: valueAfter('--release'),
     descriptorSha256: valueAfter('--release-sha256'),
+    provenancePath: valueAfter('--provenance'),
+    provenanceSha256: valueAfter('--provenance-sha256'),
     sourceRoot: valueAfter('--source'),
     configPath: valueAfter('--config'),
     requestPrivateKeyPath: valueAfter('--request-private-key'),
@@ -530,12 +625,10 @@ async function main() {
   };
   if (
     Object.entries(options)
-      .slice(0, 7)
+      .slice(0, 9)
       .some(([, value]) => !value)
   ) {
-    throw new Error(
-      'Usage: node scripts/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> --signer <native-rfc6979-signer> --signer-sha256 <sha256> [--output tmp/path] [--bundle tmp/path.zip]',
-    );
+    throw new Error('Run build-windows-installed-acceptance-kit.mjs --help for usage.');
   }
   const result = await buildInstalledAcceptanceKit(options);
   console.log(canonicalAcceptanceJson(result));

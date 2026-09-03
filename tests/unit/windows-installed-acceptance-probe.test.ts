@@ -134,26 +134,35 @@ describe('Windows installed acceptance packaged probe transport', () => {
 
   it('launches the exact executable only after both one-use channels are listening', async () => {
     const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    const spawnProcess = vi.fn((executable: string, arguments_: readonly string[]) => {
-      expect(executable).toBe('C:/Program Files/Talking Quill/Talking Quill.exe');
-      const value = (prefix: string) =>
-        arguments_.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
-      const correlation = value('--talking-quill-launch-correlation=');
-      const pipe = value('--talking-quill-installed-readiness-pipe=');
-      if (pipe === undefined || correlation === undefined)
-        throw new Error('missing probe arguments');
-      const client = net.connect(pipe);
-      client.once('connect', () =>
-        client.end(
-          `${JSON.stringify({ version: 1, result: 'passed', correlation, runtimeLifecycleAuthoritative: false, userDataRootSha256: '66'.repeat(32) })}\n`,
-        ),
-      );
-      return {
-        pid: 42,
-        exited: Promise.resolve(0),
-        terminateIfRunning: vi.fn(() => Promise.resolve()),
-      };
-    });
+    const spawnProcess = vi.fn(
+      (
+        executable: string,
+        commandArguments: readonly string[],
+        _timeoutMs: number,
+        startupFrame: Buffer,
+      ) => {
+        expect(executable).toBe('C:/Program Files/Talking Quill/Talking Quill.exe');
+        expect(commandArguments).toEqual(['--talking-quill-installed-acceptance-fd=3']);
+        const frame = JSON.parse(startupFrame.toString('utf8')) as { arguments: string[] };
+        const value = (prefix: string) =>
+          frame.arguments.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+        const correlation = value('--talking-quill-launch-correlation=');
+        const pipe = value('--talking-quill-installed-readiness-pipe=');
+        if (pipe === undefined || correlation === undefined)
+          throw new Error('missing probe arguments');
+        const client = net.connect(pipe);
+        client.once('connect', () =>
+          client.end(
+            `${JSON.stringify({ version: 1, result: 'passed', correlation, runtimeLifecycleAuthoritative: false, userDataRootSha256: '66'.repeat(32) })}\n`,
+          ),
+        );
+        return {
+          pid: 42,
+          exited: Promise.resolve(0),
+          terminateIfRunning: vi.fn(() => Promise.resolve()),
+        };
+      },
+    );
     const signedRequest = createSignedAcceptanceRequest('normal-readiness', {
       buildId: '11'.repeat(32),
       privateKeyPem: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),

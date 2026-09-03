@@ -13,6 +13,8 @@ import type { InstalledObservationRequest } from '../acceptance/installed-observ
 import { isStrictPathChild } from '../app/runtime-path-policy';
 import { startMain, type MainBootstrapOptions } from '../bootstrap';
 
+hydrateAcceptanceArguments(process.argv);
+
 if (
   !app.isPackaged ||
   process.platform !== 'win32' ||
@@ -37,6 +39,30 @@ const authorization = authorizeInstalledAcceptance({
   },
 });
 consumeInstalledAcceptanceNonce(authorization, app.getPath('temp'));
+
+function hydrateAcceptanceArguments(argv: string[]): void {
+  const marker = '--talking-quill-installed-acceptance-fd=3';
+  const matches = argv.filter((argument) => argument === marker);
+  if (matches.length === 0) return;
+  if (matches.length !== 1) throw new Error('Installed acceptance startup descriptor is invalid');
+  const bytes = readFileSync(3);
+  if (bytes.length === 0 || bytes.length > 20 * 1024 || bytes.at(-1) !== 0x0a) {
+    throw new Error('Installed acceptance startup frame is invalid');
+  }
+  const value = JSON.parse(bytes.subarray(0, -1).toString('utf8')) as {
+    version?: unknown;
+    arguments?: unknown;
+  };
+  if (
+    value.version !== 1 ||
+    !Array.isArray(value.arguments) ||
+    value.arguments.length === 0 ||
+    value.arguments.some((argument) => typeof argument !== 'string' || argument.length > 18_000)
+  ) {
+    throw new Error('Installed acceptance startup arguments are invalid');
+  }
+  for (const argument of value.arguments) argv.push(argument as string);
+}
 
 let lifecycleProfile: string | undefined;
 if (authorization.lifecycleUserData !== null) {

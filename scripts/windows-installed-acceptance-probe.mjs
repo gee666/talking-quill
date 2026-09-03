@@ -93,18 +93,18 @@ export async function runPackagedAcceptanceProbe(command, options) {
   const armedChannel =
     armedPipe === null ? null : createOneUseJsonChannel(armedPipe, options.timeoutMs);
   await Promise.all([resultChannel.listening, armedChannel?.listening]);
-  const arguments_ = [
+  const sensitiveArguments = [
     `--talking-quill-acceptance-request=${options.signedRequest}`,
     `--talking-quill-installed-readiness-pipe=${readinessPipe}`,
     `--talking-quill-launch-correlation=${launchCorrelation}`,
   ];
   if (command === 'manual-physical-observation') {
-    arguments_.push('--talking-quill-installed-physical-observation');
+    sensitiveArguments.push('--talking-quill-installed-physical-observation');
   }
   if (armedChannel !== null) {
-    arguments_.push(`--talking-quill-automation-armed-pipe=${armedPipe}`);
+    sensitiveArguments.push(`--talking-quill-automation-armed-pipe=${armedPipe}`);
     if (automationValidationFor(command)) {
-      arguments_.push(
+      sensitiveArguments.push(
         '--talking-quill-installed-automation-validation',
         `--talking-quill-automation-case=${
           command === 'supplemental-synthetic-observation' ? 'general' : 'lifecycle'
@@ -112,8 +112,16 @@ export async function runPackagedAcceptanceProbe(command, options) {
       );
     }
   }
-  if (command === 'login-marker') arguments_.push('--talking-quill-login-start');
-  const child = options.spawnProcess(options.executable, arguments_, options.timeoutMs);
+  if (command === 'login-marker') sensitiveArguments.push('--talking-quill-login-start');
+  const startupFrame = Buffer.from(
+    `${canonicalAcceptanceJson({ version: 1, arguments: sensitiveArguments })}\n`,
+  );
+  const child = options.spawnProcess(
+    options.executable,
+    ['--talking-quill-installed-acceptance-fd=3'],
+    options.timeoutMs,
+    startupFrame,
+  );
   let rejectAbort;
   const aborted = new Promise((_, reject) => {
     rejectAbort = reject;
@@ -257,14 +265,28 @@ function assertBoundResponse(value, correlation, expectedPhase) {
   }
 }
 
-export function spawnPackagedProcess(executable, arguments_, timeoutMs) {
+export function spawnPackagedProcess(executable, arguments_, timeoutMs, startupFrame) {
+  if (
+    startupFrame !== undefined &&
+    (!Buffer.isBuffer(startupFrame) || startupFrame.length === 0 || startupFrame.length > 20 * 1024)
+  ) {
+    throw new Error('Packaged probe startup frame is invalid');
+  }
   const child = spawn(executable, arguments_, {
     shell: false,
     windowsHide: true,
-    stdio: 'ignore',
+    stdio: startupFrame === undefined ? 'ignore' : ['ignore', 'ignore', 'ignore', 'pipe'],
     detached: false,
     env: sanitizedChildEnvironment(),
   });
+  if (startupFrame !== undefined) {
+    const startup = child.stdio[3];
+    if (startup === null || startup === undefined) {
+      child.kill('SIGKILL');
+      throw new Error('Packaged probe startup pipe is unavailable');
+    }
+    startup.end(startupFrame);
+  }
   let running = true;
   let rejectExit;
   const exited = new Promise((resolveExit, rejectPromise) => {

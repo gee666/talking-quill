@@ -66,6 +66,7 @@ export async function verifyAcceptanceBundleTree(rootPath, expected = {}) {
     throw new Error('Acceptance bundle evidence architecture/source/output binding is invalid');
   }
   verifyEvidenceReferences(evidence, declarations);
+  verifyCanonicalReleaseReference(evidence.canonicalRelease, manifest, declarations);
   const manifestSha256 = sha256(manifestBytes);
   if (
     sha256(
@@ -365,6 +366,23 @@ function verifyEvidenceReferences(evidence, declarations) {
     'trustedLauncherPath',
   ]) {
     requireDeclared(evidence.acceptance?.[field], declarations);
+  }
+}
+
+function verifyCanonicalReleaseReference(canonicalRelease, manifest, declarations) {
+  if (canonicalRelease === undefined) return;
+  requireDeclared(canonicalRelease.descriptorPath, declarations);
+  requireDeclared(canonicalRelease.provenancePath, declarations);
+  if (
+    declarations.get(canonicalRelease.descriptorPath)?.sha256 !==
+      canonicalRelease.descriptorSha256 ||
+    declarations.get(canonicalRelease.provenancePath)?.sha256 !==
+      canonicalRelease.provenanceSha256 ||
+    canonicalRelease.sourceCommit !== manifest.sourceCommit ||
+    canonicalRelease.sourceTree !== manifest.sourceTree ||
+    !/^[0-9a-f]{64}$/u.test(canonicalRelease.installerSha256 ?? '')
+  ) {
+    throw new Error('Acceptance canonicalRelease builder provenance is invalid');
   }
 }
 
