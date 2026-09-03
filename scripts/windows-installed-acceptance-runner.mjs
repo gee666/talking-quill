@@ -11,6 +11,7 @@ import {
 } from './windows-installed-acceptance-probe.mjs';
 import { verifyAcceptancePreflight } from './windows-acceptance-preflight.mjs';
 import { reserveAcceptanceRequestNonces } from './windows-acceptance-replay-ledger.mjs';
+import { launchVerifiedChild } from './windows-verified-child-launcher.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_REQUEST_SCHEDULE,
@@ -546,33 +547,22 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export async function startTrustedAcceptanceBroker(launcher, dependencies = {}) {
+export async function startTrustedAcceptanceBroker(launcher, bootstrap, dependencies = {}) {
   requireValue(launcher !== undefined, 'Frozen trusted acceptance broker is unavailable');
-  const hashFile =
-    dependencies.hashFile ??
-    (async (path) => {
-      const bytes = await readFile(path);
-      return { bytes: bytes.length, sha256: sha256(bytes) };
-    });
-  const observed = await hashFile(launcher.path);
-  requireValue(
-    observed.sha256 === launcher.sha256 && observed.bytes === launcher.bytes,
-    'Frozen trusted acceptance broker was substituted before start',
-  );
-  const spawnProcess =
-    dependencies.spawnProcess ??
-    ((executable, arguments_) =>
-      spawn(executable, arguments_, {
-        shell: false,
-        windowsHide: true,
-        stdio: ['pipe', 'pipe', 'ignore'],
-        env: sanitizedChildEnvironment(),
-      }));
-  const child = spawnProcess(launcher.path, [
-    '--windows-installed-acceptance-broker-v1',
-    launcher.sha256,
-    String(launcher.bytes),
-  ]);
+  requireValue(bootstrap !== undefined, 'Frozen verified-child bootstrap is unavailable');
+  const launch = dependencies.launchVerifiedChild ?? launchVerifiedChild;
+  const child = launch({
+    bootstrap,
+    child: {
+      ...launcher,
+      arguments: [
+        '--windows-installed-acceptance-broker-v1',
+        launcher.sha256,
+        String(launcher.bytes),
+      ],
+    },
+    timeoutMs: 80 * 60 * 1_000,
+  });
   requireValue(child.stdin !== null && child.stdout !== null, 'Trusted broker pipes unavailable');
   const pending = new Map();
   let buffer = Buffer.alloc(0);
@@ -750,6 +740,18 @@ export function createWindowsOsAdapter(
     process.env.SystemRoot ?? 'C:\\Windows',
     'System32/WindowsPowerShell/v1.0/powershell.exe',
   );
+  const protectedNativeRoot = process.env.TQ_ACCEPTANCE_PROTECTED_NATIVE_ROOT;
+  const runtimeNative = (identity, fileName) =>
+    protectedNativeRoot === undefined
+      ? identity
+      : Object.freeze({ ...identity, path: resolve(protectedNativeRoot, fileName) });
+  const runtimeBroker = runtimeNative(acceptance.acceptanceBroker, 'acceptance-broker.exe');
+  const runtimeBootstrap = runtimeNative(
+    acceptance.acceptanceBootstrap,
+    'acceptance-bootstrap.exe',
+  );
+  const runtimeLauncher = runtimeNative(acceptance.trustedLauncher, 'trusted-launcher.exe');
+  const runtimeSender = runtimeNative(acceptance.syntheticSender, 'synthetic-sender.exe');
   const acceptanceOptions = {
     buildId: acceptance.buildId,
     runWindow: acceptance.runWindow,
@@ -783,7 +785,8 @@ export function createWindowsOsAdapter(
         ...electronIdentity,
         path: resolve(installedRoot, 'Talking Quill.exe'),
       },
-      brokerIdentity: acceptance.acceptanceBroker,
+      brokerIdentity: runtimeBroker,
+      bootstrapIdentity: runtimeBootstrap,
       sourceCommit: sourceIdentity.sourceCommit,
       sourceTree: sourceIdentity.sourceTree,
     });
@@ -824,7 +827,7 @@ export function createWindowsOsAdapter(
     },
     startAcceptanceBroker: async () => {
       requireValue(broker === undefined, 'Trusted acceptance broker was already started');
-      broker = await startTrustedAcceptanceBroker(acceptance.trustedLauncher);
+      broker = await startTrustedAcceptanceBroker(runtimeLauncher, runtimeBootstrap);
       return broker.evidence;
     },
     closeAcceptanceBroker: async () => {
@@ -1082,18 +1085,21 @@ export function createWindowsOsAdapter(
       probe('supplemental-synthetic-observation', {
         timeoutMs: 45_000,
         onArmed: async () => {
-          const sender = acceptance.syntheticSender;
-          requireValue(sender !== undefined, 'Frozen synthetic sender is unavailable');
-          const observed = await adapter.hashFile(sender.path);
-          requireValue(
-            observed.sha256 === sender.sha256 && observed.bytes === sender.bytes,
-            'Frozen synthetic sender was substituted before spawn',
-          );
-          await adapter.spawn({
-            executable: sender.path,
-            arguments: acceptance.syntheticSenderArguments ?? [],
+          requireValue(runtimeSender !== undefined, 'Frozen synthetic sender is unavailable');
+          const child = launchVerifiedChild({
+            bootstrap: runtimeBootstrap,
+            child: {
+              ...runtimeSender,
+              arguments: acceptance.syntheticSenderArguments ?? [],
+            },
             timeoutMs: 15_000,
-            acceptedExitCodes: [0],
+          });
+          await new Promise((resolveExit, rejectExit) => {
+            child.once('error', rejectExit);
+            child.once('exit', (code, signal) => {
+              if (code === 0 && signal === null) resolveExit(code);
+              else rejectExit(new Error('Verified synthetic sender failed'));
+            });
           });
         },
       }),

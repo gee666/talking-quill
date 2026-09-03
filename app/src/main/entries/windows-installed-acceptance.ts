@@ -2,7 +2,7 @@ declare const __TALKING_QUILL_SOURCE_REVISION__: string;
 declare const __TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL__: string;
 
 import { app } from 'electron';
-import { closeSync, readFileSync, readSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
   authorizeInstalledAcceptanceRequest,
@@ -38,33 +38,30 @@ const authorization = authorizeInstalledAcceptanceRequest({
 consumeInstalledAcceptanceNonce(authorization, app.getPath('temp'));
 
 function readInstalledAcceptanceStartup(argv: readonly string[]): { signedRequest: string } {
-  const marker = '--talking-quill-installed-acceptance-stdin-v1';
+  const prefix = '--talking-quill-installed-acceptance-startup-pipe-v1=';
+  const descriptors = argv.filter((argument) => argument.startsWith(prefix));
+  const descriptor = descriptors[0];
   if (
-    argv.filter((argument) => argument === marker).length !== 1 ||
+    descriptors.length !== 1 ||
+    descriptor === undefined ||
+    argv.includes('--talking-quill-installed-acceptance-stdin-v1') ||
     argv.some(
       (argument) =>
-        argument !== marker &&
+        argument !== descriptor &&
         (INSTALLED_ACCEPTANCE_ARGUMENT_FLAGS.some((flag) => argument.startsWith(flag)) ||
-          INSTALLED_ACCEPTANCE_ARGUMENT_PREFIXES.some((prefix) => argument.startsWith(prefix))),
+          INSTALLED_ACCEPTANCE_ARGUMENT_PREFIXES.some((value) => argument.startsWith(value))),
     )
   ) {
     throw new Error('Installed acceptance startup descriptor is invalid');
   }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const chunk = Buffer.allocUnsafe(Math.min(4096, 20 * 1024 + 1 - total));
-      const count = readSync(0, chunk, 0, chunk.length, null);
-      if (count === 0) break;
-      total += count;
-      if (total > 20 * 1024) throw new Error('Installed acceptance startup frame is too large');
-      chunks.push(chunk.subarray(0, count));
-    }
-  } finally {
-    closeSync(0);
+  const pipeName = descriptor.slice(prefix.length);
+  if (!/^\\\\\.\\pipe\\TalkingQuill\.AcceptanceStartup\.[0-9a-f]{32}$/u.test(pipeName)) {
+    throw new Error('Installed acceptance startup pipe is invalid');
   }
-  const bytes = Buffer.concat(chunks, total);
+  const bytes = readFileSync(pipeName);
+  if (bytes.length > 20 * 1024) {
+    throw new Error('Installed acceptance startup frame is too large');
+  }
   if (bytes.length === 0 || bytes.at(-1) !== 0x0a) {
     throw new Error('Installed acceptance startup frame is invalid');
   }

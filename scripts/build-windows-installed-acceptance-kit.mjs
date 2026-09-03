@@ -196,13 +196,17 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   for (const [field, fileName] of [
     ['syntheticSenderPath', 'synthetic-sender.exe'],
     ['acceptanceBrokerPath', 'acceptance-broker.exe'],
+    ['acceptanceBootstrapPath', 'acceptance-bootstrap.exe'],
     ['trustedLauncherPath', 'trusted-launcher.exe'],
   ]) {
-    const destination = resolve(outputRoot, 'acceptance', fileName);
+    const destination = resolve(outputRoot, 'acceptance', 'native', fileName);
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(config.acceptance[field], destination);
     stagedConfig.acceptance[field] = destination;
   }
+  (dependencies.protectNativeExecutionDirectory ?? protectNativeExecutionDirectory)(
+    resolve(outputRoot, 'acceptance', 'native'),
+  );
   const signerPath = resolve(options.signerPath);
   const signerSha256 = options.signerSha256;
   const privateKeyPath = resolve(options.requestPrivateKeyPath);
@@ -240,8 +244,15 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
       {
         signerPath,
         signerSha256,
-        brokerPath: stagedConfig.acceptance.acceptanceBrokerPath,
+        signerBytes: (await lstat(signerPath)).size,
+        brokerPath: config.acceptance.acceptanceBrokerPath,
         brokerSha256: config.acceptance.acceptanceBrokerSha256,
+        brokerBytes: (await lstat(config.acceptance.acceptanceBrokerPath)).size,
+        bootstrapIdentity: {
+          path: config.acceptance.acceptanceBootstrapPath,
+          sha256: config.acceptance.acceptanceBootstrapSha256,
+          bytes: (await lstat(config.acceptance.acceptanceBootstrapPath)).size,
+        },
         signerSourceCommit: imported.descriptor.sourceCommit,
         signerSourceTree: imported.descriptor.sourceTree,
         privateKeyPath,
@@ -424,6 +435,55 @@ function signInNarrowSubprocess(payload, options, signPayload) {
   };
 }
 
+function protectNativeExecutionDirectory(path) {
+  if (process.platform !== 'win32') return;
+  const user = spawnSync(
+    resolve(process.env.SystemRoot ?? 'C:/Windows', 'System32/whoami.exe'),
+    ['/user', '/fo', 'csv', '/nh'],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  const match = user.status === 0 ? user.stdout.match(/"[^"]+","(S-[0-9-]+)"/u) : null;
+  if (match === null) throw new Error('Acceptance execution user SID is unavailable');
+  const acl = spawnSync(
+    resolve(process.env.SystemRoot ?? 'C:/Windows', 'System32/icacls.exe'),
+    [
+      path,
+      '/inheritance:r',
+      '/setowner',
+      '*S-1-5-32-544',
+      '/grant:r',
+      '*S-1-5-18:(OI)(CI)F',
+      '*S-1-5-32-544:(OI)(CI)F',
+      `*${match[1]}:(OI)(CI)RX`,
+      '/T',
+      '/C',
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (acl.status !== 0) throw new Error('Acceptance execution ACL publication failed');
+  const verify = spawnSync(
+    resolve(
+      process.env.SystemRoot ?? 'C:/Windows',
+      'System32/WindowsPowerShell/v1.0/powershell.exe',
+    ),
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$a=Get-Acl -LiteralPath $env:TQ_NATIVE_ROOT;$o=([Security.Principal.NTAccount]$a.Owner).Translate([Security.Principal.SecurityIdentifier]).Value;if(-not $a.AreAccessRulesProtected -or $o -ne 'S-1-5-32-544'){exit 1};if(@(Get-ChildItem -LiteralPath $env:TQ_NATIVE_ROOT -Force|?{($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0}).Count -ne 0){exit 2}",
+    ],
+    {
+      env: { SystemRoot: process.env.SystemRoot, TQ_NATIVE_ROOT: path },
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  if (verify.status !== 0) throw new Error('Acceptance execution ACL verification failed');
+}
+
 function assertSharedArtifact(label, left, right) {
   for (const field of [
     'architecture',
@@ -508,6 +568,7 @@ function portablePaths(input, outputRoot) {
     'signedRequestsPath',
     'syntheticSenderPath',
     'acceptanceBrokerPath',
+    'acceptanceBootstrapPath',
     'trustedLauncherPath',
   ]) {
     acceptance[field] = portablePath(input.acceptance[field], outputRoot);

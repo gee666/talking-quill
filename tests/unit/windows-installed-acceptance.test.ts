@@ -720,23 +720,13 @@ describe('installed Windows acceptance executor', () => {
       },
       kill: vi.fn(),
     });
-    let launcherReplaced = false;
-    const hashFile = vi.fn(() =>
-      Promise.resolve(
-        launcherReplaced
-          ? { bytes: 1, sha256: '00'.repeat(32) }
-          : { bytes: launcher.bytes, sha256: launcher.sha256 },
-      ),
-    );
-    const spawnProcess = vi.fn(() => child);
-    const broker = (await startTrustedAcceptanceBroker(launcher, {
-      hashFile,
-      spawnProcess,
+    const launchVerifiedChild = vi.fn(() => child);
+    const broker = (await startTrustedAcceptanceBroker(launcher, launcher, {
+      launchVerifiedChild,
     })) as {
       launchInstaller: (request: Record<string, unknown>) => Promise<unknown>;
       close: () => Promise<void>;
     };
-    launcherReplaced = true;
     await expect(
       broker.launchInstaller({
         path: 'candidate.exe',
@@ -748,8 +738,19 @@ describe('installed Windows acceptance executor', () => {
       }),
     ).resolves.toMatchObject({ result: 'passed', installerExitCode: 0 });
     await broker.close();
-    expect(hashFile).toHaveBeenCalledOnce();
-    expect(spawnProcess).toHaveBeenCalledOnce();
+    expect(launchVerifiedChild).toHaveBeenCalledOnce();
+    expect(launchVerifiedChild).toHaveBeenCalledWith({
+      bootstrap: launcher,
+      child: {
+        ...launcher,
+        arguments: [
+          '--windows-installed-acceptance-broker-v1',
+          launcher.sha256,
+          String(launcher.bytes),
+        ],
+      },
+      timeoutMs: 80 * 60 * 1_000,
+    });
   });
 
   it('constructs the production runner over the injected low-level OS adapter', async () => {

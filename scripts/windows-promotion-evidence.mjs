@@ -14,13 +14,14 @@ import { verifyAuthenticatedSetupReceipt } from './windows-installer-success-evi
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SOURCE = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*$/u;
-const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v3\0');
+const DOMAIN = Buffer.from('TalkingQuill/windows-promotion-lifecycle-evidence/v4\0');
 const SUCCESS_NAMES = (arch) => [
   [`windows-installer-success-fresh-${arch}.json`, 'fresh', 'install'],
 ];
 const MIGRATION_NAME = (arch) => `windows-local-migration-${arch}.json`;
 const TERMINAL_FAULT_NAME = (arch) => `windows-terminal-fault-candidate-${arch}.json`;
 const REBOOT_NAME = (arch) => `windows-reboot-acceptance-${arch}.json`;
+const INSTALLED_ACCEPTANCE_NAME = 'windows-installed-acceptance-x64-gate.json';
 
 function exactObject(value, keys, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -508,7 +509,89 @@ function validateRebootEvidence(
   };
 }
 
-async function evidenceRecords(directory, pinned, rebootRunIds) {
+function validateInstalledAcceptanceGate(source, expectedRunId) {
+  const value = JSON.parse(source);
+  exactObject(
+    value,
+    [
+      'architecture',
+      'artifactSha256',
+      'bootstrapSha256',
+      'brokerSha256',
+      'buildId',
+      'bundleSha256',
+      'candidateInstallerSha256',
+      'evidenceSha256',
+      'launcherSha256',
+      'phaseCount',
+      'producerBundleSha256',
+      'producerE2eSha256',
+      'purpose',
+      'repository',
+      'result',
+      'runId',
+      'schemaVersion',
+      'sourceCommit',
+      'sourceTree',
+      'targetGatewaySha256',
+      'targetOwnerSha256',
+      'targetPackageLayoutDigest',
+      'targetReleaseBuildDigest',
+      'validationKeySha256',
+      'workflow',
+    ],
+    'installed acceptance gate',
+  );
+  if (
+    value.schemaVersion !== 1 ||
+    value.purpose !== 'talking-quill/windows-installed-acceptance-gate' ||
+    value.result !== 'passed' ||
+    value.architecture !== 'x64' ||
+    value.runId !== expectedRunId ||
+    value.workflow !== '.github/workflows/windows-installed-acceptance.yml' ||
+    value.phaseCount !== 19 ||
+    !SOURCE.test(value.sourceCommit) ||
+    !SOURCE.test(value.sourceTree) ||
+    !SHA256.test(value.buildId) ||
+    !SHA256.test(value.bootstrapSha256) ||
+    !SHA256.test(value.brokerSha256) ||
+    !SHA256.test(value.launcherSha256) ||
+    !SHA256.test(value.bundleSha256) ||
+    !SHA256.test(value.candidateInstallerSha256) ||
+    !SHA256.test(value.evidenceSha256) ||
+    !SHA256.test(value.producerBundleSha256) ||
+    !SHA256.test(value.producerE2eSha256) ||
+    !SHA256.test(value.targetReleaseBuildDigest) ||
+    !SHA256.test(value.targetPackageLayoutDigest) ||
+    !SHA256.test(value.targetGatewaySha256) ||
+    !SHA256.test(value.targetOwnerSha256) ||
+    !SHA256.test(value.validationKeySha256) ||
+    !Array.isArray(value.artifactSha256) ||
+    value.artifactSha256.some((digest) => !SHA256.test(digest))
+  ) {
+    throw new Error('Installed acceptance gate is invalid');
+  }
+  return {
+    kind: 'installed-acceptance-gate',
+    operation: 'full-installed-acceptance',
+    action: 'verify',
+    passed: true,
+    exitCode: 0,
+    architecture: value.architecture,
+    packageSha256: value.candidateInstallerSha256,
+    releaseBuildDigest: value.targetReleaseBuildDigest,
+    layoutDigest: value.targetPackageLayoutDigest,
+    installedState: {
+      gatewaySha256: value.targetGatewaySha256,
+      ownerSha256: value.targetOwnerSha256,
+    },
+    sourceCommit: value.sourceCommit,
+    sourceTree: value.sourceTree,
+    evidence: value,
+  };
+}
+
+async function evidenceRecords(directory, pinned, rebootRunIds, installedAcceptanceRunId) {
   const records = [];
   for (const arch of ['arm64', 'x64']) {
     let freshClaims;
@@ -563,6 +646,28 @@ async function evidenceRecords(directory, pinned, rebootRunIds) {
     });
     validateArchitectureBinding(records, arch);
   }
+  const installedSource = await readFile(resolve(directory, INSTALLED_ACCEPTANCE_NAME));
+  const installedClaims = validateInstalledAcceptanceGate(
+    installedSource,
+    installedAcceptanceRunId,
+  );
+  const x64Fresh = records.find(
+    ({ claims }) => claims.architecture === 'x64' && claims.kind === 'success',
+  )?.claims;
+  if (
+    x64Fresh === undefined ||
+    installedClaims.releaseBuildDigest !== x64Fresh.releaseBuildDigest ||
+    installedClaims.layoutDigest !== x64Fresh.layoutDigest ||
+    installedClaims.installedState.gatewaySha256 !== x64Fresh.installedState.gatewaySha256 ||
+    installedClaims.installedState.ownerSha256 !== x64Fresh.installedState.ownerSha256
+  ) {
+    throw new Error('Installed acceptance target differs from the promoted x64 product');
+  }
+  records.push({
+    file: INSTALLED_ACCEPTANCE_NAME,
+    sha256: hash(installedSource),
+    claims: installedClaims,
+  });
   return records.sort((left, right) => left.file.localeCompare(right.file));
 }
 
@@ -575,9 +680,11 @@ export async function createWindowsPromotionEvidence({
   publicKeyPath,
   updatePublicKeyPath,
   rebootRunIds,
+  installedAcceptanceRunId,
 }) {
   if (
     !GENERATION.test(workflowRunId) ||
+    !GENERATION.test(installedAcceptanceRunId) ||
     !GENERATION.test(rebootRunIds?.x64 ?? '') ||
     !GENERATION.test(rebootRunIds?.arm64 ?? '') ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)
@@ -595,7 +702,7 @@ export async function createWindowsPromotionEvidence({
   });
   if (!publicSec1(privateKey).equals(pinned))
     throw new Error('Protected promotion key does not match the repository promotion-key pin');
-  const records = await evidenceRecords(directory, pinned, rebootRunIds);
+  const records = await evidenceRecords(directory, pinned, rebootRunIds, installedAcceptanceRunId);
   const sourceCommit = records[0].claims.sourceCommit;
   const sourceTree = records[0].claims.sourceTree;
   if (
@@ -606,7 +713,7 @@ export async function createWindowsPromotionEvidence({
     throw new Error('Lifecycle evidence source identities disagree');
   const keyId = hash(pinned);
   const payload = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     promotionClass: 'protected-release-acceptance',
     releasePolicy: {
       version: '0.0.69',
@@ -624,6 +731,7 @@ export async function createWindowsPromotionEvidence({
     sourceTree,
     promotionKeySha256: keyId,
     rebootRunIds,
+    installedAcceptanceRunId,
     records,
   };
   const signed = Buffer.concat([DOMAIN, Buffer.from(canonicalJson(payload))]);
@@ -646,6 +754,7 @@ export async function verifyWindowsPromotionEvidence({
   workflowRunId,
   publicKeyPath,
   rebootRunIds,
+  installedAcceptanceRunId,
 }) {
   const source = await readFile(path, 'utf8');
   const envelope = JSON.parse(source);
@@ -662,6 +771,7 @@ export async function verifyWindowsPromotionEvidence({
       'sourceTree',
       'promotionKeySha256',
       'rebootRunIds',
+      'installedAcceptanceRunId',
       'records',
     ],
     'promotion payload',
@@ -670,7 +780,7 @@ export async function verifyWindowsPromotionEvidence({
   const pinned = Buffer.from((await readFile(publicKeyPath, 'utf8')).trim(), 'hex');
   const keyId = hash(pinned);
   if (
-    envelope.payload.schemaVersion !== 3 ||
+    envelope.payload.schemaVersion !== 4 ||
     canonicalJson(envelope.payload.releasePolicy) !==
       canonicalJson({
         version: '0.0.69',
@@ -687,18 +797,27 @@ export async function verifyWindowsPromotionEvidence({
     envelope.payload.promotionKeySha256 !== keyId ||
     envelope.payload.promotionClass !== 'protected-release-acceptance' ||
     envelope.payload.repository !== repository ||
-    envelope.payload.workflowRunId !== workflowRunId
+    envelope.payload.workflowRunId !== workflowRunId ||
+    (installedAcceptanceRunId !== undefined &&
+      envelope.payload.installedAcceptanceRunId !== installedAcceptanceRunId)
   )
     throw new Error('Promotion signature identity is invalid');
   const signedRebootRunIds = envelope.payload.rebootRunIds;
+  const signedInstalledAcceptanceRunId = envelope.payload.installedAcceptanceRunId;
   if (
+    !GENERATION.test(signedInstalledAcceptanceRunId ?? '') ||
     !GENERATION.test(signedRebootRunIds?.x64 ?? '') ||
     !GENERATION.test(signedRebootRunIds?.arm64 ?? '') ||
     (rebootRunIds !== undefined &&
       canonicalJson(rebootRunIds) !== canonicalJson(signedRebootRunIds))
   )
     throw new Error('Reboot workflow identity is invalid');
-  const records = await evidenceRecords(directory, pinned, signedRebootRunIds);
+  const records = await evidenceRecords(
+    directory,
+    pinned,
+    signedRebootRunIds,
+    signedInstalledAcceptanceRunId,
+  );
   if (canonicalJson(records) !== canonicalJson(envelope.payload.records))
     throw new Error('Promotion evidence inventory or signed claims changed');
   const spkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
@@ -724,11 +843,13 @@ function option(name) {
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const rebootX64RunId = option('--reboot-x64-run-id');
   const rebootArm64RunId = option('--reboot-arm64-run-id');
+  const installedAcceptanceRunId = option('--installed-acceptance-run-id');
   const common = {
     directory: resolve(option('--directory')),
     repository: option('--repository'),
     workflowRunId: option('--run-id'),
     publicKeyPath: resolve(option('--public-key')),
+    installedAcceptanceRunId,
     ...(rebootX64RunId === undefined && rebootArm64RunId === undefined
       ? {}
       : { rebootRunIds: { x64: rebootX64RunId, arm64: rebootArm64RunId } }),

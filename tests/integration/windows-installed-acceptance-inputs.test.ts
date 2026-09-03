@@ -71,6 +71,8 @@ describe('Windows installed-acceptance input producer', () => {
         signerSha256: hash,
         acceptanceBrokerPath: launcher,
         acceptanceBrokerSha256: hash,
+        acceptanceBootstrapPath: launcher,
+        acceptanceBootstrapSha256: hash,
         candidate: artifact,
         repair: artifact,
         faults,

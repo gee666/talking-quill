@@ -1,22 +1,23 @@
-import { createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 
 const HEX_32 = /^[0-9a-f]{64}$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
 const MAX_ENVELOPE_BYTES = 16 * 1024;
 
+export function authenticateAcceptanceBuildManifest(encoded, publicKeySpkiBase64url) {
+  const manifest = decodeCanonicalEnvelope(encoded, 'acceptance build manifest');
+  const manifestKey = readP256PublicKey(publicKeySpkiBase64url, 'acceptance manifest public key');
+  verifyEnvelopeSignature(manifest, manifestKey, 'Acceptance build manifest');
+  return Object.freeze(manifest.payload);
+}
+
 export async function verifyAcceptancePreflight(input) {
   const { plan, sequence, nowMs } = input;
-  const manifest = decodeCanonicalEnvelope(
+  const payload = authenticateAcceptanceBuildManifest(
     plan.acceptance.buildManifest,
-    'acceptance build manifest',
-  );
-  const manifestKey = readP256PublicKey(
     plan.acceptance.manifestPublicKeySpkiBase64url,
-    'acceptance manifest public key',
   );
-  verifyEnvelopeSignature(manifest, manifestKey, 'Acceptance build manifest');
-  const payload = manifest.payload;
   const candidate = plan.artifacts.candidate;
   const gateway = role(candidate.metadata, 'gateway');
   const owner = role(candidate.metadata, 'owner');
@@ -35,6 +36,11 @@ export async function verifyAcceptancePreflight(input) {
     payload.appAsarSha256 !== candidate.appAsar.sha256 ||
     payload.gatewaySha256 !== gateway.sha256 ||
     payload.ownerSha256 !== owner.sha256 ||
+    !/^[A-Za-z0-9_-]+$/u.test(payload.validationPublicKeySpkiBase64url ?? '') ||
+    payload.faultValidationPolicy?.schemaVersion !== 1 ||
+    !HEX_32.test(payload.faultValidationPolicy?.validatorSha256 ?? '') ||
+    !Array.isArray(payload.faultValidationPolicy?.phases) ||
+    payload.faultValidationPolicy.phases.length !== 10 ||
     acceptancePayload?.schemaVersion !== 1 ||
     acceptancePayload?.installerSha256 !== candidate.installer.sha256 ||
     acceptancePayload?.electronSha256 !== candidate.electron.sha256 ||
@@ -49,6 +55,10 @@ export async function verifyAcceptancePreflight(input) {
   ) {
     throw new Error('Acceptance build manifest binding is invalid');
   }
+  const validationKey = readP256PublicKey(
+    payload.validationPublicKeySpkiBase64url,
+    'fault validation public key',
+  );
   const requestKey = readP256PublicKey(
     payload.requestPublicKeySpkiBase64url,
     'acceptance request public key',
@@ -78,6 +88,13 @@ export async function verifyAcceptancePreflight(input) {
     manifestBuildId: payload.buildId,
     requestCount: sequence.requests.length,
     signaturesVerified: sequence.requests.length + 1,
+    manifestSignatureVerified: true,
+    requestSignaturesVerified: sequence.requests.length,
+    validationKeySha256: createHash('sha256')
+      .update(validationKey.export({ format: 'der', type: 'spki' }))
+      .digest('hex'),
+    faultRecordsVerified: plan.acceptance.faultValidation?.recordsVerified ?? 0,
+    faultChainHeadSha256: plan.acceptance.faultValidation?.chainHeadSha256 ?? null,
     reservedNonceCount,
   });
 }

@@ -65,71 +65,80 @@ describe('Windows installed-acceptance kit', () => {
   });
 
   it('passes only the protected key path and payload to the minimal native signer', () => {
-    const spawnProcess = vi.fn((...arguments_: unknown[]) => {
-      const options = arguments_[2] as { input: Buffer };
-      const request = JSON.parse(options.input.toString('utf8')) as {
-        correlation: string;
-        signerBytes: number;
-        signerSha256: string;
-      };
-      return {
-        status: 0,
-        stderr: '',
-        stdout: `${JSON.stringify({
-          version: 1,
-          correlation: request.correlation,
-          result: 'passed',
-          signerSha256: createHash('sha256')
-            .update(readFileSync('scripts/windows-installed-acceptance-signer.mjs'))
-            .digest('hex'),
-          signerBytes: request.signerBytes,
-          retainedIdentityMatches: true,
-          processIdentityMatches: true,
-          processHashMatches: true,
-          parentIdentityMatches: true,
-          creationIdentityMatches: true,
-          signatureHex: '11'.repeat(64),
-          publicKeySec1Hex: `04${'22'.repeat(64)}`,
-        })}\n`,
-      };
-    });
+    const launchProcess = vi.fn(
+      (options: { input: Buffer; child: { path: string; sha256: string; bytes: number } }) => {
+        const request = JSON.parse(options.input.toString('utf8')) as {
+          correlation: string;
+          signerBytes: number;
+          signerSha256: string;
+        };
+        return {
+          status: 0,
+          stderr: '',
+          stdout: `${JSON.stringify({
+            version: 1,
+            correlation: request.correlation,
+            result: 'passed',
+            signerSha256: createHash('sha256')
+              .update(readFileSync('scripts/windows-installed-acceptance-signer.mjs'))
+              .digest('hex'),
+            signerBytes: request.signerBytes,
+            retainedIdentityMatches: true,
+            processIdentityMatches: true,
+            processHashMatches: true,
+            parentIdentityMatches: true,
+            creationIdentityMatches: true,
+            signatureHex: '11'.repeat(64),
+            publicKeySec1Hex: `04${'22'.repeat(64)}`,
+          })}\n`,
+        };
+      },
+    );
     const payloadBytes = Buffer.from('fixed canonical payload');
     const signerPath = 'scripts/windows-installed-acceptance-signer.mjs';
     const signerSha256 = createHash('sha256').update(readFileSync(signerPath)).digest('hex');
+    const signerBytes = readFileSync(signerPath).length;
+    const identity = { path: signerPath, sha256: signerSha256, bytes: signerBytes };
     const result = signAcceptancePayload({
       signerPath,
       signerSha256,
+      signerBytes,
       brokerPath: signerPath,
+      brokerSha256: signerSha256,
+      brokerBytes: signerBytes,
+      bootstrapIdentity: identity,
       privateKeyPath: 'tmp/protected-request-key.der',
       payloadBytes,
-      spawnProcess,
+      launchProcess,
     });
     expect(result.signatureBase64url).toBe(
       Buffer.from('11'.repeat(64), 'hex').toString('base64url'),
     );
-    const call = spawnProcess.mock.calls[0];
+    const call = launchProcess.mock.calls[0];
     if (call === undefined) throw new Error('Native signer was not spawned');
-    const arguments_ = call[1] as string[];
-    const options = call[2] as { input: Buffer; env: Record<string, string> };
-    expect(arguments_).toEqual([]);
+    const options = call[0];
     const request = JSON.parse(options.input.toString('utf8')) as Record<string, unknown>;
     expect(request.operation).toBe('sign');
     expect(typeof request.privateKeyPath).toBe('string');
     expect(String(request.privateKeyPath)).toMatch(/protected-request-key\.der$/u);
     expect(request.payloadHex).toBe(payloadBytes.toString('hex'));
-    expect(options.env).not.toHaveProperty('PATH');
+    expect(options.child).toEqual({ ...identity, path: resolve(identity.path) });
     expect(JSON.stringify(options)).not.toContain('private-key-material');
     expect(() =>
       signAcceptancePayload({
         signerPath,
         signerSha256: '00'.repeat(32),
+        signerBytes,
         brokerPath: signerPath,
+        brokerSha256: signerSha256,
+        brokerBytes: signerBytes,
+        bootstrapIdentity: identity,
         privateKeyPath: 'tmp/protected-request-key.der',
         payloadBytes,
-        spawnProcess,
+        launchProcess,
       }),
     ).toThrow('broker result is invalid');
-    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    expect(launchProcess).toHaveBeenCalledTimes(2);
   });
 
   it('builds and verifies a fixture kit with independent shared artifact entries', async () => {
@@ -148,6 +157,8 @@ describe('Windows installed-acceptance kit', () => {
     const validationEvidencePath = resolve(inputs, 'validation.json');
     const syntheticSenderPath = resolve(inputs, 'synthetic-sender.exe');
     const acceptanceBrokerPath = resolve(inputs, 'acceptance-broker.exe');
+    const signerFixturePath = resolve(inputs, 'signer.exe');
+    const acceptanceBootstrapPath = resolve(inputs, 'acceptance-bootstrap.exe');
     const trustedLauncherPath = resolve(inputs, 'trusted-launcher.exe');
     await Promise.all([
       writeFile(installerPath, installerBytes),
@@ -156,6 +167,8 @@ describe('Windows installed-acceptance kit', () => {
       writeFile(validationEvidencePath, '{}\n'),
       writeFile(syntheticSenderPath, 'sender'),
       writeFile(acceptanceBrokerPath, 'broker'),
+      writeFile(signerFixturePath, 'signer'),
+      writeFile(acceptanceBootstrapPath, 'bootstrap'),
       writeFile(trustedLauncherPath, 'launcher'),
     ]);
     const artifact = () => ({
@@ -207,6 +220,7 @@ describe('Windows installed-acceptance kit', () => {
         buildManifestPath: resolve(unpackedRoot, 'resources/acceptance-manifest.json'),
         syntheticSenderPath,
         acceptanceBrokerPath,
+        acceptanceBootstrapPath,
         trustedLauncherPath,
       },
     };
@@ -231,7 +245,7 @@ describe('Windows installed-acceptance kit', () => {
         sourceRoot: fixtureRoot,
         configPath,
         requestPrivateKeyPath: resolve(inputs, 'request-key.der'),
-        signerPath: resolve(inputs, 'signer.exe'),
+        signerPath: signerFixturePath,
         signerSha256: '34'.repeat(32),
         outputRoot,
         bundlePath,
@@ -255,6 +269,7 @@ describe('Windows installed-acceptance kit', () => {
           }),
         validateAcceptanceRunSequence: () => ({ requests: [] }),
         verifyAcceptancePreflight: () => Promise.resolve({ result: 'passed' }),
+        protectNativeExecutionDirectory: () => undefined,
       },
     );
     expect(result.bundlePath).toBe(bundlePath);

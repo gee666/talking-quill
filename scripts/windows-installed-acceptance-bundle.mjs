@@ -363,6 +363,8 @@ function verifyEvidenceReferences(evidence, declarations) {
     'buildManifestPath',
     'signedRequestsPath',
     'syntheticSenderPath',
+    'acceptanceBrokerPath',
+    'acceptanceBootstrapPath',
     'trustedLauncherPath',
   ]) {
     requireDeclared(evidence.acceptance?.[field], declarations);

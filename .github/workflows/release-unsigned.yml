@@ -11,6 +11,10 @@ on:
         description: GitHub run ID that produced signed real-reboot ARM64 evidence
         required: true
         type: string
+      installed_acceptance_x64_run_id:
+        description: Successful protected installed-acceptance x64 workflow run ID
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -558,6 +562,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REBOOT_EVIDENCE_X64_RUN_ID: ${{ inputs.reboot_evidence_x64_run_id }}
           REBOOT_EVIDENCE_ARM64_RUN_ID: ${{ inputs.reboot_evidence_arm64_run_id }}
+          INSTALLED_ACCEPTANCE_X64_RUN_ID: ${{ inputs.installed_acceptance_x64_run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -580,6 +585,18 @@ jobs:
             NODE
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
+          acceptance_run_id="$INSTALLED_ACCEPTANCE_X64_RUN_ID"
+          echo "$acceptance_run_id" | grep -Eq '^[1-9][0-9]*$' || { echo 'Installed acceptance run ID is invalid.' >&2; exit 1; }
+          run_json="$(gh api "repos/${{ github.repository }}/actions/runs/$acceptance_run_id")"
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .head_sha <<<"$run_json")" = '${{ needs.validate.outputs.release_commit }}'
+          test "$(jq -r .path <<<"$run_json")" = '.github/workflows/windows-installed-acceptance.yml'
+          mkdir -p installed-acceptance-x64
+          gh run download "$acceptance_run_id" --repo '${{ github.repository }}' --name windows-x64-installed-acceptance-gate --dir installed-acceptance-x64
+          acceptance_bundle_sha="$(node -p "JSON.parse(require('fs').readFileSync('installed-acceptance-x64/gate-result.json','utf8')).bundleSha256")"
+          echo "$acceptance_bundle_sha" | grep -Eq '^[0-9a-f]{64}$'
+          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence installed-acceptance-x64/evidence.json --producer-result installed-acceptance-x64/producer-e2e-result.json --output release-artifacts/windows-installed-acceptance-x64-gate.json --architecture x64 --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --bundle-sha256 "$acceptance_bundle_sha" --run-id "$acceptance_run_id"
+          cmp installed-acceptance-x64/gate-result.json release-artifacts/windows-installed-acceptance-x64-gate.json
           for arch in x64 arm64; do
             run_id="$REBOOT_EVIDENCE_X64_RUN_ID"
             if [ "$arch" = arm64 ]; then run_id="$REBOOT_EVIDENCE_ARM64_RUN_ID"; fi
@@ -588,7 +605,7 @@ jobs:
             gh run download "$run_id" --repo '${{ github.repository }}' --name "windows-$arch-signed-real-reboot-evidence" --dir "reboot-evidence-$arch"
             cp "reboot-evidence-$arch/windows-reboot-acceptance-$arch.json" release-artifacts/
           done
-          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --reboot-x64-run-id "$REBOOT_EVIDENCE_X64_RUN_ID" --reboot-arm64-run-id "$REBOOT_EVIDENCE_ARM64_RUN_ID" --public-key build/windows-promotion-public-key.sec1 --update-public-key build/windows-update-public-key.sec1
+          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --reboot-x64-run-id "$REBOOT_EVIDENCE_X64_RUN_ID" --reboot-arm64-run-id "$REBOOT_EVIDENCE_ARM64_RUN_ID" --installed-acceptance-run-id "$INSTALLED_ACCEPTANCE_X64_RUN_ID" --public-key build/windows-promotion-public-key.sec1 --update-public-key build/windows-update-public-key.sec1
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
           if find release-artifacts -type f -name '*terminalAcceptance*' | grep -q .; then echo 'Nonpromotable terminal acceptance setup entered release assembly.' >&2; exit 1; fi

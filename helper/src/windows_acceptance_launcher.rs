@@ -6,12 +6,13 @@ use std::io::BufRead;
 use std::time::Duration;
 
 const MODE: &str = "--windows-installed-acceptance-launch-v1";
+const VERIFIED_CHILD_MODE: &str = "--windows-installed-acceptance-verified-child-v1";
 const PROCESS_GUARD_MODE: &str = "--windows-installed-acceptance-process-guard-v1";
 const BROKER_MODE: &str = "--windows-installed-acceptance-broker-v1";
 const MAX_ARGUMENTS: usize = 32;
 const MAX_BROKER_FRAME_BYTES: u64 = 16 * 1024;
 const MAX_ARGUMENT_UNITS: usize = 32_768;
-const MAX_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
+const MAX_TIMEOUT_MS: u32 = 80 * 60 * 1_000;
 const EXIT_USAGE: i32 = 64;
 const EXIT_MISMATCH: i32 = 78;
 const EXIT_LAUNCH: i32 = 79;
@@ -44,6 +45,7 @@ trait LauncherNative {
         &mut self,
         path: &std::path::Path,
         arguments: &[OsString],
+        inherit_standard_handles: bool,
     ) -> Result<Self::Suspended, ()>;
     fn snapshot_process_image(&mut self, process: &Self::Suspended) -> Result<FileSnapshot, ()>;
     fn resume_and_wait(
@@ -148,6 +150,7 @@ struct Request {
     timeout_ms: u32,
     accepted_exit_codes: Vec<i32>,
     installer_arguments: Vec<OsString>,
+    inherit_standard_handles: bool,
 }
 
 #[derive(Serialize)]
@@ -205,18 +208,55 @@ pub fn run(arguments: &[OsString]) -> i32 {
     if arguments.first().and_then(|value| value.to_str()) == Some(PROCESS_GUARD_MODE) {
         return run_process_guard(arguments);
     }
-    let request = match parse(arguments) {
+    let verified_self =
+        arguments.first().and_then(|value| value.to_str()) == Some(VERIFIED_CHILD_MODE);
+    let parsed_arguments;
+    let request_arguments = if verified_self {
+        if arguments.len() < 9 {
+            emit(&Evidence::failure("invalid_request"));
+            return EXIT_USAGE;
+        }
+        let Some(expected_self_sha256) = arguments[1].to_str().and_then(decode_hash) else {
+            emit(&Evidence::failure("invalid_request"));
+            return EXIT_USAGE;
+        };
+        let Ok(expected_self_bytes) = arguments[2]
+            .to_str()
+            .ok_or(())
+            .and_then(|value| value.parse::<u64>().map_err(|_| ()))
+        else {
+            emit(&Evidence::failure("invalid_request"));
+            return EXIT_USAGE;
+        };
+        #[cfg(windows)]
+        if native::verify_self(expected_self_sha256, expected_self_bytes).is_err() {
+            emit(&Evidence::failure("bootstrap_identity_mismatch"));
+            return EXIT_MISMATCH;
+        }
+        #[cfg(not(windows))]
+        let _ = (expected_self_sha256, expected_self_bytes);
+        parsed_arguments = std::iter::once(OsString::from(MODE))
+            .chain(arguments[3..].iter().cloned())
+            .collect::<Vec<_>>();
+        &parsed_arguments
+    } else {
+        arguments
+    };
+    let mut request = match parse(request_arguments) {
         Ok(request) => request,
         Err(()) => {
             emit(&Evidence::failure("invalid_request"));
             return EXIT_USAGE;
         }
     };
+    request.inherit_standard_handles = verified_self;
     #[cfg(windows)]
     {
         let mut native = native::WindowsNative;
         let (code, evidence) = execute(&mut native, &request);
-        emit(&evidence);
+        if !verified_self {
+            emit(&evidence);
+        }
         code
     }
     #[cfg(not(windows))]
@@ -524,7 +564,11 @@ fn execute<N: LauncherNative>(native: &mut N, request: &Request) -> (i32, Eviden
             evidence_with_reason(evidence, "expected_identity_mismatch"),
         );
     }
-    let mut process = match native.create_suspended(&request.path, &request.installer_arguments) {
+    let mut process = match native.create_suspended(
+        &request.path,
+        &request.installer_arguments,
+        request.inherit_standard_handles,
+    ) {
         Ok(value) => value,
         Err(()) => return (EXIT_LAUNCH, evidence),
     };
@@ -667,6 +711,7 @@ fn parse(arguments: &[OsString]) -> Result<Request, ()> {
         timeout_ms,
         accepted_exit_codes,
         installer_arguments,
+        inherit_standard_handles: false,
     })
 }
 
@@ -718,21 +763,51 @@ mod native {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
-    use windows_sys::Win32::Foundation::{FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Foundation::{
+        FILETIME, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ, GetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ,
+        GetFileInformationByHandle,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess, GetProcessId, GetProcessTimes,
-        OpenProcess, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-        QueryFullProcessImageNameW, ResumeThread, STARTUPINFOW, TerminateProcess,
-        WaitForMultipleObjects, WaitForSingleObject,
+        CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessId, GetProcessTimes,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, QueryFullProcessImageNameW, ResumeThread, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects,
+        WaitForSingleObject,
     };
 
     pub struct WindowsNative;
+    pub struct Retained {
+        file: File,
+        _parent: File,
+    }
     pub struct Suspended {
         process: OwnedHandle,
         thread: OwnedHandle,
+        _job: Option<OwnedHandle>,
+    }
+
+    pub fn verify_self(expected_sha256: [u8; 32], expected_bytes: u64) -> Result<(), ()> {
+        let current = std::env::current_exe().map_err(|_| ())?;
+        let mut retained = open_locked(&current)?;
+        let observed = snapshot(&mut retained)?;
+        if observed.sha256 == expected_sha256 && observed.bytes == expected_bytes {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     pub fn run_broker(expected_sha256: [u8; 32], expected_bytes: u64) -> i32 {
@@ -854,47 +929,125 @@ mod native {
     }
 
     impl LauncherNative for WindowsNative {
-        type Retained = File;
+        type Retained = Retained;
         type Suspended = Suspended;
 
-        fn open_retained(&mut self, path: &Path) -> Result<File, ()> {
-            open_locked(path)
+        fn open_retained(&mut self, path: &Path) -> Result<Retained, ()> {
+            let parent = path.parent().ok_or(())?;
+            Ok(Retained {
+                file: open_locked(path)?,
+                _parent: open_locked_directory(parent)?,
+            })
         }
-        fn snapshot_retained(&mut self, retained: &mut File) -> Result<FileSnapshot, ()> {
-            snapshot(retained)
+        fn snapshot_retained(&mut self, retained: &mut Retained) -> Result<FileSnapshot, ()> {
+            snapshot(&mut retained.file)
         }
         fn create_suspended(
             &mut self,
             path: &Path,
             arguments: &[std::ffi::OsString],
+            inherit_standard_handles: bool,
         ) -> Result<Suspended, ()> {
             let mut application = wide_nul(path.as_os_str())?;
             let mut command = command_line(path, arguments)?;
-            let startup = STARTUPINFOW {
-                cb: size_of::<STARTUPINFOW>() as u32,
-                ..unsafe { std::mem::zeroed() }
-            };
             let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-            if unsafe {
-                CreateProcessW(
-                    application.as_mut_ptr(),
-                    command.as_mut_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    CREATE_SUSPENDED,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    &startup,
-                    &mut info,
-                )
-            } == 0
-            {
-                return Err(());
+            if inherit_standard_handles {
+                let inherited = unsafe {
+                    [
+                        GetStdHandle(STD_INPUT_HANDLE),
+                        GetStdHandle(STD_OUTPUT_HANDLE),
+                        GetStdHandle(STD_ERROR_HANDLE),
+                    ]
+                };
+                if inherited
+                    .iter()
+                    .any(|handle| handle.is_null() || *handle as isize == -1)
+                {
+                    return Err(());
+                }
+                let _seal = HandleInheritanceSeal(inherited);
+                for handle in inherited {
+                    if unsafe {
+                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+                    } == 0
+                    {
+                        return Err(());
+                    }
+                }
+                let (_attribute_storage, attributes) = inherited_handle_list(&inherited)?;
+                let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+                startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                startup.StartupInfo.hStdInput = inherited[0];
+                startup.StartupInfo.hStdOutput = inherited[1];
+                startup.StartupInfo.hStdError = inherited[2];
+                startup.lpAttributeList = attributes.0;
+                if unsafe {
+                    CreateProcessW(
+                        application.as_mut_ptr(),
+                        command.as_mut_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        1,
+                        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        &startup.StartupInfo,
+                        &mut info,
+                    )
+                } == 0
+                {
+                    return Err(());
+                }
+            } else {
+                let startup = windows_sys::Win32::System::Threading::STARTUPINFOW {
+                    cb: size_of::<windows_sys::Win32::System::Threading::STARTUPINFOW>() as u32,
+                    ..unsafe { std::mem::zeroed() }
+                };
+                if unsafe {
+                    CreateProcessW(
+                        application.as_mut_ptr(),
+                        command.as_mut_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                        CREATE_SUSPENDED,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        &startup,
+                        &mut info,
+                    )
+                } == 0
+                {
+                    return Err(());
+                }
             }
+            let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+            let thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+            let job = if inherit_standard_handles {
+                let job = match kill_on_close_job() {
+                    Ok(job) => job,
+                    Err(()) => {
+                        unsafe {
+                            TerminateProcess(process.as_raw_handle(), super::EXIT_LAUNCH as u32)
+                        };
+                        return Err(());
+                    }
+                };
+                if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process.as_raw_handle()) }
+                    == 0
+                {
+                    unsafe { TerminateProcess(process.as_raw_handle(), super::EXIT_LAUNCH as u32) };
+                    return Err(());
+                }
+                Some(job)
+            } else {
+                None
+            };
             Ok(Suspended {
-                process: unsafe { OwnedHandle::from_raw_handle(info.hProcess) },
-                thread: unsafe { OwnedHandle::from_raw_handle(info.hThread) },
+                process,
+                thread,
+                _job: job,
             })
         }
         fn snapshot_process_image(&mut self, process: &Suspended) -> Result<FileSnapshot, ()> {
@@ -952,6 +1105,70 @@ mod native {
         }
     }
 
+    fn kill_on_close_job() -> Result<OwnedHandle, ()> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(());
+        }
+        let job = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(());
+        }
+        Ok(job)
+    }
+
+    struct HandleInheritanceSeal([HANDLE; 3]);
+    impl Drop for HandleInheritanceSeal {
+        fn drop(&mut self) {
+            for handle in self.0 {
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+            }
+        }
+    }
+
+    struct AttributeList(LPPROC_THREAD_ATTRIBUTE_LIST);
+    impl Drop for AttributeList {
+        fn drop(&mut self) {
+            unsafe { DeleteProcThreadAttributeList(self.0) };
+        }
+    }
+
+    fn inherited_handle_list(handles: &[HANDLE]) -> Result<(Vec<u8>, AttributeList), ()> {
+        let mut bytes = 0;
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut bytes) };
+        if bytes == 0 {
+            return Err(());
+        }
+        let mut storage = vec![0u8; bytes];
+        let list = storage.as_mut_ptr().cast();
+        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut bytes) } == 0
+            || unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    handles.as_ptr().cast_mut().cast(),
+                    std::mem::size_of_val(handles),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } == 0
+        {
+            return Err(());
+        }
+        Ok((storage, AttributeList(list)))
+    }
+
     const SYNCHRONIZE: u32 = 0x0010_0000;
 
     fn open_process(pid: u32, access: u32) -> Result<OwnedHandle, ()> {
@@ -964,9 +1181,11 @@ mod native {
     }
 
     fn open_locked(path: &Path) -> Result<File, ()> {
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         let file = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .map_err(|_| ())?;
         if !file.metadata().map_err(|_| ())?.is_file() {
@@ -974,9 +1193,33 @@ mod native {
         }
         Ok(file)
     }
+
+    fn open_locked_directory(path: &Path) -> Result<File, ()> {
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|_| ())?;
+        if !file.metadata().map_err(|_| ())?.is_dir() {
+            return Err(());
+        }
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
+            || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(());
+        }
+        Ok(file)
+    }
     fn snapshot(file: &mut File) -> Result<FileSnapshot, ()> {
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
+            || info.nNumberOfLinks != 1
+            || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
             return Err(());
         }
         file.seek(SeekFrom::Start(0)).map_err(|_| ())?;
@@ -1053,6 +1296,7 @@ mod tests {
         image: Option<FileSnapshot>,
         terminated: bool,
         resumed: bool,
+        inherited_standard_handles: bool,
     }
     impl LauncherNative for Fake {
         type Retained = ();
@@ -1067,7 +1311,13 @@ mod tests {
                 self.retained.first().cloned().ok_or(())
             }
         }
-        fn create_suspended(&mut self, _: &std::path::Path, _: &[OsString]) -> Result<(), ()> {
+        fn create_suspended(
+            &mut self,
+            _: &std::path::Path,
+            _: &[OsString],
+            inherit_standard_handles: bool,
+        ) -> Result<(), ()> {
+            self.inherited_standard_handles = inherit_standard_handles;
             Ok(())
         }
         fn snapshot_process_image(&mut self, _: &()) -> Result<FileSnapshot, ()> {
@@ -1100,6 +1350,7 @@ mod tests {
             timeout_ms: 1000,
             accepted_exit_codes: vec![0],
             installer_arguments: vec![],
+            inherit_standard_handles: false,
         }
     }
 
@@ -1114,7 +1365,23 @@ mod tests {
         assert_eq!(execute(&mut fake, &request()).0, 0);
         assert!(fake.resumed);
         assert!(!fake.terminated);
+        assert!(!fake.inherited_standard_handles);
     }
+
+    #[test]
+    fn bootstrap_transport_is_the_only_launch_that_inherits_standard_handles() {
+        let expected = snap(2, 4);
+        let mut fake = Fake {
+            retained: vec![expected.clone()],
+            image: Some(expected),
+            ..Fake::default()
+        };
+        let mut request = request();
+        request.inherit_standard_handles = true;
+        assert_eq!(execute(&mut fake, &request).0, 0);
+        assert!(fake.inherited_standard_handles);
+    }
+
     #[test]
     fn replacement_race_terminates_without_resuming() {
         let expected = snap(2, 4);
@@ -1249,7 +1516,12 @@ mod tests {
         fn snapshot_retained(&mut self, _: &mut ()) -> Result<FileSnapshot, ()> {
             Err(())
         }
-        fn create_suspended(&mut self, _: &std::path::Path, _: &[OsString]) -> Result<(), ()> {
+        fn create_suspended(
+            &mut self,
+            _: &std::path::Path,
+            _: &[OsString],
+            _: bool,
+        ) -> Result<(), ()> {
             Err(())
         }
         fn snapshot_process_image(&mut self, _: &()) -> Result<FileSnapshot, ()> {

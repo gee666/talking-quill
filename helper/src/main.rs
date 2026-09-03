@@ -8,6 +8,7 @@ fn main() {
     #[cfg(all(windows, feature = "windows-installed-acceptance"))]
     if os_arguments.get(1).is_some_and(|value| {
         value == "--windows-installed-acceptance-launch-v1"
+            || value == "--windows-installed-acceptance-verified-child-v1"
             || value == "--windows-installed-acceptance-process-guard-v1"
             || value == "--windows-installed-acceptance-broker-v1"
     }) {

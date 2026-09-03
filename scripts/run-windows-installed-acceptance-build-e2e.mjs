@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, readFile, readdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { lstat, readFile, readdir, rm } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { buildWindowsInstalledAcceptanceInputs } from './build-windows-installed-acceptance-inputs.mjs';
 import { verifyAcceptanceBundleArchive } from './windows-installed-acceptance-bundle.mjs';
 import { MAX_ACCEPTANCE_RUN_MS } from './windows-installed-acceptance.mjs';
@@ -42,6 +42,10 @@ if (result.kit === null || typeof result.kit.bundlePath !== 'string') {
   throw new Error('Installed-acceptance E2E did not produce a bundle');
 }
 await verifyAcceptanceBundleArchive(result.kit.bundlePath, { architecture: 'x64' });
+await rm(dirname(result.config.acceptance.acceptanceBootstrapPath), {
+  recursive: true,
+  force: false,
+});
 const after = await Promise.all(roots.map(treeHash));
 if (JSON.stringify(before) !== JSON.stringify(after)) {
   throw new Error('Installed-acceptance build E2E changed production machine state');

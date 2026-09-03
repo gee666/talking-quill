@@ -1,10 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
+import { launchVerifiedChildSync } from './windows-verified-child-launcher.mjs';
 
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/u;
 const HEX_SEC1 = /^04[0-9a-f]{128}$/u;
@@ -15,59 +13,50 @@ export function signAcceptancePayload({
   privateKeyPath,
   payloadBytes,
   signerSha256,
+  signerBytes,
   signerSourceCommit,
   signerSourceTree,
   brokerPath = resolve(dirname(signerPath), 'talking-quill-windows-acceptance-broker.exe'),
   brokerSha256,
-  spawnProcess = spawnSync,
+  brokerBytes,
+  bootstrapIdentity,
+  launchProcess = launchVerifiedChildSync,
 }) {
   if (
     !Buffer.isBuffer(payloadBytes) ||
     payloadBytes.length === 0 ||
     payloadBytes.length > 64 * 1024 ||
-    !HEX_SHA256.test(signerSha256 ?? '')
+    !HEX_SHA256.test(signerSha256 ?? '') ||
+    !Number.isSafeInteger(signerBytes) ||
+    signerBytes <= 0 ||
+    !HEX_SHA256.test(brokerSha256 ?? '') ||
+    !Number.isSafeInteger(brokerBytes) ||
+    brokerBytes <= 0
   ) {
     throw new Error('Acceptance signing request is invalid');
   }
   const absoluteBroker = resolve(brokerPath);
   const absoluteSigner = resolve(signerPath);
-  const brokerMetadata = lstatSync(absoluteBroker);
-  const brokerBytes = readFileSync(absoluteBroker);
-  const observedBrokerSha256 = createHash('sha256').update(brokerBytes).digest('hex');
-  if (
-    !brokerMetadata.isFile() ||
-    brokerMetadata.isSymbolicLink() ||
-    brokerMetadata.nlink !== 1 ||
-    brokerMetadata.size !== brokerBytes.length ||
-    (brokerSha256 !== undefined && brokerSha256 !== observedBrokerSha256)
-  ) {
-    throw new Error('Native acceptance broker identity is invalid');
-  }
   const correlation = randomBytes(16).toString('hex');
   const request = {
     version: 1,
     operation: 'sign',
     correlation,
-    brokerSha256: observedBrokerSha256,
-    brokerBytes: brokerBytes.length,
+    brokerSha256,
+    brokerBytes,
     signerPath: absoluteSigner,
     signerSha256,
-    signerBytes: lstatSync(absoluteSigner).size,
+    signerBytes,
     privateKeyPath: resolve(privateKeyPath),
     payloadHex: payloadBytes.toString('hex'),
     ...(signerSourceCommit === undefined ? {} : { sourceCommit: signerSourceCommit }),
     ...(signerSourceTree === undefined ? {} : { sourceTree: signerSourceTree }),
   };
-  const result = spawnProcess(absoluteBroker, [], {
-    cwd: resolve('.'),
-    env: sanitizedSubprocessEnvironment({
-      SystemRoot: process.env.SystemRoot,
-      WINDIR: process.env.WINDIR,
-    }),
+  const result = launchProcess({
+    bootstrap: bootstrapIdentity,
+    child: { path: absoluteBroker, sha256: brokerSha256, bytes: brokerBytes },
+    timeoutMs: 12_000,
     input: Buffer.from(`${canonicalAcceptanceJson(request)}\n`),
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 12_000,
     maxBuffer: 4 * 1024,
   });
   if (

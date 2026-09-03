@@ -54,6 +54,23 @@ function fixture(overrides: Partial<AcceptanceRunRequestPayload> = {}) {
     gatewaySha256: '99'.repeat(32),
     ownerSha256: 'aa'.repeat(32),
     requestPublicKeySpkiBase64url: publicKeyBase64url(requestKeys.publicKey),
+    validationPublicKeySpkiBase64url: publicKeyBase64url(requestKeys.publicKey),
+    faultValidationPolicy: {
+      schemaVersion: 1,
+      phases: [
+        'staged',
+        'prepared',
+        'predecessorMoved',
+        'publishing',
+        'publishedBeforePersist',
+        'published',
+        'registered',
+        'committed',
+        'legacyRetiring',
+        'legacyRetired',
+      ],
+      validatorSha256: 'ab'.repeat(32),
+    },
     validFromMs: NOW - 60_000,
     validUntilMs: NOW + 81 * 60_000,
   };

@@ -128,11 +128,16 @@ async function writeWindowsAcceptanceManifest(context, executable) {
   }
   const requestPublicKeySpkiBase64url =
     process.env.TALKING_QUILL_ACCEPTANCE_REQUEST_PUBLIC_KEY_SPKI_BASE64URL ?? '';
+  const validationPublicKeySpkiBase64url =
+    process.env.TALKING_QUILL_ACCEPTANCE_VALIDATION_PUBLIC_KEY_SPKI_BASE64URL ?? '';
+  const faultValidatorSha256 = process.env.TALKING_QUILL_ACCEPTANCE_FAULT_VALIDATOR_SHA256 ?? '';
   const buildId = process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID ?? '';
   const validFromMs = Number(process.env.TALKING_QUILL_ACCEPTANCE_VALID_FROM_MS);
   const validUntilMs = Number(process.env.TALKING_QUILL_ACCEPTANCE_VALID_UNTIL_MS);
   if (
     !/^[A-Za-z0-9_-]+$/u.test(requestPublicKeySpkiBase64url) ||
+    !/^[A-Za-z0-9_-]+$/u.test(validationPublicKeySpkiBase64url) ||
+    !/^[0-9a-f]{64}$/u.test(faultValidatorSha256) ||
     !/^[0-9a-f]{64}$/u.test(buildId) ||
     !Number.isSafeInteger(validFromMs) ||
     !Number.isSafeInteger(validUntilMs)
@@ -166,6 +171,23 @@ async function writeWindowsAcceptanceManifest(context, executable) {
     gatewaySha256: hash(await readFile(join(context.appOutDir, gateway.path))),
     ownerSha256: hash(await readFile(join(context.appOutDir, owner.path))),
     requestPublicKeySpkiBase64url,
+    validationPublicKeySpkiBase64url,
+    faultValidationPolicy: {
+      schemaVersion: 1,
+      phases: [
+        'staged',
+        'prepared',
+        'predecessorMoved',
+        'publishing',
+        'publishedBeforePersist',
+        'published',
+        'registered',
+        'committed',
+        'legacyRetiring',
+        'legacyRetired',
+      ],
+      validatorSha256: faultValidatorSha256,
+    },
     validFromMs,
     validUntilMs,
   };

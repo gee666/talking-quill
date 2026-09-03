@@ -19,6 +19,9 @@ use windows_sys::Win32::System::Threading::{
 pub const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
 pub const PIPE_OPEN_MODE: u32 = windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX
     | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
+pub const PIPE_OUTBOUND_OPEN_MODE: u32 =
+    windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_OUTBOUND
+        | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
 pub const PIPE_MODE: u32 = windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE
     | windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE
     | windows_sys::Win32::System::Pipes::PIPE_WAIT
@@ -106,6 +109,25 @@ pub fn create_server_instance(
     security: &EndpointSecurity,
     first: bool,
 ) -> Result<OwnedHandle, EndpointError> {
+    create_server_instance_with_mode(name, security, first, PIPE_OPEN_MODE)
+}
+
+/// Creates a server-to-client startup channel. The handle is non-inheritable and
+/// the first-instance flag prevents an attacker from pre-creating the endpoint.
+pub fn create_outbound_server_instance(
+    name: &str,
+    security: &EndpointSecurity,
+    first: bool,
+) -> Result<OwnedHandle, EndpointError> {
+    create_server_instance_with_mode(name, security, first, PIPE_OUTBOUND_OPEN_MODE)
+}
+
+fn create_server_instance_with_mode(
+    name: &str,
+    security: &EndpointSecurity,
+    first: bool,
+    open_mode: u32,
+) -> Result<OwnedHandle, EndpointError> {
     let name: Vec<u16> = std::ffi::OsStr::new(name)
         .encode_wide()
         .chain([0])
@@ -118,7 +140,7 @@ pub fn create_server_instance(
     let handle = unsafe {
         windows_sys::Win32::System::Pipes::CreateNamedPipeW(
             name.as_ptr(),
-            PIPE_OPEN_MODE | first_flag,
+            open_mode | first_flag,
             PIPE_MODE,
             4,
             PIPE_BUFFER_SIZE,
@@ -222,6 +244,25 @@ mod tests {
         assert!(create_server_instance(&name, &security, true).is_err());
         drop(first);
         assert!(create_server_instance(&name, &security, true).is_ok());
+    }
+
+    #[test]
+    fn outbound_startup_pipe_is_first_instance_and_non_inheritable() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+        let name = format!(
+            r"\\.\pipe\TalkingQuill.AcceptanceStartup.Test.{}",
+            std::process::id()
+        );
+        let security = EndpointSecurity::for_current_logon().unwrap();
+        let first = create_outbound_server_instance(&name, &security, true).unwrap();
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { GetHandleInformation(first.as_raw_handle(), &mut flags) },
+            0
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        assert!(create_outbound_server_instance(&name, &security, true).is_err());
     }
 
     #[test]

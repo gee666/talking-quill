@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { ACCEPTANCE_FAULT_PHASES } from './windows-installed-acceptance-schedule.mjs';
@@ -55,6 +56,15 @@ function runNativeStage(stage, options, context, outputs) {
             outputs['prepare-signing-identities'].manifestPublicKeySpkiBase64url,
           TALKING_QUILL_ACCEPTANCE_REQUEST_PUBLIC_KEY_SPKI_BASE64URL:
             outputs['prepare-signing-identities'].requestPublicKeySpkiBase64url,
+          TALKING_QUILL_ACCEPTANCE_VALIDATION_PUBLIC_KEY_SPKI_BASE64URL:
+            outputs['prepare-signing-identities'].validationPublicKeySpkiBase64url,
+          TALKING_QUILL_ACCEPTANCE_FAULT_VALIDATOR_SHA256: createHash('sha256')
+            .update(
+              readFileSync(
+                resolve(root, 'scripts/run-windows-installed-acceptance-fault-validation.mjs'),
+              ),
+            )
+            .digest('hex'),
         }),
     TALKING_QUILL_ACCEPTANCE_VALID_FROM_MS: String(context.runWindow.notBeforeMs - 60_000),
     TALKING_QUILL_ACCEPTANCE_VALID_UNTIL_MS: String(context.runWindow.expiresAtMs),
@@ -144,20 +154,20 @@ function nativeStageCommands(stage, options, context) {
     ];
   }
   if (stage === 'native-signer') {
+    const common = [
+      'build',
+      '--manifest-path',
+      'helper/Cargo.toml',
+      '--locked',
+      '--release',
+      '--target',
+      'x86_64-pc-windows-msvc',
+    ];
     return [
+      ['cargo.exe', [...common, '-p', 'talking-quill-acceptance-signer']],
       [
         'cargo.exe',
-        [
-          'build',
-          '--manifest-path',
-          'helper/Cargo.toml',
-          '--locked',
-          '--release',
-          '--target',
-          'x86_64-pc-windows-msvc',
-          '-p',
-          'talking-quill-acceptance-signer',
-        ],
+        [...common, '-p', 'talking-quill-helper', '--features', 'windows-installed-acceptance'],
       ],
     ];
   }

@@ -26,6 +26,21 @@ describe('installed-acceptance fault validation evidence', () => {
         installer: { sha256: hex(`fault-${faultPhase}`) },
         packageManifest: { treeSha256: hex(`tree-${faultPhase}`) },
       };
+      const measurement = {
+        schemaVersion: 1,
+        namespaceTreeSha256: hex(`namespace-tree-${String(sequence)}`),
+        namespace: {
+          files: [],
+          journals: [],
+          registry: [],
+          processes: [],
+          services: [],
+          tasks: [],
+          heldMutexes: [],
+        },
+        production: { files: {}, registry: [], processes: [], services: [], tasks: [] },
+      };
+      const faultAudit = { nonce: '33'.repeat(32), phase: faultPhase, processId: 100 + sequence };
       const payload = {
         schemaVersion: 1,
         purpose: 'talking-quill/installed-acceptance-fault-validation',
@@ -44,18 +59,25 @@ describe('installed-acceptance fault validation evidence', () => {
         namespaceIdSha256: hex(`namespace-${String(sequence)}`),
         machineIdentitySha256: hex('machine'),
         sessionIdentitySha256: hex('session'),
-        productionStateBeforeSha256: hex('production'),
-        productionStateAfterSha256: hex('production'),
-        isolatedStateBeforeSha256: hex(`before-${String(sequence)}`),
-        isolatedStateAfterSha256: hex(`after-${String(sequence)}`),
+        before: measurement,
+        faulted: {
+          ...measurement,
+          namespace: {
+            ...measurement.namespace,
+            files: [
+              {
+                path: '/fault-audit-v1.json',
+                bytes: 1,
+                sha256: hashBytes(Buffer.from(`${canonicalAcceptanceJson(faultAudit)}\n`)),
+              },
+            ],
+          },
+        },
+        recovered: measurement,
+        faultAudit,
+        faultAuditSha256: hashBytes(Buffer.from(`${canonicalAcceptanceJson(faultAudit)}\n`)),
         faultExitCode: 197,
         recoveryExitCode: 0,
-        failurePointObserved: faultPhase,
-        failureInjected: true,
-        recoveryCompleted: true,
-        zeroResidue: true,
-        productionStateUnchanged: true,
-        mixedAuthorityAbsent: true,
       };
       const signatureBase64url = sign('sha256', Buffer.from(canonicalAcceptanceJson(payload)), {
         key: keys.privateKey,
@@ -74,6 +96,8 @@ describe('installed-acceptance fault validation evidence', () => {
       sourceTree: '22'.repeat(20),
       publicKeySpkiBase64url,
       chainHeadSha256: previous,
+      validatorSha256: hex('validator'),
+      faultPhases: ACCEPTANCE_FAULT_PHASES,
     });
     expect(verified.chainHeadSha256).toBe(previous);
     const forged = records.map((record) => ({ ...record }));
@@ -90,6 +114,8 @@ describe('installed-acceptance fault validation evidence', () => {
         sourceCommit: '11'.repeat(20),
         sourceTree: '22'.repeat(20),
         publicKeySpkiBase64url,
+        validatorSha256: hex('validator'),
+        faultPhases: ACCEPTANCE_FAULT_PHASES,
       }),
     ).toThrow();
   });

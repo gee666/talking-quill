@@ -4125,6 +4125,31 @@ unsafe fn wide_ptr_string(pointer: *const u16) -> String {
 #[cfg(feature = "acceptance-faults")]
 fn crash_at(package: &ParsedPackage, phase: &str) {
     if package.manifest.fault_phase.as_deref() == Some(phase) {
+        let namespace = std::env::var("TQ_MACHINE_LOCK_TEST_NAMESPACE_ID")
+            .ok()
+            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let nonce = std::env::var("TQ_FAULT_AUDIT_NONCE")
+            .ok()
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if let (Some(namespace), Some(nonce)) = (namespace, nonce) {
+            let audit = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("tmp/machine-lock-tests/windows-setup")
+                .join(namespace)
+                .join("fault-audit-v1.json");
+            let record = format!(
+                "{{\"nonce\":\"{nonce}\",\"phase\":\"{phase}\",\"processId\":{}}}\n",
+                std::process::id()
+            );
+            let _ = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(audit)
+                .and_then(|mut file| {
+                    file.write_all(record.as_bytes())?;
+                    file.sync_all()
+                });
+        }
         std::process::exit(197);
     }
 }

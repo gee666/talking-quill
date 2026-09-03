@@ -12,6 +12,11 @@ export interface AcceptancePreflightInput {
     | undefined;
 }
 
+export function authenticateAcceptanceBuildManifest(
+  encoded: string,
+  publicKeySpkiBase64url: string,
+): Readonly<Record<string, any>>;
+
 export function verifyAcceptancePreflight(
   input: AcceptancePreflightInput,
 ): Promise<Readonly<Record<string, unknown>>>;

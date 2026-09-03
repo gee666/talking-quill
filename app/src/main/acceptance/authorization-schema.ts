@@ -33,6 +33,25 @@ export const AcceptanceBuildManifestPayloadSchema = z
     gatewaySha256: Hex32Schema,
     ownerSha256: Hex32Schema,
     requestPublicKeySpkiBase64url: Base64UrlSchema.max(256),
+    validationPublicKeySpkiBase64url: Base64UrlSchema.max(256),
+    faultValidationPolicy: z
+      .object({
+        schemaVersion: z.literal(1),
+        phases: z.tuple([
+          z.literal('staged'),
+          z.literal('prepared'),
+          z.literal('predecessorMoved'),
+          z.literal('publishing'),
+          z.literal('publishedBeforePersist'),
+          z.literal('published'),
+          z.literal('registered'),
+          z.literal('committed'),
+          z.literal('legacyRetiring'),
+          z.literal('legacyRetired'),
+        ]),
+        validatorSha256: Hex32Schema,
+      })
+      .strict(),
     validFromMs: z.number().int().nonnegative(),
     validUntilMs: z.number().int().positive(),
   })

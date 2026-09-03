@@ -18,6 +18,7 @@ import {
 import { bindTqpkg2OwnerManifest, parseTqpkg2 } from './tqpkg2.mjs';
 import { verifyFaultEvidenceChain } from './windows-installed-acceptance-fault-evidence.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
+import { authenticateAcceptanceBuildManifest } from './windows-acceptance-preflight.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_MATRIX,
@@ -100,8 +101,39 @@ export async function createInstalledAcceptancePlan(
   }
   const predecessor = artifacts.predecessor.metadata;
   const candidate = artifacts.candidate.metadata;
+  const embeddedBuildManifestPath = resolve(
+    artifacts.candidate.unpackedRoot,
+    'resources/windows-installed-acceptance-v1.txt',
+  );
+  if (resolve(input.acceptance?.buildManifestPath ?? '') !== embeddedBuildManifestPath) {
+    throw new Error('Acceptance build manifest is not the frozen candidate embedded manifest');
+  }
+  const buildManifestFile = await regularIdentity(
+    embeddedBuildManifestPath,
+    input.acceptance?.buildManifestSha256,
+    fileSystem,
+  );
+  const buildManifest = buildManifestFile.content.toString('utf8').trim();
+  if (!/^[A-Za-z0-9_-]+$/u.test(buildManifest)) {
+    throw new Error('Frozen acceptance build manifest is invalid');
+  }
+  const embeddedManifestPayload = authenticateAcceptanceBuildManifest(
+    buildManifest,
+    requireBase64Url(
+      input.acceptance?.manifestPublicKeySpkiBase64url,
+      'Acceptance manifest public key',
+    ),
+  );
+  const validationPublicKeySpkiBase64url = requireBase64Url(
+    embeddedManifestPayload?.validationPublicKeySpkiBase64url,
+    'Embedded fault validation public key',
+  );
+  if (input.acceptance?.validationPublicKeySpkiBase64url !== validationPublicKeySpkiBase64url) {
+    throw new Error('Artifact-set validation key differs from the embedded signed key');
+  }
+  let faultValidation;
   if (artifacts.faults !== undefined) {
-    verifyFaultEvidenceChain(
+    faultValidation = verifyFaultEvidenceChain(
       ACCEPTANCE_FAULT_PHASES.map((phase) => ({
         bytes: artifacts.faults[phase].validationEvidence.content,
         artifact: artifacts.faults[phase],
@@ -113,8 +145,10 @@ export async function createInstalledAcceptancePlan(
         sourceTree: candidate.sourceTree,
         candidateSha256: artifacts.candidate.installer.sha256,
         candidateLayoutDigest: candidate.packageLayoutDigest,
-        publicKeySpkiBase64url: input.acceptance?.validationPublicKeySpkiBase64url,
+        publicKeySpkiBase64url: validationPublicKeySpkiBase64url,
         chainHeadSha256: input.acceptance?.validationChainHeadSha256,
+        validatorSha256: embeddedManifestPayload.faultValidationPolicy?.validatorSha256,
+        faultPhases: embeddedManifestPayload.faultValidationPolicy?.phases,
       },
     );
   }
@@ -170,22 +204,6 @@ export async function createInstalledAcceptancePlan(
     }
   }
   await options.reverifyBundle?.();
-  const embeddedBuildManifestPath = resolve(
-    artifacts.candidate.unpackedRoot,
-    'resources/windows-installed-acceptance-v1.txt',
-  );
-  if (resolve(input.acceptance?.buildManifestPath ?? '') !== embeddedBuildManifestPath) {
-    throw new Error('Acceptance build manifest is not the frozen candidate embedded manifest');
-  }
-  const buildManifestFile = await regularIdentity(
-    embeddedBuildManifestPath,
-    input.acceptance?.buildManifestSha256,
-    fileSystem,
-  );
-  const buildManifest = buildManifestFile.content.toString('utf8').trim();
-  if (!/^[A-Za-z0-9_-]+$/u.test(buildManifest)) {
-    throw new Error('Frozen acceptance build manifest is invalid');
-  }
   const candidateAcceptanceBinding = artifacts.candidate.releaseIdentity?.acceptancePayload;
   if (
     candidateAcceptanceBinding?.schemaVersion !== 1 ||
@@ -239,6 +257,21 @@ export async function createInstalledAcceptancePlan(
       candidate,
       fileSystem,
     ),
+    faultValidation:
+      faultValidation === undefined
+        ? undefined
+        : Object.freeze({
+            recordsVerified: ACCEPTANCE_FAULT_PHASES.length,
+            chainHeadSha256: faultValidation.chainHeadSha256,
+          }),
+    acceptanceBootstrap: await freezeAcceptanceExecutable(
+      'Acceptance bootstrap',
+      input.acceptance?.acceptanceBootstrapPath,
+      input.acceptance?.acceptanceBootstrapSha256,
+      input.architecture,
+      candidate,
+      fileSystem,
+    ),
     syntheticSenderArguments: Object.freeze(input.acceptance?.syntheticSenderArguments ?? []),
   });
   validateAcceptanceRunSequence(acceptance);
@@ -257,6 +290,13 @@ export async function createInstalledAcceptancePlan(
     physicalTeardownAllowanceMs: PHYSICAL_TEARDOWN_ALLOWANCE_MS,
     physicalTotalBoundMs: PHYSICAL_TOTAL_BOUND_MS,
     heartbeatReadinessWindowMs: HEARTBEAT_READINESS_WINDOW_MS,
+    sourceCommit: candidate.sourceCommit,
+    sourceTree: candidate.sourceTree,
+    candidateInstallerSha256: artifacts.candidate.installer.sha256,
+    bundleSha256:
+      options.bundleSha256 === undefined
+        ? null
+        : requireHex(options.bundleSha256, 'Acceptance bundle SHA-256'),
   });
 }
 
@@ -293,6 +333,30 @@ export async function executeInstalledAcceptance(plan, adapters, options = {}) {
     result: 'running',
     architecture: plan.architecture,
     artifacts: artifactEvidence(plan.artifacts),
+    sourceCommit: plan.sourceCommit,
+    sourceTree: plan.sourceTree,
+    buildId: plan.acceptance.buildId,
+    candidateInstallerSha256: plan.candidateInstallerSha256,
+    targetIdentity:
+      plan.artifacts.candidate.metadata.roles === undefined
+        ? null
+        : {
+            releaseBuildDigest: plan.artifacts.candidate.metadata.releaseBuildDigest,
+            packageLayoutDigest: plan.artifacts.candidate.metadata.packageLayoutDigest,
+            gatewaySha256: role(plan.artifacts.candidate.metadata, 'gateway').sha256,
+            ownerSha256: role(plan.artifacts.candidate.metadata, 'owner').sha256,
+          },
+    bundleSha256: plan.bundleSha256,
+    acceptanceNative:
+      plan.acceptance.acceptanceBroker === undefined ||
+      plan.acceptance.acceptanceBootstrap === undefined ||
+      plan.acceptance.trustedLauncher === undefined
+        ? null
+        : {
+            broker: identityEvidence(plan.acceptance.acceptanceBroker),
+            bootstrap: identityEvidence(plan.acceptance.acceptanceBootstrap),
+            launcher: identityEvidence(plan.acceptance.trustedLauncher),
+          },
     preflight: redactEvidence(preflight),
     phases: [],
   };
@@ -1082,6 +1146,7 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
     'signedRequestsPath',
     'syntheticSenderPath',
     'acceptanceBrokerPath',
+    'acceptanceBootstrapPath',
     'trustedLauncherPath',
   ]) {
     if (typeof copy.acceptance?.[field] === 'string') {
@@ -1134,7 +1199,10 @@ async function main() {
   );
   try {
     const reverifyBundle = () => verifyAcceptanceBundleTree(bundleRoot, bundleExpectation);
-    const plan = await createInstalledAcceptancePlan(input, fileSystem, { reverifyBundle });
+    const plan = await createInstalledAcceptancePlan(input, fileSystem, {
+      reverifyBundle,
+      bundleSha256: process.env.ACCEPTANCE_BUNDLE_SHA256,
+    });
     const result = await executeInstalledAcceptance(
       plan,
       { fileSystem, runner: createWindowsAcceptanceRunner(plan) },

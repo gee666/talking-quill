@@ -1,7 +1,7 @@
-import { createPrivateKey, createHash, randomBytes, sign } from 'node:crypto';
+import { createPrivateKey, randomBytes, sign } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lstatSync, readFileSync } from 'node:fs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { launchVerifiedChild } from './windows-verified-child-launcher.mjs';
 const MAX_ACCEPTANCE_RUN_MS = 80 * 60 * 1_000;
 
 export function canonicalAcceptanceJson(value) {
@@ -101,27 +101,14 @@ export async function runPackagedAcceptanceProbe(command, options) {
   ) {
     throw new Error('Native probe broker identities are invalid');
   }
-  const brokerMetadata = lstatSync(brokerIdentity.path);
-  const brokerBytes = readFileSync(brokerIdentity.path);
-  if (
-    !brokerMetadata.isFile() ||
-    brokerMetadata.isSymbolicLink() ||
-    brokerMetadata.nlink !== 1 ||
-    brokerMetadata.size !== brokerIdentity.bytes ||
-    brokerBytes.length !== brokerIdentity.bytes ||
-    createHash('sha256').update(brokerBytes).digest('hex') !== brokerIdentity.sha256
-  ) {
-    throw new Error('Native probe broker was replaced before launch');
-  }
   const startupFrame = Buffer.from(
     `${canonicalAcceptanceJson({ version: 1, signedRequest: options.signedRequest })}\n`,
   );
   const correlation = randomBytes(16).toString('hex');
-  const child = spawn(brokerIdentity.path, [], {
-    shell: false,
-    windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: sanitizedChildEnvironment(),
+  const child = (options.launchVerifiedChild ?? launchVerifiedChild)({
+    bootstrap: options.bootstrapIdentity,
+    child: brokerIdentity,
+    timeoutMs: options.timeoutMs,
   });
   const events = createBrokerEventReader(child, correlation);
   child.stdin.write(

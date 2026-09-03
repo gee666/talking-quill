@@ -76,6 +76,8 @@ export function createInstalledAcceptancePlan(
       readonly syntheticSenderSha256: string;
       readonly acceptanceBrokerPath: string;
       readonly acceptanceBrokerSha256: string;
+      readonly acceptanceBootstrapPath: string;
+      readonly acceptanceBootstrapSha256: string;
       readonly trustedLauncherPath: string;
       readonly trustedLauncherSha256: string;
       readonly syntheticSenderArguments?: readonly string[];
@@ -118,6 +120,7 @@ export function authenticatedUpdateBootstrapArgument(artifact: unknown): string;
 export function createWindowsOsAdapter(acceptance?: unknown): unknown;
 export function startTrustedAcceptanceBroker(
   launcher: Readonly<{ path: string; bytes: number; sha256: string }>,
+  bootstrap: Readonly<{ path: string; bytes: number; sha256: string }>,
   dependencies?: unknown,
 ): Promise<unknown>;
 export function externalTimeout(

@@ -4,6 +4,7 @@ export interface WindowsPromotionEvidenceOptions {
   readonly workflowRunId: string;
   readonly publicKeyPath: string;
   readonly rebootRunIds?: Readonly<{ x64: string; arm64: string }>;
+  readonly installedAcceptanceRunId?: string;
 }
 
 export interface CreateWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
@@ -11,6 +12,7 @@ export interface CreateWindowsPromotionEvidenceOptions extends WindowsPromotionE
   readonly privateKeyPkcs8Base64: string;
   readonly updatePublicKeyPath: string;
   readonly rebootRunIds: Readonly<{ x64: string; arm64: string }>;
+  readonly installedAcceptanceRunId: string;
 }
 
 export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionEvidenceOptions {
@@ -19,7 +21,7 @@ export interface VerifyWindowsPromotionEvidenceOptions extends WindowsPromotionE
 
 export interface WindowsPromotionEvidenceEnvelope {
   readonly payload: {
-    readonly schemaVersion: 3;
+    readonly schemaVersion: 4;
     readonly promotionClass: 'protected-release-acceptance';
     readonly releasePolicy: {
       readonly version: '0.0.69';
@@ -37,6 +39,7 @@ export interface WindowsPromotionEvidenceEnvelope {
     readonly sourceTree: string;
     readonly promotionKeySha256: string;
     readonly rebootRunIds: Readonly<{ x64: string; arm64: string }>;
+    readonly installedAcceptanceRunId: string;
     readonly records: readonly unknown[];
   };
   readonly signature: {

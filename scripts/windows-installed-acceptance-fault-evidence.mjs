@@ -38,6 +38,13 @@ export function verifyFaultEvidenceChain(records, expectation) {
   ) {
     throw new Error('Fault validation chain inventory is invalid');
   }
+  if (
+    !HEX.test(expectation.validatorSha256 ?? '') ||
+    canonicalAcceptanceJson(expectation.faultPhases) !==
+      canonicalAcceptanceJson(ACCEPTANCE_FAULT_PHASES)
+  ) {
+    throw new Error('Embedded fault validation policy is invalid');
+  }
   const key = readPublicKey(expectation.publicKeySpkiBase64url);
   let previous = faultEvidenceGenesis(expectation.buildId, expectation.candidateSha256);
   const hashes = [];
@@ -68,12 +75,19 @@ export function verifyFaultEvidenceChain(records, expectation) {
       payload.candidatePackageLayoutDigest !== expectation.candidateLayoutDigest ||
       payload.faultPackageSha256 !== artifact.installer.sha256 ||
       payload.faultPackageTreeSha256 !== artifact.packageManifest.treeSha256 ||
-      payload.failurePointObserved !== payload.faultPhase ||
-      payload.failureInjected !== true ||
-      payload.recoveryCompleted !== true ||
-      payload.zeroResidue !== true ||
-      payload.productionStateUnchanged !== true ||
-      payload.mixedAuthorityAbsent !== true
+      payload.validatorSha256 !== expectation.validatorSha256 ||
+      payload.faultExitCode !== 197 ||
+      payload.recoveryExitCode !== 0 ||
+      payload.faultAudit?.phase !== payload.faultPhase ||
+      !Number.isSafeInteger(payload.faultAudit?.processId) ||
+      payload.faultAudit?.processId <= 0 ||
+      sha256(Buffer.from(`${canonicalAcceptanceJson(payload.faultAudit)}\n`)) !==
+        payload.faultAuditSha256 ||
+      !payload.faulted.namespace.files.some(
+        (entry) =>
+          entry?.path === '/fault-audit-v1.json' && entry.sha256 === payload.faultAuditSha256,
+      ) ||
+      !measuredRecoveryIsClean(payload.before, payload.recovered)
     ) {
       throw new Error(
         `Fault validation evidence binding is invalid: ${String(payload.faultPhase)}`,
@@ -107,26 +121,22 @@ export function verifyFaultEvidenceChain(records, expectation) {
 function validatePayloadShape(payload) {
   const keys = [
     'architecture',
+    'before',
     'buildId',
     'candidatePackageLayoutDigest',
     'candidatePackageSha256',
-    'failureInjected',
-    'failurePointObserved',
+    'faultAudit',
+    'faultAuditSha256',
     'faultExitCode',
     'faultPackageSha256',
     'faultPackageTreeSha256',
     'faultPhase',
-    'isolatedStateAfterSha256',
-    'isolatedStateBeforeSha256',
+    'faulted',
     'machineIdentitySha256',
-    'mixedAuthorityAbsent',
     'namespaceIdSha256',
     'previousEnvelopeSha256',
-    'productionStateAfterSha256',
-    'productionStateBeforeSha256',
-    'productionStateUnchanged',
     'purpose',
-    'recoveryCompleted',
+    'recovered',
     'recoveryExitCode',
     'schemaVersion',
     'sequence',
@@ -134,7 +144,6 @@ function validatePayloadShape(payload) {
     'sourceCommit',
     'sourceTree',
     'validatorSha256',
-    'zeroResidue',
   ];
   if (
     payload === null ||
@@ -149,10 +158,38 @@ function validatePayloadShape(payload) {
     !/^[0-9a-f]{40}$/u.test(payload.sourceTree ?? '') ||
     !Object.entries(payload)
       .filter(([name]) => name.endsWith('Sha256') || name === 'buildId')
-      .every(([, value]) => HEX.test(value))
+      .every(([, value]) => HEX.test(value)) ||
+    !validMeasurement(payload.before) ||
+    !validMeasurement(payload.faulted) ||
+    !validMeasurement(payload.recovered)
   ) {
     throw new Error('Fault validation evidence schema is invalid');
   }
+}
+
+function validMeasurement(value) {
+  return (
+    value?.schemaVersion === 1 &&
+    HEX.test(value.namespaceTreeSha256 ?? '') &&
+    ['namespace', 'production'].every(
+      (name) => value[name] !== null && typeof value[name] === 'object',
+    ) &&
+    ['files', 'journals', 'registry', 'processes', 'services', 'tasks', 'heldMutexes'].every(
+      (name) => Array.isArray(value.namespace[name]),
+    )
+  );
+}
+
+function measuredRecoveryIsClean(before, recovered) {
+  return (
+    validMeasurement(before) &&
+    validMeasurement(recovered) &&
+    before.namespaceTreeSha256 === recovered.namespaceTreeSha256 &&
+    canonicalAcceptanceJson(before.production) === canonicalAcceptanceJson(recovered.production) &&
+    ['registry', 'processes', 'services', 'tasks', 'journals', 'heldMutexes'].every(
+      (name) => recovered.namespace[name].length === 0,
+    )
+  );
 }
 
 function readPublicKey(encoded) {

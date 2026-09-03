@@ -27,6 +27,8 @@ async function fixture(): Promise<string> {
     ['payload/build.txt', Buffer.from('build')],
     ['payload/requests.json', Buffer.from('{}\n')],
     ['payload/sender.exe', Buffer.from('sender')],
+    ['payload/broker.exe', Buffer.from('broker')],
+    ['payload/bootstrap.exe', Buffer.from('bootstrap')],
     ['payload/launcher.exe', Buffer.from('launcher')],
   ]);
   const evidence = {
@@ -38,6 +40,8 @@ async function fixture(): Promise<string> {
       buildManifestPath: 'payload/build.txt',
       signedRequestsPath: 'payload/requests.json',
       syntheticSenderPath: 'payload/sender.exe',
+      acceptanceBrokerPath: 'payload/broker.exe',
+      acceptanceBootstrapPath: 'payload/bootstrap.exe',
       trustedLauncherPath: 'payload/launcher.exe',
     },
   };

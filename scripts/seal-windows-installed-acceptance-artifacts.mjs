@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, lstat, mkdir, open, readFile, writeFile } from 'node:fs/promises';
@@ -13,10 +14,21 @@ const outputRoot = resolve(valueAfter('--output') ?? '');
 const secrets = await readSecrets();
 const sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '';
 const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '';
-const nativeRoot = resolve(outputRoot, 'native');
+const nativePublicationBase = resolve(
+  process.env.ProgramData ?? 'C:/ProgramData',
+  'Talking Quill Acceptance Native',
+);
+const nativeRoot = resolve(
+  nativePublicationBase,
+  process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID ?? '',
+);
 const signerPath = resolve(nativeRoot, 'talking-quill-acceptance-signer.exe');
 const acceptanceBrokerPath = resolve(nativeRoot, 'talking-quill-windows-acceptance-broker.exe');
+const acceptanceBootstrapPath = resolve(nativeRoot, 'talking-quill-helper.exe');
 if (mode === 'identities') {
+  if (!/^[0-9a-f]{64}$/u.test(process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID ?? '')) {
+    throw new Error('Protected native publication build identity is invalid');
+  }
   await mkdir(nativeRoot, { recursive: true, mode: 0o700 });
   await copyFile(
     resolve(
@@ -34,15 +46,32 @@ if (mode === 'identities') {
     acceptanceBrokerPath,
     constants.COPYFILE_EXCL,
   );
+  await copyFile(
+    resolve(root, 'helper/target/x86_64-pc-windows-msvc/release/talking-quill-helper.exe'),
+    acceptanceBootstrapPath,
+    constants.COPYFILE_EXCL,
+  );
+  protectNativeExecutionDirectory(nativePublicationBase);
 }
 const signerSha256 = await hashFile(signerPath);
+const signerBytes = (await lstat(signerPath)).size;
 const acceptanceBrokerSha256 = await hashFile(acceptanceBrokerPath);
+const acceptanceBrokerBytes = (await lstat(acceptanceBrokerPath)).size;
+const acceptanceBootstrapSha256 = await hashFile(acceptanceBootstrapPath);
+const acceptanceBootstrapBytes = (await lstat(acceptanceBootstrapPath)).size;
 const signWith = (privateKeyPath, payloadBytes) =>
   signAcceptancePayload({
     signerPath,
     signerSha256,
+    signerBytes,
     brokerPath: acceptanceBrokerPath,
     brokerSha256: acceptanceBrokerSha256,
+    brokerBytes: acceptanceBrokerBytes,
+    bootstrapIdentity: {
+      path: acceptanceBootstrapPath,
+      sha256: acceptanceBootstrapSha256,
+      bytes: acceptanceBootstrapBytes,
+    },
     signerSourceCommit: sourceCommit,
     signerSourceTree: sourceTree,
     privateKeyPath,
@@ -64,6 +93,8 @@ if (mode === 'identities') {
     signerSha256,
     acceptanceBrokerPath,
     acceptanceBrokerSha256,
+    acceptanceBootstrapPath,
+    acceptanceBootstrapSha256,
     sourceCommit,
     sourceTree,
   };
@@ -195,6 +226,8 @@ async function sealArtifactSet() {
     signerSha256: identities.signerSha256,
     acceptanceBrokerPath: identities.acceptanceBrokerPath,
     acceptanceBrokerSha256: identities.acceptanceBrokerSha256,
+    acceptanceBootstrapPath: identities.acceptanceBootstrapPath,
+    acceptanceBootstrapSha256: identities.acceptanceBootstrapSha256,
     candidate,
     repair,
     faults,
@@ -271,6 +304,74 @@ async function hashFile(path) {
 
 function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function protectNativeExecutionDirectory(path) {
+  if (process.platform !== 'win32')
+    throw new Error('Protected native publication requires Windows');
+  const user = spawnSync(
+    resolve(process.env.SystemRoot ?? 'C:/Windows', 'System32/whoami.exe'),
+    ['/user', '/fo', 'csv', '/nh'],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  const match = user.status === 0 ? user.stdout.match(/"[^"]+","(S-[0-9-]+)"/u) : null;
+  if (match === null) throw new Error('Native publication user SID is unavailable');
+  const result = spawnSync(
+    resolve(process.env.SystemRoot ?? 'C:/Windows', 'System32/icacls.exe'),
+    [
+      path,
+      '/inheritance:r',
+      '/setowner',
+      '*S-1-5-32-544',
+      '/grant:r',
+      '*S-1-5-18:(OI)(CI)F',
+      '*S-1-5-32-544:(OI)(CI)F',
+      `*${match[1]}:(OI)(CI)RX`,
+      '/T',
+      '/C',
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status !== 0) throw new Error('Native execution directory ACL publication failed');
+  verifyNativeExecutionAcl(path, match[1]);
+}
+
+function verifyNativeExecutionAcl(path, userSid) {
+  const script = String.raw`
+$ErrorActionPreference='Stop'
+$expected=@('S-1-5-18','S-1-5-32-544','${userSid}')
+$items=@(Get-Item -LiteralPath $env:TQ_NATIVE_ROOT)+(Get-ChildItem -LiteralPath $env:TQ_NATIVE_ROOT -Force)
+foreach($item in $items){
+  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){exit 10}
+  $acl=Get-Acl -LiteralPath $item.FullName
+  if(-not $acl.AreAccessRulesProtected){exit 11}
+  $owner=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
+  if($owner -ne 'S-1-5-32-544'){exit 12}
+  $seen=@()
+  foreach($rule in $acl.Access){
+    if($rule.IsInherited -or $rule.AccessControlType -ne 'Allow'){exit 13}
+    $sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if($sid -notin $expected){exit 14};$seen+=$sid
+    if($sid -eq '${userSid}' -and (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Write) -ne 0 -or ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -ne 0 -or ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne 0)){exit 15}
+  }
+  if(@($seen|Sort-Object -Unique).Count -ne 3){exit 16}
+}`;
+  const result = spawnSync(
+    resolve(
+      process.env.SystemRoot ?? 'C:/Windows',
+      'System32/WindowsPowerShell/v1.0/powershell.exe',
+    ),
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      env: { SystemRoot: process.env.SystemRoot, TQ_NATIVE_ROOT: path },
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) throw new Error('Native execution directory ACL verification failed');
 }
 
 function valueAfter(name) {

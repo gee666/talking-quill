@@ -369,6 +369,37 @@ async function fixture() {
       }),
     );
   }
+  const installedAcceptanceRunId = '999';
+  await writeFile(
+    join(directory, 'windows-installed-acceptance-x64-gate.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      purpose: 'talking-quill/windows-installed-acceptance-gate',
+      result: 'passed',
+      repository: 'owner/repository',
+      workflow: '.github/workflows/windows-installed-acceptance.yml',
+      runId: installedAcceptanceRunId,
+      architecture: 'x64',
+      sourceCommit: source('b'),
+      sourceTree: source('c'),
+      buildId: sha('1'),
+      brokerSha256: sha('2'),
+      bootstrapSha256: sha('3'),
+      launcherSha256: sha('4'),
+      candidateInstallerSha256: sha('5'),
+      targetReleaseBuildDigest: sha('d'),
+      targetPackageLayoutDigest: sha('d'),
+      targetGatewaySha256: sha('e'),
+      targetOwnerSha256: sha('f'),
+      bundleSha256: sha('6'),
+      evidenceSha256: sha('7'),
+      producerBundleSha256: sha('9'),
+      producerE2eSha256: sha('a'),
+      validationKeySha256: sha('8'),
+      phaseCount: 19,
+      artifactSha256: [sha('5')],
+    }),
+  );
   const updater = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const updaterJwk = updater.publicKey.export({ format: 'jwk' });
   if (updaterJwk.x === undefined || updaterJwk.y === undefined)
@@ -385,6 +416,7 @@ async function fixture() {
     publicKeyPath,
     updatePublicKeyPath,
     rebootRunIds: { x64: '456', arm64: '789' },
+    installedAcceptanceRunId,
     output: join(directory, 'windows-promotion-lifecycle-evidence-v1.json'),
     privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
     updatePrivateKeyPkcs8Base64: updater.privateKey

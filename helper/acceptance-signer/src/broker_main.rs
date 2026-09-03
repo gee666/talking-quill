@@ -346,8 +346,31 @@ mod windows {
             })
             .transpose()?;
         let control = Control::new(input.correlation.clone());
-        let mut child =
-            launch_probe_process(&input.executable_path, &input.startup_frame, &expected)?;
+        let mut startup_nonce = [0u8; 16];
+        getrandom::fill(&mut startup_nonce).map_err(|_| "startup pipe random")?;
+        let startup_pipe_name = format!(
+            r"\\.\pipe\TalkingQuill.AcceptanceStartup.{}",
+            startup_nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let startup_pipe =
+            talking_quill_windows_owner_ipc::endpoint::create_outbound_server_instance(
+                &startup_pipe_name,
+                &security,
+                true,
+            )
+            .map_err(|_| "startup pipe")?;
+        let mut child = launch_probe_process(
+            &input.executable_path,
+            &startup_pipe_name,
+            startup_pipe.as_raw_handle(),
+            &input.startup_frame,
+            &expected,
+            input.absolute_deadline_ms,
+            &control,
+        )?;
         emit_response(&ProbeEvent {
             version: 1,
             correlation: &input.correlation,
@@ -465,7 +488,6 @@ mod windows {
         job: Handle,
         pid: u32,
         facts: talking_quill_windows_owner_ipc::peer::PeerFacts,
-        startup_delivery: std::sync::mpsc::Receiver<Result<(), &'static str>>,
     }
 
     impl ProbeChild {
@@ -481,9 +503,6 @@ mod windows {
                     if unsafe { GetExitCodeProcess(self.process.0, &mut code) } == 0 || code != 0 {
                         return Err("probe exit");
                     }
-                    self.startup_delivery
-                        .recv_timeout(Duration::from_secs(1))
-                        .map_err(|_| "startup delivery")??;
                     return Ok(ControlAction::Continue);
                 }
                 if control.poll()? == Some(ControlAction::Terminate) {
@@ -503,22 +522,27 @@ mod windows {
 
     fn launch_probe_process(
         path: &Path,
+        startup_pipe_name: &str,
+        startup_pipe: HANDLE,
         startup_frame: &[u8],
         expected: &Snapshot,
+        deadline: u64,
+        control: &Control,
     ) -> Result<ProbeChild, &'static str> {
-        let (stdin_read, stdin_write) = input_pipe()?;
         let (nul_read, nul_write) = nul_handles()?;
-        let inherited = [stdin_read.0, nul_write.0];
+        let inherited = [nul_read.0, nul_write.0];
         let (_storage, attributes) = attribute_list(&inherited)?;
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = stdin_read.0;
+        startup.StartupInfo.hStdInput = nul_read.0;
         startup.StartupInfo.hStdOutput = nul_write.0;
         startup.StartupInfo.hStdError = nul_write.0;
         startup.lpAttributeList = attributes.0;
         let job = kill_job()?;
-        let mut command = command_line(path, &["--talking-quill-installed-acceptance-stdin-v1"])?;
+        let startup_argument =
+            format!("--talking-quill-installed-acceptance-startup-pipe-v1={startup_pipe_name}");
+        let mut command = command_line(path, &[&startup_argument])?;
         let mut application = wide(path.as_os_str())?;
         let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -545,7 +569,6 @@ mod windows {
             return Err("assign probe job");
         }
         drop(attributes);
-        drop(stdin_read);
         drop(nul_read);
         drop(nul_write);
         let actual = process_snapshot(process.0)?;
@@ -566,15 +589,130 @@ mod windows {
         if unsafe { ResumeThread(thread.0) } == u32::MAX {
             return Err("resume probe");
         }
-        let startup_delivery = spawn_writer(stdin_write, startup_frame.to_vec(), "startup write");
+        deliver_startup(
+            startup_pipe,
+            info.dwProcessId,
+            &facts,
+            startup_frame,
+            deadline,
+            control,
+        )?;
         Ok(ProbeChild {
             process,
             _thread: thread,
             job,
             pid: info.dwProcessId,
             facts,
-            startup_delivery,
         })
+    }
+
+    fn deliver_startup(
+        pipe: HANDLE,
+        expected_pid: u32,
+        expected: &talking_quill_windows_owner_ipc::peer::PeerFacts,
+        frame: &[u8],
+        deadline: u64,
+        control: &Control,
+    ) -> Result<(), &'static str> {
+        use windows_sys::Win32::Foundation::{
+            ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GetLastError,
+        };
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+        use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
+        let mut rejected = 0;
+        loop {
+            let event = Handle(unsafe {
+                windows_sys::Win32::System::Threading::CreateEventW(null(), 1, 0, null())
+            });
+            if event.0.is_null() {
+                return Err("startup event");
+            }
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = event.0;
+            let connected = unsafe { ConnectNamedPipe(pipe, &mut overlapped) };
+            if connected == 0 {
+                let error = unsafe { GetLastError() };
+                if error == ERROR_IO_PENDING {
+                    match wait_overlapped_or_control(event.0, remaining_ms(deadline)?, control) {
+                        ControlAction::Continue => {}
+                        ControlAction::Terminate => {
+                            cancel_overlapped(pipe, &mut overlapped);
+                            return Err("probe terminated");
+                        }
+                        ControlAction::Deadline => {
+                            cancel_overlapped(pipe, &mut overlapped);
+                            return Err("startup deadline");
+                        }
+                    }
+                    let mut transferred = 0;
+                    if unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 0) } == 0 {
+                        return Err("startup connect");
+                    }
+                } else if error != ERROR_PIPE_CONNECTED {
+                    return Err("startup connect");
+                }
+            }
+            let pid = talking_quill_windows_owner_ipc::peer::named_pipe_client_pid(unsafe {
+                std::os::windows::io::BorrowedHandle::borrow_raw(pipe)
+            });
+            let authorized = pid
+                .ok()
+                .filter(|value| *value == expected_pid)
+                .and_then(|value| {
+                    talking_quill_windows_owner_ipc::peer::VerifiedPeer::from_process_id(value).ok()
+                })
+                .is_some_and(|peer| peer.facts == *expected);
+            if !authorized {
+                rejected += 1;
+                unsafe { DisconnectNamedPipe(pipe) };
+                if rejected >= 64 {
+                    return Err("startup forged clients");
+                }
+                continue;
+            }
+            let event = Handle(unsafe {
+                windows_sys::Win32::System::Threading::CreateEventW(null(), 1, 0, null())
+            });
+            if event.0.is_null() {
+                return Err("startup write event");
+            }
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = event.0;
+            let mut count = 0;
+            if unsafe {
+                WriteFile(
+                    pipe,
+                    frame.as_ptr(),
+                    frame.len() as u32,
+                    null_mut(),
+                    &mut overlapped,
+                )
+            } == 0
+            {
+                if unsafe { GetLastError() } != ERROR_IO_PENDING {
+                    return Err("startup write");
+                }
+                match wait_overlapped_or_control(event.0, remaining_ms(deadline)?, control) {
+                    ControlAction::Continue => {}
+                    ControlAction::Terminate => {
+                        cancel_overlapped(pipe, &mut overlapped);
+                        return Err("probe terminated");
+                    }
+                    ControlAction::Deadline => {
+                        cancel_overlapped(pipe, &mut overlapped);
+                        return Err("startup write deadline");
+                    }
+                }
+            }
+            if unsafe { GetOverlappedResult(pipe, &overlapped, &mut count, 0) } == 0
+                || count as usize != frame.len()
+            {
+                return Err("startup write");
+            }
+            unsafe { DisconnectNamedPipe(pipe) };
+            return Ok(());
+        }
     }
 
     fn nul_handles() -> Result<(Handle, Handle), &'static str> {
