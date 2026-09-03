@@ -4,7 +4,7 @@ This inventory is generated from the production @talking-quill/app deployment gr
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: 2f01485d2680096427badf8ea04fa25c0e37b14a0fdd745045be1a2acd67578c
-helper/Cargo.lock SHA-256: 8e959f5f6d572b9a7c1b7100cd169bae6e9089cf74d26e2e9c0739889a91c235
+helper/Cargo.lock SHA-256: 218913a30db825d02e3ebf2f4db659cd23f220aa103226d4b087032c430d43df
 scripts/model-manifest.json SHA-256: e5f139abb8b3baf5a31faf8235d64adc9ff3dc9c7d2b1aae808366e4e6124fff
 
 Production JavaScript/native dependencies (109 records)
