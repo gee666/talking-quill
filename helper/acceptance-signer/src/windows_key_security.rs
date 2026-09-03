@@ -22,10 +22,12 @@ use windows_sys::Win32::Security::{
     WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
-    FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING, WRITE_DAC,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FileDispositionInfo, FlushFileBuffers, GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL,
+    SetFileInformationByHandle, WRITE_DAC,
 };
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -118,6 +120,48 @@ pub fn create_protected_private_key(path: &Path, bytes: &[u8]) -> Result<(), &'s
             return Err("private key failed validation cleanup");
         }
         return Err(error);
+    }
+    Ok(())
+}
+
+pub fn delete_validated_private_key(path: &Path) -> Result<(), &'static str> {
+    if !path.is_absolute() {
+        return Err("private key delete path");
+    }
+    let _ancestors = retain_ancestors(path)?;
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("private key delete open");
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    validate_private_key_handle(&file)?;
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            &disposition as *const _ as *const c_void,
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err("private key handle delete");
+    }
+    drop(file);
+    if path.exists() {
+        return Err("private key handle delete verification");
     }
     Ok(())
 }
@@ -405,7 +449,8 @@ mod tests {
         std::fs::hard_link(&key, &linked).expect("create hard link");
         assert!(open_validated_private_key(&key).is_err());
         std::fs::remove_file(&linked).expect("remove hard link");
-        std::fs::remove_file(&key).expect("remove key");
+        delete_validated_private_key(&key).expect("handle-delete key");
+        assert!(!key.exists());
         std::fs::remove_dir(&directory).expect("remove directory");
     }
 }

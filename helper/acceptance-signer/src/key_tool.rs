@@ -31,7 +31,7 @@ fn run() -> Result<(), &'static str> {
     use std::io::{Read, Seek};
     use std::path::PathBuf;
     use talking_quill_acceptance_signer::windows_key_security::{
-        create_protected_private_key, open_validated_private_key,
+        create_protected_private_key, delete_validated_private_key, open_validated_private_key,
     };
     use zeroize::Zeroize;
 
@@ -46,12 +46,7 @@ fn run() -> Result<(), &'static str> {
         return Err("arguments");
     }
     if mode == "--delete-protected-key-v1" {
-        let validated = open_validated_private_key(&path)?;
-        drop(validated);
-        std::fs::remove_file(&path).map_err(|_| "key delete")?;
-        if path.exists() {
-            return Err("key delete verification");
-        }
+        delete_validated_private_key(&path)?;
         println!("{{\"result\":\"deleted\"}}");
         return Ok(());
     }
