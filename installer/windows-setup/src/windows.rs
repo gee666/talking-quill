@@ -153,7 +153,11 @@ fn machine_lock_test_id() -> Result<&'static str> {
 
 #[cfg(any(test, feature = "machine-lock-test-namespace"))]
 fn machine_lock_registry_hive() -> HKEY {
-    HKEY_CURRENT_USER
+    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_some() {
+        HKEY_CURRENT_USER
+    } else {
+        HKEY_LOCAL_MACHINE
+    }
 }
 #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 fn machine_lock_registry_hive() -> HKEY {
@@ -162,10 +166,13 @@ fn machine_lock_registry_hive() -> HKEY {
 
 #[cfg(any(test, feature = "machine-lock-test-namespace"))]
 fn machine_lock_registry_key() -> Result<String> {
-    Ok(format!(
-        r"Software\Talking Quill Tests\{}\RecoveryStateLockV1",
-        machine_lock_test_id()?
-    ))
+    match std::env::var_os(MACHINE_LOCK_TEST_ID_ENV) {
+        Some(_) => Ok(format!(
+            r"Software\Talking Quill Tests\{}\RecoveryStateLockV1",
+            machine_lock_test_id()?
+        )),
+        None => Ok(MACHINE_LOCK_REGISTRY_KEY.to_owned()),
+    }
 }
 #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 fn machine_lock_registry_key() -> Result<String> {
@@ -174,10 +181,13 @@ fn machine_lock_registry_key() -> Result<String> {
 
 #[cfg(any(test, feature = "machine-lock-test-namespace"))]
 fn machine_lock_registry_parent() -> Result<String> {
-    Ok(format!(
-        r"Software\Talking Quill Tests\{}",
-        machine_lock_test_id()?
-    ))
+    match std::env::var_os(MACHINE_LOCK_TEST_ID_ENV) {
+        Some(_) => Ok(format!(
+            r"Software\Talking Quill Tests\{}",
+            machine_lock_test_id()?
+        )),
+        None => Ok(r"Software\Talking Quill".to_owned()),
+    }
 }
 #[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
 fn machine_lock_registry_parent() -> Result<String> {
@@ -185,7 +195,10 @@ fn machine_lock_registry_parent() -> Result<String> {
 }
 
 #[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_program_data(_production: &Path) -> Result<PathBuf> {
+fn machine_lock_program_data(production: &Path) -> Result<PathBuf> {
+    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_none() {
+        return Ok(production.to_owned());
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("tmp/machine-lock-tests/windows-setup")
@@ -202,6 +215,12 @@ fn machine_lock_program_data(production: &Path) -> Result<PathBuf> {
 
 #[cfg(any(test, feature = "machine-lock-test-namespace"))]
 fn machine_lock_mutex_names() -> Result<[String; 2]> {
+    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_none() {
+        return Ok([
+            r"Global\TalkingQuill.NativeSetup.V2".to_owned(),
+            r"Global\TalkingQuill.UpdateRecovery.State.V1".to_owned(),
+        ]);
+    }
     let id = machine_lock_test_id()?;
     Ok([
         format!(r"Local\TalkingQuill.Tests.{id}.NativeSetup.V2"),

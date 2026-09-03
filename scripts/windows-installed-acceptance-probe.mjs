@@ -89,32 +89,20 @@ export async function runPackagedAcceptanceProbe(command, options) {
   );
   const { readinessPipe, launchCorrelation } = signedRequest.payload;
   const armedPipe = signedRequest.payload.automationArmedPipe;
-  const resultChannel = createOneUseJsonChannel(readinessPipe, options.timeoutMs);
+  const resultChannel = createOneUseJsonChannel(readinessPipe, options.timeoutMs, (value) =>
+    isBoundResponse(value, launchCorrelation),
+  );
+  const armedExpectedPhase =
+    command === 'manual-physical-observation' ? 'observation-started' : 'armed';
   const armedChannel =
-    armedPipe === null ? null : createOneUseJsonChannel(armedPipe, options.timeoutMs);
+    armedPipe === null
+      ? null
+      : createOneUseJsonChannel(armedPipe, options.timeoutMs, (value) =>
+          isBoundResponse(value, launchCorrelation, armedExpectedPhase),
+        );
   await Promise.all([resultChannel.listening, armedChannel?.listening]);
-  const sensitiveArguments = [
-    `--talking-quill-acceptance-request=${options.signedRequest}`,
-    `--talking-quill-installed-readiness-pipe=${readinessPipe}`,
-    `--talking-quill-launch-correlation=${launchCorrelation}`,
-  ];
-  if (command === 'manual-physical-observation') {
-    sensitiveArguments.push('--talking-quill-installed-physical-observation');
-  }
-  if (armedChannel !== null) {
-    sensitiveArguments.push(`--talking-quill-automation-armed-pipe=${armedPipe}`);
-    if (automationValidationFor(command)) {
-      sensitiveArguments.push(
-        '--talking-quill-installed-automation-validation',
-        `--talking-quill-automation-case=${
-          command === 'supplemental-synthetic-observation' ? 'general' : 'lifecycle'
-        }`,
-      );
-    }
-  }
-  if (command === 'login-marker') sensitiveArguments.push('--talking-quill-login-start');
   const startupFrame = Buffer.from(
-    `${canonicalAcceptanceJson({ version: 1, arguments: sensitiveArguments })}\n`,
+    `${canonicalAcceptanceJson({ version: 1, signedRequest: options.signedRequest })}\n`,
   );
   const child = options.spawnProcess(
     options.executable,
@@ -142,9 +130,7 @@ export async function runPackagedAcceptanceProbe(command, options) {
   try {
     const armed = armedChannel === null ? null : await wait(armedChannel.value);
     if (armed !== null) {
-      const expectedPhase =
-        command === 'manual-physical-observation' ? 'observation-started' : 'armed';
-      assertBoundResponse(armed, launchCorrelation, expectedPhase);
+      assertBoundResponse(armed, launchCorrelation, armedExpectedPhase);
       if (command === 'manual-physical-observation') options.onObservationStarted?.(armed);
       const armedAction = await options.onArmed?.(armed, child);
       if (command === 'electron-crash-arm') {
@@ -193,9 +179,9 @@ function readFrozenSignedRequest(encoded, command, buildId, invocation, nowMs) {
   return envelope;
 }
 
-export function createOneUseJsonChannel(pipeName, timeoutMs) {
+export function createOneUseJsonChannel(pipeName, timeoutMs, acceptValue = () => true) {
   let settled = false;
-  let connected = false;
+  let rejectedClients = 0;
   let timer;
   let resolveListening;
   let rejectListening;
@@ -210,32 +196,40 @@ export function createOneUseJsonChannel(pipeName, timeoutMs) {
     rejectValue = rejectPromise;
   });
   const server = net.createServer((socket) => {
-    if (connected) {
-      socket.destroy();
-      return;
-    }
-    connected = true;
-    server.close();
     let bytes = Buffer.alloc(0);
+    let oversized = false;
     socket.on('data', (chunk) => {
       bytes = Buffer.concat([bytes, chunk]);
-      if (bytes.length > MAX_RESPONSE_BYTES) socket.destroy(new Error('Probe response too large'));
+      if (bytes.length > MAX_RESPONSE_BYTES) {
+        oversized = true;
+        rejectClient();
+        socket.destroy();
+      }
     });
-    socket.once('error', fail);
+    socket.once('error', () => rejectClient());
     socket.once('end', () => {
+      if (settled || oversized) return;
       try {
         const text = bytes.toString('utf8');
         if (!text.endsWith('\n') || text.indexOf('\n') !== text.length - 1) {
           throw new Error('Probe response must be one newline-terminated frame');
         }
+        const parsed = JSON.parse(text);
+        if (!acceptValue(parsed, socket)) throw new Error('Probe response client is unauthorized');
         settled = true;
         clearTimeout(timer);
-        resolveValue(JSON.parse(text));
-      } catch (error) {
-        fail(error);
+        server.close();
+        resolveValue(parsed);
+      } catch {
+        rejectClient();
       }
     });
   });
+  const rejectClient = () => {
+    if (settled) return;
+    rejectedClients += 1;
+    if (rejectedClients >= 8) fail(new Error('Packaged probe rejected too many clients'));
+  };
   const fail = (error) => {
     if (settled) return;
     settled = true;
@@ -252,15 +246,19 @@ export function createOneUseJsonChannel(pipeName, timeoutMs) {
   return { listening, value, close: () => server.close() };
 }
 
+function isBoundResponse(value, correlation, expectedPhase) {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    value.version === 1 &&
+    value.correlation === correlation &&
+    value.runtimeLifecycleAuthoritative === false &&
+    (expectedPhase === undefined ? value.result === 'passed' : value.phase === expectedPhase)
+  );
+}
+
 function assertBoundResponse(value, correlation, expectedPhase) {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    value.version !== 1 ||
-    value.correlation !== correlation ||
-    value.runtimeLifecycleAuthoritative !== false ||
-    (expectedPhase === undefined ? value.result !== 'passed' : value.phase !== expectedPhase)
-  ) {
+  if (!isBoundResponse(value, correlation, expectedPhase)) {
     throw new Error('Packaged probe response was not bound to its signed request');
   }
 }

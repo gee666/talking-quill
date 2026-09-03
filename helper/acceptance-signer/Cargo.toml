@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 description = "Narrow deterministic signer for nonpromotable installed-acceptance kits"
+build = "build.rs"
 
 [package.metadata.talking-quill-boundary]
 role = "acceptance-signer"
@@ -13,12 +14,16 @@ runtime = false
 executable = true
 private-key-reader = true
 
+[[bin]]
+name = "talking-quill-acceptance-synthetic-sender"
+path = "src/synthetic_sender.rs"
+
 [dependencies]
 p256 = { workspace = true, features = ["pkcs8"] }
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints]
 workspace = true

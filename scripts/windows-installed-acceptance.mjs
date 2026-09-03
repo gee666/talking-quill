@@ -16,6 +16,7 @@ import {
   verifyWindowsUpdaterReleaseBinding,
 } from './release-package-metadata.mjs';
 import { bindTqpkg2OwnerManifest, parseTqpkg2 } from './tqpkg2.mjs';
+import { verifyFaultEvidenceChain } from './windows-installed-acceptance-fault-evidence.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
@@ -99,6 +100,24 @@ export async function createInstalledAcceptancePlan(
   }
   const predecessor = artifacts.predecessor.metadata;
   const candidate = artifacts.candidate.metadata;
+  if (artifacts.faults !== undefined) {
+    verifyFaultEvidenceChain(
+      ACCEPTANCE_FAULT_PHASES.map((phase) => ({
+        bytes: artifacts.faults[phase].validationEvidence.content,
+        artifact: artifacts.faults[phase],
+      })),
+      {
+        buildId: input.acceptance?.buildId,
+        architecture: input.architecture,
+        sourceCommit: candidate.sourceCommit,
+        sourceTree: candidate.sourceTree,
+        candidateSha256: artifacts.candidate.installer.sha256,
+        candidateLayoutDigest: candidate.packageLayoutDigest,
+        publicKeySpkiBase64url: input.acceptance?.validationPublicKeySpkiBase64url,
+        chainHeadSha256: input.acceptance?.validationChainHeadSha256,
+      },
+    );
+  }
   const predecessorUpdaterKey = inspectWindowsUpdaterKey(
     resolve(artifacts.predecessor.unpackedRoot, role(predecessor, 'gateway').path),
     input.architecture,
@@ -492,34 +511,13 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
   ) {
     throw new Error(`${name} TQPKG2 mode does not match release metadata`);
   }
-  let isolatedValidation = false;
+  let validationEvidence = null;
   if (name === 'fault') {
-    const validationFile = await regularIdentity(
+    validationEvidence = await regularIdentity(
       input.validationEvidencePath,
       input.validationEvidenceSha256,
       fileSystem,
     );
-    const validation = JSON.parse(validationFile.content.toString('utf8'));
-    if (
-      validation.isolatedInstallValidation !== true ||
-      validation.failurePoint !== nativePackage.manifest.faultPhase ||
-      ![
-        'staged',
-        'prepared',
-        'predecessorMoved',
-        'publishing',
-        'publishedBeforePersist',
-        'published',
-        'registered',
-        'committed',
-        'legacyRetiring',
-        'legacyRetired',
-      ].includes(validation.failurePoint) ||
-      validation.candidatePackageLayoutDigest !== metadata.packageLayoutDigest
-    ) {
-      throw new Error('Fault artifact validation evidence is invalid');
-    }
-    isolatedValidation = true;
   }
   return Object.freeze({
     name,
@@ -530,7 +528,8 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     releaseIdentity,
     electron,
     appAsar,
-    isolatedValidation,
+    isolatedValidation: validationEvidence !== null,
+    validationEvidence,
     packageManifest: nativePackage.manifest,
   });
 }

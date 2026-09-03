@@ -1,14 +1,16 @@
-import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { currentSourceIdentity } from './source-identity.mjs';
 import { parseTqpkg2 } from './tqpkg2.mjs';
+import { buildWindowsInstalledAcceptanceArtifacts } from './windows-installed-acceptance-native-build.mjs';
 import {
-  validateCanonicalRelease,
   buildInstalledAcceptanceKit,
+  validateCanonicalRelease,
 } from './build-windows-installed-acceptance-kit.mjs';
+import { assertNoLinkPath } from './windows-installed-acceptance-bundle.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_REQUEST_SCHEDULE,
@@ -29,13 +31,26 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
   }
   const outputRoot = resolve(options.outputRoot ?? 'tmp/windows-installed-acceptance/producer');
   requireBelowTmp(outputRoot);
+  await ensureSafeOutputParent(resolve(outputRoot, '..'));
   await requireAbsent(outputRoot);
-  await mkdir(outputRoot, { recursive: true, mode: 0o700 });
+  await mkdir(outputRoot, { recursive: false, mode: 0o700 });
+  await assertNoLinkPath(outputRoot, { directory: true });
   try {
     const validateRelease = dependencies.validateCanonicalRelease ?? validateCanonicalRelease;
     const canonical = await validateRelease(options);
     if (canonical.descriptor.architecture !== options.architecture) {
       throw new Error('Canonical RELEASE architecture differs from the producer target');
+    }
+    const readSourceIdentity = dependencies.currentSourceIdentity ?? currentSourceIdentity;
+    const sourceIdentity = readSourceIdentity({
+      repositoryRoot,
+      requireClean: process.env.NODE_ENV !== 'test',
+    });
+    if (
+      sourceIdentity.sourceCommit !== canonical.descriptor.sourceCommit ||
+      sourceIdentity.sourceTree !== canonical.descriptor.sourceTree
+    ) {
+      throw new Error('Acceptance build checkout differs from the canonical source identity');
     }
     const parseCanonicalPackage = dependencies.parseTqpkg2 ?? parseTqpkg2;
     const parsed = parseCanonicalPackage(canonical.installerBytes, options.architecture);
@@ -57,11 +72,15 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
       canonicalRoot,
       canonical,
       canonicalMetadata,
+      canonicalMetadataSha256: createHash('sha256').update(canonicalMetadataBytes).digest('hex'),
       buildId,
       runWindow,
       predecessorEnvironment: predecessorEnvironment(canonicalMetadata, canonicalRoot),
     });
-    const produceArtifacts = dependencies.produceArtifacts ?? produceFirstPartyArtifacts;
+    const produceArtifacts =
+      dependencies.produceArtifacts ??
+      ((producerOptions, producerContext) =>
+        buildWindowsInstalledAcceptanceArtifacts(producerOptions, producerContext));
     const produced = await produceArtifacts(options, workspace, dependencies);
     validateProducedArtifacts(produced);
 
@@ -111,6 +130,8 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
         buildManifestPath: produced.buildManifestPath,
         buildManifestSha256: await fileHash(produced.buildManifestPath),
         manifestPublicKeySpkiBase64url: produced.manifestPublicKeySpkiBase64url,
+        validationPublicKeySpkiBase64url: produced.validationPublicKeySpkiBase64url,
+        validationChainHeadSha256: produced.validationChainHeadSha256,
         syntheticSenderPath: produced.syntheticSenderPath,
         syntheticSenderSha256: await fileHash(produced.syntheticSenderPath),
         trustedLauncherPath: produced.trustedLauncherPath,
@@ -130,6 +151,8 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
         ? null
         : await assembler({
             ...options,
+            signerPath: produced.signerPath,
+            signerSha256: produced.signerSha256,
             configPath,
             outputRoot: options.kitOutputRoot,
             bundlePath: options.bundlePath,
@@ -139,67 +162,6 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
     await rm(outputRoot, { recursive: true, force: true });
     throw error;
   }
-}
-
-async function produceFirstPartyArtifacts(options, workspace, dependencies) {
-  const runBuildStep = dependencies.runBuildStep ?? runBuildStepProcess;
-  const stages = [
-    'native-signer',
-    'source-bound-synthetic-sender',
-    'acceptance-candidate',
-    'nonpromotable-repair',
-    ...ACCEPTANCE_FAULT_PHASES.map((phase) => `fault-${phase}`),
-    ...ACCEPTANCE_FAULT_PHASES.map((phase) => `validate-${phase}`),
-  ];
-  let result;
-  for (const stage of stages) {
-    result = await runBuildStep(stage, options, workspace);
-  }
-  if (result?.artifactSetPath === undefined) {
-    throw new Error('First-party heavy build did not return its frozen artifact inventory');
-  }
-  return JSON.parse(await readFile(result.artifactSetPath, 'utf8'));
-}
-
-function runBuildStepProcess(stage, options, workspace) {
-  const command = resolve(
-    options.heavyBuildDriverPath ?? 'scripts/windows-installed-acceptance-native-build.ps1',
-  );
-  const result = spawnSync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      command,
-      '-Stage',
-      stage,
-      '-Architecture',
-      options.architecture,
-      '-OutputRoot',
-      workspace.outputRoot,
-    ],
-    {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 30 * 60 * 1_000,
-      env: installedAcceptanceBuildEnvironment(process.env, {
-        TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
-        TALKING_QUILL_ACCEPTANCE_BUILD: '1',
-        TALKING_QUILL_ACCEPTANCE_BUILD_ID: workspace.buildId,
-        TALKING_QUILL_ACCEPTANCE_VALID_UNTIL_MS: String(workspace.runWindow.expiresAtMs),
-        ...workspace.predecessorEnvironment,
-      }),
-    },
-  );
-  if (result.status !== 0 || result.signal !== null || result.error !== undefined) {
-    throw new Error(`Installed-acceptance heavy build stage failed: ${stage}`);
-  }
-  const line = result.stdout.trim();
-  return line === '' ? {} : JSON.parse(line);
 }
 
 function predecessorEnvironment(metadata, root) {
@@ -239,10 +201,14 @@ function validateProducedArtifacts(value) {
   }
   for (const name of [
     'predecessor',
+    'signerPath',
+    'signerSha256',
     'candidate',
     'repair',
     'buildManifestPath',
     'manifestPublicKeySpkiBase64url',
+    'validationPublicKeySpkiBase64url',
+    'validationChainHeadSha256',
     'syntheticSenderPath',
     'trustedLauncherPath',
   ]) {
@@ -292,13 +258,31 @@ function needsArmedPipe(command) {
 }
 
 async function fileHash(path) {
-  const metadata = await lstat(resolve(path));
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
-    throw new Error('Acceptance producer input is not a one-link regular file');
+  const absolute = resolve(path);
+  await assertNoLinkPath(absolute, { file: true });
+  const handle = await open(absolute, 'r');
+  try {
+    const before = await handle.stat();
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    const pathAfter = await lstat(absolute);
+    if (
+      !before.isFile() ||
+      before.nlink !== 1 ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== bytes.length ||
+      before.size !== after.size ||
+      pathAfter.dev !== before.dev ||
+      pathAfter.ino !== before.ino ||
+      pathAfter.size !== before.size
+    ) {
+      throw new Error('Acceptance producer input changed while hashing');
+    }
+    return createHash('sha256').update(bytes).digest('hex');
+  } finally {
+    await handle.close();
   }
-  return createHash('sha256')
-    .update(await readFile(resolve(path)))
-    .digest('hex');
 }
 
 function requireHex(value, label) {
@@ -310,6 +294,20 @@ function requireBelowTmp(path) {
   const local = relative(resolve(repositoryRoot, 'tmp'), path);
   if (local === '' || local === '..' || local.startsWith(`..${sep}`) || local.includes(':')) {
     throw new Error('Acceptance producer output must stay below tmp');
+  }
+}
+
+async function ensureSafeOutputParent(parent) {
+  const tmpRoot = resolve(repositoryRoot, 'tmp');
+  await assertNoLinkPath(tmpRoot, { directory: true });
+  const local = relative(tmpRoot, parent);
+  let current = tmpRoot;
+  for (const component of local.split(/[\\/]/u).filter(Boolean)) {
+    current = resolve(current, component);
+    await mkdir(current, { recursive: false, mode: 0o700 }).catch((error) => {
+      if (error?.code !== 'EEXIST') throw error;
+    });
+    await assertNoLinkPath(current, { directory: true });
   }
 }
 
@@ -328,7 +326,7 @@ function valueAfter(name) {
 }
 
 const usage =
-  'Usage: node scripts/build-windows-installed-acceptance-inputs.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --request-private-key <pkcs8-der> --signer <native-signer> --signer-sha256 <sha256> --manifest-private-key <pkcs8-der> --update-private-key <pkcs8-der> --not-before-ms <ms> --expires-at-ms <ms> [--build-id <hex>] [--output tmp/path] [--kit-output tmp/path] [--bundle tmp/path.zip]';
+  'Usage: node scripts/build-windows-installed-acceptance-inputs.mjs --release RELEASE.json --release-sha256 <sha256> --provenance artifact-provenance.json --provenance-sha256 <sha256> --source <git-root> --request-private-key <pkcs8-der> --signer <native-signer> --signer-sha256 <sha256> --manifest-private-key <pkcs8-der> --update-private-key <pkcs8-der> --validation-private-key <pkcs8-der> --not-before-ms <ms> --expires-at-ms <ms> [--build-id <hex>] [--output tmp/path] [--kit-output tmp/path] [--bundle tmp/path.zip]';
 
 async function main() {
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -347,6 +345,7 @@ async function main() {
     signerSha256: valueAfter('--signer-sha256'),
     manifestPrivateKeyPath: valueAfter('--manifest-private-key'),
     updatePrivateKeyPath: valueAfter('--update-private-key'),
+    validationPrivateKeyPath: valueAfter('--validation-private-key'),
     notBeforeMs: valueAfter('--not-before-ms'),
     expiresAtMs: valueAfter('--expires-at-ms'),
     buildId: valueAfter('--build-id'),
@@ -366,6 +365,7 @@ async function main() {
       options.signerSha256,
       options.manifestPrivateKeyPath,
       options.updatePrivateKeyPath,
+      options.validationPrivateKeyPath,
       options.notBeforeMs,
       options.expiresAtMs,
     ].some((value) => !value)

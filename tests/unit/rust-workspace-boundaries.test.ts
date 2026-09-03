@@ -360,7 +360,11 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
       policy('zeroize', '=1.9.0', { features: ['derive'], usesDefaultFeatures: false }),
       policy('windows-sys', '=0.61.2', {
         target: windows,
-        features: ['Win32_Foundation', 'Win32_Storage_FileSystem'],
+        features: [
+          'Win32_Foundation',
+          'Win32_Storage_FileSystem',
+          'Win32_UI_Input_KeyboardAndMouse',
+        ],
       }),
     ]);
     expectDependencies('talking-quill-helper', [

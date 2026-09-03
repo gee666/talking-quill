@@ -17,7 +17,7 @@ describe('installed observation routing', () => {
       expect(canonical).not.toContain('--talking-quill-installed-readiness-pipe=');
     }
     expect(index).toBe("import { startMain } from './bootstrap';\n\nstartMain();\n");
-    expect(entry).toContain('authorizeInstalledAcceptance({');
+    expect(entry).toContain('authorizeInstalledAcceptanceRequest({');
     expect(entry).toContain('installedObservation: {');
     expect(entry).not.toContain('extension:');
     expect(observation).not.toContain('new BrowserWindow');

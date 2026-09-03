@@ -129,10 +129,12 @@ async function writeWindowsAcceptanceManifest(context, executable) {
   const requestPublicKeySpkiBase64url =
     process.env.TALKING_QUILL_ACCEPTANCE_REQUEST_PUBLIC_KEY_SPKI_BASE64URL ?? '';
   const buildId = process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID ?? '';
+  const validFromMs = Number(process.env.TALKING_QUILL_ACCEPTANCE_VALID_FROM_MS);
   const validUntilMs = Number(process.env.TALKING_QUILL_ACCEPTANCE_VALID_UNTIL_MS);
   if (
     !/^[A-Za-z0-9_-]+$/u.test(requestPublicKeySpkiBase64url) ||
     !/^[0-9a-f]{64}$/u.test(buildId) ||
+    !Number.isSafeInteger(validFromMs) ||
     !Number.isSafeInteger(validUntilMs)
   ) {
     throw new Error('Acceptance build authorization inputs are invalid');
@@ -144,7 +146,6 @@ async function writeWindowsAcceptanceManifest(context, executable) {
   const gateway = role('gateway');
   const owner = role('owner');
   if (!gateway || !owner) throw new Error('Acceptance owner manifest roles are missing');
-  const validFromMs = Date.now() - 60_000;
   if (validUntilMs <= validFromMs || validUntilMs - validFromMs > 31 * 24 * 60 * 60 * 1_000) {
     throw new Error('Acceptance build validity must be positive and no longer than 31 days');
   }

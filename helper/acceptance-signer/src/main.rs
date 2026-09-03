@@ -8,6 +8,16 @@ use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
 use zeroize::Zeroize;
 
+#[used]
+static SOURCE_COMMIT_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_COMMIT=",
+    env!("TALKING_QUILL_SOURCE_COMMIT")
+);
+#[used]
+static SOURCE_TREE_MARKER: &str = concat!(
+    "TALKING_QUILL_SOURCE_TREE=",
+    env!("TALKING_QUILL_SOURCE_TREE")
+);
 const MAX_KEY_BYTES: u64 = 512;
 const MAX_MESSAGE_BYTES: u64 = 64 * 1024;
 
@@ -19,6 +29,8 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    std::hint::black_box(SOURCE_COMMIT_MARKER);
+    std::hint::black_box(SOURCE_TREE_MARKER);
     let mut arguments = env::args_os();
     let _program = arguments.next();
     if arguments.next().as_deref() != Some("--private-key".as_ref()) {

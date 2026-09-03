@@ -18,11 +18,23 @@ import { fileURLToPath } from 'node:url';
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/u;
 const HEX_SEC1 = /^04[0-9a-f]{128}$/u;
 
+function matchesSourceIdentity(bytes, commit, tree) {
+  if (commit === undefined && tree === undefined) return true;
+  return (
+    /^[0-9a-f]{40}$/u.test(commit ?? '') &&
+    /^[0-9a-f]{40}$/u.test(tree ?? '') &&
+    bytes.includes(Buffer.from(`TALKING_QUILL_SOURCE_COMMIT=${commit}`, 'ascii')) &&
+    bytes.includes(Buffer.from(`TALKING_QUILL_SOURCE_TREE=${tree}`, 'ascii'))
+  );
+}
+
 export function signAcceptancePayload({
   signerPath,
   privateKeyPath,
   payloadBytes,
   signerSha256,
+  signerSourceCommit,
+  signerSourceTree,
   spawnProcess = spawnSync,
 }) {
   if (
@@ -56,7 +68,8 @@ export function signAcceptancePayload({
       pathAfter.ino !== opened.ino ||
       pathAfter.size !== executableBytes.length ||
       !/^[0-9a-f]{64}$/u.test(signerSha256 ?? '') ||
-      createHash('sha256').update(executableBytes).digest('hex') !== signerSha256
+      createHash('sha256').update(executableBytes).digest('hex') !== signerSha256 ||
+      !matchesSourceIdentity(executableBytes, signerSourceCommit, signerSourceTree)
     ) {
       throw new Error('Native acceptance signer identity is invalid');
     }

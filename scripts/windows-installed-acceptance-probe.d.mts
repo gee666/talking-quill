@@ -6,6 +6,7 @@ export function createSignedAcceptanceRequest(
 export function createOneUseJsonChannel(
   pipeName: string,
   timeoutMs: number,
+  acceptValue?: (value: any, socket: unknown) => boolean,
 ): {
   readonly listening: Promise<void>;
   readonly value: Promise<any>;

@@ -33,7 +33,7 @@ const result = spawnSync(
     '--release',
     '--locked',
     '--features',
-    'installed-acceptance-repair',
+    'installed-acceptance-repair,machine-lock-test-namespace',
   ],
   {
     cwd: repositoryRoot,

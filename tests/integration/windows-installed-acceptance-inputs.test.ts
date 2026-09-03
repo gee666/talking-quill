@@ -5,6 +5,7 @@ import {
   buildWindowsInstalledAcceptanceInputs,
   installedAcceptanceBuildEnvironment,
 } from '../../scripts/build-windows-installed-acceptance-inputs.mjs';
+import { buildWindowsInstalledAcceptanceArtifacts } from '../../scripts/windows-installed-acceptance-native-build.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_REQUEST_SCHEDULE,
@@ -66,11 +67,15 @@ describe('Windows installed-acceptance input producer', () => {
     const produceArtifacts = vi.fn(() =>
       Promise.resolve({
         predecessor: artifact,
+        signerPath: launcher,
+        signerSha256: hash,
         candidate: artifact,
         repair: artifact,
         faults,
         buildManifestPath: manifest,
         manifestPublicKeySpkiBase64url: 'fixture_key',
+        validationPublicKeySpkiBase64url: 'fixture_validation_key',
+        validationChainHeadSha256: '88'.repeat(32),
         syntheticSenderPath: sender,
         trustedLauncherPath: launcher,
       }),
@@ -90,6 +95,7 @@ describe('Windows installed-acceptance input producer', () => {
         requestPrivateKeyPath: resolve(root, 'request.der'),
         manifestPrivateKeyPath: resolve(root, 'manifest.der'),
         updatePrivateKeyPath: resolve(root, 'update.der'),
+        validationPrivateKeyPath: resolve(root, 'validation.der'),
         signerPath: resolve(root, 'signer.exe'),
         signerSha256: hash,
         notBeforeMs,
@@ -108,6 +114,7 @@ describe('Windows installed-acceptance input producer', () => {
             },
             installerBytes: Buffer.from('mock installer'),
           }),
+        currentSourceIdentity: () => ({ sourceCommit, sourceTree }),
         parseTqpkg2: () => ({
           contents: new Map([
             ['resources/keyboard-owner-release-v1.json', Buffer.from(JSON.stringify(metadata()))],
@@ -135,6 +142,34 @@ describe('Windows installed-acceptance input producer', () => {
     expect(Object.keys(config.acceptance.requestPayloads)).toEqual(
       ACCEPTANCE_REQUEST_SCHEDULE.map(({ invocationId }) => invocationId),
     );
+  });
+
+  it('runs every checked-in native build and isolated validation stage in order', async () => {
+    const stages: string[] = [];
+    const sealed = { candidate: { installerSha256: hash } };
+    const result = await buildWindowsInstalledAcceptanceArtifacts(
+      {},
+      {},
+      {
+        runStage: (stage: string) => {
+          stages.push(stage);
+          return Promise.resolve(stage === 'seal-artifact-set' ? sealed : { result: 'passed' });
+        },
+      },
+    );
+    expect(stages).toEqual([
+      'native-signer',
+      'prepare-signing-identities',
+      'source-bound-synthetic-sender',
+      'acceptance-candidate',
+      'sign-candidate-manifest',
+      'pack-candidate',
+      'nonpromotable-repair',
+      ...ACCEPTANCE_FAULT_PHASES.map((phase) => `fault-${phase}`),
+      ...ACCEPTANCE_FAULT_PHASES.map((phase) => `validate-${phase}`),
+      'seal-artifact-set',
+    ]);
+    expect(result).toBe(sealed);
   });
 
   it('does not inherit signing material into build subprocess environments', () => {

@@ -15,6 +15,7 @@ export interface WindowsInstalledAcceptanceProducerOptions {
   readonly signerSha256: string;
   readonly manifestPrivateKeyPath: string;
   readonly updatePrivateKeyPath: string;
+  readonly validationPrivateKeyPath: string;
   readonly notBeforeMs: number | string;
   readonly expiresAtMs: number | string;
   readonly buildId?: string;

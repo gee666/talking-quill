@@ -2,27 +2,24 @@ declare const __TALKING_QUILL_SOURCE_REVISION__: string;
 declare const __TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL__: string;
 
 import { app } from 'electron';
-import { readFileSync } from 'node:fs';
+import { closeSync, readFileSync, readSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
-  authorizeInstalledAcceptance,
+  authorizeInstalledAcceptanceRequest,
   consumeInstalledAcceptanceNonce,
-  hasInstalledAcceptanceArguments,
+  INSTALLED_ACCEPTANCE_ARGUMENT_FLAGS,
+  INSTALLED_ACCEPTANCE_ARGUMENT_PREFIXES,
 } from '../acceptance/authorization';
 import type { InstalledObservationRequest } from '../acceptance/installed-observation';
 import { isStrictPathChild } from '../app/runtime-path-policy';
 import { startMain, type MainBootstrapOptions } from '../bootstrap';
 
-hydrateAcceptanceArguments(process.argv);
+const startup = readInstalledAcceptanceStartup(process.argv);
 
-if (
-  !app.isPackaged ||
-  process.platform !== 'win32' ||
-  !hasInstalledAcceptanceArguments(process.argv)
-) {
+if (!app.isPackaged || process.platform !== 'win32') {
   throw new Error('Windows installed acceptance entry requires an authorized packaged invocation');
 }
-const authorization = authorizeInstalledAcceptance({
+const authorization = authorizeInstalledAcceptanceRequest({
   acceptanceBuild: true,
   encodedBuildManifest: readFileSync(
     join(process.resourcesPath, 'windows-installed-acceptance-v1.txt'),
@@ -30,7 +27,7 @@ const authorization = authorizeInstalledAcceptance({
   ).trim(),
   manifestPublicKeySpkiBase64url: __TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL__,
   sourceRevision: __TALKING_QUILL_SOURCE_REVISION__,
-  argv: process.argv,
+  encodedRequest: startup.signedRequest,
   installed: {
     resourcesPath: process.resourcesPath,
     executablePath: process.execPath,
@@ -40,28 +37,47 @@ const authorization = authorizeInstalledAcceptance({
 });
 consumeInstalledAcceptanceNonce(authorization, app.getPath('temp'));
 
-function hydrateAcceptanceArguments(argv: string[]): void {
+function readInstalledAcceptanceStartup(argv: readonly string[]): { signedRequest: string } {
   const marker = '--talking-quill-installed-acceptance-fd=3';
-  const matches = argv.filter((argument) => argument === marker);
-  if (matches.length === 0) return;
-  if (matches.length !== 1) throw new Error('Installed acceptance startup descriptor is invalid');
-  const bytes = readFileSync(3);
-  if (bytes.length === 0 || bytes.length > 20 * 1024 || bytes.at(-1) !== 0x0a) {
+  if (
+    argv.filter((argument) => argument === marker).length !== 1 ||
+    argv.some(
+      (argument) =>
+        argument !== marker &&
+        (INSTALLED_ACCEPTANCE_ARGUMENT_FLAGS.some((flag) => argument.startsWith(flag)) ||
+          INSTALLED_ACCEPTANCE_ARGUMENT_PREFIXES.some((prefix) => argument.startsWith(prefix))),
+    )
+  ) {
+    throw new Error('Installed acceptance startup descriptor is invalid');
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(Math.min(4096, 20 * 1024 + 1 - total));
+      const count = readSync(3, chunk, 0, chunk.length, null);
+      if (count === 0) break;
+      total += count;
+      if (total > 20 * 1024) throw new Error('Installed acceptance startup frame is too large');
+      chunks.push(chunk.subarray(0, count));
+    }
+  } finally {
+    closeSync(3);
+  }
+  const bytes = Buffer.concat(chunks, total);
+  if (bytes.length === 0 || bytes.at(-1) !== 0x0a) {
     throw new Error('Installed acceptance startup frame is invalid');
   }
-  const value = JSON.parse(bytes.subarray(0, -1).toString('utf8')) as {
-    version?: unknown;
-    arguments?: unknown;
-  };
+  const value = JSON.parse(bytes.subarray(0, -1).toString('utf8')) as Record<string, unknown>;
   if (
+    Object.keys(value).sort().join(',') !== 'signedRequest,version' ||
     value.version !== 1 ||
-    !Array.isArray(value.arguments) ||
-    value.arguments.length === 0 ||
-    value.arguments.some((argument) => typeof argument !== 'string' || argument.length > 18_000)
+    typeof value.signedRequest !== 'string' ||
+    !/^[A-Za-z0-9_-]+$/u.test(value.signedRequest)
   ) {
-    throw new Error('Installed acceptance startup arguments are invalid');
+    throw new Error('Installed acceptance startup request is invalid');
   }
-  for (const argument of value.arguments) argv.push(argument as string);
+  return { signedRequest: value.signedRequest };
 }
 
 let lifecycleProfile: string | undefined;
@@ -84,6 +100,7 @@ const startInstalledAcceptance = startMain as (
 startInstalledAcceptance({
   ...(lifecycleProfile === undefined ? {} : { userDataPath: lifecycleProfile }),
   hiddenStartupFailure: true,
+  windowsLoginStart: authorization.command === 'login-marker',
   installedObservation: {
     command: authorization.command,
     heartbeatDurationMs: authorization.heartbeatDurationMs,

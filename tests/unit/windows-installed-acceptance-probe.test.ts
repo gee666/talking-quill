@@ -70,6 +70,29 @@ describe('Windows installed acceptance packaged probe transport', () => {
     channel.close();
   });
 
+  it('rejects a forged first client and accepts the later authorized frame', async () => {
+    const socket = `\\\\.\\pipe\\TalkingQuill.InstalledReadiness.${String(Date.now() + 1).padStart(32, '0')}`;
+    const channel = createOneUseJsonChannel(
+      socket,
+      2_000,
+      (value: unknown) =>
+        value !== null &&
+        typeof value === 'object' &&
+        'nonce' in value &&
+        value.nonce === 'trusted',
+    );
+    await channel.listening;
+    for (const nonce of ['forged', 'trusted']) {
+      await new Promise<void>((resolveWrite, reject) => {
+        const client = net.connect(socket);
+        client.once('error', reject);
+        client.once('connect', () => client.end(`${JSON.stringify({ nonce })}\n`, resolveWrite));
+      });
+    }
+    await expect(channel.value).resolves.toEqual({ nonce: 'trusted' });
+    channel.close();
+  });
+
   it('confirms a cancelled packaged process has exited before teardown resolves', async () => {
     const child = spawnPackagedProcess(
       process.execPath,
@@ -143,13 +166,12 @@ describe('Windows installed acceptance packaged probe transport', () => {
       ) => {
         expect(executable).toBe('C:/Program Files/Talking Quill/Talking Quill.exe');
         expect(commandArguments).toEqual(['--talking-quill-installed-acceptance-fd=3']);
-        const frame = JSON.parse(startupFrame.toString('utf8')) as { arguments: string[] };
-        const value = (prefix: string) =>
-          frame.arguments.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
-        const correlation = value('--talking-quill-launch-correlation=');
-        const pipe = value('--talking-quill-installed-readiness-pipe=');
-        if (pipe === undefined || correlation === undefined)
-          throw new Error('missing probe arguments');
+        const frame = JSON.parse(startupFrame.toString('utf8')) as { signedRequest: string };
+        const envelope = JSON.parse(
+          Buffer.from(frame.signedRequest, 'base64url').toString('utf8'),
+        ) as { payload: { launchCorrelation: string; readinessPipe: string } };
+        const correlation = envelope.payload.launchCorrelation;
+        const pipe = envelope.payload.readinessPipe;
         const client = net.connect(pipe);
         client.once('connect', () =>
           client.end(

@@ -63,6 +63,8 @@ export function createInstalledAcceptancePlan(
       readonly buildManifestPath: string;
       readonly buildManifestSha256: string;
       readonly manifestPublicKeySpkiBase64url: string;
+      readonly validationPublicKeySpkiBase64url: string;
+      readonly validationChainHeadSha256: string;
       readonly runWindow: {
         readonly notBeforeMs: number;
         readonly expiresAtMs: number;

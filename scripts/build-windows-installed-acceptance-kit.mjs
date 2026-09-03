@@ -239,6 +239,8 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
       {
         signerPath,
         signerSha256,
+        signerSourceCommit: imported.descriptor.sourceCommit,
+        signerSourceTree: imported.descriptor.sourceTree,
         privateKeyPath,
       },
       signPayload,

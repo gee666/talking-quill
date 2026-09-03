@@ -22,6 +22,7 @@ export interface MainBootstrapOptions {
   readonly userDataPath?: string;
   readonly isolatedInstance?: boolean;
   readonly hiddenStartupFailure?: boolean;
+  readonly windowsLoginStart?: boolean;
   readonly application?: Omit<TalkingQuillApplicationOptions, 'windowsLoginStart'>;
 }
 
@@ -39,11 +40,12 @@ export function startMain(options: MainBootstrapOptions = {}): void {
     app.setPath('userData', profile);
   }
 
-  const windowsLoginStartClassification = classifyWindowsLoginStartArguments(
-    process.argv,
-    app.isPackaged,
-    process.platform,
-  );
+  const windowsLoginStartClassification =
+    options.windowsLoginStart === undefined
+      ? classifyWindowsLoginStartArguments(process.argv, app.isPackaged, process.platform)
+      : options.windowsLoginStart
+        ? 'login-start'
+        : 'not-login-start';
   if (windowsLoginStartClassification === 'invalid') {
     throw new Error('Windows login-start argument is invalid for this launch');
   }

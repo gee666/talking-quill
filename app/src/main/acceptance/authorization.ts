@@ -58,6 +58,16 @@ export function hasInstalledAcceptanceArguments(argv: readonly string[]): boolea
 export function authorizeInstalledAcceptance(
   options: AcceptanceAuthorizationOptions,
 ): AcceptanceRunRequestPayload {
+  const encodedRequest = readSingleValue(options.argv, REQUEST_PREFIX);
+  if (encodedRequest === null) throw new Error('Signed installed acceptance request is missing');
+  const payload = authorizeInstalledAcceptanceRequest({ ...options, encodedRequest });
+  assertArgumentsMatchRequest(options.argv, payload);
+  return payload;
+}
+
+export function authorizeInstalledAcceptanceRequest(
+  options: Omit<AcceptanceAuthorizationOptions, 'argv'> & { readonly encodedRequest: string },
+): AcceptanceRunRequestPayload {
   if (!options.acceptanceBuild)
     throw new Error('Installed acceptance is unavailable in this build');
 
@@ -84,10 +94,8 @@ export function authorizeInstalledAcceptance(
   if (options.installed !== undefined)
     verifyInstalledAcceptanceBinding(manifestPayload, options.installed);
 
-  const encodedRequest = readSingleValue(options.argv, REQUEST_PREFIX);
-  if (encodedRequest === null) throw new Error('Signed installed acceptance request is missing');
   const request = decodeCanonicalEnvelope(
-    encodedRequest,
+    options.encodedRequest,
     (value) => AcceptanceRunRequestSchema.parse(value),
     'acceptance run request',
   );
@@ -120,7 +128,6 @@ export function authorizeInstalledAcceptance(
   ) {
     throw new Error('Acceptance run request is outside its validity interval');
   }
-  assertArgumentsMatchRequest(options.argv, payload);
   return Object.freeze(payload);
 }
 
