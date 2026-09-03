@@ -85,6 +85,7 @@
     "package:mac:owner:x64": "node scripts/run-package.mjs mac-owner-x64",
     "package:mac:owner:arm64": "node scripts/run-package.mjs mac-owner-arm64",
     "test:windows-x64:lifecycle": "node scripts/windows-package-lifecycle.mjs --arch x64 --mode unpacked --root release/win-unpacked",
+    "acceptance:win:installed:build-kit": "node scripts/build-windows-installed-acceptance-kit.mjs",
     "acceptance:win:installed:preflight": "node scripts/windows-installed-acceptance.mjs",
     "validate:owner-common": "pnpm test:helper:owner-common && pnpm test:helper:transactional-dev && pnpm test:helper:arm64-compile",
     "rebuild:electron-native": "node scripts/rebuild-electron-native.mjs",

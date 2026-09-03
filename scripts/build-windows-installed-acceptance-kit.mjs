@@ -19,18 +19,18 @@ import {
   extractVerifiedAcceptanceBundle,
   verifyAcceptanceBundleArchive,
   verifyAcceptanceBundleTree,
-} from '../scripts/windows-installed-acceptance-bundle.mjs';
-import { signAcceptancePayload } from '../scripts/windows-installed-acceptance-signer.mjs';
-import { parseTqpkg2 } from '../scripts/tqpkg2.mjs';
-import { verifyAcceptancePreflight } from '../scripts/windows-acceptance-preflight.mjs';
-import { canonicalAcceptanceJson } from '../scripts/windows-installed-acceptance-probe.mjs';
+} from './windows-installed-acceptance-bundle.mjs';
+import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs';
+import { parseTqpkg2 } from './tqpkg2.mjs';
+import { verifyAcceptancePreflight } from './windows-acceptance-preflight.mjs';
+import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import {
   ACCEPTANCE_FAULT_PHASES,
   ACCEPTANCE_REQUEST_SCHEDULE,
   MAX_ACCEPTANCE_REQUEST_MS,
   createInstalledAcceptancePlan,
   validateAcceptanceRunSequence,
-} from '../scripts/windows-installed-acceptance.mjs';
+} from './windows-installed-acceptance.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PRIVATE_ENVIRONMENT = /(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u;
@@ -536,7 +536,7 @@ async function main() {
       .some(([, value]) => !value)
   ) {
     throw new Error(
-      'Usage: node tmp/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> --signer <native-rfc6979-signer> --signer-sha256 <sha256> [--output tmp/path] [--bundle tmp/path.zip]',
+      'Usage: node scripts/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> --signer <native-rfc6979-signer> --signer-sha256 <sha256> [--output tmp/path] [--bundle tmp/path.zip]',
     );
   }
   const result = await buildInstalledAcceptanceKit(options);

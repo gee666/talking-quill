@@ -4,7 +4,7 @@ The installed-acceptance kit is nonpromotable test material for Windows 0.0.69. 
 
 ## Inputs
 
-`tmp/build-windows-installed-acceptance-kit.mjs` requires:
+`scripts/build-windows-installed-acceptance-kit.mjs` requires:
 
 - the canonical `RELEASE.json` and its independently recorded SHA-256;
 - the directory containing the exact canonical installer named by `RELEASE.json`;
@@ -18,7 +18,7 @@ The builder accepts only version 0.0.69, a canonical fresh RELEASE, and x64 or A
 Run it from the repository root:
 
 ```powershell
-node tmp/build-windows-installed-acceptance-kit.mjs `
+pnpm acceptance:win:installed:build-kit -- `
   --release C:\release\RELEASE.json `
   --release-sha256 <sha256> `
   --source C:\source\talking-quill `

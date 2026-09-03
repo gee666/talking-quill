@@ -64,6 +64,9 @@ jobs:
           git checkout --detach $sourceRevision
           $head = (git rev-parse HEAD).Trim()
           if ($head -cne $sourceRevision) { throw 'Runner checkout does not match the signed tooling source revision.' }
+          node scripts/release-audit.mjs
+          node scripts/reference-independence.mjs
+          node scripts/windows-recovery-lineage.mjs
           $env:ACCEPTANCE_SOURCE_REVISION = $head
           node scripts/verify-windows-acceptance-authorization.mjs
           New-Item -ItemType Directory -Force tmp/windows-installed-acceptance | Out-Null

@@ -12,10 +12,21 @@ import {
 import {
   buildInstalledAcceptanceKit,
   sanitizedBuildEnvironment,
-} from '../../tmp/build-windows-installed-acceptance-kit.mjs';
+} from '../../scripts/build-windows-installed-acceptance-kit.mjs';
 
-const builderSource = readFileSync('tmp/build-windows-installed-acceptance-kit.mjs', 'utf8');
+const builderSource = readFileSync('scripts/build-windows-installed-acceptance-kit.mjs', 'utf8');
 const signerSource = readFileSync('scripts/windows-installed-acceptance-signer.mjs', 'utf8');
+const rootPackage = JSON.parse(readFileSync('package.json', 'utf8')) as {
+  scripts: Record<string, string>;
+};
+const productionPackageInputs = [
+  readFileSync('app/package.json', 'utf8'),
+  readFileSync('build/electron-builder.yml', 'utf8'),
+].join('\n');
+const acceptanceWorkflow = readFileSync(
+  '.github/workflows/windows-installed-acceptance.yml',
+  'utf8',
+);
 const fixtureRoots: string[] = [];
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
@@ -26,6 +37,17 @@ afterEach(async () => {
 });
 
 describe('Windows installed-acceptance kit', () => {
+  it('keeps the builder in audited scripts and outside production package inputs', () => {
+    expect(rootPackage.scripts['acceptance:win:installed:build-kit']).toBe(
+      'node scripts/build-windows-installed-acceptance-kit.mjs',
+    );
+    expect(productionPackageInputs).not.toContain('build-windows-installed-acceptance-kit');
+    expect(productionPackageInputs).not.toMatch(/from:\s+\.\.[\\/]scripts/u);
+    expect(productionPackageInputs).not.toContain('windows-installed-acceptance-v1.txt');
+    expect(productionPackageInputs).not.toContain('--windows-installed-acceptance-broker-v1');
+    expect(acceptanceWorkflow).toContain('node scripts/release-audit.mjs');
+  });
+
   it('keeps every private signing value out of broad build environments', () => {
     expect(
       sanitizedBuildEnvironment({
