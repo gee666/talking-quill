@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ACCEPTANCE_FAULT_PHASES,
@@ -12,10 +13,12 @@ import {
   PHYSICAL_TEARDOWN_ALLOWANCE_MS,
   PHYSICAL_TOTAL_BOUND_MS,
   authenticatedUpdateBootstrapArgument,
+  createInstalledAcceptancePlan,
   createWindowsAcceptanceRunner,
   executeInstalledAcceptance,
   externalTimeout,
   redactEvidence,
+  resolveInstalledAcceptanceInputPaths,
   runProductionPhase,
   startTrustedAcceptanceBroker,
   validateAcceptancePhaseStart,
@@ -208,6 +211,61 @@ function adapters(overrides: Record<string, unknown> = {}) {
 }
 
 describe('installed Windows acceptance executor', () => {
+  it('accepts only canonical bundle-relative inputs and the fixed external evidence output', () => {
+    const evidencePath = resolve('tmp/windows-installed-acceptance/frozen/evidence-input.json');
+    const input = {
+      outputPath: '../evidence.json',
+      artifacts: {
+        candidate: { installerPath: 'artifacts/candidate/installer.exe' },
+      },
+      acceptance: { signedRequestsPath: 'signed-requests.json' },
+    };
+    expect(resolveInstalledAcceptanceInputPaths(input, evidencePath)).toMatchObject({
+      outputPath: resolve('tmp/windows-installed-acceptance/evidence.json'),
+      artifacts: {
+        candidate: {
+          installerPath: resolve(
+            'tmp/windows-installed-acceptance/frozen/artifacts/candidate/installer.exe',
+          ),
+        },
+      },
+    });
+    expect(() =>
+      resolveInstalledAcceptanceInputPaths(
+        {
+          ...input,
+          artifacts: { candidate: { installerPath: 'C:\\outside.exe' } },
+        },
+        evidencePath,
+      ),
+    ).toThrow('Invalid acceptance bundle path');
+    expect(() =>
+      resolveInstalledAcceptanceInputPaths(
+        { ...input, outputPath: '../../outside.json' },
+        evidencePath,
+      ),
+    ).toThrow('fixed bundle-relative path');
+  });
+
+  it('reverifies the frozen bundle immediately before the first artifact read', async () => {
+    const reverifyBundle = vi.fn(() => Promise.reject(new Error('bundle changed')));
+    const fileSystem = { lstat: vi.fn(), readFile: vi.fn() };
+    await expect(
+      createInstalledAcceptancePlan(
+        {
+          architecture: 'x64',
+          artifacts: {},
+          acceptance: {},
+        } as unknown as Parameters<typeof createInstalledAcceptancePlan>[0],
+        fileSystem,
+        { reverifyBundle },
+      ),
+    ).rejects.toThrow('bundle changed');
+    expect(reverifyBundle).toHaveBeenCalledOnce();
+    expect(fileSystem.lstat).not.toHaveBeenCalled();
+    expect(fileSystem.readFile).not.toHaveBeenCalled();
+  });
+
   it('runs acceptance candidate probes before canonical reinstall and external readiness', () => {
     expect(ACCEPTANCE_MATRIX).toEqual([
       'upgrade',

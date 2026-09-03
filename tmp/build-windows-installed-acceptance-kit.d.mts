@@ -12,5 +12,8 @@ export function buildInstalledAcceptanceKit(options: {
   readonly sourceRoot: string;
   readonly configPath: string;
   readonly requestPrivateKeyPath: string;
+  readonly signerPath: string;
+  readonly signerSha256: string;
   readonly outputRoot?: string;
+  readonly bundlePath?: string;
 }): Promise<Readonly<Record<string, unknown>>>;

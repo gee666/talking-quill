@@ -70,6 +70,7 @@ export function createInstalledAcceptancePlan(
     readonly outputPath?: string;
   },
   fileSystem?: unknown,
+  options?: { readonly reverifyBundle?: () => Promise<unknown> },
 ): Promise<Readonly<Record<string, unknown>>>;
 export function executeInstalledAcceptance(
   plan: any,
@@ -89,7 +90,7 @@ export function validateAcceptancePhaseStart(
   phase: string,
   nowMs: number,
 ): Readonly<Record<string, unknown>>;
-export function resolveInstalledAcceptanceInputPaths(input: any, evidencePath: string): any;
+export function resolveInstalledAcceptanceInputPaths<T>(input: T, evidencePath: string): T;
 export function nodeFileSystem(): unknown;
 export function redactEvidence(
   value: Readonly<Record<string, unknown>>,

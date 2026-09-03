@@ -63,7 +63,7 @@ jobs:
           if ($sourceRevision -cnotmatch '^[0-9a-f]{40}$') { throw 'Signed acceptance source revision is invalid.' }
           git checkout --detach $sourceRevision
           $head = (git rev-parse HEAD).Trim()
-          if ($head -cne $sourceRevision) { throw 'Runner checkout does not match the signed acceptance source revision.' }
+          if ($head -cne $sourceRevision) { throw 'Runner checkout does not match the signed tooling source revision.' }
           $env:ACCEPTANCE_SOURCE_REVISION = $head
           node scripts/verify-windows-acceptance-authorization.mjs
           New-Item -ItemType Directory -Force tmp/windows-installed-acceptance | Out-Null
@@ -71,15 +71,16 @@ jobs:
           Invoke-WebRequest -Uri $env:ACCEPTANCE_BUNDLE_URL -OutFile $bundle
           $actual = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -cne $env:ACCEPTANCE_BUNDLE_SHA256) { throw 'Acceptance bundle SHA-256 mismatch.' }
-          Expand-Archive -LiteralPath $bundle -DestinationPath tmp/windows-installed-acceptance/frozen -Force
-          if (-not (Test-Path -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json)) { throw 'Frozen acceptance evidence input is missing.' }
+          $extraction = node scripts/windows-installed-acceptance-bundle.mjs extract $bundle tmp/windows-installed-acceptance/frozen $env:ACCEPTANCE_ARCHITECTURE - - $env:ACCEPTANCE_BUNDLE_SHA256 | ConvertFrom-Json
+          "ACCEPTANCE_MANIFEST_SHA256=$($extraction.manifestSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $evidenceInput = Get-Content -Raw -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json | ConvertFrom-Json
-          if (-not $head.StartsWith([string]$evidenceInput.acceptance.sourceRevision)) { throw 'Acceptance bundle evidence source revision does not match checkout HEAD.' }
           $env:ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL = [string]$evidenceInput.acceptance.manifestPublicKeySpkiBase64url
           node scripts/verify-windows-acceptance-authorization.mjs
       - name: Execute installed acceptance matrix
         shell: pwsh
-        run: node scripts/windows-installed-acceptance.mjs --evidence tmp/windows-installed-acceptance/frozen/evidence-input.json --execute
+        run: |
+          node scripts/windows-installed-acceptance-bundle.mjs verify-tree tmp/windows-installed-acceptance/frozen '${{ inputs.architecture }}' - - - $env:ACCEPTANCE_MANIFEST_SHA256
+          node scripts/windows-installed-acceptance.mjs --bundle-root tmp/windows-installed-acceptance/frozen --evidence tmp/windows-installed-acceptance/frozen/evidence-input.json --output tmp/windows-installed-acceptance/evidence.json --execute
       - name: Upload partial or complete acceptance evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0

@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { lstat, mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises';
+import { basename, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyNativeSourceIdentity } from './helper-build-contract.mjs';
-import { readNativeArchitectures } from './native-architecture.mjs';
+import { SOURCE_COMMIT_MARKER, SOURCE_TREE_MARKER } from './helper-build-contract.mjs';
+import {
+  assertNoLinkPath,
+  resolveBundlePath,
+  verifyAcceptanceBundleTree,
+} from './windows-installed-acceptance-bundle.mjs';
+import { parseNativeArchitectures } from './native-architecture.mjs';
 import {
   inspectWindowsUpdaterKey,
   validatePackageReleaseMetadata,
@@ -58,12 +63,17 @@ export class AcceptanceStoppedError extends Error {
   }
 }
 
-export async function createInstalledAcceptancePlan(input, fileSystem = nodeFileSystem()) {
+export async function createInstalledAcceptancePlan(
+  input,
+  fileSystem = nodeFileSystem(),
+  options = {},
+) {
   if (!['x64', 'arm64'].includes(input.architecture)) {
     throw new Error('Acceptance requires an exact native x64 or arm64 architecture');
   }
   const artifacts = {};
   for (const name of ['predecessor', 'candidate', 'fresh', 'repair', 'fault']) {
+    await options.reverifyBundle?.();
     artifacts[name] = await freezeArtifact(
       name,
       input.artifacts?.[name],
@@ -77,6 +87,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
       const faultInput = input.artifacts.faults[phase];
       if (faultInput === undefined)
         throw new Error(`Acceptance fault artifact is missing for ${phase}`);
+      await options.reverifyBundle?.();
       artifacts.faults[phase] = await freezeArtifact(
         'fault',
         faultInput,
@@ -140,6 +151,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
       throw new Error(`Fault-injection artifact is not bound to the exact candidate: ${phase}`);
     }
   }
+  await options.reverifyBundle?.();
   const embeddedBuildManifestPath = resolve(
     artifacts.candidate.unpackedRoot,
     'resources/windows-installed-acceptance-v1.txt',
@@ -152,7 +164,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     input.acceptance?.buildManifestSha256,
     fileSystem,
   );
-  const buildManifest = (await fileSystem.readFile(buildManifestFile.path)).toString('utf8').trim();
+  const buildManifest = buildManifestFile.content.toString('utf8').trim();
   if (!/^[A-Za-z0-9_-]+$/u.test(buildManifest)) {
     throw new Error('Frozen acceptance build manifest is invalid');
   }
@@ -171,9 +183,7 @@ export async function createInstalledAcceptancePlan(input, fileSystem = nodeFile
     input.acceptance?.signedRequestsSha256,
     fileSystem,
   );
-  const signedRequests = JSON.parse(
-    (await fileSystem.readFile(requestsFile.path)).toString('utf8'),
-  );
+  const signedRequests = JSON.parse(requestsFile.content.toString('utf8'));
   const runWindow = freezeRunWindow(input.acceptance?.runWindow);
   const acceptance = Object.freeze({
     buildId: requireHex(input.acceptance?.buildId, 'Acceptance build ID'),
@@ -407,7 +417,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     fileSystem,
   );
   const metadata = validatePackageReleaseMetadata(
-    JSON.parse((await fileSystem.readFile(metadataIdentity.path)).toString('utf8')),
+    JSON.parse(metadataIdentity.content.toString('utf8')),
   );
   if (metadata.platform !== 'win' || metadata.architecture !== architecture) {
     throw new Error(`${name} metadata architecture is not exact`);
@@ -427,14 +437,10 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     }
     appAsar = await regularIdentity(input.appAsarPath, input.appAsarSha256, fileSystem);
   }
-  const nativePackage = parseTqpkg2(
-    await fileSystem.readFile(installer.path),
-    metadata.architecture,
-    {
-      allowAcceptanceFaults: name === 'fault',
-      allowAcceptanceRepair: name === 'repair' || name === 'fault',
-    },
-  );
+  const nativePackage = parseTqpkg2(installer.content, metadata.architecture, {
+    allowAcceptanceFaults: name === 'fault',
+    allowAcceptanceRepair: name === 'repair' || name === 'fault',
+  });
   if (name === 'repair' || name === 'fault') {
     bindAcceptanceRepairTarget(nativePackage.manifest, metadata);
   } else {
@@ -456,9 +462,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
       input.releaseIdentitySha256,
       fileSystem,
     );
-    releaseIdentity = JSON.parse(
-      (await fileSystem.readFile(releaseIdentityFile.path)).toString('utf8'),
-    );
+    releaseIdentity = JSON.parse(releaseIdentityFile.content.toString('utf8'));
     if (
       releaseIdentity.packageSha256 !== installer.sha256 ||
       releaseIdentity.packageLayoutDigest !== metadata.packageLayoutDigest ||
@@ -492,9 +496,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
       input.validationEvidenceSha256,
       fileSystem,
     );
-    const validation = JSON.parse(
-      (await fileSystem.readFile(validationFile.path)).toString('utf8'),
-    );
+    const validation = JSON.parse(validationFile.content.toString('utf8'));
     if (
       validation.isolatedInstallValidation !== true ||
       validation.failurePoint !== nativePackage.manifest.faultPhase ||
@@ -764,39 +766,78 @@ async function freezeAcceptanceExecutable(
   fileSystem,
 ) {
   const identity = await regularIdentity(path, expectedSha256, fileSystem);
-  const native = await readNativeArchitectures(identity.path);
+  const native = parseNativeArchitectures(identity.content, identity.path);
   if (
     native?.format !== 'pe' ||
     canonicalAcceptanceJson(native.architectures) !== `[${JSON.stringify(architecture)}]`
   ) {
     throw new Error(`${label} architecture is not exact`);
   }
-  await verifyNativeSourceIdentity(identity.path, sourceIdentity);
+  verifyRetainedNativeSourceIdentity(identity.content, sourceIdentity, label);
   if (
     label === 'Trusted launcher' &&
-    !(await fileSystem.readFile(identity.path)).includes(
-      Buffer.from('--windows-installed-acceptance-broker-v1', 'ascii'),
-    )
+    !identity.content.includes(Buffer.from('--windows-installed-acceptance-broker-v1', 'ascii'))
   ) {
     throw new Error('Trusted launcher acceptance broker marker is missing');
   }
   return identity;
 }
 
+function verifyRetainedNativeSourceIdentity(bytes, sourceIdentity, label) {
+  for (const [marker, expected] of [
+    [SOURCE_COMMIT_MARKER, sourceIdentity.sourceCommit],
+    [SOURCE_TREE_MARKER, sourceIdentity.sourceTree],
+  ]) {
+    const offset = bytes.indexOf(marker);
+    const value = bytes.subarray(offset + marker.length, offset + marker.length + 40);
+    if (
+      offset < 0 ||
+      bytes.indexOf(marker, offset + 1) >= 0 ||
+      value.toString('ascii') !== expected
+    ) {
+      throw new Error(`${label} source identity is invalid`);
+    }
+  }
+}
+
 async function regularIdentity(path, expectedSha256, fileSystem) {
   if (!/^[0-9a-f]{64}$/u.test(expectedSha256 ?? ''))
     throw new Error(`Invalid expected SHA-256: ${basename(path ?? '')}`);
   const absolute = resolve(path);
-  const [stat, bytes] = await Promise.all([
-    fileSystem.lstat(absolute),
-    fileSystem.readFile(absolute),
-  ]);
-  if (!stat.isFile() || stat.isSymbolicLink())
-    throw new Error(`Frozen input is not a regular file: ${basename(absolute)}`);
+  let metadata;
+  let bytes;
+  if (typeof fileSystem.open === 'function') {
+    const handle = await fileSystem.open(absolute, 'r');
+    try {
+      const before = await handle.stat();
+      bytes = await handle.readFile();
+      const after = await handle.stat();
+      if (
+        !before.isFile() ||
+        before.nlink !== 1 ||
+        before.size !== bytes.length ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs
+      ) {
+        throw new Error(`Frozen input changed while read: ${basename(absolute)}`);
+      }
+      metadata = before;
+    } finally {
+      await handle.close();
+    }
+  } else {
+    [metadata, bytes] = await Promise.all([
+      fileSystem.lstat(absolute),
+      fileSystem.readFile(absolute),
+    ]);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Frozen input is not a regular file: ${basename(absolute)}`);
+    }
+  }
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   if (sha256 !== expectedSha256)
     throw new Error(`Frozen input SHA-256 mismatch: ${basename(absolute)}`);
-  return Object.freeze({ path: absolute, bytes: stat.size, sha256 });
+  return Object.freeze({ path: absolute, bytes: metadata.size, sha256, content: bytes });
 }
 function canonicalTargetIdentity(metadata) {
   return canonicalAcceptanceJson({
@@ -876,13 +917,23 @@ async function persist(fileSystem, path, evidence) {
   await fileSystem.writeFile(path, `${JSON.stringify(redactEvidence(evidence), null, 2)}\n`);
 }
 
-export function nodeFileSystem() {
+export function nodeFileSystem(retainedOutput) {
   return {
     readFile,
     lstat,
+    open,
     readdir: (path) => readdir(path, { withFileTypes: true }),
     mkdir: (path) => mkdir(path, { recursive: true }),
-    writeFile: (path, value) => writeFile(path, value, { encoding: 'utf8', mode: 0o600 }),
+    writeFile: async (path, value) => {
+      if (retainedOutput !== undefined && resolve(path) === retainedOutput.path) {
+        const bytes = Buffer.from(value, 'utf8');
+        await retainedOutput.handle.truncate(0);
+        await retainedOutput.handle.write(bytes, 0, bytes.length, 0);
+        await retainedOutput.handle.sync();
+        return;
+      }
+      await writeFile(path, value, { encoding: 'utf8', mode: 0o600 });
+    },
   };
 }
 
@@ -917,8 +968,8 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
   for (const artifact of artifacts) {
     if (artifact === undefined) continue;
     for (const field of pathFields) {
-      if (typeof artifact[field] === 'string' && !isAbsolute(artifact[field])) {
-        artifact[field] = resolve(base, artifact[field]);
+      if (typeof artifact[field] === 'string') {
+        artifact[field] = resolveBundlePath(base, artifact[field]);
       }
     }
   }
@@ -929,24 +980,65 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
     'trustedLauncherPath',
   ]) {
     if (typeof copy.acceptance?.[field] === 'string') {
-      copy.acceptance[field] = resolve(base, copy.acceptance[field]);
+      copy.acceptance[field] = resolveBundlePath(base, copy.acceptance[field]);
     }
   }
+  if (copy.outputPath !== '../evidence.json') {
+    throw new Error('Acceptance evidence output must use the fixed bundle-relative path');
+  }
+  copy.outputPath = resolve(base, copy.outputPath);
   return copy;
 }
 
 async function main() {
   const evidencePath = resolve(required('--evidence'));
+  const bundleRoot = resolve(required('--bundle-root'));
+  if (resolve(evidencePath, '..') !== bundleRoot) {
+    throw new Error('Acceptance evidence must be the direct child of the frozen bundle root');
+  }
+  const acceptanceRoot = resolve('tmp/windows-installed-acceptance');
+  if (relative(acceptanceRoot, bundleRoot) !== 'frozen') {
+    throw new Error('Frozen acceptance bundle root is not canonical');
+  }
+  await assertNoLinkPath(bundleRoot, { directory: true });
+  const manifestSha256 = process.env.ACCEPTANCE_MANIFEST_SHA256;
+  if (!/^[0-9a-f]{64}$/u.test(manifestSha256 ?? '')) {
+    throw new Error('ACCEPTANCE_MANIFEST_SHA256 is required');
+  }
+  const bundleExpectation = { manifestSha256 };
+  await verifyAcceptanceBundleTree(bundleRoot, bundleExpectation);
   const rawInput = JSON.parse(await readFile(evidencePath, 'utf8'));
   const input = resolveInstalledAcceptanceInputPaths(rawInput, evidencePath);
-  const plan = await createInstalledAcceptancePlan(input);
+  const outputPath = resolve(required('--output'));
+  if (outputPath !== input.outputPath || resolve(outputPath, '..') !== acceptanceRoot) {
+    throw new Error('Acceptance evidence output escapes its controlled directory');
+  }
+  await assertNoLinkPath(resolve(outputPath, '..'), { directory: true });
   const execute = process.argv.includes('--execute');
-  const result = await executeInstalledAcceptance(
-    plan,
-    { fileSystem: nodeFileSystem(), runner: createWindowsAcceptanceRunner(plan) },
-    { dryRun: !execute },
+  const outputHandle = execute ? await open(outputPath, 'wx', 0o600) : null;
+  if (outputHandle !== null) {
+    try {
+      await assertNoLinkPath(outputPath, { file: true });
+    } catch (error) {
+      await outputHandle.close();
+      throw error;
+    }
+  }
+  const fileSystem = nodeFileSystem(
+    outputHandle === null ? undefined : { path: outputPath, handle: outputHandle },
   );
-  console.log(JSON.stringify(result, null, 2));
+  try {
+    const reverifyBundle = () => verifyAcceptanceBundleTree(bundleRoot, bundleExpectation);
+    const plan = await createInstalledAcceptancePlan(input, fileSystem, { reverifyBundle });
+    const result = await executeInstalledAcceptance(
+      plan,
+      { fileSystem, runner: createWindowsAcceptanceRunner(plan) },
+      { dryRun: !execute },
+    );
+    console.log(JSON.stringify(result, null, 2));
+  } finally {
+    await outputHandle?.close();
+  }
 }
 function valueAfter(name) {
   const index = process.argv.indexOf(name);

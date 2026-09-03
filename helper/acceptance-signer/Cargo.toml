@@ -1,0 +1,24 @@
+[package]
+name = "talking-quill-acceptance-signer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Narrow deterministic signer for nonpromotable installed-acceptance kits"
+
+[package.metadata.talking-quill-boundary]
+role = "acceptance-signer"
+runtime = false
+executable = true
+private-key-reader = true
+
+[dependencies]
+p256 = { workspace = true, features = ["pkcs8"] }
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[lints]
+workspace = true

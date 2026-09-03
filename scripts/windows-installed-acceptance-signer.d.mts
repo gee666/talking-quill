@@ -1,18 +1,11 @@
-export function signAcceptanceInput(input: {
-  readonly operation: 'acceptance-envelope';
-  readonly privateKeyPkcs8Base64: string;
-  readonly payload: unknown;
-}): Readonly<{
-  encoded: string;
-  publicKeySpkiBase64url: string;
-}>;
-export function signAcceptanceInput(input: {
-  readonly operation: 'windows-update';
-  readonly privateKeyPkcs8Base64: string;
-  readonly packageSha256: string;
-  readonly packageLayoutDigest: string;
-}): Readonly<{
-  scheme: 'p256-sha256-v1';
-  signature: string;
-  verificationKeySha256: string;
-}>;
+export interface NativeSignerResult {
+  readonly signatureBase64url: string;
+  readonly publicKeySpkiBase64url: string;
+}
+export function signAcceptancePayload(options: {
+  readonly signerPath: string;
+  readonly privateKeyPath: string;
+  readonly signerSha256: string;
+  readonly payloadBytes: Buffer;
+  readonly spawnProcess?: (...arguments_: any[]) => any;
+}): NativeSignerResult;

@@ -1,8 +1,26 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  cp,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  assertNoLinkPath,
+  createDeterministicAcceptanceZip,
+  extractVerifiedAcceptanceBundle,
+  verifyAcceptanceBundleArchive,
+  verifyAcceptanceBundleTree,
+} from '../scripts/windows-installed-acceptance-bundle.mjs';
+import { signAcceptancePayload } from '../scripts/windows-installed-acceptance-signer.mjs';
 import { parseTqpkg2 } from '../scripts/tqpkg2.mjs';
 import { verifyAcceptancePreflight } from '../scripts/windows-acceptance-preflight.mjs';
 import { canonicalAcceptanceJson } from '../scripts/windows-installed-acceptance-probe.mjs';
@@ -15,7 +33,6 @@ import {
 } from '../scripts/windows-installed-acceptance.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const signer = resolve(root, 'scripts/windows-installed-acceptance-signer.mjs');
 const PRIVATE_ENVIRONMENT = /(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u;
 
 export function sanitizedBuildEnvironment(environment = process.env) {
@@ -89,20 +106,52 @@ export async function buildInstalledAcceptanceKit(options) {
   if (!isBelow(resolve(root, 'tmp'), outputRoot)) {
     throw new Error('Acceptance kit output must stay under tmp');
   }
-  await rm(outputRoot, { recursive: true, force: true });
-  await mkdir(resolve(outputRoot, 'imported'), { recursive: true });
-  const stagedConfig = structuredClone(config);
-  for (const name of ['predecessor', 'candidate', 'fresh', 'repair', 'fault']) {
-    stagedConfig.artifacts[name] = await stageArtifact(name, config.artifacts[name], outputRoot);
+  await assertNoLinkPath(dirname(outputRoot), { directory: true });
+  try {
+    await lstat(outputRoot);
+    throw new Error('Acceptance kit output already exists');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
   }
+  await mkdir(resolve(outputRoot, 'imported'), { recursive: true, mode: 0o700 });
+  const stagedConfig = structuredClone(config);
+  stagedConfig.artifacts.predecessor = await stageArtifact(
+    'predecessor',
+    config.artifacts.predecessor,
+    outputRoot,
+  );
+  stagedConfig.artifacts.candidate = await stageArtifact(
+    'candidate',
+    config.artifacts.candidate,
+    outputRoot,
+  );
+  assertSharedArtifact(
+    'fresh canonical artifact',
+    config.artifacts.predecessor,
+    config.artifacts.fresh,
+  );
+  stagedConfig.artifacts.fresh = stagedConfig.artifacts.predecessor;
+  stagedConfig.artifacts.repair = await stageArtifact(
+    'repair',
+    config.artifacts.repair,
+    outputRoot,
+    stagedConfig.artifacts.candidate.unpackedRoot,
+  );
   stagedConfig.artifacts.faults = {};
   for (const phase of ACCEPTANCE_FAULT_PHASES) {
     stagedConfig.artifacts.faults[phase] = await stageArtifact(
       `fault-${phase}`,
       config.artifacts.faults[phase],
       outputRoot,
+      stagedConfig.artifacts.candidate.unpackedRoot,
     );
   }
+  assertSharedArtifact(
+    'fallback/published fault artifact',
+    config.artifacts.fault,
+    config.artifacts.faults.published,
+  );
+  stagedConfig.artifacts.fault = stagedConfig.artifacts.faults.published;
   const candidateInput = config.artifacts.candidate;
   const candidateOutput = stagedConfig.artifacts.candidate;
   const embeddedManifestRelative = relative(
@@ -125,8 +174,18 @@ export async function buildInstalledAcceptanceKit(options) {
     await copyFile(config.acceptance[field], destination);
     stagedConfig.acceptance[field] = destination;
   }
-  const requestKeyBytes = await readRegular(options.requestPrivateKeyPath);
+  const signerPath = resolve(options.signerPath);
+  const signerSha256 = options.signerSha256;
+  const privateKeyPath = resolve(options.requestPrivateKeyPath);
+  const nonceKeys = Object.keys(config.acceptance?.requestNonces ?? {});
+  if (
+    canonicalAcceptanceJson(nonceKeys) !==
+    canonicalAcceptanceJson(ACCEPTANCE_REQUEST_SCHEDULE.map(({ invocationId }) => invocationId))
+  ) {
+    throw new Error('Acceptance request nonce inventory is missing, extra, or unordered');
+  }
   const signedRequests = {};
+  let requestPublicKey;
   for (const invocation of ACCEPTANCE_REQUEST_SCHEDULE) {
     const supplied = config.acceptance?.requestPayloads?.[invocation.invocationId];
     if (supplied === null || typeof supplied !== 'object' || Array.isArray(supplied)) {
@@ -143,10 +202,20 @@ export async function buildInstalledAcceptanceKit(options) {
       latestStartOffsetMs: invocation.latestStartOffsetMs,
       deadlineOffsetMs: invocation.deadlineOffsetMs,
       runWindow: config.acceptance.runWindow,
+      requestNonce: config.acceptance.requestNonces[invocation.invocationId],
       issuedAtMs: deadline - MAX_ACCEPTANCE_REQUEST_MS,
       expiresAtMs: deadline,
     };
-    const encoded = signInNarrowSubprocess(payload, requestKeyBytes);
+    const signed = signInNarrowSubprocess(payload, {
+      signerPath,
+      signerSha256,
+      privateKeyPath,
+    });
+    requestPublicKey ??= signed.publicKeySpkiBase64url;
+    if (requestPublicKey !== signed.publicKeySpkiBase64url) {
+      throw new Error('Native signer public key changed between requests');
+    }
+    const encoded = signed.encoded;
     const current = signedRequests[invocation.command];
     if (current === undefined) signedRequests[invocation.command] = encoded;
     else if (Array.isArray(current)) current.push(encoded);
@@ -167,6 +236,8 @@ export async function buildInstalledAcceptanceKit(options) {
     },
   };
   delete evidenceInput.acceptance.requestPayloads;
+  delete evidenceInput.acceptance.requestNonces;
+  evidenceInput.outputPath = '../evidence.json';
   const requestsBytes = Buffer.from(`${canonicalAcceptanceJson(signedRequests)}\n`);
   const requestsPath = resolve(outputRoot, 'signed-requests.json');
   await writeFile(requestsPath, requestsBytes, { mode: 0o600 });
@@ -178,11 +249,11 @@ export async function buildInstalledAcceptanceKit(options) {
   await writeFile(evidencePath, evidenceBytes, { mode: 0o600 });
   const releaseCopy = resolve(outputRoot, 'imported', 'RELEASE.json');
   const installerCopy = resolve(outputRoot, 'imported', imported.descriptor.installer);
-  await copyFile(options.descriptorPath, releaseCopy);
-  await copyFile(imported.installerPath, installerCopy);
+  await writeFile(releaseCopy, imported.descriptorBytes, { flag: 'wx', mode: 0o600 });
+  await writeFile(installerCopy, imported.installerBytes, { flag: 'wx', mode: 0o600 });
   const before = sha256(imported.installerBytes);
   if (
-    sha256(await readFile(imported.installerPath)) !== before ||
+    sha256(await readFile(releaseCopy)) !== sha256(imported.descriptorBytes) ||
     sha256(await readFile(installerCopy)) !== before
   ) {
     throw new Error('Canonical installer bytes changed while assembling the kit');
@@ -209,61 +280,90 @@ export async function buildInstalledAcceptanceKit(options) {
       };
     }),
   );
-  entries.sort((left, right) => left.path.localeCompare(right.path, 'en'));
+  entries.sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
   const manifest = {
     schemaVersion: 1,
     classification: 'nonpromotable-installed-acceptance-kit',
+    architecture: imported.descriptor.architecture,
     sourceCommit: imported.descriptor.sourceCommit,
     sourceTree: imported.descriptor.sourceTree,
     entries,
   };
-  await writeFile(
-    resolve(outputRoot, 'bundle-manifest.json'),
-    `${canonicalAcceptanceJson(manifest)}\n`,
-    { mode: 0o600 },
-  );
-  return Object.freeze({ outputRoot, evidencePath, manifest });
+  const manifestPath = resolve(outputRoot, 'bundle-manifest.json');
+  await writeFile(manifestPath, `${canonicalAcceptanceJson(manifest)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  });
+  const expected = {
+    architecture: imported.descriptor.architecture,
+    sourceCommit: imported.descriptor.sourceCommit,
+    sourceTree: imported.descriptor.sourceTree,
+  };
+  await verifyAcceptanceBundleTree(outputRoot, expected);
+  const bundlePath = resolve(options.bundlePath ?? `${outputRoot}.zip`);
+  if (!isBelow(resolve(root, 'tmp'), bundlePath)) {
+    throw new Error('Acceptance ZIP output must stay under tmp');
+  }
+  const bundle = await createDeterministicAcceptanceZip(outputRoot, bundlePath, expected);
+  await verifyAcceptanceBundleArchive(bundlePath, expected);
+  const selfCheckRoot = `${outputRoot}-self-check`;
+  await extractVerifiedAcceptanceBundle(bundlePath, selfCheckRoot, expected);
+  await verifyAcceptanceBundleTree(selfCheckRoot, expected);
+  await rm(selfCheckRoot, { recursive: true, force: true });
+  return Object.freeze({
+    outputRoot,
+    evidencePath,
+    bundlePath,
+    bundleSha256: bundle.sha256,
+    manifest,
+  });
 }
 
-function signInNarrowSubprocess(payload, keyBytes) {
-  const input = canonicalAcceptanceJson({
-    operation: 'acceptance-envelope',
-    payload,
-    privateKeyPkcs8Base64: keyBytes.toString('base64'),
-  });
-  const result = spawnSync(process.execPath, [signer], {
-    cwd: root,
-    env: Object.fromEntries(
-      Object.entries({ SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }).filter(
-        ([, value]) => value !== undefined,
-      ),
-    ),
-    input,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 10_000,
-    maxBuffer: 64 * 1024,
-  });
-  if (result.status !== 0) throw new Error('Narrow acceptance signing subprocess failed');
-  const signed = JSON.parse(result.stdout);
-  if (typeof signed.encoded !== 'string') throw new Error('Narrow signer returned invalid output');
-  return signed.encoded;
+function signInNarrowSubprocess(payload, options) {
+  const payloadBytes = Buffer.from(canonicalAcceptanceJson(payload));
+  const signed = signAcceptancePayload({ ...options, payloadBytes });
+  return {
+    encoded: Buffer.from(
+      canonicalAcceptanceJson({
+        payload,
+        signatureBase64url: signed.signatureBase64url,
+      }),
+    ).toString('base64url'),
+    publicKeySpkiBase64url: signed.publicKeySpkiBase64url,
+  };
 }
 
-async function stageArtifact(name, input, outputRoot) {
+function assertSharedArtifact(label, left, right) {
+  for (const field of [
+    'architecture',
+    'installerSha256',
+    'metadataSha256',
+    'releaseIdentitySha256',
+    'validationEvidenceSha256',
+    'electronRelativePath',
+  ]) {
+    if (left[field] !== right[field]) {
+      throw new Error(`${label} has mismatched ${field}`);
+    }
+  }
+}
+
+async function stageArtifact(name, input, outputRoot, sharedUnpackedRoot) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error(`Kit artifact is missing: ${name}`);
   }
   const artifactRoot = resolve(outputRoot, 'artifacts', name);
-  const unpackedRoot = resolve(artifactRoot, 'unpacked');
+  const unpackedRoot = sharedUnpackedRoot ?? resolve(artifactRoot, 'unpacked');
   await mkdir(artifactRoot, { recursive: true });
-  await cp(resolve(input.unpackedRoot), unpackedRoot, {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-    dereference: false,
-    preserveTimestamps: false,
-  });
+  if (sharedUnpackedRoot === undefined) {
+    await cp(resolve(input.unpackedRoot), unpackedRoot, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+      dereference: false,
+      preserveTimestamps: false,
+    });
+  }
   const output = { ...input, unpackedRoot };
   for (const [field, fileName] of [
     ['installerPath', 'installer.exe'],
@@ -350,10 +450,26 @@ async function collectRegularFiles(directory) {
 async function readRegular(path) {
   const absolute = resolve(path);
   const metadata = await lstat(absolute);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
     throw new Error(`Kit input is not a regular file: ${basename(absolute)}`);
   }
-  return readFile(absolute);
+  const handle = await open(absolute, 'r');
+  try {
+    const before = await handle.stat();
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      before.nlink !== 1 ||
+      before.size !== bytes.length ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs
+    ) {
+      throw new Error(`Kit input changed while read: ${basename(absolute)}`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 function git(sourceRoot, arguments_) {
@@ -387,15 +503,18 @@ async function main() {
     sourceRoot: valueAfter('--source'),
     configPath: valueAfter('--config'),
     requestPrivateKeyPath: valueAfter('--request-private-key'),
+    signerPath: valueAfter('--signer'),
+    signerSha256: valueAfter('--signer-sha256'),
     outputRoot: valueAfter('--output'),
+    bundlePath: valueAfter('--bundle'),
   };
   if (
     Object.entries(options)
-      .slice(0, 5)
+      .slice(0, 7)
       .some(([, value]) => !value)
   ) {
     throw new Error(
-      'Usage: node tmp/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> [--output tmp/path]',
+      'Usage: node tmp/build-windows-installed-acceptance-kit.mjs --release RELEASE.json --release-sha256 <sha256> --source <git-root> --config <kit-input.json> --request-private-key <P-256-pkcs8-der> --signer <native-rfc6979-signer> --signer-sha256 <sha256> [--output tmp/path] [--bundle tmp/path.zip]',
     );
   }
   const result = await buildInstalledAcceptanceKit(options);

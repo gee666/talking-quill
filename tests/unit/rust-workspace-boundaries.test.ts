@@ -61,6 +61,7 @@ const macos = 'cfg(target_os = "macos")';
 const windows = 'cfg(windows)';
 const expectedPackages = new Map([
   ['talking-quill-helper', 'helper/Cargo.toml'],
+  ['talking-quill-acceptance-signer', 'helper/acceptance-signer/Cargo.toml'],
   ['talking-quill-common-e2e', 'helper/common-e2e/Cargo.toml'],
   ['talking-quill-keyboard-core', 'helper/keyboard-core/Cargo.toml'],
   ['talking-quill-keyboard-owner', 'helper/keyboard-owner/Cargo.toml'],
@@ -208,7 +209,7 @@ async function rustSources(directory: string): Promise<string> {
 }
 
 describe('Rust A3 package and compile-forbidden boundaries', () => {
-  it('materializes six packages with separate gateway and owner default executables', () => {
+  it('materializes seven packages with separate runtime and narrow signer executables', () => {
     expect(
       new Map(
         metadata().packages.map((record) => [record.name, portablePath(record.manifest_path)]),
@@ -232,6 +233,12 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
         record.name,
       ).toEqual({ version: sourceVersion, edition: '2024', rustVersion: '1.97.1' });
     }
+    expect(boundaryMetadata('talking-quill-acceptance-signer')).toEqual({
+      role: 'acceptance-signer',
+      runtime: false,
+      executable: true,
+      'private-key-reader': true,
+    });
     expect(boundaryMetadata('talking-quill-helper')).toEqual({
       role: 'gateway',
       stage: 'a3-structural-gateway',
@@ -269,6 +276,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
             .map((dependency) => dependency.name),
         ),
       ].sort();
+    expect(internal('talking-quill-acceptance-signer')).toEqual([]);
     expect(internal('talking-quill-helper')).toEqual([
       'talking-quill-keyboard-core',
       'talking-quill-owner-protocol',
@@ -344,6 +352,17 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
   });
 
   it('pins exact dependency source, path, kind, target, and feature policies', () => {
+    expectDependencies('talking-quill-acceptance-signer', [
+      policy('p256', '=0.14.0', {
+        features: ['ecdh', 'ecdsa', 'pkcs8', 'std'],
+        usesDefaultFeatures: false,
+      }),
+      policy('zeroize', '=1.9.0', { features: ['derive'], usesDefaultFeatures: false }),
+      policy('windows-sys', '=0.61.2', {
+        target: windows,
+        features: ['Win32_Foundation', 'Win32_Storage_FileSystem'],
+      }),
+    ]);
     expectDependencies('talking-quill-helper', [
       policy('core-foundation-sys', '=0.8.7', { target: macos }),
       policy('crossbeam-channel', '=0.5.16'),

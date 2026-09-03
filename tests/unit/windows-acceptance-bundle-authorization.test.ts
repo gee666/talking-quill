@@ -24,6 +24,16 @@ describe('Windows acceptance bundle authorization', () => {
     expect(workflow).toContain('$env:ACCEPTANCE_SOURCE_REVISION = $head');
     expect(workflow).toContain('ref: ${{ github.workflow_sha }}');
     expect(workflow.match(/verify-windows-acceptance-authorization\.mjs/gu)).toHaveLength(3);
+    expect(workflow).not.toContain('Expand-Archive');
+    expect(workflow).toContain(
+      'windows-installed-acceptance-bundle.mjs extract $bundle tmp/windows-installed-acceptance/frozen $env:ACCEPTANCE_ARCHITECTURE - - $env:ACCEPTANCE_BUNDLE_SHA256',
+    );
+    expect(workflow).toContain('ACCEPTANCE_MANIFEST_SHA256');
+    expect(workflow).toContain(
+      'windows-installed-acceptance-bundle.mjs verify-tree tmp/windows-installed-acceptance/frozen',
+    );
+    expect(workflow).toContain('--bundle-root tmp/windows-installed-acceptance/frozen');
+    expect(workflow).toContain('--output tmp/windows-installed-acceptance/evidence.json');
   });
   it('requires a pinned P-256 signature bound to URL, digest, architecture, and time', () => {
     const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });

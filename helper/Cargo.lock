@@ -731,6 +731,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "talking-quill-acceptance-signer"
+version = "0.0.69"
+dependencies = [
+ "p256",
+ "windows-sys",
+ "zeroize",
+]
+
+[[package]]
 name = "talking-quill-common-e2e"
 version = "0.0.69"
 dependencies = [
