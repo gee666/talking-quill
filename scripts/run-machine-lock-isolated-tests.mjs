@@ -11,7 +11,6 @@ import {
   readSync,
   readdirSync,
   rmdirSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';

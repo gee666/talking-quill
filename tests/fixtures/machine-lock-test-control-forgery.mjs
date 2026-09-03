@@ -29,15 +29,21 @@ for (const name of logs) {
   try {
     renameSync(path, `${path}.moved`);
     process.exit(82);
-  } catch {}
+  } catch {
+    // The supervisor must keep each log pinned against renames.
+  }
   try {
     unlinkSync(path);
     process.exit(83);
-  } catch {}
+  } catch {
+    // The supervisor must keep each log pinned against deletion.
+  }
   try {
     openSync(path, 'w');
     process.exit(84);
-  } catch {}
+  } catch {
+    // The supervisor must deny write access while the child runs.
+  }
 }
 try {
   readFileSync(resolve(recordRoot, records[0]), 'utf8');

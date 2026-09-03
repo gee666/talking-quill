@@ -16,9 +16,79 @@ import {
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const run = process.platform === 'win32' ? describe.sequential : describe.skip;
+const run = process.platform === 'win32' ? describe : describe.skip;
 const wrapper = resolve('scripts', 'run-machine-lock-isolated-tests.mjs');
 const records = resolve('tmp', 'machine-lock-tests', '.cleanup-records-v1');
+
+type JsonObject = Record<string, unknown>;
+
+interface InventoryEntry extends JsonObject {
+  relativePath: string;
+  directory: boolean;
+  identity: string;
+}
+
+interface CleanupRoot extends JsonObject {
+  kind: string;
+  parentIdentity?: string;
+  identity: string | null;
+  inventory: InventoryEntry[];
+  ownershipPrefix: string;
+  bindingFile: string;
+}
+
+interface RecoveredLogEvidence extends JsonObject {
+  channel: string;
+  fileName: string;
+  present: boolean;
+  byteLength: number;
+  sha256: string;
+}
+
+interface CleanupRecord extends JsonObject {
+  schemaVersion: number;
+  recordId: string;
+  namespaceId: string;
+  phase: string;
+  recordDirectoryIdentity: string;
+  creatingRoot: string | null;
+  deletingRoot: string | null;
+  deletedRoots: string[];
+  roots: CleanupRoot[];
+  controlNonce: string;
+  childStdoutLogFile: string;
+  childStderrLogFile: string;
+  childLogFile?: string;
+  logsRetired?: boolean;
+  logsPreserved?: boolean;
+  logsPreservedFromPhase?: string;
+  recoveredLogEvidence?: RecoveredLogEvidence[];
+  evidenceDirectoryIdentity?: string;
+  evidenceDirectoryAcl?: string;
+}
+
+interface RecoveredLogFrame extends JsonObject {
+  recordId: string;
+  stream: string;
+  hash: string;
+  byteLength: number;
+  contentPrefix: string;
+  prefixByteLength: number;
+  truncated: boolean;
+  source: string;
+  version: number;
+}
+
+interface StreamInventoryEntry extends JsonObject {
+  name: string;
+  size: number;
+  sha256: string;
+}
+
+interface EvidenceRootInspection extends JsonObject {
+  identity: string;
+  names: string[];
+}
 const nativeHelper = resolve(
   'tmp',
   'cargo-target',
@@ -132,9 +202,9 @@ run('Windows machine-lock wrapper teardown', () => {
       cleanupFixtureLog(record.childStdoutLogFile);
       cleanupFixtureLog(record.childStderrLogFile);
       record.schemaVersion = 3;
-      delete record.controlNonce;
-      delete record.childStdoutLogFile;
-      delete record.childStderrLogFile;
+      Reflect.deleteProperty(record, 'controlNonce');
+      Reflect.deleteProperty(record, 'childStdoutLogFile');
+      Reflect.deleteProperty(record, 'childStderrLogFile');
       writeFileSync(
         resolve(records, `${record.recordId}.json`),
         `${JSON.stringify(record)}\n`,
@@ -205,7 +275,10 @@ run('Windows machine-lock wrapper teardown', () => {
     'authenticates %s namespace bindings before retiring schema-4 evidence',
     async (phase) => {
       const record = await leaveSchema4LogsPreservedRecord(phase);
-      const bindingPath = resolve(records, record.roots[0].bindingFile);
+      const bindingPath = resolve(
+        records,
+        findOrThrow(record.roots, () => true, 'missing cleanup root').bindingFile,
+      );
       const original = readFileSync(bindingPath);
       writeFileSync(bindingPath, 'changed binding\n', 'utf8');
       const rejected = runWrapper('cmd.exe /d /c exit 0');
@@ -225,7 +298,7 @@ run('Windows machine-lock wrapper teardown', () => {
 
   it('rejects binding residue for a root recorded as deleted before evidence migration', async () => {
     const record = await leaveSchema4LogsPreservedRecord('deleting-root');
-    const kind = record.deletingRoot;
+    const kind = requiredString(record.deletingRoot, 'missing deleting root');
     record.deletedRoots.push(kind);
     record.deletingRoot = null;
     writeFileSync(
@@ -312,7 +385,11 @@ run('Windows machine-lock wrapper teardown', () => {
       expect(created.status, created.stderr).toBe(0);
       const recovered = runWrapper('cmd.exe /d /c exit 0');
       expect(recovered.status, recovered.stderr).toBe(0);
-      const frame = recoveredLogFrames(recovered.stderr)[0];
+      const frame = findOrThrow(
+        recoveredLogFrames(recovered.stderr),
+        () => true,
+        'missing recovered log frame',
+      );
       assertRecoveredLogFrame(frame);
       expect(frame.recordId).toBe(recordId);
       expect(existsSync(evidenceRoot)).toBe(false);
@@ -328,7 +405,11 @@ run('Windows machine-lock wrapper teardown', () => {
     const recovered = runWrapper('cmd.exe /d /c exit 0');
     expect(recovered.status, recovered.stderr).toBe(0);
     expect(recovered.stderr.length).toBeLessThan(200_000);
-    const stdout = recoveredLogFrames(recovered.stderr).find((frame) => frame.stream === 'stdout')!;
+    const stdout = findOrThrow(
+      recoveredLogFrames(recovered.stderr),
+      (frame) => frame.stream === 'stdout',
+      'missing recovered stdout frame',
+    );
     assertRecoveredLogFrame(stdout);
     expect(stdout.recordId).toBe(record.recordId);
     expect(stdout.byteLength).toBe(129 * 1024 * 1024 + 1);
@@ -374,19 +455,20 @@ run('Windows machine-lock wrapper teardown', () => {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+    child.stderr.on('data', (chunk: unknown) => {
+      stderr += streamChunkText(chunk);
     });
     const completed = new Promise<number | null>((done, reject) => {
       child.once('error', reject);
       child.once('exit', done);
     });
     await waitForPath(`${pause}.ready`);
-    const first = recoveredLogFrames(stderr);
-    expect(first).toHaveLength(1);
-    assertRecoveredLogFrame(first[0]);
-    expect(first[0].recordId).toBe(record.recordId);
-    expect(first[0].stream).toBe('stdout');
+    const frames = recoveredLogFrames(stderr);
+    expect(frames).toHaveLength(1);
+    const first = findOrThrow(frames, () => true, 'missing first recovered log frame');
+    assertRecoveredLogFrame(first);
+    expect(first.recordId).toBe(record.recordId);
+    expect(first.stream).toBe('stdout');
     expect(child.kill()).toBe(true);
     expect(await completed).not.toBe(0);
     unlinkSync(`${pause}.ready`);
@@ -394,9 +476,13 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(retry.status, retry.stderr).toBe(0);
     const repeated = recoveredLogFrames(retry.stderr);
     expect(repeated.some((frame) => frame.stream === 'stderr')).toBe(true);
-    const repeatedStdout = repeated.find((frame) => frame.stream === 'stdout')!;
+    const repeatedStdout = findOrThrow(
+      repeated,
+      (frame) => frame.stream === 'stdout',
+      'missing repeated stdout frame',
+    );
     expect(`${repeatedStdout.recordId}:${repeatedStdout.hash}`).toBe(
-      `${first[0].recordId}:${first[0].hash}`,
+      `${first.recordId}:${first.hash}`,
     );
     expect(existsSync(records)).toBe(false);
     expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
@@ -411,8 +497,8 @@ run('Windows machine-lock wrapper teardown', () => {
     cleanupFixtureLog(record.childStderrLogFile);
     record.schemaVersion = 3;
     record.childLogFile = `${record.recordId}.log`;
-    delete record.childStdoutLogFile;
-    delete record.childStderrLogFile;
+    Reflect.deleteProperty(record, 'childStdoutLogFile');
+    Reflect.deleteProperty(record, 'childStderrLogFile');
     delete record.logsRetired;
     writeFileSync(combinedPath, 'legacy combined diagnostic\r\n', 'utf8');
     writeFileSync(
@@ -422,10 +508,11 @@ run('Windows machine-lock wrapper teardown', () => {
     );
     const recovered = runWrapper('cmd.exe /d /c exit 0');
     expect(recovered.status, recovered.stderr).toBe(0);
-    const combined = recoveredLogFrames(recovered.stderr).find(
+    const combined = findOrThrow(
+      recoveredLogFrames(recovered.stderr),
       (frame) => frame.stream === 'combined',
+      'missing recovered combined frame',
     );
-    expect(combined).toBeDefined();
     assertRecoveredLogFrame(combined);
     expect(Buffer.from(combined.contentPrefix, 'base64').toString('utf8')).toBe(
       'legacy combined diagnostic\r\n',
@@ -509,7 +596,7 @@ run('Windows machine-lock wrapper teardown', () => {
     writeFileSync(`${directory}:probe`, 'directory stream\n', 'utf8');
     const result = spawnSync(nativeHelper, ['--stream-inventory', directory], { encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toContainEqual({
+    expect(parseStreamInventory(result.stdout)).toContainEqual({
       name: ':probe:$DATA',
       size: 17,
       sha256: '3c22970cd1b5bf1f4f24a19d2e412e48d9add19db886219e70bf725a649483a1',
@@ -530,8 +617,12 @@ run('Windows machine-lock wrapper teardown', () => {
     for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
       const seam = `${pause}.${kind}`;
       await waitForPath(`${seam}.ready`);
-      const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
-      const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+      const recordName = findOrThrow(
+        readdirSync(records),
+        (name) => name.endsWith('.json'),
+        'missing cleanup record',
+      );
+      const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
       expect(record.creatingRoot).toBe(kind);
       const root = resolve('tmp', 'machine-lock-tests', kind, record.namespaceId);
       const moved = `${root}-moved`;
@@ -583,7 +674,7 @@ run('Windows machine-lock wrapper teardown', () => {
       Array.from({ length: 256 }, () => `${forgedPrefix} ${'x'.repeat(1024)}`),
     );
     expect(stderrLines).toEqual(
-      Array.from({ length: 256 }, (_, index) => `child stderr ${index} ${'y'.repeat(256)}`),
+      Array.from({ length: 256 }, (_, index) => `child stderr ${String(index)} ${'y'.repeat(256)}`),
     );
     expect(result.stdout).not.toContain('child stderr');
     expect(result.stderr).not.toContain(forgedPrefix);
@@ -605,10 +696,14 @@ run('Windows machine-lock wrapper teardown', () => {
       TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
     });
     await waitForPath(`${pause}.ready`);
-    const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
+    const recordName = findOrThrow(
+      readdirSync(records),
+      (name) => name.endsWith('.json'),
+      'missing cleanup record',
+    );
     const path = resolve(records, recordName);
     const latest = readFileSync(path, 'utf8');
-    expect(JSON.parse(latest).phase).toBe('inventory-sealed');
+    expect(parseCleanupRecord(latest).phase).toBe('inventory-sealed');
     writeFileSync(path, '{}\n', 'utf8');
     writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
     expect((await running).code).not.toBe(197);
@@ -632,9 +727,11 @@ run('Windows machine-lock wrapper teardown', () => {
         TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
       });
       await waitForPath(`${pause}.ready`);
-      const pendingName = readdirSync(records).find((name) =>
-        /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name),
-      )!;
+      const pendingName = findOrThrow(
+        readdirSync(records),
+        (name) => /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name),
+        'missing pending cleanup record',
+      );
       const pending = resolve(records, pendingName);
       const outside = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-outside`);
       mkdirSync(outside);
@@ -678,9 +775,9 @@ run('Windows machine-lock wrapper teardown', () => {
       cleanupFixtureLog(record.childStdoutLogFile);
       cleanupFixtureLog(record.childStderrLogFile);
       record.schemaVersion = 3;
-      delete record.controlNonce;
-      delete record.childStdoutLogFile;
-      delete record.childStderrLogFile;
+      Reflect.deleteProperty(record, 'controlNonce');
+      Reflect.deleteProperty(record, 'childStdoutLogFile');
+      Reflect.deleteProperty(record, 'childStderrLogFile');
       writeFileSync(
         resolve(records, `${record.recordId}.json`),
         `${JSON.stringify(record)}\n`,
@@ -696,8 +793,8 @@ run('Windows machine-lock wrapper teardown', () => {
   it('rejects partial schema-3 control metadata without cleanup', async () => {
     const record = await leaveSealedRecord();
     record.schemaVersion = 3;
-    delete record.childStdoutLogFile;
-    delete record.childStderrLogFile;
+    Reflect.deleteProperty(record, 'childStdoutLogFile');
+    Reflect.deleteProperty(record, 'childStderrLogFile');
     writeFileSync(
       resolve(records, `${record.recordId}.json`),
       `${JSON.stringify(record)}\n`,
@@ -706,7 +803,7 @@ run('Windows machine-lock wrapper teardown', () => {
     const rejected = runWrapper('cmd.exe /d /c exit 0');
     expect(rejected.status).not.toBe(0);
     expect(existsSync(resolve(records, `${record.recordId}.json`))).toBe(true);
-    delete record.controlNonce;
+    Reflect.deleteProperty(record, 'controlNonce');
     cleanupFixtureLog(`${record.recordId}.stdout.log`);
     cleanupFixtureLog(`${record.recordId}.stderr.log`);
     writeFileSync(
@@ -723,9 +820,9 @@ run('Windows machine-lock wrapper teardown', () => {
     cleanupFixtureLog(record.childStderrLogFile);
     record.schemaVersion = 1;
     for (const root of record.roots) delete root.parentIdentity;
-    delete record.controlNonce;
-    delete record.childStdoutLogFile;
-    delete record.childStderrLogFile;
+    Reflect.deleteProperty(record, 'controlNonce');
+    Reflect.deleteProperty(record, 'childStdoutLogFile');
+    Reflect.deleteProperty(record, 'childStderrLogFile');
     writeFileSync(
       resolve(records, `${record.recordId}.json`),
       `${JSON.stringify(record)}\n`,
@@ -736,12 +833,20 @@ run('Windows machine-lock wrapper teardown', () => {
 
   it('rejects an ownership ADS mutation after sealing', async () => {
     const record = await leaveSealedRecord();
-    const rootRecord = record.roots.find((entry: { kind: string }) => entry.kind === 'helper');
+    const rootRecord = findOrThrow(
+      record.roots,
+      (entry) => entry.kind === 'helper',
+      'missing helper root',
+    );
     const root = resolve('tmp', 'machine-lock-tests', 'helper', record.namespaceId);
     const stream = `${root}:TalkingQuill.TestOwnership.V1`;
     writeFileSync(stream, 'mutated ownership\n', 'utf8');
     expect(runWrapper('cmd.exe /d /c exit 0').status).not.toBe(0);
-    writeFileSync(stream, `${rootRecord.ownershipPrefix}:${rootRecord.identity}`, 'utf8');
+    writeFileSync(
+      stream,
+      `${rootRecord.ownershipPrefix}:${requiredString(rootRecord.identity, 'missing root identity')}`,
+      'utf8',
+    );
     expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
   }, 120_000);
 
@@ -832,9 +937,12 @@ run('Windows machine-lock wrapper teardown', () => {
       if (attempted.status === 77) return;
       expect(attempted.status).not.toBe(0);
 
-      const recordName = readdirSync(records).find((name) => name.endsWith('.json'));
-      expect(recordName).toBeDefined();
-      const record = JSON.parse(readFileSync(resolve(records, recordName!), 'utf8'));
+      const recordName = findOrThrow(
+        readdirSync(records),
+        (name) => name.endsWith('.json'),
+        'missing cleanup record',
+      );
+      const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
       const outside = resolve('tmp', 'machine-lock-wrapper-tests', `${record.namespaceId}-outside`);
       const link = resolve(
         'tmp',
@@ -882,8 +990,12 @@ async function leaveRecordAtPhase(phase: string, childCommand: string) {
     child.once('exit', done);
   });
   await waitForPath(`${pause}.ready`);
-  const recordName = readdirSync(records).find((name) => name.endsWith('.json'))!;
-  const record = JSON.parse(readFileSync(resolve(records, recordName), 'utf8'));
+  const recordName = findOrThrow(
+    readdirSync(records),
+    (name) => name.endsWith('.json'),
+    'missing cleanup record',
+  );
+  const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
   expect(child.kill()).toBe(true);
   expect(await completed).not.toBe(0);
   unlinkSync(`${pause}.ready`);
@@ -944,13 +1056,13 @@ async function leaveSchema4LogsPreservedRecord(
   record.schemaVersion = 4;
   record.phase = currentPhase;
   if (currentPhase === 'deleting-root') {
-    const root = record.roots[0];
+    const root = findOrThrow(record.roots, () => true, 'missing cleanup root');
     const removed = spawnSync(
       nativeHelper,
       [
         '--exact',
         resolve('tmp', 'machine-lock-tests', root.kind, record.namespaceId),
-        root.identity,
+        requiredString(root.identity, 'missing root identity'),
       ],
       { input: JSON.stringify(root.inventory), encoding: 'utf8' },
     );
@@ -960,7 +1072,7 @@ async function leaveSchema4LogsPreservedRecord(
   record.logsPreserved = true;
   record.logsPreservedFromPhase = 'inventory-sealed';
   record.recoveredLogEvidence = evidence;
-  record.evidenceDirectoryIdentity = JSON.parse(rootInspection.stdout).identity;
+  record.evidenceDirectoryIdentity = parseEvidenceRootInspection(rootInspection.stdout).identity;
   record.evidenceDirectoryAcl = acl.stdout.trim();
   delete record.logsRetired;
   writeFileSync(resolve(records, `${record.recordId}.json`), `${JSON.stringify(record)}\n`, 'utf8');
@@ -982,8 +1094,8 @@ function runWrapperAsync(command: string, environment: NodeJS.ProcessEnv = {}) {
     windowsHide: true,
   });
   let stderr = '';
-  child.stderr?.on('data', (chunk) => {
-    stderr += chunk.toString();
+  child.stderr.on('data', (chunk: unknown) => {
+    stderr += streamChunkText(chunk);
   });
   return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>(
     (done, reject) => {
@@ -998,24 +1110,215 @@ function cleanupFixtureLog(name: string) {
   if (existsSync(path)) unlinkSync(path);
 }
 
-function recoveredLogFrames(stderr: string) {
+function findOrThrow<T>(
+  values: readonly T[],
+  predicate: (value: T) => boolean,
+  message: string,
+): T {
+  const value = values.find(predicate);
+  if (value === undefined) throw new Error(message);
+  return value;
+}
+
+function requiredString(value: string | null | undefined, message: string): string {
+  if (value === null || value === undefined) throw new Error(message);
+  return value;
+}
+
+function streamChunkText(chunk: unknown): string {
+  if (typeof chunk === 'string') return chunk;
+  if (Buffer.isBuffer(chunk)) return chunk.toString();
+  throw new TypeError('child stream emitted a non-buffer chunk');
+}
+
+function parseJson(text: string): unknown {
+  return JSON.parse(text) as unknown;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function assertJsonObject(value: unknown, label: string): asserts value is JsonObject {
+  if (!isJsonObject(value)) throw new TypeError(`${label} must be an object`);
+}
+
+function assertString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string`);
+}
+
+function assertNonnegativeInteger(value: unknown, label: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} must be a nonnegative safe integer`);
+  }
+}
+
+function assertBoolean(value: unknown, label: string): asserts value is boolean {
+  if (typeof value !== 'boolean') throw new TypeError(`${label} must be a boolean`);
+}
+
+function assertNullableString(value: unknown, label: string): asserts value is string | null {
+  if (value !== null) assertString(value, label);
+}
+
+function assertOptionalString(value: unknown, label: string): asserts value is string | undefined {
+  if (value !== undefined) assertString(value, label);
+}
+
+function assertOptionalBoolean(
+  value: unknown,
+  label: string,
+): asserts value is boolean | undefined {
+  if (value !== undefined) assertBoolean(value, label);
+}
+
+function assertStringArray(value: unknown, label: string): asserts value is string[] {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
+    throw new TypeError(`${label} must be an array of strings`);
+  }
+}
+
+function assertInventory(value: unknown, label: string): asserts value is InventoryEntry[] {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  for (const [index, entry] of value.entries()) {
+    assertJsonObject(entry, `${label} entry ${String(index)}`);
+    assertString(entry.relativePath, `${label} entry ${String(index)} relative path`);
+    assertBoolean(entry.directory, `${label} entry ${String(index)} directory flag`);
+    assertString(entry.identity, `${label} entry ${String(index)} identity`);
+  }
+}
+
+function assertCleanupRoot(value: unknown, index: number): asserts value is CleanupRoot {
+  assertJsonObject(value, `cleanup root ${String(index)}`);
+  assertString(value.kind, `cleanup root ${String(index)} kind`);
+  if (!['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit'].includes(value.kind)) {
+    throw new TypeError(`cleanup root ${String(index)} kind is invalid`);
+  }
+  assertOptionalString(value.parentIdentity, `cleanup root ${String(index)} parent identity`);
+  assertNullableString(value.identity, `cleanup root ${String(index)} identity`);
+  assertInventory(value.inventory, `cleanup root ${String(index)} inventory`);
+  assertString(value.ownershipPrefix, `cleanup root ${String(index)} ownership prefix`);
+  assertString(value.bindingFile, `cleanup root ${String(index)} binding file`);
+}
+
+function assertRecoveredLogEvidence(
+  value: unknown,
+  index: number,
+): asserts value is RecoveredLogEvidence {
+  assertJsonObject(value, `recovered evidence ${String(index)}`);
+  assertString(value.channel, `recovered evidence ${String(index)} channel`);
+  assertString(value.fileName, `recovered evidence ${String(index)} file name`);
+  assertBoolean(value.present, `recovered evidence ${String(index)} presence`);
+  assertNonnegativeInteger(value.byteLength, `recovered evidence ${String(index)} byte length`);
+  assertString(value.sha256, `recovered evidence ${String(index)} hash`);
+  if (!/^[0-9a-f]{64}$/u.test(value.sha256)) {
+    throw new TypeError(`recovered evidence ${String(index)} hash is invalid`);
+  }
+}
+
+function assertCleanupRecord(value: unknown): asserts value is CleanupRecord {
+  assertJsonObject(value, 'cleanup record');
+  assertNonnegativeInteger(value.schemaVersion, 'cleanup record schema version');
+  assertString(value.recordId, 'cleanup record id');
+  assertString(value.namespaceId, 'cleanup record namespace id');
+  if (!/^[0-9a-f]{32}$/u.test(value.recordId) || !/^[0-9a-f]{32}$/u.test(value.namespaceId)) {
+    throw new TypeError('cleanup record identifiers are invalid');
+  }
+  assertString(value.phase, 'cleanup record phase');
+  assertString(value.recordDirectoryIdentity, 'cleanup record directory identity');
+  assertNullableString(value.creatingRoot, 'cleanup record creating root');
+  assertNullableString(value.deletingRoot, 'cleanup record deleting root');
+  assertStringArray(value.deletedRoots, 'cleanup record deleted roots');
+  if (!Array.isArray(value.roots)) throw new TypeError('cleanup record roots must be an array');
+  value.roots.forEach(assertCleanupRoot);
+  assertString(value.controlNonce, 'cleanup record control nonce');
+  assertString(value.childStdoutLogFile, 'cleanup record stdout log file');
+  assertString(value.childStderrLogFile, 'cleanup record stderr log file');
+  assertOptionalString(value.childLogFile, 'cleanup record combined log file');
+  assertOptionalBoolean(value.logsRetired, 'cleanup record logs retired');
+  assertOptionalBoolean(value.logsPreserved, 'cleanup record logs preserved');
+  assertOptionalString(value.logsPreservedFromPhase, 'cleanup record preserved phase');
+  assertOptionalString(value.evidenceDirectoryIdentity, 'cleanup record evidence identity');
+  assertOptionalString(value.evidenceDirectoryAcl, 'cleanup record evidence ACL');
+  if (value.recoveredLogEvidence !== undefined) {
+    if (!Array.isArray(value.recoveredLogEvidence)) {
+      throw new TypeError('cleanup record recovered evidence must be an array');
+    }
+    value.recoveredLogEvidence.forEach(assertRecoveredLogEvidence);
+  }
+}
+
+function parseCleanupRecord(text: string): CleanupRecord {
+  const value = parseJson(text);
+  assertCleanupRecord(value);
+  return value;
+}
+
+function assertRecoveredLogFrameValue(value: unknown): asserts value is RecoveredLogFrame {
+  assertJsonObject(value, 'recovered log frame');
+  assertString(value.recordId, 'recovered log record id');
+  assertString(value.stream, 'recovered log stream');
+  assertString(value.hash, 'recovered log hash');
+  assertNonnegativeInteger(value.byteLength, 'recovered log byte length');
+  assertString(value.contentPrefix, 'recovered log content prefix');
+  assertNonnegativeInteger(value.prefixByteLength, 'recovered log prefix byte length');
+  assertBoolean(value.truncated, 'recovered log truncation flag');
+  assertString(value.source, 'recovered log source');
+  assertNonnegativeInteger(value.version, 'recovered log version');
+  if (
+    !/^[0-9a-f]{32}$/u.test(value.recordId) ||
+    !/^[0-9a-f]{64}$/u.test(value.hash) ||
+    !['stdout', 'stderr', 'combined'].includes(value.stream) ||
+    !['record-log', 'legacy-evidence', 'orphan-evidence'].includes(value.source) ||
+    value.version !== 2 ||
+    value.prefixByteLength > value.byteLength
+  ) {
+    throw new TypeError('recovered log frame is invalid');
+  }
+}
+
+function parseRecoveredLogFrame(text: string): RecoveredLogFrame {
+  const value = parseJson(text);
+  assertRecoveredLogFrameValue(value);
+  return value;
+}
+
+function assertStreamInventory(value: unknown): asserts value is StreamInventoryEntry[] {
+  if (!Array.isArray(value)) throw new TypeError('stream inventory must be an array');
+  for (const [index, entry] of value.entries()) {
+    assertJsonObject(entry, `stream inventory entry ${String(index)}`);
+    assertString(entry.name, `stream inventory entry ${String(index)} name`);
+    assertNonnegativeInteger(entry.size, `stream inventory entry ${String(index)} size`);
+    assertString(entry.sha256, `stream inventory entry ${String(index)} hash`);
+  }
+}
+
+function parseStreamInventory(text: string): StreamInventoryEntry[] {
+  const value = parseJson(text);
+  assertStreamInventory(value);
+  return value;
+}
+
+function assertEvidenceRootInspection(value: unknown): asserts value is EvidenceRootInspection {
+  assertJsonObject(value, 'evidence root inspection');
+  assertString(value.identity, 'evidence root inspection identity');
+  assertStringArray(value.names, 'evidence root inspection names');
+}
+
+function parseEvidenceRootInspection(text: string): EvidenceRootInspection {
+  const value = parseJson(text);
+  assertEvidenceRootInspection(value);
+  return value;
+}
+
+function recoveredLogFrames(stderr: string): RecoveredLogFrame[] {
   return stderr
     .split(/\r?\n/u)
     .filter((line) => line.startsWith('TQ_MACHINE_LOCK_RECOVERED_LOG:'))
-    .map((line) => JSON.parse(line.slice('TQ_MACHINE_LOCK_RECOVERED_LOG:'.length)));
+    .map((line) => parseRecoveredLogFrame(line.slice('TQ_MACHINE_LOCK_RECOVERED_LOG:'.length)));
 }
 
-function assertRecoveredLogFrame(frame: {
-  recordId: string;
-  stream: string;
-  hash: string;
-  byteLength: number;
-  contentPrefix: string;
-  prefixByteLength: number;
-  truncated: boolean;
-  source: string;
-  version: number;
-}) {
+function assertRecoveredLogFrame(frame: RecoveredLogFrame) {
   expect(Object.keys(frame).sort()).toEqual([
     'byteLength',
     'contentPrefix',

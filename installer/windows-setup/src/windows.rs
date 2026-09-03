@@ -11333,6 +11333,35 @@ mod tests {
     }
 
     #[test]
+    fn machine_lock_registry_deletion_delegates_to_the_configured_hive() {
+        let _test_lock = CHANNEL_TEST_LOCK.lock().unwrap();
+        let parent = machine_lock_registry_parent().unwrap();
+        let path = format!(r"{parent}\RegistryDelegateTest");
+        let mut key = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                RegCreateKeyExW(
+                    machine_lock_registry_hive(),
+                    wide(OsStr::new(&path)).as_ptr(),
+                    0,
+                    ptr::null_mut(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_READ | KEY_WRITE,
+                    ptr::null(),
+                    &mut key,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { RegCloseKey(key) }, 0);
+
+        delete_machine_lock_registry_durable(&path, &parent, "test machine-lock key").unwrap();
+
+        assert!(!registry_key_present(machine_lock_registry_hive(), &path).unwrap());
+    }
+
+    #[test]
     fn delegated_handle_validation_never_owns_or_closes_the_callers_handle() {
         assert!(duplicate_delegated_process_handle(0, std::process::id()).is_err());
         assert!(duplicate_delegated_process_handle(u64::MAX, std::process::id()).is_err());

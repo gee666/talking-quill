@@ -221,11 +221,12 @@ describe('Windows elevated updater launch', () => {
       setup.indexOf('fn delete_machine_lock_registry_durable'),
       setup.indexOf('fn delete_registry_tree_durable('),
     );
-    expect(machineRegistryDelegate.trim()).toBe(
-      'fn delete_machine_lock_registry_durable(path: &str, parent: &str, label: &str) -> Result<()> {\n' +
-        '    delete_registry_tree_durable_in_hive(machine_lock_registry_hive(), path, parent, label)\n' +
-        '}',
+    expect(machineRegistryDelegate).toContain('fn delete_machine_lock_registry_durable');
+    expect(machineRegistryDelegate).toMatch(
+      /delete_registry_tree_durable_in_hive\(\s*machine_lock_registry_hive\(\)/u,
     );
+    expect(machineRegistryDelegate).not.toContain('HKEY_LOCAL_MACHINE');
+    expect(machineRegistryDelegate).not.toContain('RegDeleteTreeW');
     const durableRegistryDeletion = setup.slice(
       setup.indexOf('fn delete_registry_tree_durable_in_hive'),
       setup.indexOf('fn transaction_action'),
