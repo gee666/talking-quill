@@ -1,0 +1,151 @@
+name: Protected Windows installed acceptance producer
+
+on:
+  workflow_dispatch:
+    inputs:
+      fresh_release_run_id:
+        description: Successful release-unsigned run containing the exact x64 fresh setup input
+        required: true
+        type: string
+      fresh_artifact_digest:
+        description: GitHub SHA-256 digest of the exact x64 fresh setup artifact
+        required: true
+        type: string
+      release_descriptor_sha256:
+        description: Approved SHA-256 of RELEASE.json
+        required: true
+        type: string
+      provenance_sha256:
+        description: Approved SHA-256 of the fresh setup provenance
+        required: true
+        type: string
+      force_producer_failure:
+        description: Force the producer to fail after key import to exercise unconditional cleanup
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-installed-acceptance-producer-x64
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    name: Produce non-mocked protected x64 acceptance inputs
+    runs-on: windows-latest
+    timeout-minutes: 120
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Authenticate exact fresh producer input and source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.fresh_release_run_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ inputs.fresh_artifact_digest }}
+          EXPECTED_RELEASE_SHA256: ${{ inputs.release_descriptor_sha256 }}
+          EXPECTED_PROVENANCE_SHA256: ${{ inputs.provenance_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_RUN_ID -cnotmatch '^[1-9][0-9]*$') { throw 'Fresh release run ID is invalid.' }
+          foreach ($digest in @($env:EXPECTED_ARTIFACT_DIGEST,$env:EXPECTED_RELEASE_SHA256,$env:EXPECTED_PROVENANCE_SHA256)) { if ($digest -cnotmatch '^[0-9a-f]{64}$') { throw 'Approved fresh input digest is invalid.' } }
+          $run = gh api "repos/${{ github.repository }}/actions/runs/$env:RELEASE_RUN_ID" | ConvertFrom-Json
+          if ($run.path -cne '.github/workflows/release-unsigned.yml') { throw 'Fresh input must come from release-unsigned.' }
+          $jobs = gh api --paginate "repos/${{ github.repository }}/actions/runs/$env:RELEASE_RUN_ID/jobs?per_page=100" | ConvertFrom-Json
+          $packageJobs = @($jobs.jobs | Where-Object { $_.name -ceq 'Package and preserve Windows x64 native setup' -and $_.conclusion -ceq 'success' })
+          if ($packageJobs.Count -ne 1) { throw 'The exact x64 package job did not succeed.' }
+          $artifacts = gh api "repos/${{ github.repository }}/actions/runs/$env:RELEASE_RUN_ID/artifacts?per_page=100" | ConvertFrom-Json
+          $artifact = @($artifacts.artifacts | Where-Object { $_.name -ceq 'windows-x64-exact-native-setup-input' -and -not $_.expired })
+          if ($artifact.Count -ne 1 -or [string]$artifact[0].digest -cne "sha256:$env:EXPECTED_ARTIFACT_DIGEST") { throw 'Fresh artifact digest is not the approved identity.' }
+          $source = [string]$run.head_sha
+          if ($source -cnotmatch '^[0-9a-f]{40}$' -or $source -cne '${{ github.sha }}') { throw 'Fresh input source does not match this protected producer run.' }
+          git checkout --detach $source
+          if ((git rev-parse HEAD).Trim() -cne $source) { throw 'Producer source checkout mismatch.' }
+          gh run download $env:RELEASE_RUN_ID --repo '${{ github.repository }}' --name windows-x64-exact-native-setup-input --dir preserved
+          node scripts/release-audit.mjs
+          $release = (Resolve-Path preserved/tmp/release-upload/RELEASE.json).Path
+          $provenance = (Resolve-Path preserved/tmp/release-upload/provenance-win-x64-setup.json).Path
+          if ((Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_RELEASE_SHA256) { throw 'RELEASE.json is not the approved identity.' }
+          if ((Get-FileHash -LiteralPath $provenance -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_PROVENANCE_SHA256) { throw 'Provenance is not the approved identity.' }
+          "TQ_ACCEPTANCE_E2E_RELEASE=$release" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TQ_ACCEPTANCE_E2E_RELEASE_SHA256=$env:EXPECTED_RELEASE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TQ_ACCEPTANCE_E2E_PROVENANCE=$provenance" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TQ_ACCEPTANCE_E2E_PROVENANCE_SHA256=$env:EXPECTED_PROVENANCE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - run: pnpm install --frozen-lockfile
+      - name: Create protected ephemeral producer keys
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($role in @('request','manifest','validation')) {
+            $key = Join-Path $env:RUNNER_TEMP "talking-quill-$role-$env:GITHUB_RUN_ID.pkcs8.der"
+            $descriptor = Join-Path $env:RUNNER_TEMP "talking-quill-$role-cleanup-$env:GITHUB_RUN_ID/descriptor.json"
+            node scripts/windows-update-native-chain.mjs key-generate --key-path $key --descriptor $descriptor | Out-Null
+            "TQ_ACCEPTANCE_E2E_$($role.ToUpperInvariant())_KEY=$key" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+            "TQ_ACCEPTANCE_$($role.ToUpperInvariant())_KEY_DESCRIPTOR=$descriptor" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+      - name: Import protected updater key through stdin
+        shell: pwsh
+        env:
+          UPDATE_KEY_INPUT: ${{ secrets.TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $encoded = $env:UPDATE_KEY_INPUT
+          Remove-Item Env:UPDATE_KEY_INPUT
+          $key = Join-Path $env:RUNNER_TEMP "talking-quill-update-$env:GITHUB_RUN_ID.pkcs8.der"
+          $descriptor = Join-Path $env:RUNNER_TEMP "talking-quill-update-cleanup-$env:GITHUB_RUN_ID/descriptor.json"
+          try {
+            $receipt = $encoded | node scripts/windows-update-native-chain.mjs key-import --key-path $key --descriptor $descriptor | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Protected update key import failed.' }
+          } finally {
+            $encoded = $null
+          }
+          $expectedPublicKey = (Get-FileHash -LiteralPath build/windows-update-public-key.sec1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($receipt.descriptorPath -cne $descriptor -or $receipt.key.publicKeySha256 -cne $expectedPublicKey -or -not (Test-Path -LiteralPath $key -PathType Leaf)) { throw 'Protected update key import receipt is invalid.' }
+          "TQ_ACCEPTANCE_E2E_UPDATE_KEY=$key" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TQ_ACCEPTANCE_UPDATE_KEY_DESCRIPTOR=$descriptor" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run the non-mocked protected producer E2E
+        shell: pwsh
+        env:
+          TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}
+        run: node scripts/run-windows-installed-acceptance-build-e2e.mjs | Set-Content tmp/windows-installed-acceptance-producer-result.json -Encoding utf8NoBOM
+      - name: Upload protected producer result
+        uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-x64-installed-acceptance-producer-result
+          path: |
+            tmp/windows-installed-acceptance-producer-result.json
+            tmp/windows-installed-acceptance/kit.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Delete every protected producer key from its retained snapshot
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failures = @()
+          foreach ($role in @('update','request','manifest','validation')) {
+            $descriptor = Join-Path $env:RUNNER_TEMP "talking-quill-$role-cleanup-$env:GITHUB_RUN_ID/descriptor.json"
+            if (Test-Path -LiteralPath $descriptor -PathType Leaf) {
+              node scripts/windows-update-native-chain.mjs key-delete --descriptor $descriptor | Out-Null
+              if ($LASTEXITCODE -ne 0) { $failures += "$role descriptor cleanup failed" }
+            }
+            $key = Join-Path $env:RUNNER_TEMP "talking-quill-$role-$env:GITHUB_RUN_ID.pkcs8.der"
+            if (Test-Path -LiteralPath $key) { $failures += "$role protected key remains" }
+          }
+          if ($failures.Count -ne 0) { throw "Protected producer cleanup failures: $($failures -join '; ')" }

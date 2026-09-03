@@ -14,6 +14,7 @@ import {
   verifyArtifactProvenanceManifest,
 } from './artifact-provenance.mjs';
 import { createWindowsUpdateNativeSigner } from './windows-update-native-signer.mjs';
+import { parseTqpkg2 } from './tqpkg2.mjs';
 
 async function main() {
   const { platform, arch, updatePrivateKeyPath } = parseArguments(process.argv.slice(2));
@@ -29,6 +30,7 @@ async function main() {
   const stem = `Talking-Quill-${version}-${platform}-${arch}`;
   const windowsFreshTrustRoot =
     platform === 'win' && process.env.TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT === '1';
+  validateUpdateKeyPolicy(platform, windowsFreshTrustRoot, updatePrivateKeyPath);
   const finalNames =
     platform === 'win'
       ? windowsFreshTrustRoot
@@ -83,7 +85,30 @@ async function main() {
     await requireFile(resolve(release, setupName));
     await rm(pendingOutput, { recursive: true, force: true });
     await mkdir(pendingOutput, { recursive: true });
-    await copyFile(resolve(release, setupName), resolve(pendingOutput, setupName));
+    const setupPath = resolve(release, setupName);
+    await copyFile(setupPath, resolve(pendingOutput, setupName));
+    const setupBytes = await readFile(setupPath);
+    const setupEvidence = await fileEvidence(setupPath);
+    const parsedSetup = parseTqpkg2(setupBytes, arch);
+    const canonicalRelease = {
+      schemaVersion: 1,
+      result: 'passed',
+      version,
+      packageMode: 'fresh',
+      variant: 'canonical',
+      architecture: arch,
+      sourceCommit: packageMetadata.sourceCommit,
+      sourceTree: packageMetadata.sourceTree,
+      installer: setupName,
+      bytes: setupEvidence.size,
+      sha256: setupEvidence.sha256,
+      tqpkg2TreeSha256: parsedSetup.manifest.treeSha256,
+    };
+    await writeFile(
+      resolve(pendingOutput, 'RELEASE.json'),
+      `${JSON.stringify(canonicalRelease)}\n`,
+      'utf8',
+    );
     await writeFile(
       resolve(pendingOutput, `provenance-${platform}-${arch}-setup.json`),
       `${JSON.stringify(provenance, null, 2)}\n`,
@@ -206,6 +231,15 @@ export function packageRootForTarget(release, platform, architecture) {
     return resolve(release, architecture === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked');
   }
   return resolve(release, architecture === 'x64' ? 'mac' : 'mac-arm64');
+}
+
+export function validateUpdateKeyPolicy(platform, windowsFreshTrustRoot, updatePrivateKeyPath) {
+  if (platform === 'win' && windowsFreshTrustRoot && updatePrivateKeyPath !== undefined) {
+    throw new Error('Fresh Windows trust-root staging rejects an update private-key path');
+  }
+  if (platform === 'win' && !windowsFreshTrustRoot && updatePrivateKeyPath === undefined) {
+    throw new Error('Windows update staging requires a protected update private-key path');
+  }
 }
 
 export function parseArguments(arguments_) {

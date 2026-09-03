@@ -16,4 +16,6 @@ export interface ProtectedKeyResult {
 export function prepareReviewedWindowsUpdateNativeChain(): ReviewedWindowsUpdateNativeChain;
 export function generateProtectedWindowsUpdateKey(keyPath: string): ProtectedKeyResult;
 export function validateProtectedWindowsUpdateKey(keyPath: string): ProtectedKeyResult;
-export function deleteProtectedWindowsUpdateKey(keyPath: string): ProtectedKeyResult;
+export function deleteProtectedWindowsUpdateKey(
+  descriptorPath: string,
+): ProtectedKeyResult & { readonly keyPath: string };

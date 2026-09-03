@@ -15,7 +15,7 @@ import {
   closeSync,
   fstatSync,
 } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { parseNativeArchitectures } from './native-architecture.mjs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
@@ -141,7 +141,7 @@ function verifyCargoLock(commit) {
 function verifyExecutable(path, expectedName, source) {
   if (basename(path) !== expectedName) throw new Error('Native signing-chain filename is invalid');
   const before = lstatSync(path, { bigint: true });
-  if (!before.isFile() || before.isSymbolicLink()) {
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
     throw new Error('Native signing-chain file identity is invalid');
   }
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -286,13 +286,43 @@ export function validateProtectedWindowsUpdateKey(keyPath) {
   return runKeyTool('--validate-protected-key-v1', keyPath);
 }
 
-export function deleteProtectedWindowsUpdateKey(keyPath) {
-  return runKeyTool('--delete-protected-key-v1', keyPath);
+export function deleteProtectedWindowsUpdateKey(descriptorPath) {
+  if (!isAbsolute(descriptorPath))
+    throw new Error('Protected key descriptor path must be absolute');
+  const cleanupRoot = dirname(descriptorPath);
+  verifySnapshotProtection(cleanupRoot);
+  const descriptor = validateProtectedKeyDescriptor(
+    JSON.parse(readFileSync(descriptorPath, 'utf8')),
+    descriptorPath,
+  );
+  const fallback = verifyExecutable(
+    descriptor.fallbackDeleter.path,
+    roles.keyTool,
+    descriptor.nativeChain.source,
+  );
+  requireRecordedIdentity(fallback, descriptor.fallbackDeleter);
+  requireRecordedIdentity(fallback, descriptor.nativeChain.keyTool);
+  if (existsSync(descriptor.key.path)) {
+    const result = runPreparedKeyTool(
+      descriptor.fallbackDeleter.path,
+      '--delete-protected-key-v1',
+      descriptor.key.path,
+    );
+    if (result.result !== 'deleted')
+      throw new Error('Native key deleter returned an invalid result');
+  }
+  if (existsSync(descriptor.key.path)) throw new Error('Protected update key cleanup failed');
+  rmSync(cleanupRoot, { recursive: true, force: false });
+  return { result: 'deleted', keyPath: descriptor.key.path };
 }
 
 function runKeyTool(mode, keyPath, input) {
   const chain = prepareReviewedWindowsUpdateNativeChain();
-  const result = spawnSync(chain.keyTool.path, [mode, keyPath], {
+  return runPreparedKeyTool(chain.keyTool.path, mode, keyPath, input);
+}
+
+function runPreparedKeyTool(toolPath, mode, keyPath, input) {
+  const result = spawnSync(toolPath, [mode, keyPath], {
     cwd: root,
     env: sanitizedSubprocessEnvironment(),
     input,
@@ -312,6 +342,86 @@ function runKeyTool(mode, keyPath, input) {
   return JSON.parse(result.stdout);
 }
 
+function emitProtectedKeyDescriptor(chain, keyPath, publicKeySha256, descriptorPath) {
+  if (!isAbsolute(keyPath) || !isAbsolute(descriptorPath)) {
+    throw new Error('Protected key and descriptor paths must be absolute');
+  }
+  const cleanupRoot = dirname(descriptorPath);
+  if (existsSync(cleanupRoot)) throw new Error('Protected cleanup snapshot already exists');
+  mkdirSync(cleanupRoot, { recursive: false });
+  const fallbackPath = resolve(cleanupRoot, roles.keyTool);
+  try {
+    copyFileSync(chain.keyTool.path, fallbackPath, constants.COPYFILE_EXCL);
+    const descriptor = {
+      schemaVersion: 1,
+      purpose: 'talking-quill/protected-windows-update-key-cleanup',
+      key: { path: resolve(keyPath), publicKeySha256 },
+      nativeChain: {
+        source: chain.source,
+        cargoLock: chain.cargoLock,
+        signer: recordedExecutable(chain.signer),
+        broker: recordedExecutable(chain.broker),
+        bootstrap: recordedExecutable(chain.bootstrap),
+        keyTool: recordedExecutable(chain.keyTool),
+      },
+      fallbackDeleter: {
+        path: fallbackPath,
+        sha256: chain.keyTool.sha256,
+        bytes: chain.keyTool.bytes,
+      },
+    };
+    writeFileSync(descriptorPath, `${JSON.stringify(descriptor)}\n`, { flag: 'wx' });
+    protectSnapshot(cleanupRoot);
+    verifySnapshotProtection(cleanupRoot);
+    return Object.freeze({ ...descriptor, descriptorPath });
+  } catch (error) {
+    rmSync(cleanupRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function validateProtectedKeyDescriptor(value, descriptorPath) {
+  if (
+    value?.schemaVersion !== 1 ||
+    value?.purpose !== 'talking-quill/protected-windows-update-key-cleanup' ||
+    !isAbsolute(value?.key?.path ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(value?.key?.publicKeySha256 ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(value?.nativeChain?.source?.sourceCommit ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(value?.nativeChain?.source?.sourceTree ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(value?.nativeChain?.cargoLock?.sha256 ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(value?.nativeChain?.cargoLock?.blob ?? '') ||
+    !Object.keys(roles).every(
+      (role) =>
+        isAbsolute(value?.nativeChain?.[role]?.path ?? '') &&
+        validRecordedIdentity(value?.nativeChain?.[role]),
+    ) ||
+    !isAbsolute(value?.fallbackDeleter?.path ?? '') ||
+    resolve(value.fallbackDeleter.path) !== resolve(dirname(descriptorPath), roles.keyTool) ||
+    !validRecordedIdentity(value.fallbackDeleter)
+  ) {
+    throw new Error('Protected key cleanup descriptor is invalid');
+  }
+  return value;
+}
+
+function recordedExecutable(value) {
+  return { path: value.path, sha256: value.sha256, bytes: value.bytes };
+}
+
+function validRecordedIdentity(value) {
+  return (
+    Number.isSafeInteger(value?.bytes) &&
+    value.bytes > 0 &&
+    /^[0-9a-f]{64}$/u.test(value?.sha256 ?? '')
+  );
+}
+
+function requireRecordedIdentity(actual, recorded) {
+  if (actual.bytes !== recorded.bytes || actual.sha256 !== recorded.sha256) {
+    throw new Error('Protected key deleter identity mismatch');
+  }
+}
+
 function valueAfter(name) {
   const index = process.argv.indexOf(name);
   return index < 0 ? undefined : process.argv[index + 1];
@@ -320,41 +430,65 @@ function valueAfter(name) {
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const [mode] = process.argv.slice(2);
   const keyPath = valueAfter('--key-path');
-  if (!keyPath || !['key-import', 'key-delete', 'key-validate', 'key-generate'].includes(mode)) {
+  const descriptorPath = valueAfter('--descriptor');
+  const modes = ['key-import', 'key-delete', 'key-validate', 'key-generate'];
+  if (
+    !modes.includes(mode) ||
+    (mode === 'key-delete'
+      ? !descriptorPath || keyPath
+      : !keyPath || (descriptorPath === undefined && mode !== 'key-validate'))
+  ) {
     throw new Error(
-      'Usage: windows-update-native-chain <key-import|key-delete|key-validate|key-generate> --key-path <absolute-path>',
+      'Usage: windows-update-native-chain <key-import|key-generate> --key-path <absolute-path> --descriptor <absolute-path>; key-delete --descriptor <absolute-path>; key-validate --key-path <absolute-path>',
     );
   }
-  if (mode === 'key-import') {
+  if (mode === 'key-delete') {
+    console.log(JSON.stringify(deleteProtectedWindowsUpdateKey(descriptorPath)));
+  } else if (mode === 'key-import') {
+    const chain = prepareReviewedWindowsUpdateNativeChain();
     const encoded = readFileSync(0, { encoding: 'utf8' }).trim();
     if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded) || encoded.length > 1024) {
       throw new Error('Protected update-key import input is invalid');
     }
     const secret = Buffer.from(encoded, 'base64');
     try {
-      const result = runKeyTool('--import-protected-key-v1', keyPath, secret);
-      const publicKeySha256 = createHash('sha256')
-        .update(Buffer.from(result.publicKeySec1Hex, 'hex'))
-        .digest('hex');
-      console.log(
-        JSON.stringify({ result: 'imported', keyPath: resolve(keyPath), publicKeySha256 }),
+      const result = runPreparedKeyTool(
+        chain.keyTool.path,
+        '--import-protected-key-v1',
+        keyPath,
+        secret,
       );
+      const publicKeySha256 = publicKeyFingerprint(result);
+      try {
+        console.log(
+          JSON.stringify(
+            emitProtectedKeyDescriptor(chain, keyPath, publicKeySha256, descriptorPath),
+          ),
+        );
+      } catch (error) {
+        deleteAfterDescriptorFailure(chain.keyTool.path, keyPath);
+        throw error;
+      }
     } finally {
       secret.fill(0);
     }
-  } else {
-    const result =
-      mode === 'key-delete'
-        ? deleteProtectedWindowsUpdateKey(keyPath)
-        : mode === 'key-validate'
-          ? validateProtectedWindowsUpdateKey(keyPath)
-          : generateProtectedWindowsUpdateKey(keyPath);
-    if (result.publicKeySec1Hex) {
-      result.publicKeySha256 = createHash('sha256')
-        .update(Buffer.from(result.publicKeySec1Hex, 'hex'))
-        .digest('hex');
-      delete result.publicKeySec1Hex;
+  } else if (mode === 'key-generate') {
+    const chain = prepareReviewedWindowsUpdateNativeChain();
+    const result = runPreparedKeyTool(chain.keyTool.path, '--generate-protected-key-v1', keyPath);
+    try {
+      console.log(
+        JSON.stringify(
+          emitProtectedKeyDescriptor(chain, keyPath, publicKeyFingerprint(result), descriptorPath),
+        ),
+      );
+    } catch (error) {
+      deleteAfterDescriptorFailure(chain.keyTool.path, keyPath);
+      throw error;
     }
+  } else {
+    const result = validateProtectedWindowsUpdateKey(keyPath);
+    result.publicKeySha256 = publicKeyFingerprint(result);
+    delete result.publicKeySec1Hex;
     console.log(JSON.stringify(result));
   }
 }
@@ -400,6 +534,19 @@ foreach($item in $items){
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
     throw new Error('Reviewed native-chain snapshot ACL is invalid');
   }
+}
+
+function deleteAfterDescriptorFailure(toolPath, keyPath) {
+  if (!existsSync(keyPath)) return;
+  runPreparedKeyTool(toolPath, '--delete-protected-key-v1', keyPath);
+  if (existsSync(keyPath)) throw new Error('Descriptor failure left protected key material');
+}
+
+function publicKeyFingerprint(result) {
+  if (!/^04[0-9a-f]{128}$/u.test(result?.publicKeySec1Hex ?? '')) {
+    throw new Error('Native protected update-key public identity is invalid');
+  }
+  return createHash('sha256').update(Buffer.from(result.publicKeySec1Hex, 'hex')).digest('hex');
 }
 
 function occurrences(bytes, marker) {

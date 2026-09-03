@@ -1,0 +1,69 @@
+import { existsSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+
+const root = resolve(`tmp/release-secrets/cleanup-integration-${String(process.pid)}`);
+const keyPath = resolve(root, 'protected-key.pkcs8.der');
+const descriptorPath = resolve(
+  'tmp',
+  `cleanup-integration-${String(process.pid)}`,
+  'descriptor.json',
+);
+
+const nativeTest = process.platform === 'win32' && process.arch === 'x64' ? it : it.skip;
+
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(resolve(descriptorPath, '..'), { recursive: true, force: true });
+});
+
+describe('Windows protected update-key failure cleanup', () => {
+  nativeTest(
+    'deletes through the retained descriptor after a forced producer failure with Cargo unavailable',
+    () => {
+      const generated = spawnSync(
+        process.execPath,
+        [
+          'scripts/windows-update-native-chain.mjs',
+          'key-generate',
+          '--key-path',
+          keyPath,
+          '--descriptor',
+          descriptorPath,
+        ],
+        { cwd: resolve('.'), encoding: 'utf8', timeout: 12 * 60_000 },
+      );
+      expect(generated.status, generated.stderr).toBe(0);
+      expect(existsSync(keyPath)).toBe(true);
+      expect(existsSync(descriptorPath)).toBe(true);
+
+      const failedProducer = spawnSync(
+        process.execPath,
+        ['-e', "process.stderr.write('forced producer build failure');process.exit(91)"],
+        { cwd: resolve('.'), encoding: 'utf8', timeout: 30_000 },
+      );
+      expect(failedProducer.status).toBe(91);
+      expect(failedProducer.stderr).toContain('forced producer build failure');
+
+      const cleanup = spawnSync(
+        process.execPath,
+        ['scripts/windows-update-native-chain.mjs', 'key-delete', '--descriptor', descriptorPath],
+        {
+          cwd: resolve('.'),
+          env: {
+            SystemRoot: process.env.SystemRoot ?? 'C:\\Windows',
+            ProgramData: process.env.ProgramData ?? 'C:\\ProgramData',
+            PATH: resolve('tmp', 'cargo-is-deliberately-unavailable'),
+          },
+          encoding: 'utf8',
+          timeout: 30_000,
+        },
+      );
+      expect(cleanup.status, cleanup.stderr).toBe(0);
+      expect(existsSync(keyPath)).toBe(false);
+      expect(existsSync(descriptorPath)).toBe(false);
+    },
+    13 * 60_000,
+  );
+});

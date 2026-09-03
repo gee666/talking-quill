@@ -148,43 +148,10 @@ jobs:
         run: |
           Get-ChildItem Env: | Where-Object { $_.Name -match '^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
           pnpm --filter @talking-quill/app ${{ matrix.package_script }}
-      - name: Import protected updater signing key for update mode
-        if: env.TALKING_QUILL_PACKAGE_MODE == 'update'
-        id: update-key
+      # Fresh trust-root staging has no updater private key or update branch.
+      - name: Stage exact Windows fresh payload
         shell: pwsh
-        env:
-          UPDATE_KEY_INPUT: ${{ secrets.TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64 }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $encoded = $env:UPDATE_KEY_INPUT
-          Remove-Item Env:UPDATE_KEY_INPUT
-          $keyPath = Join-Path $env:RUNNER_TEMP 'talking-quill-update-signing-key.pkcs8.der'
-          $receipt = Join-Path $env:RUNNER_TEMP 'talking-quill-update-signing-key-receipt.json'
-          $encoded | node scripts/windows-update-native-chain.mjs key-import --key-path $keyPath | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
-          if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) { throw 'Protected update signing key import failed.' }
-      # Canonical staging binds the exact installer bytes to the two-role
-      # talkingQuillRelease identity and copies the matching provenance.
-      - name: Stage exact Windows payload
-        shell: pwsh
-        run: |
-          if ($env:TALKING_QUILL_PACKAGE_MODE -eq 'update') {
-            $keyPath = Join-Path $env:RUNNER_TEMP 'talking-quill-update-signing-key.pkcs8.der'
-            node scripts/stage-unsigned-release.mjs win ${{ matrix.arch }} --update-private-key $keyPath
-          } else {
-            node scripts/stage-unsigned-release.mjs win ${{ matrix.arch }}
-          }
-      - name: Delete protected updater signing key
-        if: always() && env.TALKING_QUILL_PACKAGE_MODE == 'update'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $keyPath = Join-Path $env:RUNNER_TEMP 'talking-quill-update-signing-key.pkcs8.der'
-          $receipt = Join-Path $env:RUNNER_TEMP 'talking-quill-update-signing-key-receipt.json'
-          if (Test-Path -LiteralPath $keyPath) {
-            node scripts/windows-update-native-chain.mjs key-delete --key-path $keyPath
-          }
-          if (Test-Path -LiteralPath $keyPath) { throw 'Protected update signing key cleanup failed.' }
-          Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue
+        run: node scripts/stage-unsigned-release.mjs win ${{ matrix.arch }}
       # Validate the exact staged producer inventory and create the manifest
       # consumed by publication before any artifact upload or checksum pass.
       - name: Assemble the staged producer inventory
@@ -213,6 +180,7 @@ jobs:
             tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe
             tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json
             tmp/release-upload/THIRD_PARTY_NOTICES.txt
+            tmp/release-upload/RELEASE.json
             tmp/release-upload/release-manifest.json
             release/${{ matrix.unpacked }}/**
             tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/*.exe

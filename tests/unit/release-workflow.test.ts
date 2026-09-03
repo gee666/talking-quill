@@ -2,6 +2,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
+const producerWorkflow = readFileSync(
+  '.github/workflows/windows-installed-acceptance-producer.yml',
+  'utf8',
+);
+const acceptanceProducer = readFileSync(
+  'scripts/build-windows-installed-acceptance-inputs.mjs',
+  'utf8',
+);
 const publishWorkflow = readFileSync('.github/workflows/publish-local-owner.yml', 'utf8');
 const realRebootWorkflow = readFileSync(
   '.github/workflows/windows-real-reboot-acceptance.yml',
@@ -47,23 +55,44 @@ describe('Windows native release workflow', () => {
     expect(assembleScript).toContain('fresh trust-root provenance identity mismatch');
     expect(packageJob).not.toContain('latest-${{ matrix.arch }}.yml');
     expect(packageJob).not.toContain('release-identity-win-${{ matrix.arch }}.json');
-    expect(packageJob).toContain('Import protected updater signing key for update mode');
-    expect(packageJob).toContain('Remove-Item Env:UPDATE_KEY_INPUT');
-    expect(packageJob).not.toContain('[Console]::Out.Write($encoded)');
-    expect(packageJob).toContain(
-      '$encoded | node scripts/windows-update-native-chain.mjs key-import',
+    expect(packageJob).toContain('Stage exact Windows fresh payload');
+    expect(packageJob).toContain('stage-unsigned-release.mjs win ${{ matrix.arch }}');
+    expect(packageJob).not.toContain('UPDATE_KEY_INPUT');
+    expect(packageJob).not.toContain('WINDOWS_UPDATE_SIGNING_KEY');
+    expect(packageJob).not.toContain('key-import');
+    expect(packageJob).not.toContain('key-delete');
+    expect(packageJob).not.toContain('--update-private-key');
+  });
+
+  it('runs the real acceptance producer under release-signing and unconditionally retires keys', () => {
+    expect(producerWorkflow).toContain('environment: release-signing');
+    expect(producerWorkflow).toContain('windows-x64-exact-native-setup-input');
+    expect(producerWorkflow).toContain(
+      'node scripts/run-windows-installed-acceptance-build-e2e.mjs',
     );
-    expect(packageJob.indexOf('Remove-Item Env:UPDATE_KEY_INPUT')).toBeLessThan(
-      packageJob.indexOf('| node scripts/windows-update-native-chain.mjs key-import'),
+    expect(producerWorkflow).toContain('Remove-Item Env:UPDATE_KEY_INPUT');
+    expect(producerWorkflow.indexOf('Remove-Item Env:UPDATE_KEY_INPUT')).toBeLessThan(
+      producerWorkflow.indexOf('| node scripts/windows-update-native-chain.mjs key-import'),
     );
-    expect(packageJob).toContain(
-      'stage-unsigned-release.mjs win ${{ matrix.arch }} --update-private-key $keyPath',
+    expect(producerWorkflow).toContain('key-import --key-path $key --descriptor $descriptor');
+    expect(producerWorkflow).toContain('force_producer_failure');
+    expect(acceptanceProducer).toContain('Forced installed-acceptance producer build failure');
+    expect(acceptanceProducer.indexOf('const workspace =')).toBeLessThan(
+      acceptanceProducer.indexOf('TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE'),
     );
-    expect(packageJob).toContain("if: always() && env.TALKING_QUILL_PACKAGE_MODE == 'update'");
-    expect(packageJob).toContain('windows-update-native-chain.mjs key-delete --key-path $keyPath');
-    expect(packageJob).toContain(
-      "if (Test-Path -LiteralPath $keyPath) { throw 'Protected update signing key cleanup failed.' }",
+    expect(acceptanceProducer.indexOf('TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE')).toBeLessThan(
+      acceptanceProducer.indexOf('const produceArtifacts ='),
     );
+    expect(producerWorkflow).toContain(
+      "TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}",
+    );
+    const cleanup = producerWorkflow.slice(
+      producerWorkflow.indexOf('- name: Delete every protected producer key'),
+    );
+    expect(cleanup).toContain('if: always()');
+    expect(cleanup).toContain('key-delete --descriptor $descriptor');
+    expect(cleanup).not.toContain('cargo');
+    expect(cleanup).not.toContain('key-delete --key-path');
   });
 
   it('uses an actual same-repository local baseline artifact and proves preservation', () => {

@@ -31,6 +31,12 @@ export interface CanonicalUpdateMetadata {
   readonly releaseDate?: string;
 }
 
+export function validateUpdateKeyPolicy(
+  platform: string,
+  windowsFreshTrustRoot: boolean,
+  updatePrivateKeyPath: string | undefined,
+): void;
+
 export function parseArguments(arguments_: readonly string[]): {
   readonly platform: 'win' | 'mac';
   readonly arch: 'x64' | 'arm64';

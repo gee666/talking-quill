@@ -37,6 +37,21 @@ describe('Windows acceptance bundle authorization', () => {
     expect(workflow).toContain('frozen/producer-result.json');
     expect(workflow).toContain('--producer-artifact-set-identity');
     expect(workflow).not.toContain('Run the non-mocked protected producer E2E');
+    const producerWorkflow = readFileSync(
+      '.github/workflows/windows-installed-acceptance-producer.yml',
+      'utf8',
+    );
+    expect(producerWorkflow).toContain("$run.path -cne '.github/workflows/release-unsigned.yml'");
+    expect(producerWorkflow).not.toContain("$run.conclusion -cne 'success'");
+    expect(producerWorkflow).toContain(
+      "$_.name -ceq 'Package and preserve Windows x64 native setup'",
+    );
+    expect(producerWorkflow).toContain("$_.conclusion -ceq 'success'");
+    expect(producerWorkflow).toContain('artifact[0].digest');
+    expect(producerWorkflow).toContain("$source -cne '${{ github.sha }}'");
+    expect(producerWorkflow).toContain('git checkout --detach $source');
+    expect(producerWorkflow).toContain('Get-FileHash -LiteralPath $release');
+    expect(producerWorkflow).toContain('Get-FileHash -LiteralPath $provenance');
     const releaseWorkflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
     expect(releaseWorkflow).toContain('installed-acceptance-x64/producer-result.json');
     expect(releaseWorkflow).toContain('--authorization-sha256');

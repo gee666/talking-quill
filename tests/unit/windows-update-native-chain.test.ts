@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseArguments } from '../../scripts/stage-unsigned-release.mjs';
+import { parseArguments, validateUpdateKeyPolicy } from '../../scripts/stage-unsigned-release.mjs';
 
 const chain = readFileSync('scripts/windows-update-native-chain.mjs', 'utf8');
 const ceremony = readFileSync('scripts/windows-update-key-ceremony.mjs', 'utf8');
@@ -33,6 +33,36 @@ describe('reviewed Windows update native chain', () => {
     expect(keySecurity).toContain('info.nNumberOfLinks != 1');
     expect(keySecurity).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
     expect(keySecurity).toContain('retain_ancestors(path)?');
+  });
+
+  it('makes fresh staging reject update keys and update staging reject no key', () => {
+    const keyPath = resolve('tmp/release-secrets/key.pkcs8.der');
+    expect(() => validateUpdateKeyPolicy('win', true, keyPath)).toThrow(
+      'Fresh Windows trust-root staging rejects',
+    );
+    expect(() => validateUpdateKeyPolicy('win', false, undefined)).toThrow(
+      'Windows update staging requires',
+    );
+    expect(() => validateUpdateKeyPolicy('win', true, undefined)).not.toThrow();
+    expect(() => validateUpdateKeyPolicy('win', false, keyPath)).not.toThrow();
+  });
+
+  it('records a protected cleanup snapshot and deletes without rebuilding Cargo', () => {
+    expect(chain).toContain("purpose: 'talking-quill/protected-windows-update-key-cleanup'");
+    expect(chain).toContain('fallbackDeleter');
+    expect(chain).toContain('verifySnapshotProtection(cleanupRoot)');
+    expect(chain).toContain(
+      'copyFileSync(chain.keyTool.path, fallbackPath, constants.COPYFILE_EXCL)',
+    );
+    const deletion = chain.slice(
+      chain.indexOf('export function deleteProtectedWindowsUpdateKey'),
+      chain.indexOf('function runKeyTool'),
+    );
+    expect(deletion).toContain('runPreparedKeyTool');
+    expect(deletion).toContain('requireRecordedIdentity');
+    expect(deletion).not.toContain('prepareReviewedWindowsUpdateNativeChain');
+    expect(deletion).not.toContain('runCargo');
+    expect(chain).toContain('key-delete --descriptor <absolute-path>');
   });
 
   it('removes every native identity option from staging and ceremony', () => {
