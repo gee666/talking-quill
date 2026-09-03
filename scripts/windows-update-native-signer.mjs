@@ -1,42 +1,43 @@
-import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
+import { prepareReviewedWindowsUpdateNativeChain } from './windows-update-native-chain.mjs';
 import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs';
 
 const SPKI_PREFIX = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
 
-export function createWindowsUpdateNativeSigner({
-  privateKeyPath,
-  signerPath,
-  brokerPath,
-  bootstrapPath,
-  signerSourceCommit,
-  signerSourceTree,
-  signerSha256,
-  brokerSha256,
-  bootstrapSha256,
-  launchProcess,
-}) {
-  const signer = executableIdentity(signerPath, signerSha256);
-  const broker = executableIdentity(brokerPath, brokerSha256);
-  const bootstrap = executableIdentity(bootstrapPath, bootstrapSha256);
-  const protectedKeyPath = resolve(privateKeyPath);
+export function createWindowsUpdateNativeSigner(options) {
+  if (
+    options === null ||
+    typeof options !== 'object' ||
+    Object.keys(options).join(',') !== 'privateKeyPath' ||
+    typeof options.privateKeyPath !== 'string' ||
+    !isAbsolute(options.privateKeyPath)
+  ) {
+    throw new Error('Windows updater signer accepts only a protected private-key path');
+  }
+  const chain = prepareReviewedWindowsUpdateNativeChain();
+  const protectedKeyPath = resolve(options.privateKeyPath);
   return Object.freeze({
-    identities: Object.freeze({ signer, broker, bootstrap }),
+    identities: Object.freeze({
+      signer: chain.signer,
+      broker: chain.broker,
+      bootstrap: chain.bootstrap,
+      source: chain.source,
+      cargoLock: chain.cargoLock,
+      provenancePath: chain.provenancePath,
+    }),
     sign(payloadBytes) {
       const result = signAcceptancePayload({
-        signerPath: signer.path,
-        signerSha256: signer.sha256,
-        signerBytes: signer.bytes,
-        brokerPath: broker.path,
-        brokerSha256: broker.sha256,
-        brokerBytes: broker.bytes,
-        bootstrapIdentity: bootstrap,
-        signerSourceCommit,
-        signerSourceTree,
+        signerPath: chain.signer.path,
+        signerSha256: chain.signer.sha256,
+        signerBytes: chain.signer.bytes,
+        brokerPath: chain.broker.path,
+        brokerSha256: chain.broker.sha256,
+        brokerBytes: chain.broker.bytes,
+        bootstrapIdentity: chain.bootstrap,
+        signerSourceCommit: chain.source.sourceCommit,
+        signerSourceTree: chain.source.sourceTree,
         privateKeyPath: protectedKeyPath,
         payloadBytes,
-        launchProcess,
       });
       const spki = Buffer.from(result.publicKeySpkiBase64url, 'base64url');
       if (
@@ -51,23 +52,6 @@ export function createWindowsUpdateNativeSigner({
       });
     },
   });
-}
-
-function executableIdentity(path, expectedSha256) {
-  const absolute = resolve(path);
-  const metadata = lstatSync(absolute);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error('Native updater signer identity is not a regular file');
-  }
-  const bytes = readFileSync(absolute);
-  if (bytes.length !== metadata.size) {
-    throw new Error('Native updater signer identity changed while hashing');
-  }
-  const sha256 = createHash('sha256').update(bytes).digest('hex');
-  if (expectedSha256 !== undefined && sha256 !== expectedSha256) {
-    throw new Error('Native updater signer identity does not match its pinned SHA-256');
-  }
-  return Object.freeze({ path: absolute, bytes: bytes.length, sha256 });
 }
 
 function p1363ToDer(signature) {

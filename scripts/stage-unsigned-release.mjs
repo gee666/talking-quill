@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, relative, resolve } from 'node:path';
+import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dump, load } from 'js-yaml';
 import {
@@ -16,12 +16,7 @@ import {
 import { createWindowsUpdateNativeSigner } from './windows-update-native-signer.mjs';
 
 async function main() {
-  const [platform, arch] = process.argv.slice(2).filter((value) => value !== '--');
-  if (!['win', 'mac'].includes(platform) || !['x64', 'arm64'].includes(arch)) {
-    throw new Error(
-      'Usage: stage-unsigned-release <win|mac> <x64|arm64> [--update-private-key <protected-pkcs8-der> --native-signer <exe> --native-signer-sha256 <sha256> --native-broker <exe> --native-broker-sha256 <sha256> --native-bootstrap <exe> --native-bootstrap-sha256 <sha256>]',
-    );
-  }
+  const { platform, arch, updatePrivateKeyPath } = parseArguments(process.argv.slice(2));
   const root = resolve(import.meta.dirname, '..');
   const release = resolve(root, 'release');
   const output = resolve(root, 'tmp', 'release-upload');
@@ -116,37 +111,11 @@ async function main() {
   const unsignedBinding = createUpdaterReleaseBinding(packageMetadata, updateEvidence.sha256);
   let releaseBinding = unsignedBinding;
   if (platform === 'win') {
-    const privateKeyPath = valueAfter('--update-private-key');
-    const signerPath = valueAfter('--native-signer');
-    const signerSha256 = valueAfter('--native-signer-sha256');
-    const brokerPath = valueAfter('--native-broker');
-    const brokerSha256 = valueAfter('--native-broker-sha256');
-    const bootstrapPath = valueAfter('--native-bootstrap');
-    const bootstrapSha256 = valueAfter('--native-bootstrap-sha256');
-    if (
-      [
-        privateKeyPath,
-        signerPath,
-        signerSha256,
-        brokerPath,
-        brokerSha256,
-        bootstrapPath,
-        bootstrapSha256,
-      ].some((value) => !value)
-    ) {
-      throw new Error(
-        'Windows release staging requires a protected key path and native signer identities',
-      );
+    const privateKeyPath = updatePrivateKeyPath;
+    if (!privateKeyPath) {
+      throw new Error('Windows release staging requires a protected update private-key path');
     }
-    const nativeSigner = createWindowsUpdateNativeSigner({
-      privateKeyPath,
-      signerPath,
-      brokerPath,
-      bootstrapPath,
-      signerSha256,
-      brokerSha256,
-      bootstrapSha256,
-    });
+    const nativeSigner = createWindowsUpdateNativeSigner({ privateKeyPath });
     releaseBinding = authorizeWindowsUpdaterReleaseBinding(
       unsignedBinding,
       process.env,
@@ -239,9 +208,26 @@ export function packageRootForTarget(release, platform, architecture) {
   return resolve(release, architecture === 'x64' ? 'mac' : 'mac-arm64');
 }
 
-function valueAfter(name) {
-  const index = process.argv.indexOf(name);
-  return index < 0 ? undefined : process.argv[index + 1];
+export function parseArguments(arguments_) {
+  const values = arguments_.filter((value) => value !== '--');
+  const [platform, arch, ...options] = values;
+  const validTarget = ['win', 'mac'].includes(platform) && ['x64', 'arm64'].includes(arch);
+  const validOptions =
+    options.length === 0 ||
+    (platform === 'win' &&
+      options.length === 2 &&
+      options[0] === '--update-private-key' &&
+      isAbsolute(options[1] ?? ''));
+  if (!validTarget || !validOptions) {
+    throw new Error(
+      'Usage: stage-unsigned-release <win|mac> <x64|arm64> [--update-private-key <absolute-protected-pkcs8-der>]',
+    );
+  }
+  return Object.freeze({
+    platform,
+    arch,
+    updatePrivateKeyPath: options.length === 2 ? options[1] : undefined,
+  });
 }
 
 export async function canonicalizeUpdateMetadata(

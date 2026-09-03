@@ -47,6 +47,23 @@ describe('Windows native release workflow', () => {
     expect(assembleScript).toContain('fresh trust-root provenance identity mismatch');
     expect(packageJob).not.toContain('latest-${{ matrix.arch }}.yml');
     expect(packageJob).not.toContain('release-identity-win-${{ matrix.arch }}.json');
+    expect(packageJob).toContain('Import protected updater signing key for update mode');
+    expect(packageJob).toContain('Remove-Item Env:UPDATE_KEY_INPUT');
+    expect(packageJob).not.toContain('[Console]::Out.Write($encoded)');
+    expect(packageJob).toContain(
+      '$encoded | node scripts/windows-update-native-chain.mjs key-import',
+    );
+    expect(packageJob.indexOf('Remove-Item Env:UPDATE_KEY_INPUT')).toBeLessThan(
+      packageJob.indexOf('| node scripts/windows-update-native-chain.mjs key-import'),
+    );
+    expect(packageJob).toContain(
+      'stage-unsigned-release.mjs win ${{ matrix.arch }} --update-private-key $keyPath',
+    );
+    expect(packageJob).toContain("if: always() && env.TALKING_QUILL_PACKAGE_MODE == 'update'");
+    expect(packageJob).toContain('windows-update-native-chain.mjs key-delete --key-path $keyPath');
+    expect(packageJob).toContain(
+      "if (Test-Path -LiteralPath $keyPath) { throw 'Protected update signing key cleanup failed.' }",
+    );
   });
 
   it('uses an actual same-repository local baseline artifact and proves preservation', () => {

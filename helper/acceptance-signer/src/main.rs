@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
+#[cfg(windows)]
+use talking_quill_acceptance_signer::windows_key_security::validate_private_key_handle;
 use zeroize::Zeroize;
 
 #[used]
@@ -71,6 +73,8 @@ fn run() -> Result<(), String> {
         open_key(&key_path)?
     };
     validate_open_key(&key_file)?;
+    #[cfg(windows)]
+    validate_private_key_handle(&key_file)?;
     let key_size = key_file
         .metadata()
         .map_err(|_| "private key metadata is unavailable")?

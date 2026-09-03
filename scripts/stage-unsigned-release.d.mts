@@ -31,6 +31,12 @@ export interface CanonicalUpdateMetadata {
   readonly releaseDate?: string;
 }
 
+export function parseArguments(arguments_: readonly string[]): {
+  readonly platform: 'win' | 'mac';
+  readonly arch: 'x64' | 'arm64';
+  readonly updatePrivateKeyPath?: string;
+};
+
 export function packageRootForTarget(
   release: string,
   platform: 'win' | 'mac',

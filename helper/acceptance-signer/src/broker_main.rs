@@ -25,6 +25,7 @@ mod windows {
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
     use std::time::Duration;
+    use talking_quill_acceptance_signer::windows_key_security::open_validated_private_key;
     use windows_sys::Win32::Foundation::{
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
         WAIT_OBJECT_0,
@@ -1126,7 +1127,6 @@ mod windows {
 
     fn sign(input: SignInput) -> Result<Response, &'static str> {
         require_absolute_no_reparse(&input.signer_path)?;
-        require_absolute_no_reparse(&input.private_key_path)?;
         let mut signer = open_locked(&input.signer_path)?;
         let retained = snapshot(&mut signer)?;
         if retained.sha256 != input.signer_sha256
@@ -1139,8 +1139,7 @@ mod windows {
         {
             return Err("signer identity");
         }
-        let mut key = open_locked(&input.private_key_path)?;
-        validate_single_link(&key)?;
+        let mut key = open_validated_private_key(&input.private_key_path)?;
         let directory = protected_snapshot_directory()?;
         let snapshot_path = directory.0.join("acceptance-signer.exe");
         let mut snapshot_file = OpenOptions::new()
@@ -1158,7 +1157,7 @@ mod windows {
         if frozen.sha256 != retained.sha256 || frozen.bytes != retained.bytes {
             return Err("snapshot identity");
         }
-        let child = launch_signer(&snapshot_path, &mut key, &input.payload, &frozen)?;
+        let child = launch_signer(&snapshot_path, &mut key.file, &input.payload, &frozen)?;
         let output = child.wait_and_read()?;
         let mut lines = output.stdout.split('\n');
         let signature = lines.next().ok_or("signer output")?;
@@ -1496,17 +1495,6 @@ mod windows {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .map_err(|_| "file open")
-    }
-
-    fn validate_single_link(file: &File) -> Result<(), &'static str> {
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
-            || info.nNumberOfLinks != 1
-            || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        {
-            return Err("file link identity");
-        }
-        Ok(())
     }
 
     fn snapshot(file: &mut File) -> Result<Snapshot, &'static str> {

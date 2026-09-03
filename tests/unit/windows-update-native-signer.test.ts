@@ -1,87 +1,69 @@
-import { createHash } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({ signAcceptancePayload: vi.fn() }));
+
+vi.mock('../../scripts/windows-update-native-chain.mjs', () => ({
+  prepareReviewedWindowsUpdateNativeChain: () => ({
+    signer: { path: 'reviewed/signer.exe', sha256: '11'.repeat(32), bytes: 101 },
+    broker: { path: 'reviewed/broker.exe', sha256: '22'.repeat(32), bytes: 202 },
+    bootstrap: { path: 'reviewed/bootstrap.exe', sha256: '33'.repeat(32), bytes: 303 },
+    source: { sourceCommit: '44'.repeat(20), sourceTree: '55'.repeat(20) },
+    cargoLock: { sha256: '66'.repeat(32), blob: '77'.repeat(20) },
+    provenancePath: 'reviewed/provenance.json',
+  }),
+}));
+
+vi.mock('../../scripts/windows-installed-acceptance-signer.mjs', () => ({
+  signAcceptancePayload: mocks.signAcceptancePayload,
+}));
+
 import { createWindowsUpdateNativeSigner } from '../../scripts/windows-update-native-signer.mjs';
 
-const root = resolve('tmp/windows-update-native-signer-test');
-
-afterEach(() => rm(root, { recursive: true, force: true }));
+beforeEach(() => {
+  mocks.signAcceptancePayload.mockReset();
+  mocks.signAcceptancePayload.mockReturnValue({
+    signatureBase64url: Buffer.from('34'.repeat(64), 'hex').toString('base64url'),
+    publicKeySpkiBase64url: Buffer.concat([
+      Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+      Buffer.from(`04${'12'.repeat(64)}`, 'hex'),
+    ]).toString('base64url'),
+  });
+});
 
 describe('Windows update native signer adapter', () => {
-  it('passes only the protected key path to the native signer chain', async () => {
-    await mkdir(root, { recursive: true });
-    const signerPath = resolve(root, 'signer.exe');
-    const brokerPath = resolve(root, 'broker.exe');
-    const bootstrapPath = resolve(root, 'bootstrap.exe');
-    await Promise.all([
-      writeFile(signerPath, 'signer'),
-      writeFile(brokerPath, 'broker'),
-      writeFile(bootstrapPath, 'bootstrap'),
-    ]);
-    const privateKeyPath = resolve(root, 'protected-secret.pkcs8.der');
-    const publicKeySec1Hex = `04${'12'.repeat(64)}`;
-    let nativeRequest = '';
-    const native = createWindowsUpdateNativeSigner({
-      privateKeyPath,
-      signerPath,
-      brokerPath,
-      bootstrapPath,
-      signerSha256: createHash('sha256').update('signer').digest('hex'),
-      brokerSha256: createHash('sha256').update('broker').digest('hex'),
-      bootstrapSha256: createHash('sha256').update('bootstrap').digest('hex'),
-      launchProcess: ({ input }: { input: Buffer }) => {
-        nativeRequest = input.toString('utf8');
-        const request = JSON.parse(nativeRequest) as {
-          correlation: string;
-          signerSha256: string;
-          signerBytes: number;
-        };
-        return {
-          status: 0,
-          signal: null,
-          stderr: '',
-          stdout: JSON.stringify({
-            version: 1,
-            correlation: request.correlation,
-            result: 'passed',
-            signerSha256: request.signerSha256,
-            signerBytes: request.signerBytes,
-            retainedIdentityMatches: true,
-            processIdentityMatches: true,
-            processHashMatches: true,
-            parentIdentityMatches: true,
-            creationIdentityMatches: true,
-            signatureHex: '34'.repeat(64),
-            publicKeySec1Hex,
-          }),
-        };
-      },
-    });
-
+  it('accepts only the protected key path and resolves reviewed native identities internally', () => {
+    const privateKeyPath = resolve('tmp/protected-secret.pkcs8.der');
+    const native = createWindowsUpdateNativeSigner({ privateKeyPath });
     const result = native.sign(Buffer.from('public ceremony probe'));
 
-    expect(nativeRequest).toContain(privateKeyPath.replaceAll('\\', '\\\\'));
-    expect(nativeRequest).not.toContain('PRIVATE KEY');
-    expect(result.publicKeySec1.toString('hex')).toBe(publicKeySec1Hex);
+    expect(mocks.signAcceptancePayload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        privateKeyPath,
+        signerPath: 'reviewed/signer.exe',
+        signerSha256: '11'.repeat(32),
+        brokerSha256: '22'.repeat(32),
+        signerSourceCommit: '44'.repeat(20),
+        signerSourceTree: '55'.repeat(20),
+      }),
+    );
+    expect(result.publicKeySec1.toString('hex')).toBe(`04${'12'.repeat(64)}`);
     expect(result.signatureDer[0]).toBe(0x30);
     expect(() =>
       createWindowsUpdateNativeSigner({
         privateKeyPath,
-        signerPath,
-        brokerPath,
-        bootstrapPath,
-        signerSha256: '00'.repeat(32),
-      }),
-    ).toThrow('does not match its pinned SHA-256');
+        signerPath: 'attacker.exe',
+      } as never),
+    ).toThrow('accepts only a protected private-key path');
   });
 
-  it('makes release staging require a protected path and native identities', async () => {
+  it('makes release staging accept no native path or hash options', async () => {
     const source = await import('node:fs/promises').then(({ readFile }) =>
       readFile('scripts/stage-unsigned-release.mjs', 'utf8'),
     );
-    expect(source).toContain("valueAfter('--update-private-key')");
-    expect(source).toContain('createWindowsUpdateNativeSigner');
+    expect(source).toContain("options[0] === '--update-private-key'");
+    expect(source).toContain('createWindowsUpdateNativeSigner({ privateKeyPath })');
+    expect(source).not.toContain("valueAfter('--native-");
     expect(source).not.toContain('WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64');
   });
 });

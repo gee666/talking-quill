@@ -9,6 +9,15 @@ export interface WindowsUpdateNativeSigner {
     readonly signer: NativeExecutableIdentity;
     readonly broker: NativeExecutableIdentity;
     readonly bootstrap: NativeExecutableIdentity;
+    readonly source: {
+      readonly sourceCommit: string;
+      readonly sourceTree: string;
+    };
+    readonly cargoLock: {
+      readonly sha256: string;
+      readonly blob: string;
+    };
+    readonly provenancePath: string;
   };
   sign(payloadBytes: Buffer): {
     readonly publicKeySec1: Buffer;
@@ -18,22 +27,4 @@ export interface WindowsUpdateNativeSigner {
 
 export function createWindowsUpdateNativeSigner(options: {
   readonly privateKeyPath: string;
-  readonly signerPath: string;
-  readonly brokerPath: string;
-  readonly bootstrapPath: string;
-  readonly signerSourceCommit?: string;
-  readonly signerSourceTree?: string;
-  readonly signerSha256?: string;
-  readonly brokerSha256?: string;
-  readonly bootstrapSha256?: string;
-  readonly launchProcess?: (options: {
-    readonly input: Buffer;
-    readonly [key: string]: unknown;
-  }) => {
-    readonly status?: number | null;
-    readonly signal?: NodeJS.Signals | null;
-    readonly error?: Error;
-    readonly stderr?: string;
-    readonly stdout?: string;
-  };
 }): WindowsUpdateNativeSigner;

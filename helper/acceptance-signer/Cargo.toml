@@ -22,6 +22,10 @@ path = "src/synthetic_sender.rs"
 name = "talking-quill-windows-acceptance-broker"
 path = "src/broker_main.rs"
 
+[[bin]]
+name = "talking-quill-update-key-tool"
+path = "src/key_tool.rs"
+
 [dependencies]
 getrandom.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
@@ -42,6 +46,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
 ] }

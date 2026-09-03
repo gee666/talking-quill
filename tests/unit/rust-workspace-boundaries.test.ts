@@ -381,6 +381,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
           'Win32_System_JobObjects',
           'Win32_System_Pipes',
           'Win32_System_RemoteDesktop',
+          'Win32_System_SystemServices',
           'Win32_System_Threading',
           'Win32_UI_Input_KeyboardAndMouse',
         ],
