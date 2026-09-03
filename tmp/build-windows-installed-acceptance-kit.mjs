@@ -86,8 +86,14 @@ export async function validateCanonicalRelease({ descriptorPath, descriptorSha25
   return Object.freeze({ descriptor, descriptorBytes, installerPath, installerBytes });
 }
 
-export async function buildInstalledAcceptanceKit(options) {
-  const imported = await validateCanonicalRelease(options);
+export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
+  const validateRelease = dependencies.validateCanonicalRelease ?? validateCanonicalRelease;
+  const signPayload = dependencies.signAcceptancePayload ?? signAcceptancePayload;
+  const createPlan = dependencies.createInstalledAcceptancePlan ?? createInstalledAcceptancePlan;
+  const validateSequence =
+    dependencies.validateAcceptanceRunSequence ?? validateAcceptanceRunSequence;
+  const verifyPreflight = dependencies.verifyAcceptancePreflight ?? verifyAcceptancePreflight;
+  const imported = await validateRelease(options);
   const configBytes = await readRegular(options.configPath);
   const config = JSON.parse(configBytes.toString('utf8'));
   if (config.architecture !== imported.descriptor.architecture) {
@@ -130,7 +136,9 @@ export async function buildInstalledAcceptanceKit(options) {
     config.artifacts.predecessor,
     config.artifacts.fresh,
   );
-  stagedConfig.artifacts.fresh = stagedConfig.artifacts.predecessor;
+  stagedConfig.artifacts.fresh = Object.freeze({
+    ...stagedConfig.artifacts.predecessor,
+  });
   stagedConfig.artifacts.repair = await stageArtifact(
     'repair',
     config.artifacts.repair,
@@ -151,7 +159,9 @@ export async function buildInstalledAcceptanceKit(options) {
     config.artifacts.fault,
     config.artifacts.faults.published,
   );
-  stagedConfig.artifacts.fault = stagedConfig.artifacts.faults.published;
+  stagedConfig.artifacts.fault = Object.freeze({
+    ...stagedConfig.artifacts.faults.published,
+  });
   const candidateInput = config.artifacts.candidate;
   const candidateOutput = stagedConfig.artifacts.candidate;
   const embeddedManifestRelative = relative(
@@ -206,11 +216,15 @@ export async function buildInstalledAcceptanceKit(options) {
       issuedAtMs: deadline - MAX_ACCEPTANCE_REQUEST_MS,
       expiresAtMs: deadline,
     };
-    const signed = signInNarrowSubprocess(payload, {
-      signerPath,
-      signerSha256,
-      privateKeyPath,
-    });
+    const signed = signInNarrowSubprocess(
+      payload,
+      {
+        signerPath,
+        signerSha256,
+        privateKeyPath,
+      },
+      signPayload,
+    );
     requestPublicKey ??= signed.publicKeySpkiBase64url;
     if (requestPublicKey !== signed.publicKeySpkiBase64url) {
       throw new Error('Native signer public key changed between requests');
@@ -258,12 +272,9 @@ export async function buildInstalledAcceptanceKit(options) {
   ) {
     throw new Error('Canonical installer bytes changed while assembling the kit');
   }
-  const plan = await createInstalledAcceptancePlan(evidenceInput);
-  const sequence = validateAcceptanceRunSequence(
-    plan.acceptance,
-    plan.acceptance.runWindow.notBeforeMs,
-  );
-  await verifyAcceptancePreflight({
+  const plan = await createPlan(evidenceInput);
+  const sequence = validateSequence(plan.acceptance, plan.acceptance.runWindow.notBeforeMs);
+  await verifyPreflight({
     plan,
     sequence,
     nowMs: plan.acceptance.runWindow.notBeforeMs,
@@ -319,9 +330,9 @@ export async function buildInstalledAcceptanceKit(options) {
   });
 }
 
-function signInNarrowSubprocess(payload, options) {
+function signInNarrowSubprocess(payload, options, signPayload) {
   const payloadBytes = Buffer.from(canonicalAcceptanceJson(payload));
-  const signed = signAcceptancePayload({ ...options, payloadBytes });
+  const signed = signPayload({ ...options, payloadBytes });
   return {
     encoded: Buffer.from(
       canonicalAcceptanceJson({
@@ -384,43 +395,54 @@ async function stageArtifact(name, input, outputRoot, sharedUnpackedRoot) {
     }
     output[field] = resolve(unpackedRoot, local);
   }
-  return output;
+  return Object.freeze(output);
 }
 
 function portablePaths(input, outputRoot) {
-  const portable = structuredClone(input);
-  const fields = [
-    'installerPath',
-    'metadataPath',
-    'releaseIdentityPath',
-    'validationEvidencePath',
-    'unpackedRoot',
-    'electronPath',
-    'appAsarPath',
-  ];
-  const artifacts = [
-    portable.artifacts.predecessor,
-    portable.artifacts.candidate,
-    portable.artifacts.fresh,
-    portable.artifacts.repair,
-    portable.artifacts.fault,
-    ...Object.values(portable.artifacts.faults),
-  ];
-  for (const artifact of artifacts) {
-    for (const field of fields) {
-      if (artifact[field] !== undefined)
-        artifact[field] = portablePath(artifact[field], outputRoot);
+  const portableArtifact = (artifact) => {
+    const output = { ...artifact };
+    for (const field of [
+      'installerPath',
+      'metadataPath',
+      'releaseIdentityPath',
+      'validationEvidencePath',
+      'unpackedRoot',
+      'electronPath',
+      'appAsarPath',
+    ]) {
+      if (artifact[field] !== undefined) {
+        output[field] = portablePath(artifact[field], outputRoot);
+      }
     }
-  }
+    return Object.freeze(output);
+  };
+  const faults = Object.fromEntries(
+    Object.entries(input.artifacts.faults).map(([phase, artifact]) => [
+      phase,
+      portableArtifact(artifact),
+    ]),
+  );
+  const acceptance = { ...input.acceptance };
   for (const field of [
     'buildManifestPath',
     'signedRequestsPath',
     'syntheticSenderPath',
     'trustedLauncherPath',
   ]) {
-    portable.acceptance[field] = portablePath(portable.acceptance[field], outputRoot);
+    acceptance[field] = portablePath(input.acceptance[field], outputRoot);
   }
-  return portable;
+  return Object.freeze({
+    ...input,
+    artifacts: Object.freeze({
+      predecessor: portableArtifact(input.artifacts.predecessor),
+      candidate: portableArtifact(input.artifacts.candidate),
+      fresh: portableArtifact(input.artifacts.fresh),
+      repair: portableArtifact(input.artifacts.repair),
+      fault: portableArtifact(input.artifacts.fault),
+      faults: Object.freeze(faults),
+    }),
+    acceptance: Object.freeze(acceptance),
+  });
 }
 
 function portablePath(path, outputRoot) {
