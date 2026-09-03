@@ -246,7 +246,7 @@ function publishSnapshot(source, lock, built) {
 function protectSnapshot(path) {
   const script = String.raw`
 $ErrorActionPreference='Stop'
-$path=$TargetPath
+$path=$env:TQ_NATIVE_SNAPSHOT_PATH
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 & "$env:SystemRoot\System32\icacls.exe" $path '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)RX" | Out-Null
 if($LASTEXITCODE-ne 0){throw 'ACL publication failed'}
@@ -258,14 +258,18 @@ foreach($child in $children){
 $items=@(Get-Item -LiteralPath $path)+$children
 foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.AreAccessRulesProtected){throw 'ACL inheritance'};if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}}
 `;
-  const command = `& { param([string]$TargetPath)\n${script}\n}`;
   const result = spawnSync(
     resolve(
       process.env.SystemRoot ?? 'C:/Windows',
       'System32/WindowsPowerShell/v1.0/powershell.exe',
     ),
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command, path],
-    { encoding: 'utf8', windowsHide: true, timeout: 30_000 },
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30_000,
+      env: { ...process.env, TQ_NATIVE_SNAPSHOT_PATH: path },
+    },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
     throw new Error(
@@ -358,7 +362,7 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
 function verifySnapshotProtection(path) {
   const script = String.raw`
 $ErrorActionPreference='Stop'
-$path=$TargetPath
+$path=$env:TQ_NATIVE_SNAPSHOT_PATH
 $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $expected=@{}
 $expected['S-1-5-18']=2032127
@@ -380,14 +384,18 @@ foreach($item in $items){
   if($seen.Count-ne $expected.Count){throw 'snapshot principal set'}
 }
 `;
-  const command = `& { param([string]$TargetPath)\n${script}\n}`;
   const result = spawnSync(
     resolve(
       process.env.SystemRoot ?? 'C:/Windows',
       'System32/WindowsPowerShell/v1.0/powershell.exe',
     ),
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command, path],
-    { encoding: 'utf8', windowsHide: true, timeout: 30_000 },
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30_000,
+      env: { ...process.env, TQ_NATIVE_SNAPSHOT_PATH: path },
+    },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
     throw new Error('Reviewed native-chain snapshot ACL is invalid');
