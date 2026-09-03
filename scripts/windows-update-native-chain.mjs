@@ -248,9 +248,14 @@ function protectSnapshot(path) {
 $ErrorActionPreference='Stop'
 $path=$TargetPath
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-& "$env:SystemRoot\System32\icacls.exe" $path '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)RX" '/T' '/C' | Out-Null
+& "$env:SystemRoot\System32\icacls.exe" $path '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)RX" | Out-Null
 if($LASTEXITCODE-ne 0){throw 'ACL publication failed'}
-$items=@(Get-Item -LiteralPath $path)+(Get-ChildItem -LiteralPath $path -Force)
+$children=@(Get-ChildItem -LiteralPath $path -Force)
+foreach($child in $children){
+  & "$env:SystemRoot\System32\icacls.exe" $child.FullName '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' "*$($sid):RX" | Out-Null
+  if($LASTEXITCODE-ne 0){throw 'child ACL publication failed'}
+}
+$items=@(Get-Item -LiteralPath $path)+$children
 foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.AreAccessRulesProtected){throw 'ACL inheritance'};if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}}
 `;
   const command = `& { param([string]$TargetPath)\n${script}\n}`;
