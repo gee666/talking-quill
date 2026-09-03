@@ -34,6 +34,13 @@ describe('Windows acceptance bundle authorization', () => {
     );
     expect(workflow).toContain('--bundle-root tmp/windows-installed-acceptance/frozen');
     expect(workflow).toContain('--output tmp/windows-installed-acceptance/evidence.json');
+    expect(workflow).toContain('frozen/producer-result.json');
+    expect(workflow).toContain('--producer-artifact-set-identity');
+    expect(workflow).not.toContain('Run the non-mocked protected producer E2E');
+    const releaseWorkflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
+    expect(releaseWorkflow).toContain('installed-acceptance-x64/producer-result.json');
+    expect(releaseWorkflow).toContain('--authorization-sha256');
+    expect(releaseWorkflow).toContain('--manifest-sha256');
   });
   it('requires a pinned P-256 signature bound to URL, digest, architecture, and time', () => {
     const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -43,6 +50,7 @@ describe('Windows acceptance bundle authorization', () => {
       purpose: 'talking-quill/windows-installed-acceptance-bundle',
       bundleUrl: 'https://artifacts.example/frozen.zip',
       bundleSha256: '11'.repeat(32),
+      producerArtifactSetIdentity: '33'.repeat(32),
       architecture: 'x64',
       sourceRevision: 'ab'.repeat(20),
       manifestPublicKeySpkiBase64url: manifestKeys.publicKey
@@ -73,6 +81,12 @@ describe('Windows acceptance bundle authorization', () => {
     expect(verifyWindowsAcceptanceAuthorization(input)).toEqual(payload);
     expect(() =>
       verifyWindowsAcceptanceAuthorization({ ...input, bundleSha256: '22'.repeat(32) }),
+    ).toThrow('binding is invalid');
+    expect(() =>
+      verifyWindowsAcceptanceAuthorization({
+        ...input,
+        producerArtifactSetIdentity: '44'.repeat(32),
+      }),
     ).toThrow('binding is invalid');
   });
 });

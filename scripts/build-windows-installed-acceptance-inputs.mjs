@@ -132,6 +132,7 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
         manifestPublicKeySpkiBase64url: produced.manifestPublicKeySpkiBase64url,
         validationPublicKeySpkiBase64url: produced.validationPublicKeySpkiBase64url,
         validationChainHeadSha256: produced.validationChainHeadSha256,
+        signerSha256: produced.signerSha256,
         syntheticSenderPath: produced.syntheticSenderPath,
         syntheticSenderSha256: await fileHash(produced.syntheticSenderPath),
         acceptanceBrokerPath: produced.acceptanceBrokerPath,

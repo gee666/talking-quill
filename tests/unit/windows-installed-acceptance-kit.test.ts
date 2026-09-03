@@ -184,6 +184,8 @@ describe('Windows installed-acceptance kit', () => {
       unpackedRoot,
       electronPath: resolve(unpackedRoot, 'resources/app.asar'),
       appAsarPath: resolve(unpackedRoot, 'resources/app.asar'),
+      electronSha256: sha256(Buffer.from('fixture app')),
+      appAsarSha256: sha256(Buffer.from('fixture app')),
       electronRelativePath: 'resources/app.asar',
     });
     const runWindow = {
@@ -218,10 +220,17 @@ describe('Windows installed-acceptance kit', () => {
         requestPayloads,
         requestNonces,
         buildManifestPath: resolve(unpackedRoot, 'resources/acceptance-manifest.json'),
+        buildManifestSha256: sha256(Buffer.from('{}\n')),
+        signerSha256: '34'.repeat(32),
+        validationChainHeadSha256: '35'.repeat(32),
         syntheticSenderPath,
+        syntheticSenderSha256: sha256(Buffer.from('sender')),
         acceptanceBrokerPath,
+        acceptanceBrokerSha256: sha256(Buffer.from('broker')),
         acceptanceBootstrapPath,
+        acceptanceBootstrapSha256: sha256(Buffer.from('bootstrap')),
         trustedLauncherPath,
+        trustedLauncherSha256: sha256(Buffer.from('launcher')),
       },
     };
     const configPath = resolve(inputs, 'config.json');
@@ -267,6 +276,42 @@ describe('Windows installed-acceptance kit', () => {
             ...input,
             acceptance: { ...(input.acceptance as object), runWindow },
           }),
+        createProducerArtifactSetIdentityPayload: (
+          _plan: unknown,
+          bundlePayloadInventory: readonly unknown[],
+        ) => ({
+          schemaVersion: 1,
+          sourceCommit,
+          sourceTree,
+          buildId: '12'.repeat(32),
+          candidate: Object.fromEntries(
+            [
+              'electronSha256',
+              'appAsarSha256',
+              'metadataSha256',
+              'releaseIdentitySha256',
+              'packageLayoutDigest',
+              'gatewaySha256',
+              'ownerSha256',
+            ].map((name) => [name, '41'.repeat(32)]),
+          ),
+          update: { installerSha256: '42'.repeat(32), packageLayoutDigest: '43'.repeat(32) },
+          repair: { installerSha256: '44'.repeat(32), packageLayoutDigest: '45'.repeat(32) },
+          faults: ACCEPTANCE_FAULT_PHASES.map((phase) => ({
+            phase,
+            installerSha256: '46'.repeat(32),
+            packageLayoutDigest: '47'.repeat(32),
+          })),
+          native: Object.fromEntries(
+            ['bootstrapSha256', 'brokerSha256', 'signerSha256', 'senderSha256'].map((name) => [
+              name,
+              '48'.repeat(32),
+            ]),
+          ),
+          embeddedManifest: { sha256: '49'.repeat(32), validationKeySha256: '4a'.repeat(32) },
+          faultChainHeadSha256: '4b'.repeat(32),
+          bundlePayloadInventory,
+        }),
         validateAcceptanceRunSequence: () => ({ requests: [] }),
         verifyAcceptancePreflight: () => Promise.resolve({ result: 'passed' }),
         protectNativeExecutionDirectory: () => undefined,
@@ -303,6 +348,7 @@ describe('Windows installed-acceptance kit', () => {
       'parseTqpkg2(installerBytes, descriptor.architecture)',
       'ACCEPTANCE_FAULT_PHASES',
       'requestNonces',
+      'config.acceptance?.signerSha256 !== signerSha256',
       'writeFile(releaseCopy, imported.descriptorBytes',
       'writeFile(installerCopy, imported.installerBytes',
       'createDeterministicAcceptanceZip',

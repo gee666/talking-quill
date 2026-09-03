@@ -4,5 +4,8 @@ export function verifyWindowsAcceptanceAuthorization(input: {
   readonly bundleUrl: string;
   readonly bundleSha256: string;
   readonly architecture: 'x64' | 'arm64';
+  readonly producerArtifactSetIdentity?: string;
+  readonly sourceRevision?: string;
+  readonly manifestPublicKeySpkiBase64url?: string;
   readonly nowMs: number;
 }): Readonly<Record<string, unknown>>;

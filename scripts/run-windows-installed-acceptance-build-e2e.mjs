@@ -50,7 +50,13 @@ const after = await Promise.all(roots.map(treeHash));
 if (JSON.stringify(before) !== JSON.stringify(after)) {
   throw new Error('Installed-acceptance build E2E changed production machine state');
 }
-console.log(JSON.stringify({ result: 'passed', bundleSha256: result.kit.bundleSha256 }));
+console.log(
+  JSON.stringify({
+    result: 'passed',
+    bundleSha256: result.kit.bundleSha256,
+    producerArtifactSetIdentity: result.kit.producerArtifactSetIdentity,
+  }),
+);
 
 async function treeHash(path) {
   const digest = createHash('sha256');

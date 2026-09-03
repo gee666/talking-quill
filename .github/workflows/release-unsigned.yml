@@ -593,9 +593,14 @@ jobs:
           test "$(jq -r .path <<<"$run_json")" = '.github/workflows/windows-installed-acceptance.yml'
           mkdir -p installed-acceptance-x64
           gh run download "$acceptance_run_id" --repo '${{ github.repository }}' --name windows-x64-installed-acceptance-gate --dir installed-acceptance-x64
-          acceptance_bundle_sha="$(node -p "JSON.parse(require('fs').readFileSync('installed-acceptance-x64/gate-result.json','utf8')).bundleSha256")"
-          echo "$acceptance_bundle_sha" | grep -Eq '^[0-9a-f]{64}$'
-          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence installed-acceptance-x64/evidence.json --producer-result installed-acceptance-x64/producer-e2e-result.json --output release-artifacts/windows-installed-acceptance-x64-gate.json --architecture x64 --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --bundle-sha256 "$acceptance_bundle_sha" --run-id "$acceptance_run_id"
+          acceptance_bundle_sha="$(jq -r .bundleSha256 installed-acceptance-x64/gate-result.json)"
+          acceptance_manifest_sha="$(jq -r .bundleManifestSha256 installed-acceptance-x64/gate-result.json)"
+          acceptance_authorization_sha="$(jq -r .bundleAuthorizationSha256 installed-acceptance-x64/gate-result.json)"
+          acceptance_producer_identity="$(jq -r .producerArtifactSetIdentity installed-acceptance-x64/gate-result.json)"
+          for digest in "$acceptance_bundle_sha" "$acceptance_manifest_sha" "$acceptance_authorization_sha" "$acceptance_producer_identity"; do
+            echo "$digest" | grep -Eq '^[0-9a-f]{64}$'
+          done
+          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence installed-acceptance-x64/evidence.json --producer-result installed-acceptance-x64/producer-result.json --output release-artifacts/windows-installed-acceptance-x64-gate.json --architecture x64 --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --bundle-sha256 "$acceptance_bundle_sha" --manifest-sha256 "$acceptance_manifest_sha" --authorization-sha256 "$acceptance_authorization_sha" --producer-artifact-set-identity "$acceptance_producer_identity" --run-id "$acceptance_run_id"
           cmp installed-acceptance-x64/gate-result.json release-artifacts/windows-installed-acceptance-x64-gate.json
           for arch in x64 arm64; do
             run_id="$REBOOT_EVIDENCE_X64_RUN_ID"

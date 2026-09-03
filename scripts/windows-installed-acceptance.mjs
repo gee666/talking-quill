@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,10 @@ import {
 } from './release-package-metadata.mjs';
 import { bindTqpkg2OwnerManifest, parseTqpkg2 } from './tqpkg2.mjs';
 import { verifyFaultEvidenceChain } from './windows-installed-acceptance-fault-evidence.mjs';
+import {
+  createProducerArtifactSetIdentity,
+  producerArtifactSetPayloadFromPlan,
+} from './windows-installed-acceptance-artifact-set-identity.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import { authenticateAcceptanceBuildManifest } from './windows-acceptance-preflight.mjs';
 import {
@@ -230,6 +234,12 @@ export async function createInstalledAcceptancePlan(
       input.acceptance?.manifestPublicKeySpkiBase64url,
       'Acceptance manifest public key',
     ),
+    validationPublicKeySpkiBase64url,
+    requestPublicKeySpkiBase64url: requireBase64Url(
+      embeddedManifestPayload?.requestPublicKeySpkiBase64url,
+      'Embedded request public key',
+    ),
+    signerSha256: requireHex(input.acceptance?.signerSha256, 'Acceptance signer SHA-256'),
     runWindow,
     signedRequests: freezeSignedRequests(signedRequests),
     signedRequestsIdentity: requestsFile,
@@ -275,7 +285,7 @@ export async function createInstalledAcceptancePlan(
     syntheticSenderArguments: Object.freeze(input.acceptance?.syntheticSenderArguments ?? []),
   });
   validateAcceptanceRunSequence(acceptance);
-  return Object.freeze({
+  const plan = {
     schemaVersion: 2,
     architecture: input.architecture,
     artifacts: Object.freeze(artifacts),
@@ -297,7 +307,36 @@ export async function createInstalledAcceptancePlan(
       options.bundleSha256 === undefined
         ? null
         : requireHex(options.bundleSha256, 'Acceptance bundle SHA-256'),
-  });
+    bundleManifestSha256:
+      options.bundleManifestSha256 === undefined
+        ? null
+        : requireHex(options.bundleManifestSha256, 'Bundle manifest SHA-256'),
+    bundleAuthorizationSha256:
+      options.bundleAuthorizationSha256 === undefined
+        ? null
+        : requireHex(options.bundleAuthorizationSha256, 'Bundle authorization SHA-256'),
+    producerArtifactSetIdentity:
+      options.producerArtifactSetIdentity === undefined
+        ? null
+        : requireHex(options.producerArtifactSetIdentity, 'Producer artifact-set identity'),
+  };
+  if (plan.producerArtifactSetIdentity !== null) {
+    if (typeof options.bundleRoot !== 'string') {
+      throw new Error('Producer artifact-set identity requires the verified bundle root');
+    }
+    const entries = await collectProducerPayloadEntries(options.bundleRoot);
+    const measured = createProducerArtifactSetIdentity(
+      producerArtifactSetPayloadFromPlan(plan, entries),
+    );
+    if (measured !== plan.producerArtifactSetIdentity) {
+      throw new Error('Executed bundle producer artifact-set identity mismatch');
+    }
+    plan.producerResultSha256 = await verifyProducerResult(
+      resolve(options.bundleRoot, 'producer-result.json'),
+      plan,
+    );
+  }
+  return Object.freeze(plan);
 }
 
 export async function executeInstalledAcceptance(plan, adapters, options = {}) {
@@ -347,6 +386,16 @@ export async function executeInstalledAcceptance(plan, adapters, options = {}) {
             ownerSha256: role(plan.artifacts.candidate.metadata, 'owner').sha256,
           },
     bundleSha256: plan.bundleSha256,
+    bundleManifestSha256: plan.bundleManifestSha256,
+    bundleAuthorizationSha256: plan.bundleAuthorizationSha256,
+    producerArtifactSetIdentity: plan.producerArtifactSetIdentity,
+    producerResult:
+      plan.producerResultSha256 === undefined
+        ? null
+        : {
+            sha256: plan.producerResultSha256,
+            requestPublicKeySpkiBase64url: plan.acceptance.requestPublicKeySpkiBase64url,
+          },
     acceptanceNative:
       plan.acceptance.acceptanceBroker === undefined ||
       plan.acceptance.acceptanceBootstrap === undefined ||
@@ -550,12 +599,14 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     if (identity.sha256 !== current.sha256) throw new Error(`${name} unpacked role hash mismatch`);
   }
   let releaseIdentity = null;
+  let releaseIdentityIdentity = null;
   if (input.releaseIdentityPath) {
     const releaseIdentityFile = await regularIdentity(
       input.releaseIdentityPath,
       input.releaseIdentitySha256,
       fileSystem,
     );
+    releaseIdentityIdentity = releaseIdentityFile;
     releaseIdentity = JSON.parse(releaseIdentityFile.content.toString('utf8'));
     if (
       releaseIdentity.packageSha256 !== installer.sha256 ||
@@ -598,6 +649,7 @@ async function freezeArtifact(name, input, architecture, fileSystem) {
     unpackedRoot,
     metadata,
     releaseIdentity,
+    releaseIdentityIdentity,
     electron,
     appAsar,
     isolatedValidation: validationEvidence !== null,
@@ -1160,6 +1212,71 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
   return copy;
 }
 
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function verifyProducerResult(path, plan) {
+  const bytes = await readFile(path);
+  const text = bytes.toString('utf8');
+  if (bytes.length > 16 * 1024 || !text.endsWith('\n')) {
+    throw new Error('Producer result framing is invalid');
+  }
+  const envelope = JSON.parse(text.slice(0, -1));
+  const payload = envelope?.payload;
+  if (
+    canonicalAcceptanceJson(envelope) !== text.slice(0, -1) ||
+    payload?.version !== 1 ||
+    payload.purpose !== 'talking-quill/windows-installed-acceptance-producer-result' ||
+    payload.sourceCommit !== plan.sourceCommit ||
+    payload.sourceTree !== plan.sourceTree ||
+    payload.buildId !== plan.acceptance.buildId ||
+    payload.producerArtifactSetIdentity !== plan.producerArtifactSetIdentity
+  ) {
+    throw new Error('Producer result does not bind the executed artifact set');
+  }
+  const key = createPublicKey({
+    key: Buffer.from(plan.acceptance.requestPublicKeySpkiBase64url, 'base64url'),
+    format: 'der',
+    type: 'spki',
+  });
+  if (
+    !verify(
+      'sha256',
+      Buffer.from(canonicalAcceptanceJson(payload)),
+      { key, dsaEncoding: 'ieee-p1363' },
+      Buffer.from(envelope.signatureBase64url ?? '', 'base64url'),
+    )
+  ) {
+    throw new Error('Producer result signature is invalid');
+  }
+  return sha256(bytes);
+}
+
+async function collectProducerPayloadEntries(root) {
+  const output = [];
+  const visit = async (directory) => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    for (const entry of entries) {
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isFile()) {
+        const local = relative(resolve(root), path).split(sep).join('/');
+        if (local === 'bundle-manifest.json' || local === 'producer-result.json') continue;
+        const bytes = await readFile(path);
+        output.push({ path: local, bytes: bytes.length, sha256: sha256(bytes) });
+      } else {
+        throw new Error('Producer bundle payload contains a non-regular entry');
+      }
+    }
+  };
+  await visit(resolve(root));
+  output.sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
+  return output;
+}
+
 async function main() {
   const evidencePath = resolve(required('--evidence'));
   const bundleRoot = resolve(required('--bundle-root'));
@@ -1175,7 +1292,11 @@ async function main() {
   if (!/^[0-9a-f]{64}$/u.test(manifestSha256 ?? '')) {
     throw new Error('ACCEPTANCE_MANIFEST_SHA256 is required');
   }
-  const bundleExpectation = { manifestSha256 };
+  const producerArtifactSetIdentity = process.env.ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY;
+  if (!/^[0-9a-f]{64}$/u.test(producerArtifactSetIdentity ?? '')) {
+    throw new Error('ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY is required');
+  }
+  const bundleExpectation = { manifestSha256, producerArtifactSetIdentity };
   await verifyAcceptanceBundleTree(bundleRoot, bundleExpectation);
   const rawInput = JSON.parse(await readFile(evidencePath, 'utf8'));
   const input = resolveInstalledAcceptanceInputPaths(rawInput, evidencePath);
@@ -1202,6 +1323,10 @@ async function main() {
     const plan = await createInstalledAcceptancePlan(input, fileSystem, {
       reverifyBundle,
       bundleSha256: process.env.ACCEPTANCE_BUNDLE_SHA256,
+      producerArtifactSetIdentity,
+      bundleManifestSha256: manifestSha256,
+      bundleAuthorizationSha256: process.env.ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256,
+      bundleRoot,
     });
     const result = await executeInstalledAcceptance(
       plan,

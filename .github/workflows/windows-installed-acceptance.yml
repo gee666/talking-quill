@@ -60,7 +60,11 @@ jobs:
           if (-not $env:ACCEPTANCE_BUNDLE_URL.StartsWith('https://')) { throw 'Acceptance bundle URL must use HTTPS.' }
           if ($env:ACCEPTANCE_BUNDLE_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Acceptance bundle SHA-256 is invalid.' }
           node scripts/verify-windows-acceptance-authorization.mjs
-          $sourceRevision = node -e "const e=JSON.parse(Buffer.from(process.env.ACCEPTANCE_BUNDLE_AUTHORIZATION,'base64url')); process.stdout.write(e.payload.sourceRevision)"
+          $authorization = node -e "const b=Buffer.from(process.env.ACCEPTANCE_BUNDLE_AUTHORIZATION,'base64url'); const e=JSON.parse(b); process.stdout.write(JSON.stringify({sourceRevision:e.payload.sourceRevision,producerArtifactSetIdentity:e.payload.producerArtifactSetIdentity,sha256:require('node:crypto').createHash('sha256').update(b).digest('hex')}))" | ConvertFrom-Json
+          $sourceRevision = [string]$authorization.sourceRevision
+          $env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY = [string]$authorization.producerArtifactSetIdentity
+          $env:ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256 = [string]$authorization.sha256
+          if ($env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY -cnotmatch '^[0-9a-f]{64}$' -or $env:ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Signed producer or authorization identity is invalid.' }
           if ($sourceRevision -cnotmatch '^[0-9a-f]{40}$') { throw 'Signed acceptance source revision is invalid.' }
           if ($sourceRevision -cne '${{ github.sha }}') { throw 'Signed acceptance source must equal the protected workflow run head.' }
           git checkout --detach $sourceRevision
@@ -77,7 +81,7 @@ jobs:
           Invoke-WebRequest -Uri $env:ACCEPTANCE_BUNDLE_URL -OutFile $bundle
           $actual = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -cne $env:ACCEPTANCE_BUNDLE_SHA256) { throw 'Acceptance bundle SHA-256 mismatch.' }
-          $extraction = node scripts/windows-installed-acceptance-bundle.mjs extract $bundle tmp/windows-installed-acceptance/frozen $env:ACCEPTANCE_ARCHITECTURE - - $env:ACCEPTANCE_BUNDLE_SHA256 | ConvertFrom-Json
+          $extraction = node scripts/windows-installed-acceptance-bundle.mjs extract $bundle tmp/windows-installed-acceptance/frozen $env:ACCEPTANCE_ARCHITECTURE - - $env:ACCEPTANCE_BUNDLE_SHA256 - $env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY | ConvertFrom-Json
           $sourceNative = (Resolve-Path tmp/windows-installed-acceptance/frozen/acceptance/native).Path
           $nativeBase = Join-Path $env:ProgramData 'Talking Quill Acceptance Native'
           $native = Join-Path $nativeBase '${{ github.run_id }}'
@@ -96,6 +100,8 @@ jobs:
             if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $publishedFile -Algorithm SHA256).Hash) { throw "Protected native publication differs: $name" }
           }
           "ACCEPTANCE_MANIFEST_SHA256=$($extraction.manifestSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY=$env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256=$env:ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ACCEPTANCE_BUNDLE_SHA256=$env:ACCEPTANCE_BUNDLE_SHA256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TQ_ACCEPTANCE_PROTECTED_NATIVE_ROOT=$native" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $evidenceInput = Get-Content -Raw -LiteralPath tmp/windows-installed-acceptance/frozen/evidence-input.json | ConvertFrom-Json
@@ -104,38 +110,13 @@ jobs:
       - name: Execute installed acceptance matrix
         shell: pwsh
         run: |
-          node scripts/windows-installed-acceptance-bundle.mjs verify-tree tmp/windows-installed-acceptance/frozen '${{ inputs.architecture }}' - - - $env:ACCEPTANCE_MANIFEST_SHA256
+          node scripts/windows-installed-acceptance-bundle.mjs verify-tree tmp/windows-installed-acceptance/frozen '${{ inputs.architecture }}' - - - $env:ACCEPTANCE_MANIFEST_SHA256 $env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY
           node scripts/windows-installed-acceptance.mjs --bundle-root tmp/windows-installed-acceptance/frozen --evidence tmp/windows-installed-acceptance/frozen/evidence-input.json --output tmp/windows-installed-acceptance/evidence.json --execute
-      - name: Run the non-mocked protected producer E2E
-        shell: pwsh
-        env:
-          E2E_REQUEST_KEY: ${{ secrets.TALKING_QUILL_ACCEPTANCE_REQUEST_KEY_PKCS8_BASE64 }}
-          E2E_MANIFEST_KEY: ${{ secrets.TALKING_QUILL_ACCEPTANCE_MANIFEST_KEY_PKCS8_BASE64 }}
-          E2E_UPDATE_KEY: ${{ secrets.TALKING_QUILL_WINDOWS_UPDATE_KEY_PKCS8_BASE64 }}
-          E2E_VALIDATION_KEY: ${{ secrets.TALKING_QUILL_ACCEPTANCE_VALIDATION_KEY_PKCS8_BASE64 }}
-        run: |
-          $keyRoot = New-Item -ItemType Directory -Force tmp/windows-installed-acceptance/e2e-keys
-          foreach ($item in @(@('request',$env:E2E_REQUEST_KEY),@('manifest',$env:E2E_MANIFEST_KEY),@('update',$env:E2E_UPDATE_KEY),@('validation',$env:E2E_VALIDATION_KEY))) {
-            if ([string]::IsNullOrWhiteSpace($item[1])) { throw "Protected producer key is missing: $($item[0])" }
-            [IO.File]::WriteAllBytes((Join-Path $keyRoot "$($item[0]).der"),[Convert]::FromBase64String($item[1]))
-          }
-          $release = (Resolve-Path tmp/windows-installed-acceptance/frozen/imported/RELEASE.json).Path
-          $provenance = (Resolve-Path tmp/windows-installed-acceptance/frozen/imported/artifact-provenance.json).Path
-          $env:TQ_ACCEPTANCE_E2E_RELEASE=$release
-          $env:TQ_ACCEPTANCE_E2E_RELEASE_SHA256=(Get-FileHash $release -Algorithm SHA256).Hash.ToLowerInvariant()
-          $env:TQ_ACCEPTANCE_E2E_PROVENANCE=$provenance
-          $env:TQ_ACCEPTANCE_E2E_PROVENANCE_SHA256=(Get-FileHash $provenance -Algorithm SHA256).Hash.ToLowerInvariant()
-          $env:TQ_ACCEPTANCE_E2E_REQUEST_KEY=(Join-Path $keyRoot 'request.der')
-          $env:TQ_ACCEPTANCE_E2E_MANIFEST_KEY=(Join-Path $keyRoot 'manifest.der')
-          $env:TQ_ACCEPTANCE_E2E_UPDATE_KEY=(Join-Path $keyRoot 'update.der')
-          $env:TQ_ACCEPTANCE_E2E_VALIDATION_KEY=(Join-Path $keyRoot 'validation.der')
-          node scripts/run-windows-installed-acceptance-build-e2e.mjs | Tee-Object -FilePath tmp/windows-installed-acceptance/producer-e2e-result.json
-          Remove-Item -LiteralPath $keyRoot -Recurse -Force
       - name: Verify and record exact installed acceptance result
         shell: pwsh
         run: |
           $tree = (git rev-parse HEAD^{tree}).Trim()
-          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence tmp/windows-installed-acceptance/evidence.json --producer-result tmp/windows-installed-acceptance/producer-e2e-result.json --output tmp/windows-installed-acceptance/gate-result.json --architecture '${{ inputs.architecture }}' --source-commit $env:ACCEPTANCE_SOURCE_REVISION --source-tree $tree --bundle-sha256 $env:ACCEPTANCE_BUNDLE_SHA256 --run-id '${{ github.run_id }}'
+          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence tmp/windows-installed-acceptance/evidence.json --producer-result tmp/windows-installed-acceptance/frozen/producer-result.json --output tmp/windows-installed-acceptance/gate-result.json --architecture '${{ inputs.architecture }}' --source-commit $env:ACCEPTANCE_SOURCE_REVISION --source-tree $tree --bundle-sha256 $env:ACCEPTANCE_BUNDLE_SHA256 --manifest-sha256 $env:ACCEPTANCE_MANIFEST_SHA256 --authorization-sha256 $env:ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256 --producer-artifact-set-identity $env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY --run-id '${{ github.run_id }}'
       - name: Upload exact acceptance gate result
         uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -143,7 +124,7 @@ jobs:
           path: |
             tmp/windows-installed-acceptance/evidence.json
             tmp/windows-installed-acceptance/gate-result.json
-            tmp/windows-installed-acceptance/producer-e2e-result.json
+            tmp/windows-installed-acceptance/frozen/producer-result.json
           if-no-files-found: error
           retention-days: 30
       - name: Upload partial diagnostics on failure

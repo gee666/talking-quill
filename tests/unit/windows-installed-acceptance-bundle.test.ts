@@ -56,6 +56,7 @@ async function fixture(): Promise<string> {
     architecture: 'x64',
     sourceCommit,
     sourceTree,
+    producerArtifactSetIdentity: 'ab'.repeat(32),
     entries,
   };
   await writeFile(resolve(root, 'bundle-manifest.json'), `${canonicalAcceptanceJson(manifest)}\n`);

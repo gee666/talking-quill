@@ -65,6 +65,7 @@ export function createInstalledAcceptancePlan(
       readonly manifestPublicKeySpkiBase64url: string;
       readonly validationPublicKeySpkiBase64url: string;
       readonly validationChainHeadSha256: string;
+      readonly signerSha256: string;
       readonly runWindow: {
         readonly notBeforeMs: number;
         readonly expiresAtMs: number;
@@ -85,7 +86,14 @@ export function createInstalledAcceptancePlan(
     readonly outputPath?: string;
   },
   fileSystem?: unknown,
-  options?: { readonly reverifyBundle?: () => Promise<unknown> },
+  options?: {
+    readonly reverifyBundle?: () => Promise<unknown>;
+    readonly bundleSha256?: string;
+    readonly bundleManifestSha256?: string;
+    readonly bundleAuthorizationSha256?: string;
+    readonly producerArtifactSetIdentity?: string;
+    readonly bundleRoot?: string;
+  },
 ): Promise<Readonly<Record<string, unknown>>>;
 export function executeInstalledAcceptance(
   plan: any,

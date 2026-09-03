@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
@@ -15,25 +15,43 @@ const sourceCommit = valueAfter('--source-commit');
 const sourceTree = valueAfter('--source-tree');
 const runId = valueAfter('--run-id');
 const bundleSha256 = valueAfter('--bundle-sha256');
+const bundleManifestSha256 = valueAfter('--manifest-sha256');
+const bundleAuthorizationSha256 = valueAfter('--authorization-sha256');
+const producerArtifactSetIdentity = valueAfter('--producer-artifact-set-identity');
 if (
   !['x64', 'arm64'].includes(architecture) ||
   !/^[0-9a-f]{40}$/u.test(sourceCommit ?? '') ||
   !/^[0-9a-f]{40}$/u.test(sourceTree ?? '') ||
-  !/^[0-9a-f]{64}$/u.test(bundleSha256 ?? '') ||
+  ![
+    bundleSha256,
+    bundleManifestSha256,
+    bundleAuthorizationSha256,
+    producerArtifactSetIdentity,
+  ].every((value) => /^[0-9a-f]{64}$/u.test(value ?? '')) ||
   !/^[1-9][0-9]*$/u.test(runId ?? '')
 ) {
   throw new Error('Installed acceptance gate identity is invalid');
 }
 const bytes = await readFile(evidencePath);
 const producerBytes = await readFile(producerResultPath);
-const producerResult = JSON.parse(producerBytes.toString('utf8'));
-if (
-  producerResult.result !== 'passed' ||
-  !/^[0-9a-f]{64}$/u.test(producerResult.bundleSha256 ?? '')
-) {
-  throw new Error('Non-mocked acceptance producer E2E did not pass');
-}
+const producerText = producerBytes.toString('utf8');
+const producerResult = JSON.parse(producerText);
+const producerPayload = producerResult?.payload;
 const evidence = JSON.parse(bytes.toString('utf8'));
+if (
+  !producerText.endsWith('\n') ||
+  canonicalAcceptanceJson(producerResult) !== producerText.slice(0, -1) ||
+  producerPayload?.version !== 1 ||
+  producerPayload.purpose !== 'talking-quill/windows-installed-acceptance-producer-result' ||
+  producerPayload.sourceCommit !== sourceCommit ||
+  producerPayload.sourceTree !== sourceTree ||
+  producerPayload.buildId !== evidence.buildId ||
+  producerPayload.producerArtifactSetIdentity !== producerArtifactSetIdentity ||
+  evidence.producerResult?.sha256 !== sha256(producerBytes) ||
+  !verifyProducerSignature(producerResult, evidence.producerResult?.requestPublicKeySpkiBase64url)
+) {
+  throw new Error('Executed-bundle producer result binding is invalid');
+}
 const phases = evidence.phases?.map(({ phase }) => phase);
 if (
   evidence.schemaVersion !== 2 ||
@@ -42,6 +60,9 @@ if (
   evidence.sourceCommit !== sourceCommit ||
   evidence.sourceTree !== sourceTree ||
   evidence.bundleSha256 !== bundleSha256 ||
+  evidence.bundleManifestSha256 !== bundleManifestSha256 ||
+  evidence.bundleAuthorizationSha256 !== bundleAuthorizationSha256 ||
+  evidence.producerArtifactSetIdentity !== producerArtifactSetIdentity ||
   !/^[0-9a-f]{64}$/u.test(evidence.buildId ?? '') ||
   !/^[0-9a-f]{64}$/u.test(evidence.candidateInstallerSha256 ?? '') ||
   !['releaseBuildDigest', 'packageLayoutDigest', 'gatewaySha256', 'ownerSha256'].every((name) =>
@@ -91,14 +112,16 @@ const summary = {
   targetGatewaySha256: evidence.targetIdentity.gatewaySha256,
   targetOwnerSha256: evidence.targetIdentity.ownerSha256,
   bundleSha256,
+  bundleManifestSha256,
+  bundleAuthorizationSha256,
+  producerArtifactSetIdentity,
   evidenceSha256: sha256(bytes),
   validationKeySha256: evidence.preflight.validationKeySha256,
   phaseCount: phases.length,
   brokerSha256: evidence.acceptanceNative.broker.sha256,
   bootstrapSha256: evidence.acceptanceNative.bootstrap.sha256,
   launcherSha256: evidence.acceptanceNative.launcher.sha256,
-  producerE2eSha256: sha256(producerBytes),
-  producerBundleSha256: producerResult.bundleSha256,
+  producerResultSha256: sha256(producerBytes),
   artifactSha256: [...new Set(artifactHashes)].sort(),
 };
 await writeFile(outputPath, `${canonicalAcceptanceJson(summary)}\n`, { flag: 'wx', mode: 0o600 });
@@ -106,6 +129,23 @@ console.log(canonicalAcceptanceJson(summary));
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+function verifyProducerSignature(envelope, publicKeySpkiBase64url) {
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(publicKeySpkiBase64url, 'base64url'),
+      format: 'der',
+      type: 'spki',
+    });
+    return verify(
+      'sha256',
+      Buffer.from(canonicalAcceptanceJson(envelope.payload)),
+      { key, dsaEncoding: 'ieee-p1363' },
+      Buffer.from(envelope.signatureBase64url ?? '', 'base64url'),
+    );
+  } catch {
+    return false;
+  }
 }
 function valueAfter(name) {
   const index = process.argv.indexOf(name);

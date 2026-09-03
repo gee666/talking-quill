@@ -519,13 +519,15 @@ function validateInstalledAcceptanceGate(source, expectedRunId) {
       'bootstrapSha256',
       'brokerSha256',
       'buildId',
+      'bundleAuthorizationSha256',
+      'bundleManifestSha256',
       'bundleSha256',
       'candidateInstallerSha256',
       'evidenceSha256',
       'launcherSha256',
       'phaseCount',
-      'producerBundleSha256',
-      'producerE2eSha256',
+      'producerArtifactSetIdentity',
+      'producerResultSha256',
       'purpose',
       'repository',
       'result',
@@ -557,10 +559,12 @@ function validateInstalledAcceptanceGate(source, expectedRunId) {
     !SHA256.test(value.brokerSha256) ||
     !SHA256.test(value.launcherSha256) ||
     !SHA256.test(value.bundleSha256) ||
+    !SHA256.test(value.bundleManifestSha256) ||
+    !SHA256.test(value.bundleAuthorizationSha256) ||
+    !SHA256.test(value.producerArtifactSetIdentity) ||
     !SHA256.test(value.candidateInstallerSha256) ||
     !SHA256.test(value.evidenceSha256) ||
-    !SHA256.test(value.producerBundleSha256) ||
-    !SHA256.test(value.producerE2eSha256) ||
+    !SHA256.test(value.producerResultSha256) ||
     !SHA256.test(value.targetReleaseBuildDigest) ||
     !SHA256.test(value.targetPackageLayoutDigest) ||
     !SHA256.test(value.targetGatewaySha256) ||

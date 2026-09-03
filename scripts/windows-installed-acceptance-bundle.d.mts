@@ -4,6 +4,7 @@ export interface AcceptanceBundleExpectation {
   readonly sourceTree?: string;
   readonly bundleSha256?: string;
   readonly manifestSha256?: string;
+  readonly producerArtifactSetIdentity?: string;
 }
 export interface VerifiedAcceptanceBundle {
   readonly root?: string;

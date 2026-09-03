@@ -22,6 +22,9 @@ export function verifyWindowsAcceptanceAuthorization(input) {
     payload.bundleUrl !== input.bundleUrl ||
     payload.bundleSha256 !== input.bundleSha256 ||
     payload.architecture !== input.architecture ||
+    !/^[0-9a-f]{64}$/u.test(payload.producerArtifactSetIdentity ?? '') ||
+    (input.producerArtifactSetIdentity !== undefined &&
+      payload.producerArtifactSetIdentity !== input.producerArtifactSetIdentity) ||
     !/^[0-9a-f]{40}$/u.test(payload.sourceRevision ?? '') ||
     (input.sourceRevision !== undefined && payload.sourceRevision !== input.sourceRevision) ||
     (input.manifestPublicKeySpkiBase64url !== undefined &&
@@ -91,6 +94,7 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
     architecture: process.env.ACCEPTANCE_ARCHITECTURE,
     sourceRevision: process.env.ACCEPTANCE_SOURCE_REVISION,
     manifestPublicKeySpkiBase64url: process.env.ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL,
+    producerArtifactSetIdentity: process.env.ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY,
     nowMs: Date.now(),
   });
 }

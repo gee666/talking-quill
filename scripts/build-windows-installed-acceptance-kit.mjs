@@ -23,6 +23,10 @@ import {
   verifyAcceptanceBundleTree,
 } from './windows-installed-acceptance-bundle.mjs';
 import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs';
+import {
+  createProducerArtifactSetIdentity,
+  producerArtifactSetPayloadFromPlan,
+} from './windows-installed-acceptance-artifact-set-identity.mjs';
 import { parseTqpkg2 } from './tqpkg2.mjs';
 import { verifyAcceptancePreflight } from './windows-acceptance-preflight.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
@@ -111,6 +115,8 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   const validateSequence =
     dependencies.validateAcceptanceRunSequence ?? validateAcceptanceRunSequence;
   const verifyPreflight = dependencies.verifyAcceptancePreflight ?? verifyAcceptancePreflight;
+  const createArtifactSetPayload =
+    dependencies.createProducerArtifactSetIdentityPayload ?? producerArtifactSetPayloadFromPlan;
   const imported = await validateRelease(options);
   const configBytes = await readRegular(options.configPath);
   const config = JSON.parse(configBytes.toString('utf8'));
@@ -209,6 +215,9 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   );
   const signerPath = resolve(options.signerPath);
   const signerSha256 = options.signerSha256;
+  if (config.acceptance?.signerSha256 !== signerSha256) {
+    throw new Error('Artifact-set signer identity differs from the retained native signer');
+  }
   const privateKeyPath = resolve(options.requestPrivateKeyPath);
   const nonceKeys = Object.keys(config.acceptance?.requestNonces ?? {});
   if (
@@ -327,6 +336,58 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
     nowMs: plan.acceptance.runWindow.notBeforeMs,
     reserveNonces: false,
   });
+  const payloadInventoryPaths = await collectRegularFiles(outputRoot);
+  const payloadEntries = await Promise.all(
+    payloadInventoryPaths.map(async (path) => {
+      const bytes = await readFile(path);
+      return {
+        path: relative(outputRoot, path).split(sep).join('/'),
+        bytes: bytes.length,
+        sha256: sha256(bytes),
+      };
+    }),
+  );
+  payloadEntries.sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
+  const producerArtifactSetIdentityPayload = createArtifactSetPayload(plan, payloadEntries);
+  const producerArtifactSetIdentity = createProducerArtifactSetIdentity(
+    producerArtifactSetIdentityPayload,
+  );
+  const producerResultPayload = {
+    version: 1,
+    purpose: 'talking-quill/windows-installed-acceptance-producer-result',
+    sourceCommit: imported.descriptor.sourceCommit,
+    sourceTree: imported.descriptor.sourceTree,
+    buildId: plan.acceptance.buildId,
+    producerArtifactSetIdentity,
+  };
+  const signedProducerResult = signInNarrowSubprocess(
+    producerResultPayload,
+    {
+      signerPath,
+      signerSha256,
+      signerBytes: (await lstat(signerPath)).size,
+      brokerPath: config.acceptance.acceptanceBrokerPath,
+      brokerSha256: config.acceptance.acceptanceBrokerSha256,
+      brokerBytes: (await lstat(config.acceptance.acceptanceBrokerPath)).size,
+      bootstrapIdentity: {
+        path: config.acceptance.acceptanceBootstrapPath,
+        sha256: config.acceptance.acceptanceBootstrapSha256,
+        bytes: (await lstat(config.acceptance.acceptanceBootstrapPath)).size,
+      },
+      signerSourceCommit: imported.descriptor.sourceCommit,
+      signerSourceTree: imported.descriptor.sourceTree,
+      privateKeyPath,
+    },
+    signPayload,
+  );
+  if (signedProducerResult.publicKeySpkiBase64url !== requestPublicKey) {
+    throw new Error('Producer result signer differs from the embedded request authority');
+  }
+  await writeFile(
+    resolve(outputRoot, 'producer-result.json'),
+    `${Buffer.from(signedProducerResult.encoded, 'base64url').toString('utf8')}\n`,
+    { flag: 'wx', mode: 0o600 },
+  );
   const inventoryPaths = await collectRegularFiles(outputRoot);
   const entries = await Promise.all(
     inventoryPaths.map(async (path) => {
@@ -345,6 +406,7 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
     architecture: imported.descriptor.architecture,
     sourceCommit: imported.descriptor.sourceCommit,
     sourceTree: imported.descriptor.sourceTree,
+    producerArtifactSetIdentity,
     entries,
   };
   const manifestPath = resolve(outputRoot, 'bundle-manifest.json');
@@ -374,6 +436,7 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
     bundlePath,
     bundleSha256: bundle.sha256,
     manifest,
+    producerArtifactSetIdentity,
   });
 }
 

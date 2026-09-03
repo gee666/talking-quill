@@ -29,5 +29,6 @@ export function buildInstalledAcceptanceKit(
     readonly validateAcceptanceRunSequence?: (...arguments_: any[]) => any;
     readonly verifyAcceptancePreflight?: (...arguments_: any[]) => any;
     readonly protectNativeExecutionDirectory?: (path: string) => void;
+    readonly createProducerArtifactSetIdentityPayload?: (...arguments_: any[]) => any;
   },
 ): Promise<Readonly<Record<string, unknown>>>;

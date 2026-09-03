@@ -271,12 +271,15 @@ function parseManifest(bytes, expected) {
   const manifest = parseCanonicalJson(bytes, 'acceptance bundle manifest');
   if (
     Object.keys(manifest).sort().join(',') !==
-      'architecture,classification,entries,schemaVersion,sourceCommit,sourceTree' ||
+      'architecture,classification,entries,producerArtifactSetIdentity,schemaVersion,sourceCommit,sourceTree' ||
     manifest.schemaVersion !== 1 ||
     manifest.classification !== 'nonpromotable-installed-acceptance-kit' ||
     !['x64', 'arm64'].includes(manifest.architecture) ||
     !/^[0-9a-f]{40}$/u.test(manifest.sourceCommit ?? '') ||
     !/^[0-9a-f]{40}$/u.test(manifest.sourceTree ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(manifest.producerArtifactSetIdentity ?? '') ||
+    (expected.producerArtifactSetIdentity !== undefined &&
+      manifest.producerArtifactSetIdentity !== expected.producerArtifactSetIdentity) ||
     (expected.architecture !== undefined && manifest.architecture !== expected.architecture) ||
     (expected.sourceCommit !== undefined && manifest.sourceCommit !== expected.sourceCommit) ||
     (expected.sourceTree !== undefined && manifest.sourceTree !== expected.sourceTree) ||
@@ -584,8 +587,14 @@ async function main() {
   const [operation, ...operands] = process.argv.slice(2);
   const pathCount = operation === 'extract' ? 2 : 1;
   const [first, second] = operands;
-  const [architecture, sourceCommit, sourceTree, bundleSha256, manifestSha256] =
-    operands.slice(pathCount);
+  const [
+    architecture,
+    sourceCommit,
+    sourceTree,
+    bundleSha256,
+    manifestSha256,
+    producerArtifactSetIdentity,
+  ] = operands.slice(pathCount);
   const expected = Object.fromEntries(
     Object.entries({
       architecture,
@@ -593,6 +602,7 @@ async function main() {
       sourceTree,
       bundleSha256,
       manifestSha256,
+      producerArtifactSetIdentity,
     }).filter(([, value]) => value !== undefined && value !== '-'),
   );
   const result =
@@ -609,6 +619,7 @@ async function main() {
       result: 'passed',
       sourceCommit: result.manifest.sourceCommit,
       manifestSha256: result.manifestSha256,
+      producerArtifactSetIdentity: result.manifest.producerArtifactSetIdentity,
     }),
   );
 }
