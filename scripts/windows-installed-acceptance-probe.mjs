@@ -1,9 +1,7 @@
-import { createPrivateKey, randomBytes, sign } from 'node:crypto';
+import { createPrivateKey, createHash, randomBytes, sign } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import net from 'node:net';
+import { lstatSync, readFileSync } from 'node:fs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
-
-const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_ACCEPTANCE_RUN_MS = 80 * 60 * 1_000;
 
 export function canonicalAcceptanceJson(value) {
@@ -89,66 +87,207 @@ export async function runPackagedAcceptanceProbe(command, options) {
   );
   const { readinessPipe, launchCorrelation } = signedRequest.payload;
   const armedPipe = signedRequest.payload.automationArmedPipe;
-  const resultChannel = createOneUseJsonChannel(readinessPipe, options.timeoutMs, (value) =>
-    isBoundResponse(value, launchCorrelation),
-  );
   const armedExpectedPhase =
     command === 'manual-physical-observation' ? 'observation-started' : 'armed';
-  const armedChannel =
-    armedPipe === null
-      ? null
-      : createOneUseJsonChannel(armedPipe, options.timeoutMs, (value) =>
-          isBoundResponse(value, launchCorrelation, armedExpectedPhase),
-        );
-  await Promise.all([resultChannel.listening, armedChannel?.listening]);
+  const executableIdentity = options.executableIdentity;
+  const brokerIdentity = options.brokerIdentity;
+  if (
+    executableIdentity?.path !== options.executable ||
+    !/^[0-9a-f]{64}$/u.test(executableIdentity?.sha256 ?? '') ||
+    !Number.isSafeInteger(executableIdentity?.bytes) ||
+    !/^[0-9a-f]{40}$/u.test(options.sourceCommit ?? '') ||
+    !/^[0-9a-f]{40}$/u.test(options.sourceTree ?? '') ||
+    !/^[0-9a-f]{64}$/u.test(brokerIdentity?.sha256 ?? '')
+  ) {
+    throw new Error('Native probe broker identities are invalid');
+  }
+  const brokerMetadata = lstatSync(brokerIdentity.path);
+  const brokerBytes = readFileSync(brokerIdentity.path);
+  if (
+    !brokerMetadata.isFile() ||
+    brokerMetadata.isSymbolicLink() ||
+    brokerMetadata.nlink !== 1 ||
+    brokerMetadata.size !== brokerIdentity.bytes ||
+    brokerBytes.length !== brokerIdentity.bytes ||
+    createHash('sha256').update(brokerBytes).digest('hex') !== brokerIdentity.sha256
+  ) {
+    throw new Error('Native probe broker was replaced before launch');
+  }
   const startupFrame = Buffer.from(
     `${canonicalAcceptanceJson({ version: 1, signedRequest: options.signedRequest })}\n`,
   );
-  const child = options.spawnProcess(
-    options.executable,
-    ['--talking-quill-installed-acceptance-fd=3'],
-    options.timeoutMs,
-    startupFrame,
-  );
-  let rejectAbort;
-  const aborted = new Promise((_, reject) => {
-    rejectAbort = reject;
+  const correlation = randomBytes(16).toString('hex');
+  const child = spawn(brokerIdentity.path, [], {
+    shell: false,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: sanitizedChildEnvironment(),
   });
-  const abort = async () => {
-    resultChannel.close();
-    armedChannel?.close();
-    try {
-      await child.terminateIfRunning();
-      rejectAbort(new Error('Packaged probe was actively cancelled after confirmed teardown'));
-    } catch (error) {
-      rejectAbort(error instanceof Error ? error : new Error('Packaged probe cancellation failed'));
-    }
+  const events = createBrokerEventReader(child, correlation);
+  child.stdin.write(
+    `${canonicalAcceptanceJson({
+      version: 1,
+      operation: 'probe',
+      correlation,
+      brokerSha256: brokerIdentity.sha256,
+      brokerBytes: brokerIdentity.bytes,
+      executablePath: options.executable,
+      executableSha256: executableIdentity.sha256,
+      executableBytes: executableIdentity.bytes,
+      sourceCommit: options.sourceCommit,
+      sourceTree: options.sourceTree,
+      startupFrameHex: startupFrame.toString('hex'),
+      readinessPipe,
+      armedPipe,
+      armedExpectedPhase: armedPipe === null ? null : armedExpectedPhase,
+      launchCorrelation,
+      absoluteDeadlineMs: Date.now() + options.timeoutMs,
+    })}\n`,
+  );
+  const termination = events.next('terminated');
+  const waitEvent = (name) =>
+    Promise.race([
+      events.next(name),
+      termination.then(() => {
+        throw new Error('Packaged probe was actively cancelled after confirmed teardown');
+      }),
+    ]);
+  const listening = await waitEvent('listening');
+  let cancellationRequested = false;
+  const control = {
+    pid: listening.processId,
+    exited: events.exited,
+    terminateIfRunning: async () => {
+      if (!cancellationRequested) {
+        cancellationRequested = true;
+        events.action('terminate');
+      }
+      await termination;
+    },
   };
+  const abort = () => void control.terminateIfRunning().catch(() => undefined);
   options.signal?.addEventListener('abort', abort, { once: true });
-  if (options.signal?.aborted === true) await abort();
-  const wait = (operation) => Promise.race([operation, aborted]);
   try {
-    const armed = armedChannel === null ? null : await wait(armedChannel.value);
-    if (armed !== null) {
+    if (options.signal?.aborted === true) {
+      await control.terminateIfRunning();
+      throw new Error('Packaged probe was actively cancelled after confirmed teardown');
+    }
+    if (armedPipe !== null) {
+      const event = await waitEvent('armed');
+      const armed = event.value;
       assertBoundResponse(armed, launchCorrelation, armedExpectedPhase);
       if (command === 'manual-physical-observation') options.onObservationStarted?.(armed);
-      const armedAction = await options.onArmed?.(armed, child);
+      await options.onArmed?.(armed, control);
+      if (cancellationRequested && command !== 'electron-crash-arm') {
+        await termination;
+        throw new Error('Packaged probe was actively cancelled after confirmed teardown');
+      }
       if (command === 'electron-crash-arm') {
-        if (armedAction?.exitCode !== 0) throw new Error('Electron crash was not observed');
-        await wait(child.exited.catch(() => undefined));
+        await control.terminateIfRunning();
         return { result: 'passed', correlation: launchCorrelation, armed, oldElectronExited: true };
       }
+      events.action('continue');
     }
-    const result = await wait(resultChannel.value);
-    assertBoundResponse(result, launchCorrelation);
-    await wait(child.exited);
-    return result;
+    const complete = await waitEvent('complete');
+    assertBoundResponse(complete.value, launchCorrelation);
+    await events.exited;
+    return complete.value;
   } finally {
     options.signal?.removeEventListener('abort', abort);
-    resultChannel.close();
-    armedChannel?.close();
-    await child.terminateIfRunning();
+    if (!events.closed) child.kill('SIGKILL');
   }
+}
+
+function createBrokerEventReader(child, correlation) {
+  let buffered = '';
+  const waiting = new Map();
+  const queued = new Map();
+  let failed;
+  let closed = false;
+  const rejectAll = (error) => {
+    failed = error;
+    for (const entries of waiting.values()) for (const entry of entries) entry.reject(error);
+    waiting.clear();
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    buffered += chunk;
+    if (buffered.length > 128 * 1024)
+      return rejectAll(new Error('Probe broker output exceeded its bound'));
+    for (;;) {
+      const newline = buffered.indexOf('\n');
+      if (newline < 0) break;
+      const line = buffered.slice(0, newline);
+      buffered = buffered.slice(newline + 1);
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        rejectAll(new Error('Probe broker output is invalid'));
+        return;
+      }
+      const keys = Object.keys(event ?? {})
+        .sort()
+        .join(',');
+      const expectedKeys =
+        event?.value === undefined
+          ? 'correlation,event,processId,rejectedClients,version'
+          : 'correlation,event,processId,rejectedClients,value,version';
+      if (
+        keys !== expectedKeys ||
+        event.version !== 1 ||
+        event.correlation !== correlation ||
+        !['listening', 'armed', 'complete', 'terminated'].includes(event.event) ||
+        !Number.isSafeInteger(event.processId) ||
+        event.processId <= 0 ||
+        !Number.isSafeInteger(event.rejectedClients) ||
+        event.rejectedClients < 0 ||
+        (['armed', 'complete'].includes(event.event) &&
+          (event.value === null || typeof event.value !== 'object'))
+      ) {
+        rejectAll(new Error('Probe broker event is malformed or uncorrelated'));
+        return;
+      }
+      const entry = waiting.get(event.event)?.shift();
+      if (entry === undefined) {
+        const entries = queued.get(event.event) ?? [];
+        entries.push(event);
+        queued.set(event.event, entries);
+      } else entry.resolve(event);
+    }
+  });
+  const stderr = [];
+  child.stderr.on('data', (chunk) => {
+    if (stderr.reduce((n, value) => n + value.length, 0) < 4096) stderr.push(chunk);
+  });
+  const exited = new Promise((resolveExit, rejectExit) =>
+    child.once('exit', (code, signal) => {
+      closed = true;
+      if (code === 0 && signal === null && buffered === '') resolveExit(code);
+      else rejectExit(new Error('Native probe broker failed'));
+    }),
+  );
+  exited.catch(rejectAll);
+  return {
+    get closed() {
+      return closed;
+    },
+    exited,
+    next(event) {
+      if (failed !== undefined) return Promise.reject(failed);
+      const queuedEvent = queued.get(event)?.shift();
+      if (queuedEvent !== undefined) return Promise.resolve(queuedEvent);
+      return new Promise((resolveEvent, reject) => {
+        const entries = waiting.get(event) ?? [];
+        entries.push({ resolve: resolveEvent, reject });
+        waiting.set(event, entries);
+      });
+    },
+    action(action) {
+      if (child.stdin.destroyed) throw new Error('Probe broker control channel is closed');
+      child.stdin.write(`${canonicalAcceptanceJson({ version: 1, correlation, action })}\n`);
+    },
+  };
 }
 
 function readFrozenSignedRequest(encoded, command, buildId, invocation, nowMs) {
@@ -177,73 +316,6 @@ function readFrozenSignedRequest(encoded, command, buildId, invocation, nowMs) {
     throw new Error('Frozen signed acceptance request binding is invalid');
   }
   return envelope;
-}
-
-export function createOneUseJsonChannel(pipeName, timeoutMs, acceptValue = () => true) {
-  let settled = false;
-  let rejectedClients = 0;
-  let timer;
-  let resolveListening;
-  let rejectListening;
-  const listening = new Promise((resolvePromise, rejectPromise) => {
-    resolveListening = resolvePromise;
-    rejectListening = rejectPromise;
-  });
-  let resolveValue;
-  let rejectValue;
-  const value = new Promise((resolvePromise, rejectPromise) => {
-    resolveValue = resolvePromise;
-    rejectValue = rejectPromise;
-  });
-  const server = net.createServer((socket) => {
-    let bytes = Buffer.alloc(0);
-    let oversized = false;
-    socket.on('data', (chunk) => {
-      bytes = Buffer.concat([bytes, chunk]);
-      if (bytes.length > MAX_RESPONSE_BYTES) {
-        oversized = true;
-        rejectClient();
-        socket.destroy();
-      }
-    });
-    socket.once('error', () => rejectClient());
-    socket.once('end', () => {
-      if (settled || oversized) return;
-      try {
-        const text = bytes.toString('utf8');
-        if (!text.endsWith('\n') || text.indexOf('\n') !== text.length - 1) {
-          throw new Error('Probe response must be one newline-terminated frame');
-        }
-        const parsed = JSON.parse(text);
-        if (!acceptValue(parsed, socket)) throw new Error('Probe response client is unauthorized');
-        settled = true;
-        clearTimeout(timer);
-        server.close();
-        resolveValue(parsed);
-      } catch {
-        rejectClient();
-      }
-    });
-  });
-  const rejectClient = () => {
-    if (settled) return;
-    rejectedClients += 1;
-    if (rejectedClients >= 8) fail(new Error('Packaged probe rejected too many clients'));
-  };
-  const fail = (error) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    server.close();
-    rejectValue(error);
-  };
-  server.once('error', (error) => {
-    rejectListening(error);
-    fail(error);
-  });
-  server.listen(pipeName, () => resolveListening());
-  timer = setTimeout(() => fail(new Error('Packaged probe response timed out')), timeoutMs);
-  return { listening, value, close: () => server.close() };
 }
 
 function isBoundResponse(value, correlation, expectedPhase) {
@@ -307,28 +379,7 @@ export function spawnPackagedProcess(executable, arguments_, timeoutMs, startupF
   }, timeoutMs);
   const terminate = async () => {
     if (!running || child.pid === undefined) return;
-    if (process.platform === 'win32') {
-      await new Promise((resolveTaskkill, rejectTaskkill) => {
-        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-          stdio: 'ignore',
-          windowsHide: true,
-          env: sanitizedChildEnvironment(),
-        });
-        const killerTimer = setTimeout(() => {
-          killer.kill('SIGKILL');
-          rejectTaskkill(new Error('Packaged probe retirement command timed out'));
-        }, 5_000);
-        killer.once('exit', (code) => {
-          clearTimeout(killerTimer);
-          if (code === 0 || code === 128) resolveTaskkill();
-          else rejectTaskkill(new Error(`Packaged probe retirement exited ${String(code)}`));
-        });
-        killer.once('error', (error) => {
-          clearTimeout(killerTimer);
-          rejectTaskkill(error);
-        });
-      });
-    } else child.kill('SIGKILL');
+    child.kill('SIGKILL');
     const retired = await Promise.race([
       exited.then(
         () => true,

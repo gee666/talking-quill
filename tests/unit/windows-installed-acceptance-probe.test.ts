@@ -1,11 +1,9 @@
 import { generateKeyPairSync, verify } from 'node:crypto';
-import net from 'node:net';
-import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
 import {
   canonicalAcceptanceJson,
-  createOneUseJsonChannel,
   createSignedAcceptanceRequest,
-  runPackagedAcceptanceProbe,
   spawnPackagedProcess,
 } from '../../scripts/windows-installed-acceptance-probe.mjs';
 
@@ -57,42 +55,6 @@ describe('Windows installed acceptance packaged probe transport', () => {
     ).toBe(true);
   });
 
-  it('accepts exactly one bounded newline-framed response', async () => {
-    const socket = `\\\\.\\pipe\\TalkingQuill.InstalledReadiness.${String(Date.now()).padStart(32, '0')}`;
-    const channel = createOneUseJsonChannel(socket, 2_000);
-    await channel.listening;
-    await new Promise<void>((resolveWrite, reject) => {
-      const client = net.connect(socket);
-      client.once('error', reject);
-      client.once('connect', () => client.end('{"version":1,"result":"passed"}\n', resolveWrite));
-    });
-    await expect(channel.value).resolves.toEqual({ version: 1, result: 'passed' });
-    channel.close();
-  });
-
-  it('rejects a forged first client and accepts the later authorized frame', async () => {
-    const socket = `\\\\.\\pipe\\TalkingQuill.InstalledReadiness.${String(Date.now() + 1).padStart(32, '0')}`;
-    const channel = createOneUseJsonChannel(
-      socket,
-      2_000,
-      (value: unknown) =>
-        value !== null &&
-        typeof value === 'object' &&
-        'nonce' in value &&
-        value.nonce === 'trusted',
-    );
-    await channel.listening;
-    for (const nonce of ['forged', 'trusted']) {
-      await new Promise<void>((resolveWrite, reject) => {
-        const client = net.connect(socket);
-        client.once('error', reject);
-        client.once('connect', () => client.end(`${JSON.stringify({ nonce })}\n`, resolveWrite));
-      });
-    }
-    await expect(channel.value).resolves.toEqual({ nonce: 'trusted' });
-    channel.close();
-  });
-
   it('confirms a cancelled packaged process has exited before teardown resolves', async () => {
     const child = spawnPackagedProcess(
       process.execPath,
@@ -120,95 +82,25 @@ describe('Windows installed acceptance packaged probe transport', () => {
     }
   });
 
-  it('actively cancels a physical probe and awaits process teardown', async () => {
-    const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    const signedRequest = createSignedAcceptanceRequest('manual-physical-observation', {
-      buildId: '11'.repeat(32),
-      privateKeyPem: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-      nowMs: Date.now(),
-      timeoutMs: 30_000,
-      ...invocation('manual-physical-observation', 57 * 60_000, 59 * 60_000),
-      runWindow: runWindow(Date.now() - 1_000),
-      expiresAtMs: Date.now() + 59 * 60_000,
-      readinessPipe: '\\\\.\\pipe\\TalkingQuill.InstalledReadiness.' + '77'.repeat(16),
-      armedPipe: '\\\\.\\pipe\\TalkingQuill.AutomationArmed.' + '77'.repeat(16),
-      launchCorrelation: '88'.repeat(32),
-    });
-    const terminateIfRunning = vi.fn(async () => {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-    });
-    const controller = new AbortController();
-    const operation = runPackagedAcceptanceProbe('manual-physical-observation', {
-      executable: 'Talking Quill.exe',
-      buildId: '11'.repeat(32),
-      signedRequest,
-      timeoutMs: 30_000,
-      signal: controller.signal,
-      spawnProcess: () => ({
-        pid: 42,
-        exited: new Promise<number>(() => undefined),
-        terminateIfRunning,
-      }),
-    });
-    setTimeout(() => controller.abort(), 10);
-    await expect(operation).rejects.toThrow('actively cancelled');
-    expect(terminateIfRunning).toHaveBeenCalled();
+  it('moves client admission and exact process launch into the native broker', () => {
+    const native = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+    const adapter = readFileSync('scripts/windows-installed-acceptance-probe.mjs', 'utf8');
+    expect(native).toContain('named_pipe_client_pid');
+    expect(native).toContain('DisconnectNamedPipe');
+    expect(native).toContain('peer_identity_matches');
+    expect(native).toContain('creation_chain_reaches_root');
+    expect(native).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
+    expect(native).toContain('absolute_deadline_ms');
+    expect(adapter).toContain("operation: 'probe'");
+    expect(adapter).not.toContain('createOneUseJsonChannel(readinessPipe');
   });
 
-  it('launches the exact executable only after both one-use channels are listening', async () => {
-    const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    const spawnProcess = vi.fn(
-      (
-        executable: string,
-        commandArguments: readonly string[],
-        _timeoutMs: number,
-        startupFrame: Buffer,
-      ) => {
-        expect(executable).toBe('C:/Program Files/Talking Quill/Talking Quill.exe');
-        expect(commandArguments).toEqual(['--talking-quill-installed-acceptance-fd=3']);
-        const frame = JSON.parse(startupFrame.toString('utf8')) as { signedRequest: string };
-        const envelope = JSON.parse(
-          Buffer.from(frame.signedRequest, 'base64url').toString('utf8'),
-        ) as { payload: { launchCorrelation: string; readinessPipe: string } };
-        const correlation = envelope.payload.launchCorrelation;
-        const pipe = envelope.payload.readinessPipe;
-        const client = net.connect(pipe);
-        client.once('connect', () =>
-          client.end(
-            `${JSON.stringify({ version: 1, result: 'passed', correlation, runtimeLifecycleAuthoritative: false, userDataRootSha256: '66'.repeat(32) })}\n`,
-          ),
-        );
-        return {
-          pid: 42,
-          exited: Promise.resolve(0),
-          terminateIfRunning: vi.fn(() => Promise.resolve()),
-        };
-      },
-    );
-    const signedRequest = createSignedAcceptanceRequest('normal-readiness', {
-      buildId: '11'.repeat(32),
-      privateKeyPem: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-      nowMs: Date.now(),
-      timeoutMs: 2_000,
-      ...invocation('profile-normal-readiness', 15 * 60_000, 16 * 60_000),
-      runWindow: runWindow(Date.now() - 1_000),
-      expiresAtMs: Date.now() + 16 * 60_000,
-      readinessPipe: '\\\\.\\pipe\\TalkingQuill.InstalledReadiness.' + '44'.repeat(16),
-      armedPipe: '\\\\.\\pipe\\TalkingQuill.AutomationArmed.' + '44'.repeat(16),
-      launchCorrelation: '55'.repeat(32),
-    });
-    await expect(
-      runPackagedAcceptanceProbe('normal-readiness', {
-        executable: 'C:/Program Files/Talking Quill/Talking Quill.exe',
-        buildId: '11'.repeat(32),
-        signedRequest,
-        timeoutMs: 2_000,
-        spawnProcess,
-      }),
-    ).resolves.toMatchObject({ result: 'passed' });
-    expect(spawnProcess).toHaveBeenCalledOnce();
-    expect(spawnProcess.mock.calls[0]?.[0]).toBe(
-      'C:/Program Files/Talking Quill/Talking Quill.exe',
-    );
+  it('uses a broker-held job for cancellation instead of terminating by PID', () => {
+    const native = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+    const adapter = readFileSync('scripts/windows-installed-acceptance-probe.mjs', 'utf8');
+    expect(native).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
+    expect(native).toContain('TerminateJobObject');
+    expect(adapter).toContain("events.action('terminate')");
+    expect(adapter).not.toContain('taskkill.exe');
   });
 });

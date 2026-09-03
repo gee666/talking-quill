@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createUpdaterReleaseBinding } from './release-package-metadata.mjs';
 import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs';
@@ -13,15 +13,36 @@ const outputRoot = resolve(valueAfter('--output') ?? '');
 const secrets = await readSecrets();
 const sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '';
 const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '';
-const signerPath = resolve(
-  root,
-  'helper/target/x86_64-pc-windows-msvc/release/talking-quill-acceptance-signer.exe',
-);
+const nativeRoot = resolve(outputRoot, 'native');
+const signerPath = resolve(nativeRoot, 'talking-quill-acceptance-signer.exe');
+const acceptanceBrokerPath = resolve(nativeRoot, 'talking-quill-windows-acceptance-broker.exe');
+if (mode === 'identities') {
+  await mkdir(nativeRoot, { recursive: true, mode: 0o700 });
+  await copyFile(
+    resolve(
+      root,
+      'helper/target/x86_64-pc-windows-msvc/release/talking-quill-acceptance-signer.exe',
+    ),
+    signerPath,
+    constants.COPYFILE_EXCL,
+  );
+  await copyFile(
+    resolve(
+      root,
+      'helper/target/x86_64-pc-windows-msvc/release/talking-quill-windows-acceptance-broker.exe',
+    ),
+    acceptanceBrokerPath,
+    constants.COPYFILE_EXCL,
+  );
+}
 const signerSha256 = await hashFile(signerPath);
+const acceptanceBrokerSha256 = await hashFile(acceptanceBrokerPath);
 const signWith = (privateKeyPath, payloadBytes) =>
   signAcceptancePayload({
     signerPath,
     signerSha256,
+    brokerPath: acceptanceBrokerPath,
+    brokerSha256: acceptanceBrokerSha256,
     signerSourceCommit: sourceCommit,
     signerSourceTree: sourceTree,
     privateKeyPath,
@@ -41,6 +62,8 @@ if (mode === 'identities') {
     updatePublicKeySpkiBase64url: update.publicKeySpkiBase64url,
     signerPath,
     signerSha256,
+    acceptanceBrokerPath,
+    acceptanceBrokerSha256,
     sourceCommit,
     sourceTree,
   };
@@ -170,6 +193,8 @@ async function sealArtifactSet() {
     predecessor: JSON.parse(process.env.TALKING_QUILL_CANONICAL_ARTIFACT_JSON ?? 'null'),
     signerPath: identities.signerPath,
     signerSha256: identities.signerSha256,
+    acceptanceBrokerPath: identities.acceptanceBrokerPath,
+    acceptanceBrokerSha256: identities.acceptanceBrokerSha256,
     candidate,
     repair,
     faults,

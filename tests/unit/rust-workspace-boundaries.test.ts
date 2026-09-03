@@ -276,7 +276,9 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
             .map((dependency) => dependency.name),
         ),
       ].sort();
-    expect(internal('talking-quill-acceptance-signer')).toEqual([]);
+    expect(internal('talking-quill-acceptance-signer')).toEqual([
+      'talking-quill-windows-owner-ipc',
+    ]);
     expect(internal('talking-quill-helper')).toEqual([
       'talking-quill-keyboard-core',
       'talking-quill-owner-protocol',
@@ -353,16 +355,33 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
 
   it('pins exact dependency source, path, kind, target, and feature policies', () => {
     expectDependencies('talking-quill-acceptance-signer', [
+      policy('getrandom', '=0.4.3'),
       policy('p256', '=0.14.0', {
         features: ['ecdh', 'ecdsa', 'pkcs8', 'std'],
         usesDefaultFeatures: false,
+      }),
+      policy('serde', '=1.0.229', { features: ['derive'] }),
+      policy('serde_json', '=1.0.150', { features: ['raw_value'] }),
+      policy('sha2', '=0.11.0'),
+      policy('talking-quill-windows-owner-ipc', '*', {
+        source: null,
+        path: 'helper/windows-owner-ipc',
+        target: windows,
       }),
       policy('zeroize', '=1.9.0', { features: ['derive'], usesDefaultFeatures: false }),
       policy('windows-sys', '=0.61.2', {
         target: windows,
         features: [
           'Win32_Foundation',
+          'Win32_Security',
+          'Win32_Security_Authorization',
           'Win32_Storage_FileSystem',
+          'Win32_System_Diagnostics_ToolHelp',
+          'Win32_System_IO',
+          'Win32_System_JobObjects',
+          'Win32_System_Pipes',
+          'Win32_System_RemoteDesktop',
+          'Win32_System_Threading',
           'Win32_UI_Input_KeyboardAndMouse',
         ],
       }),

@@ -66,11 +66,31 @@ describe('Windows installed-acceptance kit', () => {
 
   it('passes only the protected key path and payload to the minimal native signer', () => {
     const spawnProcess = vi.fn((...arguments_: unknown[]) => {
-      void arguments_;
+      const options = arguments_[2] as { input: Buffer };
+      const request = JSON.parse(options.input.toString('utf8')) as {
+        correlation: string;
+        signerBytes: number;
+        signerSha256: string;
+      };
       return {
         status: 0,
         stderr: '',
-        stdout: `${'11'.repeat(64)}\n04${'22'.repeat(64)}\n`,
+        stdout: `${JSON.stringify({
+          version: 1,
+          correlation: request.correlation,
+          result: 'passed',
+          signerSha256: createHash('sha256')
+            .update(readFileSync('scripts/windows-installed-acceptance-signer.mjs'))
+            .digest('hex'),
+          signerBytes: request.signerBytes,
+          retainedIdentityMatches: true,
+          processIdentityMatches: true,
+          processHashMatches: true,
+          parentIdentityMatches: true,
+          creationIdentityMatches: true,
+          signatureHex: '11'.repeat(64),
+          publicKeySec1Hex: `04${'22'.repeat(64)}`,
+        })}\n`,
       };
     });
     const payloadBytes = Buffer.from('fixed canonical payload');
@@ -79,6 +99,7 @@ describe('Windows installed-acceptance kit', () => {
     const result = signAcceptancePayload({
       signerPath,
       signerSha256,
+      brokerPath: signerPath,
       privateKeyPath: 'tmp/protected-request-key.der',
       payloadBytes,
       spawnProcess,
@@ -90,23 +111,25 @@ describe('Windows installed-acceptance kit', () => {
     if (call === undefined) throw new Error('Native signer was not spawned');
     const arguments_ = call[1] as string[];
     const options = call[2] as { input: Buffer; env: Record<string, string> };
-    expect(arguments_).toEqual([
-      '--private-key',
-      expect.stringMatching(/protected-request-key\.der$/u),
-    ]);
-    expect(options.input).toBe(payloadBytes);
+    expect(arguments_).toEqual([]);
+    const request = JSON.parse(options.input.toString('utf8')) as Record<string, unknown>;
+    expect(request.operation).toBe('sign');
+    expect(typeof request.privateKeyPath).toBe('string');
+    expect(String(request.privateKeyPath)).toMatch(/protected-request-key\.der$/u);
+    expect(request.payloadHex).toBe(payloadBytes.toString('hex'));
     expect(options.env).not.toHaveProperty('PATH');
     expect(JSON.stringify(options)).not.toContain('private-key-material');
     expect(() =>
       signAcceptancePayload({
         signerPath,
         signerSha256: '00'.repeat(32),
+        brokerPath: signerPath,
         privateKeyPath: 'tmp/protected-request-key.der',
         payloadBytes,
         spawnProcess,
       }),
-    ).toThrow('signer identity is invalid');
-    expect(spawnProcess).toHaveBeenCalledOnce();
+    ).toThrow('broker result is invalid');
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
   });
 
   it('builds and verifies a fixture kit with independent shared artifact entries', async () => {
@@ -124,6 +147,7 @@ describe('Windows installed-acceptance kit', () => {
     const releaseIdentityPath = resolve(inputs, 'release-identity.json');
     const validationEvidencePath = resolve(inputs, 'validation.json');
     const syntheticSenderPath = resolve(inputs, 'synthetic-sender.exe');
+    const acceptanceBrokerPath = resolve(inputs, 'acceptance-broker.exe');
     const trustedLauncherPath = resolve(inputs, 'trusted-launcher.exe');
     await Promise.all([
       writeFile(installerPath, installerBytes),
@@ -131,6 +155,7 @@ describe('Windows installed-acceptance kit', () => {
       writeFile(releaseIdentityPath, '{}\n'),
       writeFile(validationEvidencePath, '{}\n'),
       writeFile(syntheticSenderPath, 'sender'),
+      writeFile(acceptanceBrokerPath, 'broker'),
       writeFile(trustedLauncherPath, 'launcher'),
     ]);
     const artifact = () => ({
@@ -181,6 +206,7 @@ describe('Windows installed-acceptance kit', () => {
         requestNonces,
         buildManifestPath: resolve(unpackedRoot, 'resources/acceptance-manifest.json'),
         syntheticSenderPath,
+        acceptanceBrokerPath,
         trustedLauncherPath,
       },
     };

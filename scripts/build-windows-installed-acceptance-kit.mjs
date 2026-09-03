@@ -195,6 +195,7 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
   );
   for (const [field, fileName] of [
     ['syntheticSenderPath', 'synthetic-sender.exe'],
+    ['acceptanceBrokerPath', 'acceptance-broker.exe'],
     ['trustedLauncherPath', 'trusted-launcher.exe'],
   ]) {
     const destination = resolve(outputRoot, 'acceptance', fileName);
@@ -239,6 +240,8 @@ export async function buildInstalledAcceptanceKit(options, dependencies = {}) {
       {
         signerPath,
         signerSha256,
+        brokerPath: stagedConfig.acceptance.acceptanceBrokerPath,
+        brokerSha256: config.acceptance.acceptanceBrokerSha256,
         signerSourceCommit: imported.descriptor.sourceCommit,
         signerSourceTree: imported.descriptor.sourceTree,
         privateKeyPath,
@@ -504,6 +507,7 @@ function portablePaths(input, outputRoot) {
     'buildManifestPath',
     'signedRequestsPath',
     'syntheticSenderPath',
+    'acceptanceBrokerPath',
     'trustedLauncherPath',
   ]) {
     acceptance[field] = portablePath(input.acceptance[field], outputRoot);

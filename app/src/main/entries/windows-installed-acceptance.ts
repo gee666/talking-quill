@@ -38,7 +38,7 @@ const authorization = authorizeInstalledAcceptanceRequest({
 consumeInstalledAcceptanceNonce(authorization, app.getPath('temp'));
 
 function readInstalledAcceptanceStartup(argv: readonly string[]): { signedRequest: string } {
-  const marker = '--talking-quill-installed-acceptance-fd=3';
+  const marker = '--talking-quill-installed-acceptance-stdin-v1';
   if (
     argv.filter((argument) => argument === marker).length !== 1 ||
     argv.some(
@@ -55,14 +55,14 @@ function readInstalledAcceptanceStartup(argv: readonly string[]): { signedReques
   try {
     for (;;) {
       const chunk = Buffer.allocUnsafe(Math.min(4096, 20 * 1024 + 1 - total));
-      const count = readSync(3, chunk, 0, chunk.length, null);
+      const count = readSync(0, chunk, 0, chunk.length, null);
       if (count === 0) break;
       total += count;
       if (total > 20 * 1024) throw new Error('Installed acceptance startup frame is too large');
       chunks.push(chunk.subarray(0, count));
     }
   } finally {
-    closeSync(3);
+    closeSync(0);
   }
   const bytes = Buffer.concat(chunks, total);
   if (bytes.length === 0 || bytes.at(-1) !== 0x0a) {

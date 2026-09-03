@@ -1,32 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import {
-  closeSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { resolve } from 'node:path';
-import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { createHash, randomBytes } from 'node:crypto';
+import { lstatSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/u;
 const HEX_SEC1 = /^04[0-9a-f]{128}$/u;
-
-function matchesSourceIdentity(bytes, commit, tree) {
-  if (commit === undefined && tree === undefined) return true;
-  return (
-    /^[0-9a-f]{40}$/u.test(commit ?? '') &&
-    /^[0-9a-f]{40}$/u.test(tree ?? '') &&
-    bytes.includes(Buffer.from(`TALKING_QUILL_SOURCE_COMMIT=${commit}`, 'ascii')) &&
-    bytes.includes(Buffer.from(`TALKING_QUILL_SOURCE_TREE=${tree}`, 'ascii'))
-  );
-}
+const HEX_SHA256 = /^[0-9a-f]{64}$/u;
 
 export function signAcceptancePayload({
   signerPath,
@@ -35,71 +17,59 @@ export function signAcceptancePayload({
   signerSha256,
   signerSourceCommit,
   signerSourceTree,
+  brokerPath = resolve(dirname(signerPath), 'talking-quill-windows-acceptance-broker.exe'),
+  brokerSha256,
   spawnProcess = spawnSync,
 }) {
   if (
     !Buffer.isBuffer(payloadBytes) ||
     payloadBytes.length === 0 ||
-    payloadBytes.length > 64 * 1024
+    payloadBytes.length > 64 * 1024 ||
+    !HEX_SHA256.test(signerSha256 ?? '')
   ) {
-    throw new Error('Acceptance signing payload is invalid');
+    throw new Error('Acceptance signing request is invalid');
   }
-  const executable = resolve(signerPath);
-  const metadata = lstatSync(executable);
-  const descriptor = openSync(executable, 'r');
-  let executableBytes;
-  try {
-    const opened = fstatSync(descriptor);
-    executableBytes = readFileSync(descriptor);
-    const after = fstatSync(descriptor);
-    const pathAfter = lstatSync(executable);
-    if (
-      !metadata.isFile() ||
-      metadata.isSymbolicLink() ||
-      metadata.nlink !== 1 ||
-      !opened.isFile() ||
-      opened.nlink !== 1 ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      after.dev !== opened.dev ||
-      after.ino !== opened.ino ||
-      after.size !== opened.size ||
-      pathAfter.dev !== opened.dev ||
-      pathAfter.ino !== opened.ino ||
-      pathAfter.size !== executableBytes.length ||
-      !/^[0-9a-f]{64}$/u.test(signerSha256 ?? '') ||
-      createHash('sha256').update(executableBytes).digest('hex') !== signerSha256 ||
-      !matchesSourceIdentity(executableBytes, signerSourceCommit, signerSourceTree)
-    ) {
-      throw new Error('Native acceptance signer identity is invalid');
-    }
-  } finally {
-    closeSync(descriptor);
+  const absoluteBroker = resolve(brokerPath);
+  const absoluteSigner = resolve(signerPath);
+  const brokerMetadata = lstatSync(absoluteBroker);
+  const brokerBytes = readFileSync(absoluteBroker);
+  const observedBrokerSha256 = createHash('sha256').update(brokerBytes).digest('hex');
+  if (
+    !brokerMetadata.isFile() ||
+    brokerMetadata.isSymbolicLink() ||
+    brokerMetadata.nlink !== 1 ||
+    brokerMetadata.size !== brokerBytes.length ||
+    (brokerSha256 !== undefined && brokerSha256 !== observedBrokerSha256)
+  ) {
+    throw new Error('Native acceptance broker identity is invalid');
   }
-  mkdirSync(resolve('tmp'), { recursive: true, mode: 0o700 });
-  const snapshotRoot = mkdtempSync(resolve('tmp/acceptance-signer-'));
-  const snapshotPath = resolve(snapshotRoot, 'acceptance-signer.exe');
-  let result;
-  try {
-    writeFileSync(snapshotPath, executableBytes, { flag: 'wx', mode: 0o700 });
-    if (createHash('sha256').update(readFileSync(snapshotPath)).digest('hex') !== signerSha256) {
-      throw new Error('Native acceptance signer snapshot is invalid');
-    }
-    result = spawnProcess(snapshotPath, ['--private-key', resolve(privateKeyPath)], {
-      cwd: resolve('.'),
-      env: sanitizedSubprocessEnvironment({
-        SystemRoot: process.env.SystemRoot,
-        WINDIR: process.env.WINDIR,
-      }),
-      input: payloadBytes,
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 10_000,
-      maxBuffer: 4 * 1024,
-    });
-  } finally {
-    rmSync(snapshotRoot, { recursive: true, force: true });
-  }
+  const correlation = randomBytes(16).toString('hex');
+  const request = {
+    version: 1,
+    operation: 'sign',
+    correlation,
+    brokerSha256: observedBrokerSha256,
+    brokerBytes: brokerBytes.length,
+    signerPath: absoluteSigner,
+    signerSha256,
+    signerBytes: lstatSync(absoluteSigner).size,
+    privateKeyPath: resolve(privateKeyPath),
+    payloadHex: payloadBytes.toString('hex'),
+    ...(signerSourceCommit === undefined ? {} : { sourceCommit: signerSourceCommit }),
+    ...(signerSourceTree === undefined ? {} : { sourceTree: signerSourceTree }),
+  };
+  const result = spawnProcess(absoluteBroker, [], {
+    cwd: resolve('.'),
+    env: sanitizedSubprocessEnvironment({
+      SystemRoot: process.env.SystemRoot,
+      WINDIR: process.env.WINDIR,
+    }),
+    input: Buffer.from(`${canonicalAcceptanceJson(request)}\n`),
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 12_000,
+    maxBuffer: 4 * 1024,
+  });
   if (
     result?.error !== undefined ||
     (result?.signal !== null && result?.signal !== undefined) ||
@@ -107,30 +77,46 @@ export function signAcceptancePayload({
     typeof result.stderr !== 'string' ||
     result.stderr !== '' ||
     typeof result.stdout !== 'string' ||
-    result.stdout.length > 512
+    result.stdout.length > 2048
   ) {
-    throw new Error('Narrow native acceptance signer failed');
+    throw new Error('Native acceptance signing broker failed');
   }
-  const lines = result.stdout.split('\n');
+  let response;
+  try {
+    response = JSON.parse(result.stdout);
+  } catch {
+    throw new Error('Native acceptance signing broker result is invalid');
+  }
+  const keys = Object.keys(response).sort().join(',');
   if (
-    lines.length !== 3 ||
-    !HEX_SIGNATURE.test(lines[0]) ||
-    !HEX_SEC1.test(lines[1]) ||
-    lines[2] !== ''
+    keys !==
+      'correlation,creationIdentityMatches,parentIdentityMatches,processHashMatches,processIdentityMatches,publicKeySec1Hex,result,retainedIdentityMatches,signatureHex,signerBytes,signerSha256,version' ||
+    response.version !== 1 ||
+    response.correlation !== correlation ||
+    response.result !== 'passed' ||
+    response.signerSha256 !== signerSha256 ||
+    response.signerBytes !== request.signerBytes ||
+    response.retainedIdentityMatches !== true ||
+    response.processIdentityMatches !== true ||
+    response.processHashMatches !== true ||
+    response.parentIdentityMatches !== true ||
+    response.creationIdentityMatches !== true ||
+    !HEX_SIGNATURE.test(response.signatureHex ?? '') ||
+    !HEX_SEC1.test(response.publicKeySec1Hex ?? '')
   ) {
-    throw new Error('Narrow native acceptance signer output is invalid');
+    throw new Error('Native acceptance signing broker result is invalid');
   }
-  const sec1 = Buffer.from(lines[1], 'hex');
+  const sec1 = Buffer.from(response.publicKeySec1Hex, 'hex');
   const spki = Buffer.concat([
     Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
     sec1,
   ]);
   return Object.freeze({
-    signatureBase64url: Buffer.from(lines[0], 'hex').toString('base64url'),
+    signatureBase64url: Buffer.from(response.signatureHex, 'hex').toString('base64url'),
     publicKeySpkiBase64url: spki.toString('base64url'),
   });
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
-  throw new Error('Use the native RFC6979 signer; this module is only its process adapter');
+  throw new Error('Use the Windows acceptance broker; this module only validates its result');
 }

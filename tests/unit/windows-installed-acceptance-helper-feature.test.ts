@@ -34,7 +34,7 @@ describe('Windows installed-acceptance helper feature gate', () => {
     expect(installerPackage).toContain('cfg!(feature = "installed-acceptance-repair")');
     expect(faultSetup).toContain('installed-acceptance-repair,acceptance-faults');
     expect(faultSetup).toContain('installedAcceptanceRepair: true');
-    expect(repairSetup).toContain("'installed-acceptance-repair'");
+    expect(repairSetup).toContain("'installed-acceptance-repair,machine-lock-test-namespace'");
     expect(repairSetup).toContain('acceptanceFaults: false');
   });
 

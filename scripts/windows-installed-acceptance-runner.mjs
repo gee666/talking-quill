@@ -19,7 +19,14 @@ import {
 const LEGACY_SERVICE = 'TalkingQuillKeyboardAuthority';
 const LEGACY_TASK = 'TalkingQuillKeyboardAuthority';
 
-export function createProductionRunner(plan, os = createWindowsOsAdapter(plan.acceptance)) {
+export function createProductionRunner(
+  plan,
+  os = createWindowsOsAdapter(
+    plan.acceptance,
+    plan.artifacts.candidate.electron,
+    plan.artifacts.candidate.metadata,
+  ),
+) {
   const state = {
     sentinel: null,
     installedRoot: os.installedRoot,
@@ -730,7 +737,11 @@ export function authenticatedUpdateBootstrapArgument(artifact) {
   ).toString('base64');
 }
 
-export function createWindowsOsAdapter(acceptance = {}) {
+export function createWindowsOsAdapter(
+  acceptance = {},
+  electronIdentity = {},
+  sourceIdentity = {},
+) {
   const programFiles = process.env.ProgramW6432 ?? process.env.ProgramFiles ?? '';
   const appData = process.env.APPDATA ?? '';
   const installedRoot = resolve(programFiles, 'Talking Quill');
@@ -768,7 +779,13 @@ export function createWindowsOsAdapter(acceptance = {}) {
       invocation,
       signedRequest,
       executable: resolve(installedRoot, 'Talking Quill.exe'),
-      spawnProcess: spawnPackagedProcess,
+      executableIdentity: {
+        ...electronIdentity,
+        path: resolve(installedRoot, 'Talking Quill.exe'),
+      },
+      brokerIdentity: acceptance.acceptanceBroker,
+      sourceCommit: sourceIdentity.sourceCommit,
+      sourceTree: sourceIdentity.sourceTree,
     });
   };
   const adapter = {
@@ -983,7 +1000,7 @@ export function createWindowsOsAdapter(acceptance = {}) {
       const before = await jsonPowerShell(powershell, installedIdentityScript(installedRoot));
       const crash = await probe('electron-crash-arm', {
         timeoutMs: 30_000,
-        onArmed: async (_armed, child) => terminateSingleProcess(child.pid),
+        onArmed: async (_armed, child) => child.terminateIfRunning(),
       });
       const relaunch = await probe('normal-readiness', { timeoutMs: 45_000 });
       const after = await jsonPowerShell(powershell, installedIdentityScript(installedRoot));
@@ -1151,16 +1168,6 @@ async function jsonPowerShell(executable, script) {
   });
   return JSON.parse(value.output.trim() || '{}');
 }
-async function terminateSingleProcess(processId) {
-  requireValue(Number.isInteger(processId) && processId > 0, 'Invalid process ID for retirement');
-  return spawnObserved({
-    executable: 'taskkill.exe',
-    arguments: ['/PID', String(processId), '/F'],
-    timeoutMs: 15_000,
-    acceptedExitCodes: [0],
-  });
-}
-
 export async function externalTimeout(observationMs, teardownMs, operation) {
   const controller = new AbortController();
   let observationTimer;

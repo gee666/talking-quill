@@ -734,7 +734,12 @@ dependencies = [
 name = "talking-quill-acceptance-signer"
 version = "0.0.69"
 dependencies = [
+ "getrandom 0.4.3",
  "p256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "talking-quill-windows-owner-ipc",
  "windows-sys",
  "zeroize",
 ]

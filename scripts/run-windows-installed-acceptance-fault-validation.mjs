@@ -79,10 +79,8 @@ const previousEnvelopeSha256 =
   priorPath === null
     ? faultEvidenceGenesis(process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID, hash(candidateBytes))
     : hash(await readFile(priorPath));
-const signerPath = resolve(
-  root,
-  'helper/target/x86_64-pc-windows-msvc/release/talking-quill-acceptance-signer.exe',
-);
+const signerPath = resolve(outputRoot, 'native/talking-quill-acceptance-signer.exe');
+const brokerPath = resolve(outputRoot, 'native/talking-quill-windows-acceptance-broker.exe');
 const payload = {
   schemaVersion: 1,
   purpose: 'talking-quill/installed-acceptance-fault-validation',
@@ -119,6 +117,8 @@ const payload = {
 const signed = signAcceptancePayload({
   signerPath,
   signerSha256: await hashFile(signerPath),
+  brokerPath,
+  brokerSha256: await hashFile(brokerPath),
   signerSourceCommit: payload.sourceCommit,
   signerSourceTree: payload.sourceTree,
   privateKeyPath: secrets.validationPrivateKeyPath,

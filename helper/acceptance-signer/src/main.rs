@@ -1,6 +1,9 @@
 use std::env;
-use std::fs::{self, File};
+#[cfg(not(windows))]
+use std::fs;
+use std::fs::File;
 use std::io::{self, Read};
+#[cfg(not(windows))]
 use std::path::{Path, PathBuf};
 
 use p256::ecdsa::signature::Signer;
@@ -33,15 +36,40 @@ fn run() -> Result<(), String> {
     std::hint::black_box(SOURCE_TREE_MARKER);
     let mut arguments = env::args_os();
     let _program = arguments.next();
-    if arguments.next().as_deref() != Some("--private-key".as_ref()) {
-        return Err("usage: talking-quill-acceptance-signer --private-key <pkcs8-der>".into());
-    }
-    let key_path = PathBuf::from(arguments.next().ok_or("private key path is missing")?);
+    let mode = arguments.next().ok_or("signer mode is missing")?;
+    let value = arguments
+        .next()
+        .ok_or("private key capability is missing")?;
     if arguments.next().is_some() {
         return Err("unexpected signer argument".into());
     }
-    validate_regular_no_link_path(&key_path)?;
-    let mut key_file = open_key(&key_path)?;
+    #[cfg(windows)]
+    let mut key_file = {
+        use std::os::windows::io::{FromRawHandle, RawHandle};
+        use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+        use windows_sys::Win32::Foundation::SetHandleInformation;
+        if mode != "--private-key-handle-v1" {
+            return Err("the Windows signer requires a broker key handle".into());
+        }
+        let raw = value
+            .to_str()
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|handle| *handle != 0 && *handle != usize::MAX)
+            .ok_or("private key handle is invalid")?;
+        if unsafe { SetHandleInformation(raw as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err("private key handle could not be sealed".into());
+        }
+        unsafe { File::from_raw_handle(raw as RawHandle) }
+    };
+    #[cfg(not(windows))]
+    let mut key_file = {
+        if mode != "--private-key" {
+            return Err("usage: talking-quill-acceptance-signer --private-key <pkcs8-der>".into());
+        }
+        let key_path = PathBuf::from(value);
+        validate_regular_no_link_path(&key_path)?;
+        open_key(&key_path)?
+    };
     validate_open_key(&key_file)?;
     let key_size = key_file
         .metadata()
@@ -82,6 +110,7 @@ fn read_bounded_stdin() -> Result<Vec<u8>, String> {
     Ok(message)
 }
 
+#[cfg(not(windows))]
 fn validate_regular_no_link_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("private key path must be absolute".into());
@@ -128,17 +157,6 @@ fn validate_regular_no_link_path(path: &Path) -> Result<(), String> {
 #[cfg(not(windows))]
 fn open_key(path: &Path) -> Result<File, String> {
     File::open(path).map_err(|_| "private key could not be opened".into())
-}
-
-#[cfg(windows)]
-fn open_key(path: &Path) -> Result<File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|_| "private key could not be opened".into())
 }
 
 #[cfg(not(windows))]

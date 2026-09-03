@@ -3,15 +3,6 @@ export function createSignedAcceptanceRequest(
   command: string,
   options: Readonly<Record<string, any>>,
 ): string;
-export function createOneUseJsonChannel(
-  pipeName: string,
-  timeoutMs: number,
-  acceptValue?: (value: any, socket: unknown) => boolean,
-): {
-  readonly listening: Promise<void>;
-  readonly value: Promise<any>;
-  readonly close: () => void;
-};
 export function runPackagedAcceptanceProbe(
   command: string,
   options: Readonly<Record<string, any>>,

@@ -74,6 +74,8 @@ export function createInstalledAcceptancePlan(
       readonly signedRequestsSha256: string;
       readonly syntheticSenderPath: string;
       readonly syntheticSenderSha256: string;
+      readonly acceptanceBrokerPath: string;
+      readonly acceptanceBrokerSha256: string;
       readonly trustedLauncherPath: string;
       readonly trustedLauncherSha256: string;
       readonly syntheticSenderArguments?: readonly string[];

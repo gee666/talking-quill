@@ -8,6 +8,8 @@ export function signAcceptancePayload(options: {
   readonly signerSha256: string;
   readonly signerSourceCommit?: string;
   readonly signerSourceTree?: string;
+  readonly brokerPath?: string;
+  readonly brokerSha256?: string;
   readonly payloadBytes: Buffer;
   readonly spawnProcess?: (...arguments_: any[]) => any;
 }): NativeSignerResult;

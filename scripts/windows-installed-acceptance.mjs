@@ -231,6 +231,14 @@ export async function createInstalledAcceptancePlan(
       candidate,
       fileSystem,
     ),
+    acceptanceBroker: await freezeAcceptanceExecutable(
+      'Acceptance broker',
+      input.acceptance?.acceptanceBrokerPath,
+      input.acceptance?.acceptanceBrokerSha256,
+      input.architecture,
+      candidate,
+      fileSystem,
+    ),
     syntheticSenderArguments: Object.freeze(input.acceptance?.syntheticSenderArguments ?? []),
   });
   validateAcceptanceRunSequence(acceptance);
@@ -1073,6 +1081,7 @@ export function resolveInstalledAcceptanceInputPaths(input, evidencePath) {
     'buildManifestPath',
     'signedRequestsPath',
     'syntheticSenderPath',
+    'acceptanceBrokerPath',
     'trustedLauncherPath',
   ]) {
     if (typeof copy.acceptance?.[field] === 'string') {
