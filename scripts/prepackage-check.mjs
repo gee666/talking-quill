@@ -2,26 +2,31 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeEnvironment } from './environment-policy.mjs';
 import { validatePackageElectronBuilderConfigs } from './electron-builder-config-policy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const ACCEPTANCE_BUILD_ENV = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
-const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
+const environment = normalizeEnvironment(process.env);
+const packageVariant = environment.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
 if (!['canonical', 'directory-test', 'installed-acceptance'].includes(packageVariant)) {
   throw new Error(`Production packaging rejects package variant: ${packageVariant}`);
 }
 const acceptanceVariant = packageVariant === 'installed-acceptance';
-if (acceptanceVariant && process.env[ACCEPTANCE_BUILD_ENV] !== '1') {
+if (acceptanceVariant && environment[ACCEPTANCE_BUILD_ENV] !== '1') {
   throw new Error('Installed-acceptance packaging requires its native helper feature');
 }
-const forbiddenEnvironment = Object.keys(process.env).filter(
-  (name) =>
-    ((!acceptanceVariant && (name === ACCEPTANCE_BUILD_ENV || /ACCEPTANCE/u.test(name))) ||
-      /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name)) &&
-    process.env[name] !== '' &&
-    process.env[name] !== '0',
-);
+const forbiddenEnvironment = Object.keys(environment).filter((name) => {
+  const normalizedName = name.toUpperCase();
+  return (
+    ((!acceptanceVariant &&
+      (normalizedName === ACCEPTANCE_BUILD_ENV || /ACCEPTANCE/u.test(normalizedName))) ||
+      /^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(normalizedName)) &&
+    environment[name] !== '' &&
+    environment[name] !== '0'
+  );
+});
 if (forbiddenEnvironment.length > 0) {
   throw new Error(
     `Production packaging rejects test-harness environment: ${forbiddenEnvironment.sort().join(', ')}`,
@@ -46,9 +51,9 @@ function cleanPriorProvenance() {
 function cleanTargetArtifacts() {
   const release = resolve(root, 'release');
   if (!existsSync(release)) return;
-  const lifecycleTarget = lifecyclePackageTarget(process.env.npm_lifecycle_event);
-  const target = process.env.TALKING_QUILL_PACKAGE_TARGET ?? lifecycleTarget?.target;
-  const arch = process.env.TALKING_QUILL_PACKAGE_ARCH ?? lifecycleTarget?.arch;
+  const lifecycleTarget = lifecyclePackageTarget(environment.npm_lifecycle_event);
+  const target = environment.TALKING_QUILL_PACKAGE_TARGET ?? lifecycleTarget?.target;
+  const arch = environment.TALKING_QUILL_PACKAGE_ARCH ?? lifecycleTarget?.arch;
   if ((target !== 'win' && target !== 'mac') || (arch !== 'x64' && arch !== 'arm64')) {
     throw new Error('Packaging supports Windows and macOS x64/arm64 only');
   }
@@ -89,11 +94,13 @@ function run(script, args) {
     cwd: root,
     stdio: 'inherit',
     env: Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([name]) =>
-          (acceptanceVariant || name !== ACCEPTANCE_BUILD_ENV) &&
-          !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(name),
-      ),
+      Object.entries(environment).filter(([name]) => {
+        const normalizedName = name.toUpperCase();
+        return (
+          (acceptanceVariant || normalizedName !== ACCEPTANCE_BUILD_ENV) &&
+          !/^TALKING_QUILL_.*(?:TEST|HARNESS)/u.test(normalizedName)
+        );
+      }),
     ),
   });
   if (result.status !== 0) throw new Error(`${script} ${args.join(' ')} failed`);

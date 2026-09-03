@@ -1,6 +1,7 @@
 import { createPrivateKey, randomBytes, sign } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
+import { normalizeEnvironment } from './environment-policy.mjs';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_ACCEPTANCE_RUN_MS = 80 * 60 * 1_000;
@@ -291,6 +292,7 @@ export function spawnPackagedProcess(executable, arguments_, timeoutMs) {
         const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
           stdio: 'ignore',
           windowsHide: true,
+          env: sanitizedChildEnvironment(),
         });
         const killerTimer = setTimeout(() => {
           killer.kill('SIGKILL');
@@ -325,8 +327,9 @@ export function spawnPackagedProcess(executable, arguments_, timeoutMs) {
 
 function sanitizedChildEnvironment() {
   return Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([name]) => !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name),
+    Object.entries(normalizeEnvironment(process.env)).filter(
+      ([name]) =>
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name.toUpperCase()),
     ),
   );
 }

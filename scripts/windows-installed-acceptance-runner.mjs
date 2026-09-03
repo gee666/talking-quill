@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { normalizeEnvironment } from './environment-policy.mjs';
 import { readNativeArchitectures } from './native-architecture.mjs';
 import {
   runPackagedAcceptanceProbe,
@@ -1109,6 +1110,7 @@ function spawnObserved(request) {
         shell: false,
         windowsHide: true,
         stdio: 'ignore',
+        env: sanitizedChildEnvironment(),
       });
       killer.once('error', () => child.kill('SIGKILL'));
     }, request.timeoutMs);
@@ -1138,8 +1140,9 @@ function spawnObserved(request) {
 }
 function sanitizedChildEnvironment(overrides = {}) {
   return Object.fromEntries(
-    Object.entries({ ...process.env, ...overrides }).filter(
-      ([name]) => !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name),
+    Object.entries(normalizeEnvironment({ ...process.env, ...overrides })).filter(
+      ([name]) =>
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name.toUpperCase()),
     ),
   );
 }

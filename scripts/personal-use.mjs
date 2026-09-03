@@ -7,6 +7,7 @@ import { basename, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
+import { normalizeEnvironment } from './environment-policy.mjs';
 import {
   RELEASE_PACKAGE_METADATA_NAME,
   verifyMatchingPackageReleaseMetadataBytes,
@@ -63,13 +64,15 @@ export const PERSONAL_TARGETS = Object.freeze({
 
 export function sanitizePersonalConsumerEnvironment(source = process.env) {
   return Object.fromEntries(
-    Object.entries(source).filter(
-      ([name]) =>
-        !PERSONAL_PRODUCER_ENVIRONMENT.has(name) &&
-        !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(name) &&
-        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE|ACCEPTANCE)/u.test(name) &&
-        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name),
-    ),
+    Object.entries(normalizeEnvironment(source)).filter(([name]) => {
+      const normalizedName = name.toUpperCase();
+      return (
+        !PERSONAL_PRODUCER_ENVIRONMENT.has(normalizedName) &&
+        !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(normalizedName) &&
+        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE|ACCEPTANCE)/u.test(normalizedName) &&
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(normalizedName)
+      );
+    }),
   );
 }
 

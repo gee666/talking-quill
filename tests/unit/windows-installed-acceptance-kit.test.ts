@@ -51,9 +51,10 @@ describe('Windows installed-acceptance kit', () => {
   it('keeps every private signing value out of broad build environments', () => {
     expect(
       sanitizedBuildEnvironment({
+        Path: 'discarded-tools',
         PATH: 'tools',
-        TALKING_QUILL_ACCEPTANCE_MANIFEST_PRIVATE_KEY_PEM: 'manifest-secret',
-        TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64: 'update-secret',
+        talking_quill_acceptance_manifest_private_key_pem: 'manifest-secret',
+        Talking_Quill_Windows_Update_Signing_Key_Pkcs8_Base64: 'update-secret',
         TALKING_QUILL_ACCEPTANCE_REQUEST_PRIVATE_KEY: 'request-secret',
       }),
     ).toEqual({ PATH: 'tools' });

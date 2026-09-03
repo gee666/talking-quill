@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeEnvironment } from './environment-policy.mjs';
 import {
   assertNoLinkPath,
   createDeterministicAcceptanceZip,
@@ -37,7 +38,9 @@ const PRIVATE_ENVIRONMENT = /(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u;
 
 export function sanitizedBuildEnvironment(environment = process.env) {
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => !PRIVATE_ENVIRONMENT.test(name)),
+    Object.entries(normalizeEnvironment(environment)).filter(
+      ([name]) => !PRIVATE_ENVIRONMENT.test(name.toUpperCase()),
+    ),
   );
 }
 
@@ -499,6 +502,7 @@ function git(sourceRoot, arguments_) {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 10_000,
+    env: sanitizedBuildEnvironment(),
   });
   if (result.status !== 0) throw new Error('Canonical source identity lookup failed');
   return result.stdout.trim();

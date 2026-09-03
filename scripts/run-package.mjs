@@ -1,9 +1,15 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
 
 export const CANONICAL_PACKAGE_TARGETS = Object.freeze(['win', 'win-arm64']);
+
+const FORBIDDEN_INHERITED_PACKAGE_ENVIRONMENT = new Set([
+  'TALKING_QUILL_NATIVE_FAULT_PHASE',
+  'TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT',
+]);
 
 const PACKAGE_TARGETS = Object.freeze({
   win: Object.freeze({
@@ -138,14 +144,16 @@ function main() {
 export function createProductionEnvironment(plan, sourceEnvironment = process.env) {
   const acceptance = plan.acceptance === true;
   const directoryTest = plan.directoryTest === true;
-  const fresh = directoryTest || sourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1';
+  const normalizedSourceEnvironment = normalizeEnvironment(sourceEnvironment);
+  const fresh =
+    directoryTest || normalizedSourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1';
   const sourceIdentity = currentSourceIdentity({
-    environment: sourceEnvironment,
+    environment: normalizedSourceEnvironment,
     requireClean: process.env.NODE_ENV !== 'test',
   });
   return Object.fromEntries(
     Object.entries({
-      ...sourceEnvironment,
+      ...normalizedSourceEnvironment,
       CSC_IDENTITY_AUTO_DISCOVERY: 'false',
       TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
       TALKING_QUILL_REQUIRE_CLEAN_SOURCE: '1',
@@ -167,14 +175,16 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
             TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD: '1',
           }
         : {}),
-    }).filter(
-      ([name]) =>
-        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE)/u.test(name) &&
-        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name) &&
-        (!fresh || !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(name)) &&
-        (!directoryTest || name !== 'TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT') &&
-        (acceptance || !/^TALKING_QUILL_.*ACCEPTANCE/u.test(name)),
-    ),
+    }).filter(([name]) => {
+      const normalizedName = name.toUpperCase();
+      return (
+        !FORBIDDEN_INHERITED_PACKAGE_ENVIRONMENT.has(normalizedName) &&
+        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE)/u.test(normalizedName) &&
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(normalizedName) &&
+        (!fresh || !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(normalizedName)) &&
+        (acceptance || !/^TALKING_QUILL_.*ACCEPTANCE/u.test(normalizedName))
+      );
+    }),
   );
 }
 
