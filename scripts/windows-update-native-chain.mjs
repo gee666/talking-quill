@@ -138,10 +138,10 @@ function verifyCargoLock(commit) {
   });
 }
 
-function verifyExecutable(path, expectedName, source) {
+function verifyExecutable(path, expectedName, source, requireSingleLink = false) {
   if (basename(path) !== expectedName) throw new Error('Native signing-chain filename is invalid');
   const before = lstatSync(path, { bigint: true });
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+  if (!before.isFile() || before.isSymbolicLink() || (requireSingleLink && before.nlink !== 1n)) {
     throw new Error('Native signing-chain file identity is invalid');
   }
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -230,7 +230,7 @@ function publishSnapshot(source, lock, built) {
   }
   const identities = Object.fromEntries(
     Object.entries(roles).map(([role, name]) => {
-      const verified = verifyExecutable(resolve(destination, name), name, source);
+      const verified = verifyExecutable(resolve(destination, name), name, source, true);
       if (verified.sha256 !== built[role].sha256 || verified.bytes !== built[role].bytes) {
         throw new Error('Published native-chain identity differs from reviewed build');
       }
@@ -299,6 +299,7 @@ export function deleteProtectedWindowsUpdateKey(descriptorPath) {
     descriptor.fallbackDeleter.path,
     roles.keyTool,
     descriptor.nativeChain.source,
+    true,
   );
   requireRecordedIdentity(fallback, descriptor.fallbackDeleter);
   requireRecordedIdentity(fallback, descriptor.nativeChain.keyTool);
