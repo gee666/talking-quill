@@ -4,7 +4,7 @@ This inventory is generated from the production @talking-quill/app deployment gr
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: 2f01485d2680096427badf8ea04fa25c0e37b14a0fdd745045be1a2acd67578c
-helper/Cargo.lock SHA-256: dec2e80443660329cf9922867a86c6cd7bdedca6ffcd46aedd36a5173d56647d
+helper/Cargo.lock SHA-256: e53106b04bc9bcabd93862eb8db96b4911262a73227fb6a66476fb94e0bc3e8c
 scripts/model-manifest.json SHA-256: e5f139abb8b3baf5a31faf8235d64adc9ff3dc9c7d2b1aae808366e4e6124fff
 
 Production JavaScript/native dependencies (109 records)
@@ -423,8 +423,8 @@ windows-link@0.2.1 — SPDX: MIT OR Apache-2.0
 windows-sys@0.61.2 — SPDX: MIT OR Apache-2.0
   https://crates.io/crates/windows-sys/0.61.2
   Targets: x86_64-pc-windows-msvc
-wnaf@0.14.0 — SPDX: Apache-2.0 OR MIT
-  https://crates.io/crates/wnaf/0.14.0
+wnaf@0.14.1 — SPDX: Apache-2.0 OR MIT
+  https://crates.io/crates/wnaf/0.14.1
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
 zeroize_derive@1.5.0 — SPDX: Apache-2.0 OR MIT
   https://crates.io/crates/zeroize_derive/1.5.0
@@ -528,7 +528,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --- SHA-256 076425e3ad4d136f7be70cecb72295bdc1ac6fbad8c996d13e8a87cf5063e791
-Applies to: wnaf@0.14.0/LICENSE-MIT
+Applies to: wnaf@0.14.1/LICENSE-MIT
 
 Copyright (c) 2026 RustCrypto Developers
 Copyright (c) 2018-2025 `group` crate developers
@@ -17878,7 +17878,7 @@ will be liable to anyone for any damages related to this
 software or this license, under any kind of legal claim.***
 
 --- SHA-256 e8541ea93f027a6c2cf077362f74492bdf0bb8354f63029962d84f1c130937a4
-Applies to: base16ct@1.0.0/LICENSE-APACHE, block-buffer@0.10.4/LICENSE-APACHE, block-buffer@0.12.1/LICENSE-APACHE, const-oid@0.10.2/LICENSE-APACHE, cpubits@0.1.1/LICENSE-APACHE, cpufeatures@0.2.17/LICENSE-APACHE, cpufeatures@0.3.1/LICENSE-APACHE, crypto-bigint@0.7.5/LICENSE-APACHE, crypto-common@0.1.7/LICENSE-APACHE, crypto-common@0.2.2/LICENSE-APACHE, der@0.8.1/LICENSE-APACHE, digest@0.10.7/LICENSE-APACHE, digest@0.11.3/LICENSE-APACHE, elliptic-curve@0.14.1/LICENSE-APACHE, hkdf@0.13.0/LICENSE-APACHE, hmac@0.13.0/LICENSE-APACHE, hybrid-array@0.4.14/LICENSE-APACHE, p256@0.14.0/LICENSE-APACHE, pkcs8@0.11.0/LICENSE-APACHE, primefield@0.14.0/LICENSE-APACHE, primeorder@0.14.0/LICENSE-APACHE, sec1@0.8.1/LICENSE-APACHE, sha1@0.10.6/LICENSE-APACHE, sha2@0.11.0/LICENSE-APACHE, signature@3.0.0/LICENSE-APACHE, spki@0.8.0/LICENSE-APACHE, wnaf@0.14.0/LICENSE-APACHE
+Applies to: base16ct@1.0.0/LICENSE-APACHE, block-buffer@0.10.4/LICENSE-APACHE, block-buffer@0.12.1/LICENSE-APACHE, const-oid@0.10.2/LICENSE-APACHE, cpubits@0.1.1/LICENSE-APACHE, cpufeatures@0.2.17/LICENSE-APACHE, cpufeatures@0.3.1/LICENSE-APACHE, crypto-bigint@0.7.5/LICENSE-APACHE, crypto-common@0.1.7/LICENSE-APACHE, crypto-common@0.2.2/LICENSE-APACHE, der@0.8.1/LICENSE-APACHE, digest@0.10.7/LICENSE-APACHE, digest@0.11.3/LICENSE-APACHE, elliptic-curve@0.14.1/LICENSE-APACHE, hkdf@0.13.0/LICENSE-APACHE, hmac@0.13.0/LICENSE-APACHE, hybrid-array@0.4.14/LICENSE-APACHE, p256@0.14.0/LICENSE-APACHE, pkcs8@0.11.0/LICENSE-APACHE, primefield@0.14.0/LICENSE-APACHE, primeorder@0.14.0/LICENSE-APACHE, sec1@0.8.1/LICENSE-APACHE, sha1@0.10.6/LICENSE-APACHE, sha2@0.11.0/LICENSE-APACHE, signature@3.0.0/LICENSE-APACHE, spki@0.8.0/LICENSE-APACHE, wnaf@0.14.1/LICENSE-APACHE
 
 Apache License
                         Version 2.0, January 2004

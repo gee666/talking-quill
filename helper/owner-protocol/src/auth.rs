@@ -834,7 +834,7 @@ fn validate_policy_pair(
 #[cfg(test)]
 mod tests {
     use super::{AuthenticationKeys, KeyAgreementMaterial};
-    use crate::scalar::Bytes32;
+    use crate::scalar::{Bytes32, P256PublicKey};
 
     #[test]
     fn rfc_5869_sha256_case_one_matches_extract_and_expand() {
@@ -933,6 +933,55 @@ mod tests {
     #[test]
     fn invalid_p256_private_scalar_is_rejected() {
         assert!(super::EphemeralP256Secret::from_bytes([0; 32]).is_err());
+    }
+
+    #[test]
+    fn fixed_p256_ecdh_known_answer_matches_both_protocol_roles() {
+        // RFC 5903 Section 8.1, NIST P-256 ECDH.
+        let client_secret = super::EphemeralP256Secret::from_bytes(hex32_array(
+            "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433",
+        ))
+        .expect("client private scalar");
+        let owner_secret = super::EphemeralP256Secret::from_bytes(hex32_array(
+            "c6ef9c5d78ae012a011164acb397ce2088685d8f06bf9be0b283ab46476bee53",
+        ))
+        .expect("owner private scalar");
+        let client_public = P256PublicKey::from_sec1_bytes(
+            hex(concat!(
+                "04dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c3772581180",
+                "5271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3"
+            ))
+            .try_into()
+            .expect("65-byte client public point"),
+        )
+        .expect("client public point");
+        let owner_public = P256PublicKey::from_sec1_bytes(
+            hex(concat!(
+                "04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63",
+                "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab"
+            ))
+            .try_into()
+            .expect("65-byte owner public point"),
+        )
+        .expect("owner public point");
+        assert_eq!(client_secret.public_key(), &client_public);
+        assert_eq!(owner_secret.public_key(), &owner_public);
+
+        let gateway = KeyAgreementMaterial::windows_peer(
+            super::PeerRole::Gateway,
+            &client_secret,
+            &owner_public,
+        )
+        .expect("gateway ECDH");
+        let owner = KeyAgreementMaterial::windows_peer(
+            super::PeerRole::Owner,
+            &owner_secret,
+            &client_public,
+        )
+        .expect("owner ECDH");
+        let expected = hex("d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de");
+        assert_eq!(gateway.ikm, expected);
+        assert_eq!(owner.ikm, expected);
     }
 
     #[test]

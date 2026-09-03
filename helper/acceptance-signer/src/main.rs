@@ -222,4 +222,24 @@ mod tests {
             <SigningKey as Signer<Signature>>::sign(&key, b"changed acceptance request").to_bytes()
         );
     }
+
+    #[test]
+    fn matches_rfc6979_p256_sha256_known_answer() {
+        // RFC 6979 Appendix A.2.5, NIST P-256, SHA-256, message "sample".
+        let private_key = [
+            0xc9, 0xaf, 0xa9, 0xd8, 0x45, 0xba, 0x75, 0x16, 0x6b, 0x5c, 0x21, 0x57, 0x67, 0xb1,
+            0xd6, 0x93, 0x4e, 0x50, 0xc3, 0xdb, 0x36, 0xe8, 0x9b, 0x12, 0x7b, 0x8a, 0x62, 0x2b,
+            0x12, 0x0f, 0x67, 0x21,
+        ];
+        let key = SigningKey::from_slice(&private_key).expect("RFC 6979 private key");
+        let signature: Signature = key.sign(b"sample");
+
+        assert_eq!(
+            hex(signature.to_bytes().as_slice()),
+            concat!(
+                "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
+                "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"
+            )
+        );
+    }
 }
