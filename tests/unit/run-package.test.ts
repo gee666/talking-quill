@@ -35,12 +35,14 @@ describe('package orchestration', () => {
     for (const [target, [command, artifactRequirement, platform, architecture]] of Object.entries(
       expectedPlans,
     )) {
+      const directoryTest = target.endsWith('-dir');
       expect(createPackagePlan(target)).toEqual({
         command,
         artifactRequirement,
         platform,
         architecture,
-        mode: target.endsWith('-dir') ? 'directory-test' : 'update',
+        ...(directoryTest ? { directoryTest: true } : {}),
+        mode: directoryTest ? 'fresh' : 'update',
         pnpmArguments: ['--filter', '@talking-quill/app', command],
       });
     }
@@ -58,6 +60,36 @@ describe('package orchestration', () => {
       );
     }
   });
+
+  it.each(['win-dir', 'win-arm64-dir'] as const)(
+    'uses coherent fresh metadata without a promotable installer for %s',
+    (target) => {
+      const plan = createPackagePlan(target);
+      const environment = createProductionEnvironment(plan, {
+        PATH: '/reviewed/path',
+        TALKING_QUILL_PACKAGE_MODE: 'update',
+        TALKING_QUILL_PREDECESSOR_VERSION: '0.0.68',
+        TALKING_QUILL_MACOS_PREDECESSOR_BUILD: 'a'.repeat(64),
+        TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1',
+      });
+      expect(plan).toMatchObject({
+        artifactRequirement: 'none',
+        directoryTest: true,
+        mode: 'fresh',
+      });
+      expect(CANONICAL_PACKAGE_TARGETS).not.toContain(target);
+      expect(environment).toMatchObject({
+        PATH: '/reviewed/path',
+        TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: 'none',
+        TALKING_QUILL_PACKAGE_VARIANT: 'directory-test',
+        TALKING_QUILL_PACKAGE_MODE: 'fresh',
+        TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1',
+      });
+      expect(environment).not.toHaveProperty('TALKING_QUILL_PREDECESSOR_VERSION');
+      expect(environment).not.toHaveProperty('TALKING_QUILL_MACOS_PREDECESSOR_BUILD');
+      expect(environment).not.toHaveProperty('TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT');
+    },
+  );
 
   it('keeps acceptance packages noncanonical and strips authorization from canonical builds', () => {
     const acceptance = createPackagePlan('win-installed-acceptance');
@@ -135,6 +167,7 @@ describe('package orchestration', () => {
     expect(orchestrator).not.toContain('package:inspect');
     expect(orchestrator).toContain("runNode('scripts/run-windows-installer-ui-smoke.mjs'");
     expect(afterPack).not.toContain('ACCEPTANCE_MANIFEST_PRIVATE_KEY');
+    expect(afterPack).toContain("['canonical', 'directory-test'].includes(");
     expect(afterPack).toContain('external narrow signing subprocess');
     expect(orchestrator.indexOf('runNode(')).toBeGreaterThan(orchestrator.indexOf('runPnpm('));
     for (const [command] of Object.values(expectedPlans)) {

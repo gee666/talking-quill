@@ -8,10 +8,12 @@ export const WINDOWS_ELEVATION_WRAPPER: string;
 
 export const PERSONAL_TARGETS: Readonly<{
   win: PersonalTarget;
+  'win-arm64': PersonalTarget;
   'mac-x64': PersonalTarget;
   'mac-arm64': PersonalTarget;
 }>;
 
+export function sanitizePersonalConsumerEnvironment(source?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 export function createFreshEnvironment(
   configuration: PersonalTarget,
   source?: NodeJS.ProcessEnv,

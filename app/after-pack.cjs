@@ -68,7 +68,11 @@ module.exports = async function hardenElectron(context) {
     [FuseV1Options.OnlyLoadAppFromAsar]: true,
   });
 
-  if ((process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical') === 'canonical') {
+  if (
+    ['canonical', 'directory-test'].includes(
+      process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical',
+    )
+  ) {
     await scanCanonicalRuntime(context, executable);
   }
   await writeWindowsAcceptanceManifest(context, executable);

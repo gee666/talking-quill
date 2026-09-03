@@ -111,6 +111,7 @@ jobs:
       TALKING_QUILL_PACKAGE_TARGET: win
       TALKING_QUILL_PACKAGE_ARCH: ${{ matrix.arch }}
       TALKING_QUILL_PACKAGE_MODE: fresh
+      TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1'
       TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -139,7 +140,10 @@ jobs:
       # Invoke the app package command directly. It builds and inspects the native setup
       # before any source-test ABI restoration or installed lifecycle work.
       - name: Build explicit public fresh trust-root setup
-        run: pnpm --filter @talking-quill/app ${{ matrix.package_script }}
+        shell: pwsh
+        run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -match '^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+          pnpm --filter @talking-quill/app ${{ matrix.package_script }}
       # Canonical staging binds the exact installer bytes to the two-role
       # talkingQuillRelease identity and copies the matching provenance.
       - name: Stage exact fresh trust-root payload

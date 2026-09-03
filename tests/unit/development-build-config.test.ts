@@ -43,6 +43,13 @@ describe('main entry build configuration', () => {
     expect(config.main?.plugins).toEqual([]);
   });
 
+  it('keeps the directory-test variant on the canonical production entry', () => {
+    process.env.TALKING_QUILL_PACKAGE_VARIANT = 'directory-test';
+    const config = createConfig({ mode: 'production' });
+    expect(config.main?.build?.rollupOptions?.input?.index).toMatch(/main[\\/]index\.ts$/u);
+    expect(config.main?.plugins).toEqual([]);
+  });
+
   it('selects acceptance only through the explicit noncanonical package variant', () => {
     process.env.TALKING_QUILL_PACKAGE_VARIANT = 'installed-acceptance';
     process.env.TALKING_QUILL_ACCEPTANCE_MANIFEST_PUBLIC_KEY_SPKI_BASE64URL = 'public_key';

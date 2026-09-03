@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const ACCEPTANCE_BUILD_ENV = 'TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD';
 const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
-if (!['canonical', 'installed-acceptance'].includes(packageVariant)) {
+if (!['canonical', 'directory-test', 'installed-acceptance'].includes(packageVariant)) {
   throw new Error(`Production packaging rejects package variant: ${packageVariant}`);
 }
 const acceptanceVariant = packageVariant === 'installed-acceptance';

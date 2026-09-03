@@ -50,6 +50,7 @@ import {
 } from './artifact-provenance.mjs';
 import {
   RELEASE_PACKAGE_METADATA_NAME,
+  validatePackageReleaseMetadata,
   verifyMatchingPackageReleaseMetadataBytes,
   verifySerializedPackageReleaseMetadata,
 } from './release-package-metadata.mjs';
@@ -67,10 +68,12 @@ const packageArgument = process.argv
   .find((argument) => argument !== '--' && !argument.startsWith('--'));
 const macosOwnerPackage = process.argv.includes('--macos-owner');
 const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
-if (!['canonical', 'installed-acceptance', 'packaged-test'].includes(packageVariant)) {
+if (
+  !['canonical', 'directory-test', 'installed-acceptance', 'packaged-test'].includes(packageVariant)
+) {
   throw new Error(`Unknown package inspection variant: ${packageVariant}`);
 }
-const canonicalPackage = packageVariant === 'canonical';
+const canonicalPackage = ['canonical', 'directory-test'].includes(packageVariant);
 const windowsInstalledAcceptance = packageVariant === 'installed-acceptance';
 const strictArtifactInspection =
   process.argv.includes('--strict') || process.env.TALKING_QUILL_PACKAGE_INSPECTION_STRICT === '1';
@@ -165,6 +168,10 @@ const unpackedReleaseMetadata =
   !isMacBundle || macosOwnerPackage
     ? await readFile(resolve(resources, RELEASE_PACKAGE_METADATA_NAME))
     : null;
+const unpackedReleaseIdentity =
+  unpackedReleaseMetadata === null
+    ? null
+    : validatePackageReleaseMetadata(JSON.parse(unpackedReleaseMetadata.toString('utf8')));
 const artifactEvidence = await inspectFinalArtifacts(
   packageRoot,
   isMacBundle,
@@ -176,11 +183,12 @@ const artifactEvidence = await inspectFinalArtifacts(
     arch: boundArch,
     ...(boundPlatform === 'win'
       ? {
+          packageMode: unpackedReleaseIdentity?.packageMode,
           artifactKind:
             process.env.TALKING_QUILL_NATIVE_FAULT_PHASE === undefined
-              ? process.env.TALKING_QUILL_PACKAGE_MODE === 'fresh'
+              ? unpackedReleaseIdentity?.packageMode === 'fresh'
                 ? 'setup'
-                : process.env.TALKING_QUILL_PACKAGE_MODE
+                : unpackedReleaseIdentity?.packageMode
               : `repair-${process.env.TALKING_QUILL_NATIVE_FAULT_PHASE}`,
         }
       : {}),
@@ -464,7 +472,12 @@ async function inspectFinalArtifacts(
     let extracted = null;
     let extractionArtifact = artifact;
     if (!mac && /\.exe$/iu.test(artifact)) {
-      await extractNativePackage(artifact, extractionRoot, expectedArtifact.arch);
+      await extractNativePackage(
+        artifact,
+        extractionRoot,
+        expectedArtifact.arch,
+        expectedArtifact.packageMode,
+      );
       extracted = { status: 0 };
       methods.add('tqpkg2');
     } else if (/\.zip$/iu.test(artifact) && ditto !== null) {
@@ -520,7 +533,7 @@ async function inspectFinalArtifacts(
   return { summary, artifacts };
 }
 
-async function extractNativePackage(artifact, output, expectedArchitecture) {
+async function extractNativePackage(artifact, output, expectedArchitecture, expectedPackageMode) {
   const bytes = await readFile(artifact);
   if (canonicalPackage) {
     for (const marker of ['/TQ-CLEAN-STALE-SCHEMA2', '/TQ-DIAGNOSE-STALE-SCHEMA2']) {
@@ -610,11 +623,8 @@ async function extractNativePackage(artifact, output, expectedArchitecture) {
   ) {
     throw new Error('Windows TQPKG2 manifest is not canonical');
   }
-  if (
-    process.env.TALKING_QUILL_PACKAGE_MODE !== undefined &&
-    manifest.packageMode !== process.env.TALKING_QUILL_PACKAGE_MODE
-  ) {
-    throw new Error('Windows TQPKG2 package mode does not match the requested producer mode');
+  if (manifest.packageMode !== expectedPackageMode) {
+    throw new Error('Windows TQPKG2 package mode does not match unpacked release metadata');
   }
   const folded = new Set();
   const tree = createHash('sha256');

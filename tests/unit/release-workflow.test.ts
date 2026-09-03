@@ -28,7 +28,16 @@ describe('Windows native release workflow', () => {
     expect(packageJob).toContain('package_script: package:win');
     expect(packageJob).toContain('package_script: package:win:arm64');
     expect(packageJob).toContain('TALKING_QUILL_PACKAGE_MODE: fresh');
+    expect(packageJob).toContain("TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1'");
     expect(packageJob).toContain("TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1'");
+    expect(packageJob.match(/TALKING_QUILL_PACKAGE_MODE: fresh/gu)).toHaveLength(1);
+    expect(packageJob.match(/TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1'/gu)).toHaveLength(1);
+    expect(packageJob.match(/TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT: '1'/gu)).toHaveLength(1);
+    expect(packageJob).toContain("'^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_'");
+    expect(packageJob).toContain('Remove-Item "Env:$($_.Name)"');
+    expect(packageJob.indexOf('Remove-Item "Env:$($_.Name)"')).toBeLessThan(
+      packageJob.indexOf('pnpm --filter @talking-quill/app ${{ matrix.package_script }}'),
+    );
     expect(packageJob).not.toContain('Build explicit predecessor-bound update');
     expect(workflow).not.toContain('predecessor_x64_');
     expect(workflow).not.toContain('predecessor_arm64_');

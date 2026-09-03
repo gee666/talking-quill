@@ -14,7 +14,11 @@ const harnessEnvironment = [
 export default defineConfig(({ mode }) => {
   const production = mode === 'production';
   const packageVariant = process.env.TALKING_QUILL_PACKAGE_VARIANT ?? 'canonical';
-  if (!['canonical', 'installed-acceptance', 'packaged-test'].includes(packageVariant)) {
+  if (
+    !['canonical', 'directory-test', 'installed-acceptance', 'packaged-test'].includes(
+      packageVariant,
+    )
+  ) {
     throw new Error(`Unknown package variant: ${packageVariant}`);
   }
   if (!production && packageVariant === 'installed-acceptance') {

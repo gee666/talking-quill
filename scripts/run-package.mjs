@@ -21,12 +21,14 @@ const PACKAGE_TARGETS = Object.freeze({
   'win-dir': Object.freeze({
     command: 'package:win:dir',
     artifactRequirement: 'none',
+    directoryTest: true,
     platform: 'win',
     architecture: 'x64',
   }),
   'win-arm64-dir': Object.freeze({
     command: 'package:win:arm64:dir',
     artifactRequirement: 'none',
+    directoryTest: true,
     platform: 'win',
     architecture: 'arm64',
   }),
@@ -105,7 +107,7 @@ export function createPackagePlan(target) {
   }
   return {
     ...configuration,
-    mode: target.endsWith('-dir') ? 'directory-test' : 'update',
+    mode: configuration.directoryTest === true ? 'fresh' : 'update',
     pnpmArguments: ['--filter', '@talking-quill/app', configuration.command],
   };
 }
@@ -135,6 +137,8 @@ function main() {
 
 export function createProductionEnvironment(plan, sourceEnvironment = process.env) {
   const acceptance = plan.acceptance === true;
+  const directoryTest = plan.directoryTest === true;
+  const fresh = directoryTest || sourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1';
   const sourceIdentity = currentSourceIdentity({
     environment: sourceEnvironment,
     requireClean: process.env.NODE_ENV !== 'test',
@@ -150,9 +154,13 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
       TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED: plan.artifactRequirement,
       TALKING_QUILL_PACKAGE_TARGET: plan.platform,
       TALKING_QUILL_PACKAGE_ARCH: plan.architecture,
-      TALKING_QUILL_PACKAGE_VARIANT: acceptance ? 'installed-acceptance' : 'canonical',
-      TALKING_QUILL_PACKAGE_MODE:
-        sourceEnvironment.TALKING_QUILL_PERSONAL_FRESH_INSTALL === '1' ? 'fresh' : plan.mode,
+      TALKING_QUILL_PACKAGE_VARIANT: acceptance
+        ? 'installed-acceptance'
+        : directoryTest
+          ? 'directory-test'
+          : 'canonical',
+      TALKING_QUILL_PACKAGE_MODE: fresh ? 'fresh' : plan.mode,
+      ...(fresh ? { TALKING_QUILL_PERSONAL_FRESH_INSTALL: '1' } : {}),
       ...(acceptance
         ? {
             TALKING_QUILL_ACCEPTANCE_BUILD: '1',
@@ -163,6 +171,8 @@ export function createProductionEnvironment(plan, sourceEnvironment = process.en
       ([name]) =>
         !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE)/u.test(name) &&
         !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name) &&
+        (!fresh || !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(name)) &&
+        (!directoryTest || name !== 'TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT') &&
         (acceptance || !/^TALKING_QUILL_.*ACCEPTANCE/u.test(name)),
     ),
   );

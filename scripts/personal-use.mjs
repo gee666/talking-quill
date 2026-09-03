@@ -22,6 +22,13 @@ const target = process.argv[3];
 const WINDOWS_STAGED_PATH_ENV = 'TALKING_QUILL_PERSONAL_STAGED_INSTALLER';
 const WINDOWS_STAGED_SHA256_ENV = 'TALKING_QUILL_PERSONAL_STAGED_SHA256';
 const WINDOWS_STAGING_CLEANUP_ATTEMPTS = 10;
+const PERSONAL_PRODUCER_ENVIRONMENT = new Set([
+  'TALKING_QUILL_NATIVE_FAULT_PHASE',
+  'TALKING_QUILL_PACKAGE_MODE',
+  'TALKING_QUILL_PACKAGE_VARIANT',
+  'TALKING_QUILL_PERSONAL_FRESH_INSTALL',
+  'TALKING_QUILL_WINDOWS_FRESH_TRUST_ROOT',
+]);
 
 export const WINDOWS_ELEVATION_WRAPPER = [
   '$ErrorActionPreference="Stop"',
@@ -54,15 +61,24 @@ export const PERSONAL_TARGETS = Object.freeze({
   'mac-arm64': { packageTarget: 'mac-owner-arm64', platform: 'mac', architecture: 'arm64' },
 });
 
-export function createFreshEnvironment(configuration, source = process.env) {
-  const environment = Object.fromEntries(
+export function sanitizePersonalConsumerEnvironment(source = process.env) {
+  return Object.fromEntries(
     Object.entries(source).filter(
-      ([name]) => !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(name),
+      ([name]) =>
+        !PERSONAL_PRODUCER_ENVIRONMENT.has(name) &&
+        !/^TALKING_QUILL_(?:MACOS_)?PREDECESSOR_/u.test(name) &&
+        !/^TALKING_QUILL_.*(?:TEST|HARNESS|FIXTURE|ACCEPTANCE)/u.test(name) &&
+        !/^TALKING_QUILL_.*(?:PRIVATE_KEY|SIGNING_KEY|REQUEST_PRIVATE)/u.test(name),
     ),
   );
+}
+
+export function createFreshEnvironment(configuration, source = process.env) {
+  const environment = sanitizePersonalConsumerEnvironment(source);
   if (configuration.platform === 'mac') {
     Object.assign(environment, readMacSigningConfiguration(source));
   }
+  environment.TALKING_QUILL_PACKAGE_MODE = 'fresh';
   environment.TALKING_QUILL_PERSONAL_FRESH_INSTALL = '1';
   return environment;
 }
@@ -117,6 +133,7 @@ function build(configuration) {
 }
 
 async function check(configuration) {
+  const consumerEnvironment = sanitizePersonalConsumerEnvironment();
   const paths = packagePaths(configuration);
   if (!existsSync(paths.installer)) throw new Error(`Missing package artifact: ${paths.installer}`);
   const [metadataBytes, artifactBytes] = await Promise.all([
@@ -138,7 +155,7 @@ async function check(configuration) {
     ],
     {
       env: {
-        ...process.env,
+        ...consumerEnvironment,
         TALKING_QUILL_PACKAGE_INSPECTION_STRICT: '1',
         TALKING_QUILL_PACKAGE_ARTIFACTS_REQUIRED:
           configuration.platform === 'win' ? 'native-setup' : 'dmg-zip',
@@ -159,7 +176,11 @@ async function check(configuration) {
       .update(await readFile(paths.installer))
       .digest('hex'),
   );
-  if (metadata.freshInstall !== true || metadata.predecessor !== null) {
+  if (
+    metadata.packageMode !== 'fresh' ||
+    metadata.freshInstall !== true ||
+    metadata.predecessor !== null
+  ) {
     throw new Error('Package is not the requested fresh personal-use target');
   }
   console.log(
@@ -170,6 +191,7 @@ async function check(configuration) {
 
 async function install(configuration) {
   requireHost(configuration, true);
+  const consumerEnvironment = sanitizePersonalConsumerEnvironment();
   const checked = await check(configuration);
   if (configuration.platform === 'win') {
     await withStagedWindowsInstaller(checked, (stagedInstaller, expectedSha256) => {
@@ -178,7 +200,7 @@ async function install(configuration) {
         ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_ELEVATION_WRAPPER],
         {
           env: {
-            ...process.env,
+            ...consumerEnvironment,
             [WINDOWS_STAGED_PATH_ENV]: stagedInstaller,
             [WINDOWS_STAGED_SHA256_ENV]: expectedSha256,
           },
@@ -207,6 +229,7 @@ async function install(configuration) {
     await stagedHandle.writeFile(checked.artifactBytes);
     await stagedHandle.sync();
     run('/usr/bin/ditto', ['-x', '-k', '/dev/fd/3', extraction], {
+      env: consumerEnvironment,
       stdio: ['inherit', 'inherit', 'inherit', stagedHandle.fd],
     });
   } finally {
@@ -226,14 +249,22 @@ async function install(configuration) {
     checked.metadataBytes,
     await readFile(stagedMetadataPath),
   );
-  run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
-  requireFreshMacAbsence(resolve(app, 'Contents', 'MacOS', 'talking-quill-macos-service-bridge'));
-  run('/usr/bin/sudo', ['/usr/bin/ditto', app, '/Applications/Talking Quill.app']);
+  run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], {
+    env: consumerEnvironment,
+  });
+  requireFreshMacAbsence(
+    resolve(app, 'Contents', 'MacOS', 'talking-quill-macos-service-bridge'),
+    consumerEnvironment,
+  );
+  run('/usr/bin/sudo', ['/usr/bin/ditto', app, '/Applications/Talking Quill.app'], {
+    env: consumerEnvironment,
+  });
   console.log('Installed /Applications/Talking Quill.app. Control-click it and choose Open.');
 }
 
 async function verify(configuration) {
   requireHost(configuration, true);
+  const consumerEnvironment = sanitizePersonalConsumerEnvironment();
   const checked = await check(configuration);
   if (configuration.platform === 'win') {
     const installedRoot = resolve(
@@ -256,15 +287,20 @@ async function verify(configuration) {
     });
     const service = spawnSync('sc.exe', ['query', 'TalkingQuillKeyboardAuthority'], {
       encoding: 'utf8',
+      env: consumerEnvironment,
     });
     if (service.status === 0) {
       throw new Error('Legacy TalkingQuillKeyboardAuthority service still exists');
     }
-    run(process.execPath, [
-      'tests/native/helper-harness.mjs',
-      '--helper',
-      resolve(installedRoot, 'resources/helper/talking-quill-helper.exe'),
-    ]);
+    run(
+      process.execPath,
+      [
+        'tests/native/helper-harness.mjs',
+        '--helper',
+        resolve(installedRoot, 'resources/helper/talking-quill-helper.exe'),
+      ],
+      { env: consumerEnvironment },
+    );
     console.log('Installed gateway and owner authenticated without an SCM dependency.');
     return;
   }
@@ -295,20 +331,28 @@ async function verify(configuration) {
     `${installedApp}/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner`,
     `${installedApp}/Contents/MacOS/talking-quill-macos-service-bridge`,
   ]) {
-    const result = spawnSync('/usr/bin/lipo', ['-archs', executable], { encoding: 'utf8' });
+    const result = spawnSync('/usr/bin/lipo', ['-archs', executable], {
+      encoding: 'utf8',
+      env: consumerEnvironment,
+    });
     const nativeArch = configuration.architecture === 'x64' ? 'x86_64' : 'arm64';
     if (result.status !== 0 || result.stdout.trim() !== nativeArch) {
       throw new Error(`Installed executable architecture mismatch: ${executable}`);
     }
   }
-  run('/usr/bin/open', [installedApp]);
-  waitForExactMacProcesses([
-    `${installedApp}/Contents/Resources/helper/talking-quill-helper`,
-    `${installedApp}/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner`,
-  ]);
-  run('/Applications/Talking Quill.app/Contents/Resources/helper/talking-quill-helper', [
-    '--macos-owner-validate-install',
-  ]);
+  run('/usr/bin/open', [installedApp], { env: consumerEnvironment });
+  waitForExactMacProcesses(
+    [
+      `${installedApp}/Contents/Resources/helper/talking-quill-helper`,
+      `${installedApp}/Contents/Library/LoginItems/Talking Quill Keyboard Owner.app/Contents/MacOS/talking-quill-keyboard-owner`,
+    ],
+    consumerEnvironment,
+  );
+  run(
+    '/Applications/Talking Quill.app/Contents/Resources/helper/talking-quill-helper',
+    ['--macos-owner-validate-install'],
+    { env: consumerEnvironment },
+  );
   console.log(
     'Gateway and Keyboard Owner are running and the installed policy validates. Perform the physical capture check in docs/personal-use-install.md.',
   );
@@ -444,16 +488,14 @@ export function requireNotRegisteredMacStatus(status, output) {
   }
 }
 
-function requireFreshMacAbsence(serviceBridge) {
+function requireFreshMacAbsence(serviceBridge, environment) {
   const service = 'com.talkingquill.app.keyboard-owner';
   for (const account of ['owner-ipc-v1', 'maintenance-latch-v1']) {
-    const result = spawnSync('/usr/bin/security', [
-      'find-generic-password',
-      '-s',
-      service,
-      '-a',
-      account,
-    ]);
+    const result = spawnSync(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', service, '-a', account],
+      { env: environment },
+    );
     if (result.status === 0) {
       throw new Error(
         `Fresh installation refuses existing Keyboard Owner Keychain item: ${account}`,
@@ -471,9 +513,15 @@ function requireFreshMacAbsence(serviceBridge) {
   if (existsSync(ownerRoot)) {
     throw new Error(`Fresh installation refuses pending owner state or cleanup: ${ownerRoot}`);
   }
-  const serviceStatus = spawnSync(serviceBridge, ['status'], { encoding: 'utf8' });
+  const serviceStatus = spawnSync(serviceBridge, ['status'], {
+    encoding: 'utf8',
+    env: environment,
+  });
   requireNotRegisteredMacStatus(serviceStatus.status, serviceStatus.stdout);
-  const processes = spawnSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' });
+  const processes = spawnSync('/bin/ps', ['-axo', 'command='], {
+    encoding: 'utf8',
+    env: environment,
+  });
   if (
     processes.status !== 0 ||
     /talking-quill-(?:helper|keyboard-owner)|Talking Quill Keyboard Owner/u.test(processes.stdout)
@@ -484,10 +532,13 @@ function requireFreshMacAbsence(serviceBridge) {
   }
 }
 
-function waitForExactMacProcesses(paths) {
+function waitForExactMacProcesses(paths, environment) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const result = spawnSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' });
+    const result = spawnSync('/bin/ps', ['-axo', 'command='], {
+      encoding: 'utf8',
+      env: environment,
+    });
     const commands = result.stdout.split('\n');
     if (
       result.status === 0 &&
@@ -496,7 +547,7 @@ function waitForExactMacProcesses(paths) {
       )
     )
       return;
-    spawnSync('/bin/sleep', ['1']);
+    spawnSync('/bin/sleep', ['1'], { env: environment });
   }
   throw new Error(`Timed out waiting for exact installed processes: ${paths.join(', ')}`);
 }

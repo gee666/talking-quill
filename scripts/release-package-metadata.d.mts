@@ -113,10 +113,7 @@ export function createUpdaterReleaseBinding(
   readonly outerIdentity?: MacosOuterIdentity | null;
   readonly transactionBinding: 'source-target-package-sha256-v1';
 };
-export function verifyWindowsUpdaterReleaseBinding<T>(
-  binding: T,
-  expectedPublic?: string,
-): T;
+export function verifyWindowsUpdaterReleaseBinding<T>(binding: T, expectedPublic?: string): T;
 export function authorizeWindowsUpdaterReleaseBinding<
   T extends {
     readonly platform: ReleasePlatform;
