@@ -115,7 +115,8 @@ jobs:
           } finally {
             $encoded = $null
           }
-          $expectedPublicKey = (Get-FileHash -LiteralPath build/windows-update-public-key.sec1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedPublicKey = (node scripts/windows-update-public-key.mjs build/windows-update-public-key.sec1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Committed update public key identity is invalid.' }
           if ($receipt.descriptorPath -cne $descriptor -or $receipt.key.publicKeySha256 -cne $expectedPublicKey -or -not (Test-Path -LiteralPath $key -PathType Leaf)) { throw 'Protected update key import receipt is invalid.' }
           "TQ_ACCEPTANCE_E2E_UPDATE_KEY=$key" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "TQ_ACCEPTANCE_UPDATE_KEY_DESCRIPTOR=$descriptor" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -124,15 +125,11 @@ jobs:
         env:
           TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}
         run: node scripts/run-windows-installed-acceptance-build-e2e.mjs | Set-Content tmp/windows-installed-acceptance-producer-result.json -Encoding utf8NoBOM
-      - name: Upload protected producer result
-        uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: windows-x64-installed-acceptance-producer-result
-          path: |
-            tmp/windows-installed-acceptance-producer-result.json
-            tmp/windows-installed-acceptance/kit.zip
-          if-no-files-found: error
-          retention-days: 14
+      - name: Record protected producer failure
+        if: failure()
+        shell: pwsh
+        run: |
+          "### Protected acceptance producer failed`nThe producer failed before publication. Protected key cleanup will still run; no secret values are included in this summary." | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Delete every protected producer key from its retained snapshot
         if: always()
         shell: pwsh
@@ -148,4 +145,17 @@ jobs:
             $key = Join-Path $env:RUNNER_TEMP "talking-quill-$role-$env:GITHUB_RUN_ID.pkcs8.der"
             if (Test-Path -LiteralPath $key) { $failures += "$role protected key remains" }
           }
-          if ($failures.Count -ne 0) { throw "Protected producer cleanup failures: $($failures -join '; ')" }
+          if ($failures.Count -ne 0) {
+            "### Protected key cleanup failed`nOne or more named key roles could not be retired. No key paths or values are included in this summary." | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            throw "Protected producer cleanup failures: $($failures -join '; ')"
+          }
+      - name: Upload cleaned protected producer result
+        if: success()
+        uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-x64-installed-acceptance-producer-result
+          path: |
+            tmp/windows-installed-acceptance-producer-result.json
+            tmp/windows-installed-acceptance/kit.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -84,13 +84,32 @@ describe('Windows native release workflow', () => {
     expect(producerWorkflow).toContain(
       "TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}",
     );
-    const cleanup = producerWorkflow.slice(
-      producerWorkflow.indexOf('- name: Delete every protected producer key'),
+    const importIndex = producerWorkflow.indexOf(
+      '- name: Import protected updater key through stdin',
     );
+    const cleanupIndex = producerWorkflow.indexOf('- name: Delete every protected producer key');
+    const uploadIndex = producerWorkflow.indexOf(
+      '- name: Upload cleaned protected producer result',
+    );
+    expect(importIndex).toBeGreaterThan(-1);
+    expect(cleanupIndex).toBeGreaterThan(importIndex);
+    expect(uploadIndex).toBeGreaterThan(cleanupIndex);
+    expect(producerWorkflow.slice(importIndex, cleanupIndex)).not.toContain('uses:');
+    const cleanup = producerWorkflow.slice(cleanupIndex, uploadIndex);
     expect(cleanup).toContain('if: always()');
     expect(cleanup).toContain('key-delete --descriptor $descriptor');
     expect(cleanup).not.toContain('cargo');
     expect(cleanup).not.toContain('key-delete --key-path');
+    const upload = producerWorkflow.slice(uploadIndex);
+    expect(upload).toContain('if: success()');
+    expect(upload).toContain('actions/upload-artifact@');
+    expect(producerWorkflow).toContain('GITHUB_STEP_SUMMARY');
+    expect(producerWorkflow).toContain(
+      'node scripts/windows-update-public-key.mjs build/windows-update-public-key.sec1',
+    );
+    expect(producerWorkflow).not.toContain(
+      'Get-FileHash -LiteralPath build/windows-update-public-key.sec1',
+    );
   });
 
   it('uses an actual same-repository local baseline artifact and proves preservation', () => {

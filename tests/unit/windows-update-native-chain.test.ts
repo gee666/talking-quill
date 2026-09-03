@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseArguments, validateUpdateKeyPolicy } from '../../scripts/stage-unsigned-release.mjs';
+import { publicKeySha256FromSec1Hex } from '../../scripts/windows-update-public-key.mjs';
 
 const chain = readFileSync('scripts/windows-update-native-chain.mjs', 'utf8');
 const ceremony = readFileSync('scripts/windows-update-key-ceremony.mjs', 'utf8');
@@ -33,6 +35,16 @@ describe('reviewed Windows update native chain', () => {
     expect(keySecurity).toContain('info.nNumberOfLinks != 1');
     expect(keySecurity).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
     expect(keySecurity).toContain('retain_ancestors(path)?');
+  });
+
+  it('hashes decoded SEC1 bytes independent of hex case and trailing newline', () => {
+    const sec1 = readFileSync('build/windows-update-public-key.sec1', 'utf8').trim();
+    const expected = createHash('sha256').update(Buffer.from(sec1, 'hex')).digest('hex');
+    expect(publicKeySha256FromSec1Hex(`${sec1.toUpperCase()}\r\n`)).toBe(expected);
+    expect(expected).toBe('74c86a3e2f0da44dbb094c3dc33165aa52751787ed7c3fa2cba23bdc5af60433');
+    expect(() => publicKeySha256FromSec1Hex(`${sec1}\n00`)).toThrow(
+      'one uncompressed P-256 SEC1 value',
+    );
   });
 
   it('makes fresh staging reject update keys and update staging reject no key', () => {
