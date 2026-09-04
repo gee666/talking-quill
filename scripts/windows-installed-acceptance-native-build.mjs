@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { ACCEPTANCE_FAULT_PHASES } from './windows-installed-acceptance-schedule.mjs';
+import { subprocessFailure } from './sanitized-subprocess-error.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 
@@ -121,11 +122,12 @@ function runNativeStage(stage, options, context, outputs) {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30 * 60 * 1_000,
+      maxBuffer: 16 * 1024,
       input: Buffer.from(`${JSON.stringify(permittedSecrets)}\n`),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     if (result.error !== undefined || result.signal !== null || result.status !== 0) {
-      throw new Error(`Native installed-acceptance stage failed: ${stage}`);
+      throw subprocessFailure(`Native installed-acceptance stage ${stage}`, result);
     }
     stdout = result.stdout.trim();
   }

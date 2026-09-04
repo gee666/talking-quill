@@ -165,6 +165,15 @@ fn main() {
             }
             _ => Err("expected --remove-owned-tree <path> <device:inode>".to_owned()),
         }
+    } else if arguments.get(1).map(String::as_str) == Some("--remove-exact-owned-tree-v1") {
+        #[cfg(windows)]
+        {
+            remove_exact_owned_tree_from_stdin(&arguments)
+        }
+        #[cfg(not(windows))]
+        {
+            Err("exact owned-tree removal requires Windows".to_owned())
+        }
     } else if arguments.len() == 1 {
         if let Err(error) = talking_quill_helper::run() {
             talking_quill_helper::report_run_error(&error.to_string());
@@ -178,4 +187,62 @@ fn main() {
         talking_quill_helper::report_run_error(&error);
         std::process::exit(1);
     }
+}
+
+#[cfg(windows)]
+fn remove_exact_owned_tree_from_stdin(arguments: &[String]) -> Result<(), String> {
+    use std::io::Read;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Request {
+        path: String,
+        root_identity: String,
+        entries: Vec<Entry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Entry {
+        relative_path: String,
+        directory: bool,
+        identity: String,
+    }
+
+    if arguments.len() != 2 {
+        return Err("expected --remove-exact-owned-tree-v1".to_owned());
+    }
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "exact owned-tree request read".to_owned())?;
+    if bytes.is_empty() || bytes.len() > 64 * 1024 || bytes.last() != Some(&b'\n') {
+        return Err("exact owned-tree request frame".to_owned());
+    }
+    let request: Request = serde_json::from_slice(&bytes[..bytes.len() - 1])
+        .map_err(|_| "exact owned-tree request parse".to_owned())?;
+    let path = Path::new(&request.path);
+    if !path.is_absolute() || request.entries.len() > 16 {
+        return Err("exact owned-tree request policy".to_owned());
+    }
+    let entries = request
+        .entries
+        .into_iter()
+        .map(
+            |entry| talking_quill_helper::owned_tree::ExactOwnedTreeEntry {
+                relative_path: entry.relative_path,
+                directory: entry.directory,
+                identity: entry.identity,
+            },
+        )
+        .collect::<Vec<_>>();
+    talking_quill_helper::owned_tree::remove_exact_owned_tree(
+        path,
+        &request.root_identity,
+        &entries,
+    )
+    .map_err(|error| error.to_string())?;
+    println!("{{\"result\":\"deleted\"}}");
+    Ok(())
 }

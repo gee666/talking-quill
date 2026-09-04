@@ -22,6 +22,7 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { parseNativeArchitectures } from './native-architecture.mjs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
 import { currentSourceIdentity } from './source-identity.mjs';
+import { subprocessFailure } from './sanitized-subprocess-error.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const manifestPath = resolve(root, 'helper/Cargo.toml');
@@ -271,13 +272,12 @@ foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.A
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30_000,
+      maxBuffer: 16 * 1024,
       env: { ...process.env, TQ_NATIVE_SNAPSHOT_PATH: path },
     },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
-    throw new Error(
-      `Reviewed native-chain protected publication failed (${String(result.status)}): ${result.stderr.trim()}`,
-    );
+    throw subprocessFailure('Reviewed native-chain protected publication', result);
   }
 }
 
@@ -292,6 +292,7 @@ export function validateProtectedWindowsUpdateKey(keyPath) {
 export function deleteProtectedWindowsUpdateKey(descriptorPath) {
   if (!isAbsolute(descriptorPath))
     throw new Error('Protected key descriptor path must be absolute');
+  descriptorPath = resolve(descriptorPath);
   const cleanupRoot = dirname(descriptorPath);
   verifySnapshotProtection(cleanupRoot);
   const descriptor = validateProtectedKeyDescriptor(
@@ -350,6 +351,8 @@ function prepareProtectedKeyDescriptor(chain, keyPath, descriptorPath) {
   if (!isAbsolute(keyPath) || !isAbsolute(descriptorPath)) {
     throw new Error('Protected key and descriptor paths must be absolute');
   }
+  keyPath = resolve(keyPath);
+  descriptorPath = resolve(descriptorPath);
   const cleanupRoot = dirname(descriptorPath);
   if (existsSync(cleanupRoot)) throw new Error('Protected cleanup snapshot already exists');
   mkdirSync(cleanupRoot, { recursive: false });

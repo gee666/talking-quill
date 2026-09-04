@@ -17,6 +17,10 @@ import {
   MAX_ACCEPTANCE_RUN_MS,
 } from './windows-installed-acceptance.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
+import {
+  cleanupAcceptanceNative,
+  cleanupAcceptanceNativeDescriptor,
+} from './windows-installed-acceptance-native-publication.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const HEX_32 = /^[0-9a-f]{64}$/u;
@@ -35,6 +39,12 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
   await requireAbsent(outputRoot);
   await mkdir(outputRoot, { recursive: false, mode: 0o700 });
   await assertNoLinkPath(outputRoot, { directory: true });
+  let nativePublication;
+  let retainNativePublication = false;
+  let completed = false;
+  let returnValue;
+  let primaryError;
+  let cleanupError;
   try {
     const validateRelease = dependencies.validateCanonicalRelease ?? validateCanonicalRelease;
     const canonical = await validateRelease(options);
@@ -83,6 +93,7 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
         buildWindowsInstalledAcceptanceArtifacts(producerOptions, producerContext));
     const produced = await produceArtifacts(options, workspace, dependencies);
     validateProducedArtifacts(produced);
+    nativePublication = produced.nativePublication;
 
     const requestPayloads = {};
     const requestNonces = {};
@@ -162,11 +173,50 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
             outputRoot: options.kitOutputRoot,
             bundlePath: options.bundlePath,
           });
-    return Object.freeze({ configPath, config, kit, outputRoot });
+    retainNativePublication = options.assemble === false;
+    completed = true;
+    returnValue = Object.freeze({
+      configPath,
+      config,
+      kit,
+      outputRoot,
+      nativePublication: retainNativePublication ? nativePublication : null,
+    });
   } catch (error) {
-    await rm(outputRoot, { recursive: true, force: true });
-    throw error;
+    primaryError = error;
+  } finally {
+    try {
+      if (!retainNativePublication) {
+        const cleanup = dependencies.cleanupAcceptanceNative ?? cleanupAcceptanceNative;
+        if (nativePublication !== undefined) {
+          await cleanup(nativePublication);
+        } else {
+          const descriptorPath = resolve(outputRoot, 'native-publication-cleanup.json');
+          try {
+            const cleanupDescriptor =
+              dependencies.cleanupAcceptanceNativeDescriptor ?? cleanupAcceptanceNativeDescriptor;
+            await cleanupDescriptor(descriptorPath);
+          } catch (error) {
+            if (error?.code !== 'ENOENT') cleanupError = error;
+          }
+        }
+      }
+      if (!completed && cleanupError === undefined) {
+        await rm(outputRoot, { recursive: true, force: true });
+      }
+    } catch (error) {
+      cleanupError = error;
+    }
   }
+  if (primaryError !== undefined && cleanupError !== undefined) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      'Acceptance producer and cleanup failed',
+    );
+  }
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupError !== undefined) throw cleanupError;
+  return returnValue;
 }
 
 function predecessorEnvironment(metadata, root) {
@@ -220,6 +270,7 @@ function validateProducedArtifacts(value) {
     'validationChainHeadSha256',
     'syntheticSenderPath',
     'trustedLauncherPath',
+    'nativePublication',
   ]) {
     if (value[name] === undefined) throw new Error(`Produced acceptance input is missing: ${name}`);
   }

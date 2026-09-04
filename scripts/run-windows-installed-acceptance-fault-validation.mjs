@@ -12,13 +12,17 @@ import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs
 import { ACCEPTANCE_FAULT_PHASES } from './windows-installed-acceptance-schedule.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { readAcceptanceSecretPaths } from './acceptance-secret-path-frame.mjs';
 
 if (process.platform !== 'win32') throw new Error('Fault validation requires Windows');
 const phase = valueAfter('--phase');
 const sequence = ACCEPTANCE_FAULT_PHASES.indexOf(phase);
 if (sequence < 0) throw new Error('Fault validation phase is invalid');
 const outputRoot = resolve(valueAfter('--output') ?? '');
-const secrets = await readFrame();
+const secrets = readAcceptanceSecretPaths(
+  undefined,
+  'Fault validator secret-path frame is invalid',
+);
 const root = resolve(import.meta.dirname, '..');
 const packageRoot = resolve(root, 'tmp/installed-acceptance-build');
 const faultPath = resolve(packageRoot, `Talking-Quill-0.0.69-win-x64-repair-${phase}.exe`);
@@ -292,13 +296,6 @@ async function hashFile(path) {
 }
 function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
-}
-async function readFrame() {
-  const bytes = await readFile(0);
-  if (bytes.length === 0 || bytes.length > 16 * 1024 || bytes.at(-1) !== 0x0a) {
-    throw new Error('Fault validator secret-path frame is invalid');
-  }
-  return JSON.parse(bytes.subarray(0, -1).toString('utf8'));
 }
 function valueAfter(name) {
   const index = process.argv.indexOf(name);

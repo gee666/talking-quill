@@ -10,6 +10,7 @@ const descriptorPath = resolve(
   `cleanup-integration-${String(process.pid)}`,
   'descriptor.json',
 );
+const descriptorArgument = `${resolve('tmp')}\\discarded-segment\\..\\cleanup-integration-${String(process.pid)}\\descriptor.json`;
 
 const nativeTest = process.platform === 'win32' && process.arch === 'x64' ? it : it.skip;
 
@@ -30,13 +31,15 @@ describe('Windows protected update-key failure cleanup', () => {
           '--key-path',
           keyPath,
           '--descriptor',
-          descriptorPath,
+          descriptorArgument,
         ],
         { cwd: resolve('.'), encoding: 'utf8', timeout: 12 * 60_000 },
       );
       expect(generated.status, generated.stderr).toBe(0);
       expect(existsSync(keyPath)).toBe(true);
       expect(existsSync(descriptorPath)).toBe(true);
+      const generatedDescriptor = JSON.parse(generated.stdout) as { descriptorPath: string };
+      expect(generatedDescriptor.descriptorPath).toBe(descriptorPath);
 
       const failedProducer = spawnSync(
         process.execPath,

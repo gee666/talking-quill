@@ -83,22 +83,11 @@ jobs:
           if ($actual -cne $env:ACCEPTANCE_BUNDLE_SHA256) { throw 'Acceptance bundle SHA-256 mismatch.' }
           $extraction = node scripts/windows-installed-acceptance-bundle.mjs extract $bundle tmp/windows-installed-acceptance/frozen $env:ACCEPTANCE_ARCHITECTURE - - $env:ACCEPTANCE_BUNDLE_SHA256 - $env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY | ConvertFrom-Json
           $sourceNative = (Resolve-Path tmp/windows-installed-acceptance/frozen/acceptance/native).Path
-          $nativeBase = Join-Path $env:ProgramData 'Talking Quill Acceptance Native'
-          $native = Join-Path $nativeBase '${{ github.run_id }}'
-          New-Item -ItemType Directory -Force $native | Out-Null
-          Copy-Item -Path (Join-Path $sourceNative '*') -Destination $native -Force
-          $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
-          & icacls.exe $nativeBase /inheritance:r /setowner '*S-1-5-32-544' /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$sid`:(OI)(CI)RX" /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Extracted acceptance native directory could not be protected.' }
-          $acl = Get-Acl -LiteralPath $native
-          $owner = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
-          $links = @(Get-ChildItem -LiteralPath $native -Force | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })
-          if (-not $acl.AreAccessRulesProtected -or $owner -cne 'S-1-5-32-544' -or $links.Count -ne 0) { throw 'Extracted acceptance native ACL or topology is not exact.' }
-          foreach ($name in @('acceptance-broker.exe','acceptance-bootstrap.exe','trusted-launcher.exe','synthetic-sender.exe')) {
-            $sourceFile = Join-Path $sourceNative $name
-            $publishedFile = Join-Path $native $name
-            if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $publishedFile -Algorithm SHA256).Hash) { throw "Protected native publication differs: $name" }
-          }
+          $nativeBuildId = node -e "process.stdout.write(require('node:crypto').createHash('sha256').update('${{ github.run_id }}:'+process.env.ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY).digest('hex'))"
+          $nativePublication = node scripts/windows-installed-acceptance-native-publication.mjs publish-bundle --source $sourceNative --output tmp/windows-installed-acceptance --build-id $nativeBuildId | ConvertFrom-Json
+          $native = [string]$nativePublication.nativeRoot
+          "TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR=$($nativePublication.descriptorPath)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not (Test-Path -LiteralPath $native)) { throw 'Protected acceptance native publication is absent.' }
           "ACCEPTANCE_MANIFEST_SHA256=$($extraction.manifestSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY=$env:ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256=$env:ACCEPTANCE_BUNDLE_AUTHORIZATION_SHA256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -140,6 +129,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if (-not [string]::IsNullOrWhiteSpace($env:TQ_ACCEPTANCE_PROTECTED_NATIVE_ROOT) -and (Test-Path -LiteralPath $env:TQ_ACCEPTANCE_PROTECTED_NATIVE_ROOT)) {
-            Remove-Item -LiteralPath $env:TQ_ACCEPTANCE_PROTECTED_NATIVE_ROOT -Recurse -Force
+          $descriptor = if ([string]::IsNullOrWhiteSpace($env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR)) { 'tmp/windows-installed-acceptance/native-publication-cleanup.json' } else { $env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR }
+          if (Test-Path -LiteralPath $descriptor) {
+            node scripts/windows-installed-acceptance-native-publication.mjs cleanup --descriptor $descriptor
           }

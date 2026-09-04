@@ -63,6 +63,7 @@ describe('Windows installed-acceptance input producer', () => {
     const launcher = await file('launcher.exe');
     const validation = await file('validation.json');
     const artifact = { validationEvidencePath: validation };
+    const nativePublication = { buildId: '99'.repeat(32) };
     const faults = Object.fromEntries(ACCEPTANCE_FAULT_PHASES.map((phase) => [phase, artifact]));
     const produceArtifacts = vi.fn(() =>
       Promise.resolve({
@@ -82,11 +83,13 @@ describe('Windows installed-acceptance input producer', () => {
         validationChainHeadSha256: '88'.repeat(32),
         syntheticSenderPath: sender,
         trustedLauncherPath: launcher,
+        nativePublication,
       }),
     );
     const assembler = vi.fn(({ configPath }: { configPath: string }) =>
       Promise.resolve({ configPath }),
     );
+    const cleanupNativePublication = vi.fn(() => Promise.resolve({ result: 'deleted' }));
     const notBeforeMs = 1_900_000_000_000;
     const result = await buildWindowsInstalledAcceptanceInputs(
       {
@@ -128,6 +131,7 @@ describe('Windows installed-acceptance input producer', () => {
         }),
         produceArtifacts,
         buildInstalledAcceptanceKit: assembler,
+        cleanupAcceptanceNative: cleanupNativePublication,
       },
     );
     const config = JSON.parse(await readFile(result.configPath as string, 'utf8')) as {
@@ -139,6 +143,8 @@ describe('Windows installed-acceptance input producer', () => {
     };
     expect(produceArtifacts).toHaveBeenCalledOnce();
     expect(assembler).toHaveBeenCalledOnce();
+    expect(cleanupNativePublication).toHaveBeenCalledWith(nativePublication);
+    expect(result.nativePublication).toBeNull();
     expect(Object.keys(config.artifacts.faults)).toEqual(ACCEPTANCE_FAULT_PHASES);
     expect(Object.keys(config.acceptance.requestNonces)).toEqual(
       ACCEPTANCE_REQUEST_SCHEDULE.map(({ invocationId }) => invocationId),
