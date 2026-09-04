@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
 import {
   copyFile,
@@ -47,23 +47,35 @@ export async function publishAcceptanceNative({
   const files = LAYOUTS[layout];
   if (files === undefined) throw new Error('Native publication layout is invalid');
   const nativeBase = resolve(programData, 'Talking Quill Acceptance Native');
-  const nativeRoot = resolve(nativeBase, buildId);
-  const removeNativeBase = !existsSync(nativeBase);
+  const publicationId = randomBytes(32).toString('hex');
+  const nativeRoot = resolve(nativeBase, publicationId);
   const cleanupLauncherPath = resolve(outputRoot, 'native-publication-cleanup-helper.exe');
-  let nativeRootCreated = false;
+  let nativeBaseCreated = false;
+  let nativeBaseIdentity;
+  let nativeRootIdentity;
+  let cleanupLauncher;
   let cleanupLauncherCreated = false;
   let initializedRoot = false;
   let protectedRoot = false;
   try {
+    await requireDirectory(resolve(programData));
+    try {
+      nativeBaseIdentity = await directoryIdentity(nativeBase);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await mkdir(nativeBase, { recursive: false, mode: 0o700 });
+      nativeBaseCreated = true;
+      nativeBaseIdentity = await directoryIdentity(nativeBase);
+    }
     await copyFile(
       resolve(sourceRoot, files.bootstrap),
       cleanupLauncherPath,
       constants.COPYFILE_EXCL,
     );
     cleanupLauncherCreated = true;
-    await mkdir(nativeBase, { recursive: true });
-    await mkdir(nativeRoot, { recursive: false });
-    nativeRootCreated = true;
+    cleanupLauncher = await fileIdentity(cleanupLauncherPath);
+    await mkdir(nativeRoot, { recursive: false, mode: 0o700 });
+    nativeRootIdentity = await directoryIdentity(nativeRoot);
     initializeNativeRoot(nativeRoot);
     initializedRoot = true;
     for (const name of Object.values(files)) {
@@ -72,15 +84,16 @@ export async function publishAcceptanceNative({
     protectNativeRoot(nativeRoot);
     protectedRoot = true;
     const { userSid, rootIdentity, inventory } = await verifyNativeRoot(nativeRoot);
-    const cleanupLauncher = await fileIdentity(cleanupLauncherPath);
     const descriptorPath = resolve(outputRoot, 'native-publication-cleanup.json');
     const descriptor = {
       schemaVersion: 1,
       purpose: PURPOSE,
       buildId,
+      publicationId,
       layout,
-      removeNativeBase,
+      removeNativeBase: nativeBaseCreated,
       nativeBase,
+      nativeBaseIdentity,
       nativeRoot,
       userSid,
       rootIdentity,
@@ -88,39 +101,63 @@ export async function publishAcceptanceNative({
       cleanupLauncher: { path: cleanupLauncherPath, ...cleanupLauncher },
       descriptorPath,
     };
-    await writeFile(descriptorPath, `${JSON.stringify(descriptor)}\n`, {
-      flag: 'wx',
-      mode: 0o600,
+    const descriptorBytes = Buffer.from(`${JSON.stringify(descriptor)}\n`);
+    await writeFile(descriptorPath, descriptorBytes, { flag: 'wx', mode: 0o600 });
+    return Object.freeze({
+      ...descriptor,
+      descriptorSha256: createHash('sha256').update(descriptorBytes).digest('hex'),
     });
-    return Object.freeze(descriptor);
   } catch (error) {
-    try {
-      if (nativeRootCreated) {
+    const cleanupErrors = [];
+    if (nativeRootIdentity !== undefined && cleanupLauncher !== undefined) {
+      try {
         await removeFailedPublication(
-          nativeBase,
           nativeRoot,
+          nativeRootIdentity,
           cleanupLauncherPath,
+          cleanupLauncher,
           layout,
           initializedRoot,
           protectedRoot,
         );
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
       }
-      if (cleanupLauncherCreated) await rm(cleanupLauncherPath, { force: false });
-      if (removeNativeBase) await removeEmptyBase(nativeBase);
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'Native publication and cleanup failed');
+    }
+    if (cleanupLauncherCreated && !existsSync(nativeRoot)) {
+      try {
+        await removeCleanupFile(cleanupLauncherPath, cleanupLauncher);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (nativeBaseCreated && nativeBaseIdentity !== undefined && !existsSync(nativeRoot)) {
+      try {
+        await removeEmptyBase(nativeBase, nativeBaseIdentity);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError([error, ...cleanupErrors], 'Native publication and cleanup failed');
     }
     throw error;
   }
 }
 
 export async function cleanupAcceptanceNativeDescriptor(descriptorPath, options) {
+  if (!isAbsolute(descriptorPath)) {
+    throw new Error('Native publication descriptor path must be absolute');
+  }
   const absolute = resolve(descriptorPath);
   const descriptor = JSON.parse(await readFile(absolute, 'utf8'));
   if (resolve(descriptor?.descriptorPath ?? '') !== absolute) {
     throw new Error('Native publication descriptor path is not canonical');
   }
-  return cleanupAcceptanceNative(descriptor, options);
+  return cleanupAcceptanceNative(
+    { ...descriptor, descriptorSha256: options?.descriptorSha256 },
+    options,
+  );
 }
 
 export async function cleanupAcceptanceNative(
@@ -131,29 +168,62 @@ export async function cleanupAcceptanceNative(
   if (resolve(checked.nativeBase) !== resolve(programData, 'Talking Quill Acceptance Native')) {
     throw new Error('Native publication cleanup base is unauthorized');
   }
-  if (!existsSync(checked.nativeRoot)) {
-    throw new Error('Native publication root is absent before authenticated cleanup');
+  await requireDirectory(resolve(programData));
+  let nativeBaseIdentity;
+  try {
+    nativeBaseIdentity = await directoryIdentity(checked.nativeBase);
+  } catch (error) {
+    if (error?.code !== 'ENOENT' || !checked.removeNativeBase || existsSync(checked.nativeRoot)) {
+      throw error;
+    }
   }
-  const verified = await verifyNativeRoot(checked.nativeRoot, checked.userSid, checked.layout);
-  if (
-    verified.rootIdentity !== checked.rootIdentity ||
-    JSON.stringify(verified.inventory) !== JSON.stringify(checked.inventory)
-  ) {
-    throw new Error('Native publication identity or inventory changed before cleanup');
+  if (nativeBaseIdentity !== undefined && nativeBaseIdentity !== checked.nativeBaseIdentity) {
+    throw new Error('Native publication cleanup base changed');
   }
-  const launcher = await fileIdentity(checked.cleanupLauncher.path);
-  if (
-    launcher.sha256 !== checked.cleanupLauncher.sha256 ||
-    launcher.bytes !== checked.cleanupLauncher.bytes ||
-    launcher.identity !== checked.cleanupLauncher.identity
-  ) {
-    throw new Error('Native publication cleanup launcher changed');
+  const descriptorFile = await fileIdentity(checked.descriptorPath);
+  if (descriptorFile.sha256 !== checked.descriptorSha256) {
+    throw new Error('Native publication cleanup descriptor changed');
   }
-  await removeExactPublication(checked, launcher);
-  if (existsSync(checked.nativeRoot)) throw new Error('Native publication cleanup left residue');
-  await removeCleanupFile(checked.cleanupLauncher.path);
-  await removeCleanupFile(checked.descriptorPath);
-  if (checked.removeNativeBase) await removeEmptyBase(checked.nativeBase);
+  let launcher;
+  if (existsSync(checked.cleanupLauncher.path)) {
+    launcher = await fileIdentity(checked.cleanupLauncher.path);
+    requireSameFileIdentity(
+      launcher,
+      checked.cleanupLauncher,
+      'Native publication cleanup launcher changed',
+    );
+  }
+  if (existsSync(checked.nativeRoot)) {
+    if (launcher === undefined) {
+      throw new Error('Native publication cleanup launcher is absent');
+    }
+    const verified = await verifyNativeRoot(checked.nativeRoot, checked.userSid, checked.layout);
+    if (
+      verified.rootIdentity !== checked.rootIdentity ||
+      JSON.stringify(verified.inventory) !== JSON.stringify(checked.inventory)
+    ) {
+      throw new Error('Native publication identity or inventory changed before cleanup');
+    }
+    await removeExactPublication(checked, launcher);
+    if (existsSync(checked.nativeRoot)) throw new Error('Native publication cleanup left residue');
+  }
+  const cleanupErrors = [];
+  try {
+    await removeCleanupFile(checked.cleanupLauncher.path, launcher);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  if (checked.removeNativeBase && nativeBaseIdentity !== undefined) {
+    try {
+      await removeEmptyBase(checked.nativeBase, nativeBaseIdentity, true);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, 'Native publication support cleanup failed');
+  }
+  await removeCleanupFile(checked.descriptorPath, descriptorFile);
   return Object.freeze({ result: 'deleted' });
 }
 
@@ -162,11 +232,13 @@ export function validateDescriptor(value) {
     value?.schemaVersion !== 1 ||
     value?.purpose !== PURPOSE ||
     !HEX.test(value?.buildId ?? '') ||
+    !HEX.test(value?.publicationId ?? '') ||
     LAYOUTS[value?.layout] === undefined ||
     typeof value?.removeNativeBase !== 'boolean' ||
     !isAbsolute(value?.nativeBase ?? '') ||
+    !validIdentity(value?.nativeBaseIdentity) ||
     !isAbsolute(value?.nativeRoot ?? '') ||
-    resolve(value.nativeRoot) !== resolve(value.nativeBase, value.buildId) ||
+    resolve(value.nativeRoot) !== resolve(value.nativeBase, value.publicationId) ||
     !/^S-[0-9-]+$/u.test(value?.userSid ?? '') ||
     !validIdentity(value?.rootIdentity) ||
     !Array.isArray(value?.inventory) ||
@@ -177,6 +249,7 @@ export function validateDescriptor(value) {
     !Number.isSafeInteger(value?.cleanupLauncher?.bytes) ||
     value.cleanupLauncher.bytes <= 0 ||
     !isAbsolute(value?.descriptorPath ?? '') ||
+    !HEX.test(value?.descriptorSha256 ?? '') ||
     value.nativeBase !== resolve(value.nativeBase) ||
     value.nativeRoot !== resolve(value.nativeRoot) ||
     value.cleanupLauncher.path !== resolve(value.cleanupLauncher.path) ||
@@ -213,26 +286,35 @@ export function validateDescriptor(value) {
 }
 
 async function removeFailedPublication(
-  nativeBase,
   nativeRoot,
+  expectedRootIdentity,
   cleanupLauncherPath,
+  expectedLauncher,
   layout,
   initializedRoot,
   protectedRoot,
 ) {
   if (!existsSync(nativeRoot)) return;
+  const rootIdentity = await directoryIdentity(nativeRoot);
+  if (rootIdentity !== expectedRootIdentity) {
+    throw new Error('Failed native root identity changed');
+  }
   if (protectedRoot) verifyNativeAcl(nativeRoot);
   else if (initializedRoot) verifyInitializedNativeAcl(nativeRoot);
-  const root = await lstat(nativeRoot, { bigint: true });
-  if (!root.isDirectory() || root.isSymbolicLink())
-    throw new Error('Failed native root identity is invalid');
   const inventory = await inventoryPartialRoot(nativeRoot, layout);
+  if (!protectedRoot && !initializedRoot && inventory.length > 0) {
+    verifyInitializedNativeAcl(nativeRoot);
+  }
   const launcher = await fileIdentity(cleanupLauncherPath);
+  requireSameFileIdentity(
+    launcher,
+    expectedLauncher,
+    'Native publication cleanup launcher changed',
+  );
   await removeExactPublication(
     {
-      nativeBase,
       nativeRoot,
-      rootIdentity: statIdentity(root),
+      rootIdentity,
       inventory,
       cleanupLauncher: { path: cleanupLauncherPath, ...launcher },
     },
@@ -340,19 +422,54 @@ async function fileIdentity(path) {
   }
 }
 
-async function removeCleanupFile(path) {
-  const metadata = await lstat(path, { bigint: true });
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n) {
-    throw new Error('Native publication cleanup support file identity is invalid');
+async function removeCleanupFile(path, expected) {
+  if (expected === undefined && !existsSync(path)) return;
+  const observed = await fileIdentity(path);
+  if (expected !== undefined) {
+    requireSameFileIdentity(
+      observed,
+      expected,
+      'Native publication cleanup support file identity changed',
+    );
   }
   await rm(path, { force: false });
 }
 
-async function removeEmptyBase(path) {
+async function removeEmptyBase(path, expectedIdentity, requireRemoval = false) {
   try {
+    if (expectedIdentity !== undefined && (await directoryIdentity(path)) !== expectedIdentity) {
+      throw new Error('Native publication base identity changed');
+    }
     await rmdir(path);
   } catch (error) {
-    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
+    if (error?.code === 'ENOENT') return;
+    if (!requireRemoval && ['ENOTEMPTY', 'EEXIST'].includes(error?.code)) return;
+    if (requireRemoval && ['ENOTEMPTY', 'EEXIST'].includes(error?.code)) {
+      throw new Error('Native publication base is not empty');
+    }
+    throw error;
+  }
+}
+
+async function requireDirectory(path) {
+  await directoryIdentity(path);
+}
+
+async function directoryIdentity(path) {
+  const metadata = await lstat(path, { bigint: true });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.nlink !== 1n) {
+    throw new Error('Native publication directory identity is invalid');
+  }
+  return statIdentity(metadata);
+}
+
+function requireSameFileIdentity(observed, expected, message) {
+  if (
+    observed.sha256 !== expected.sha256 ||
+    observed.bytes !== expected.bytes ||
+    observed.identity !== expected.identity
+  ) {
+    throw new Error(message);
   }
 }
 
@@ -384,33 +501,24 @@ $userSid=([Security.Principal.WindowsIdentity]::GetCurrent()).User
 if($env:TQ_EXPECTED_USER_SID -and $userSid.Value -cne $env:TQ_EXPECTED_USER_SID){exit 20}
 $admin=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $system=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-function Set-ExactAcl($item,$inheritance){
+function New-ExactAcl($item,$inheritance){
   $acl=if($item.PSIsContainer){New-Object Security.AccessControl.DirectorySecurity}else{New-Object Security.AccessControl.FileSecurity}
   $acl.SetOwner($admin);$acl.SetAccessRuleProtection($true,$false)
   foreach($entry in @(@($system,2032127),@($admin,2032127),@($userSid,1179817))){
     $rule=New-Object Security.AccessControl.FileSystemAccessRule($entry[0],[Security.AccessControl.FileSystemRights]$entry[1],$inheritance,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
     [void]$acl.AddAccessRule($rule)
   }
-  Set-Acl -LiteralPath $item.FullName -AclObject $acl
+  return $acl
 }
+function Set-ExactAcl($item,$inheritance){Set-Acl -LiteralPath $item.FullName -AclObject (New-ExactAcl $item $inheritance)}
 function Test-ExactAcl($item,$inheritance){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){exit 21}
-  $acl=Get-Acl -LiteralPath $item.FullName
-  if(-not $acl.AreAccessRulesProtected){exit 22}
-  $owner=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
-  if($owner-cne $admin.Value){exit 23}
-  $rules=@($acl.Access)
-  if($rules.Count-ne 3){exit 24}
-  $expected=@{}
-  $expected[$system.Value]=2032127;$expected[$admin.Value]=2032127;$expected[$userSid.Value]=1179817
-  $seen=@{}
-  foreach($rule in $rules){
-    $sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    $mask=([uint32][int32]$rule.FileSystemRights)
-    if($rule.IsInherited -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or -not $expected.ContainsKey($sid) -or $mask -ne [uint32]$expected[$sid] -or $rule.InheritanceFlags -ne $inheritance -or $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or $seen.ContainsKey($sid)){exit 25}
-    $seen[$sid]=$true
-  }
-  if($seen.Count-ne 3){exit 26}
+  $actual=Get-Acl -LiteralPath $item.FullName
+  if(-not $actual.AreAccessRulesProtected){exit 22}
+  $expected=New-ExactAcl $item $inheritance
+  $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+  $expectedSddl=$expected.GetSecurityDescriptorSddlForm($sections).Replace('D:P','D:PAI')
+  if($actual.GetSecurityDescriptorSddlForm($sections)-cne $expectedSddl){exit 23}
 }
 $none=[Security.AccessControl.InheritanceFlags]::None
 $inherited=[Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -469,7 +577,11 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
     console.log(JSON.stringify(descriptor));
   } else if (mode === 'cleanup') {
     console.log(
-      JSON.stringify(await cleanupAcceptanceNativeDescriptor(valueAfter('--descriptor') ?? '')),
+      JSON.stringify(
+        await cleanupAcceptanceNativeDescriptor(valueAfter('--descriptor') ?? '', {
+          descriptorSha256: valueAfter('--descriptor-sha256'),
+        }),
+      ),
     );
   } else {
     throw new Error('Expected publish-bundle or cleanup');

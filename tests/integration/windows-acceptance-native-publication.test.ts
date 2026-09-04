@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   cleanupAcceptanceNative,
+  cleanupAcceptanceNativeDescriptor,
   publishAcceptanceNative,
 } from '../../scripts/windows-installed-acceptance-native-publication.mjs';
 
@@ -63,6 +64,12 @@ beforeAll(() => {
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe('Windows acceptance native publication', () => {
+  it('requires an absolute cleanup descriptor path', async () => {
+    await expect(
+      cleanupAcceptanceNativeDescriptor('relative.json', { descriptorSha256: '0'.repeat(64) }),
+    ).rejects.toThrow('Native publication descriptor path must be absolute');
+  });
+
   nativeTest(
     'applies exact per-root ACLs and performs identity-bound cleanup',
     async () => {
@@ -79,6 +86,9 @@ describe('Windows acceptance native publication', () => {
       });
       expect(readFileSyncAcl(base)).toBe(before);
       expect(descriptor.inventory).toHaveLength(3);
+      expect(descriptor.publicationId).toMatch(/^[0-9a-f]{64}$/u);
+      expect(descriptor.publicationId).not.toBe(descriptor.buildId);
+      expect(descriptor.nativeRoot).toBe(resolve(base, descriptor.publicationId));
       expect(
         spawnSync('icacls.exe', [descriptor.nativeRoot, '/grant', '*S-1-5-32-545:R'], {
           encoding: 'utf8',
@@ -97,7 +107,8 @@ describe('Windows acceptance native publication', () => {
           windowsHide: true,
         }).status,
       ).toBe(0);
-      await cleanupAcceptanceNative(descriptor, {
+      await cleanupAcceptanceNativeDescriptor(descriptor.descriptorPath, {
+        descriptorSha256: descriptor.descriptorSha256,
         programData: resolve(root, 'program-data'),
       });
       expect(existsSync(descriptor.nativeRoot)).toBe(false);
@@ -132,9 +143,34 @@ describe('Windows acceptance native publication', () => {
           programData: resolve(root, 'program-data'),
         }),
       ).rejects.toThrow();
-      expect(
-        existsSync(resolve(root, `program-data/Talking Quill Acceptance Native/${'b'.repeat(64)}`)),
-      ).toBe(false);
+      expect(readdirSync(resolve(root, 'program-data/Talking Quill Acceptance Native'))).toEqual(
+        [],
+      );
+    },
+    30_000,
+  );
+
+  nativeTest(
+    'removes the exact failed snapshot and its newly created base',
+    async () => {
+      const programData = resolve(root, 'fresh-program-data');
+      const outputRoot = resolve(root, 'fresh-failed-output');
+      const broken = resolve(root, 'fresh-broken-source');
+      mkdirSync(programData, { recursive: true });
+      mkdirSync(outputRoot, { recursive: true });
+      mkdirSync(broken, { recursive: true });
+      for (const name of ['talking-quill-acceptance-signer.exe', 'talking-quill-helper.exe']) {
+        copyFileSync(resolve(source, name), resolve(broken, name));
+      }
+      await expect(
+        publishAcceptanceNative({
+          buildId: 'c'.repeat(64),
+          sourceRoot: broken,
+          outputRoot,
+          programData,
+        }),
+      ).rejects.toThrow();
+      expect(existsSync(resolve(programData, 'Talking Quill Acceptance Native'))).toBe(false);
     },
     30_000,
   );

@@ -125,6 +125,12 @@ jobs:
         env:
           TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE: ${{ inputs.force_producer_failure && '1' || '0' }}
         run: node scripts/run-windows-installed-acceptance-build-e2e.mjs | Set-Content tmp/windows-installed-acceptance-producer-result.json -Encoding utf8NoBOM
+      - name: Exercise native publication ACL and failure cleanup
+        shell: pwsh
+        run: |
+          net.exe session | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Native publication tests require an elevated Windows runner.' }
+          pnpm exec vitest run tests/integration/windows-acceptance-native-publication.test.ts
       - name: Record protected producer failure
         if: failure()
         shell: pwsh

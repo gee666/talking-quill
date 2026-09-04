@@ -17,10 +17,7 @@ import {
   MAX_ACCEPTANCE_RUN_MS,
 } from './windows-installed-acceptance.mjs';
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
-import {
-  cleanupAcceptanceNative,
-  cleanupAcceptanceNativeDescriptor,
-} from './windows-installed-acceptance-native-publication.mjs';
+import { cleanupAcceptanceNative } from './windows-installed-acceptance-native-publication.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const HEX_32 = /^[0-9a-f]{64}$/u;
@@ -183,23 +180,13 @@ export async function buildWindowsInstalledAcceptanceInputs(options, dependencie
       nativePublication: retainNativePublication ? nativePublication : null,
     });
   } catch (error) {
+    nativePublication ??= error?.nativePublication;
     primaryError = error;
   } finally {
     try {
       if (!retainNativePublication) {
         const cleanup = dependencies.cleanupAcceptanceNative ?? cleanupAcceptanceNative;
-        if (nativePublication !== undefined) {
-          await cleanup(nativePublication);
-        } else {
-          const descriptorPath = resolve(outputRoot, 'native-publication-cleanup.json');
-          try {
-            const cleanupDescriptor =
-              dependencies.cleanupAcceptanceNativeDescriptor ?? cleanupAcceptanceNativeDescriptor;
-            await cleanupDescriptor(descriptorPath);
-          } catch (error) {
-            if (error?.code !== 'ENOENT') cleanupError = error;
-          }
-        }
+        if (nativePublication !== undefined) await cleanup(nativePublication);
       }
       if (!completed && cleanupError === undefined) {
         await rm(outputRoot, { recursive: true, force: true });

@@ -30,12 +30,20 @@ export async function buildWindowsInstalledAcceptanceArtifacts(
     ...ACCEPTANCE_FAULT_PHASES.map((phase) => `validate-${phase}`),
     'seal-artifact-set',
   ];
-  for (const stage of stages) {
-    const result = await runStage(stage, options, context, Object.freeze({ ...outputs }));
-    if (result !== undefined) outputs[stage] = result;
-    if (stage === 'native-signer' && process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE === '1') {
-      throw new Error('Forced installed-acceptance producer build failure');
+  try {
+    for (const stage of stages) {
+      const result = await runStage(stage, options, context, Object.freeze({ ...outputs }));
+      if (result !== undefined) outputs[stage] = result;
+      if (stage === 'native-signer' && process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE === '1') {
+        throw new Error('Forced installed-acceptance producer build failure');
+      }
     }
+  } catch (error) {
+    const nativePublication = outputs['prepare-signing-identities']?.nativePublication;
+    if (nativePublication !== undefined && error !== null && typeof error === 'object') {
+      error.nativePublication = nativePublication;
+    }
+    throw error;
   }
   const artifactSet = outputs['seal-artifact-set'];
   if (artifactSet === null || typeof artifactSet !== 'object') {
@@ -62,6 +70,8 @@ function runNativeStage(stage, options, context, outputs) {
             outputs['prepare-signing-identities'].requestPublicKeySpkiBase64url,
           TALKING_QUILL_ACCEPTANCE_VALIDATION_PUBLIC_KEY_SPKI_BASE64URL:
             outputs['prepare-signing-identities'].validationPublicKeySpkiBase64url,
+          TALKING_QUILL_ACCEPTANCE_NATIVE_ROOT:
+            outputs['prepare-signing-identities'].nativePublication.nativeRoot,
           TALKING_QUILL_ACCEPTANCE_FAULT_VALIDATOR_SHA256: createHash('sha256')
             .update(
               readFileSync(

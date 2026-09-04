@@ -182,6 +182,32 @@ describe('Windows installed-acceptance input producer', () => {
     expect(result).toBe(sealed);
   });
 
+  it('retains the authenticated native cleanup receipt on a later stage failure', async () => {
+    const nativePublication = {
+      nativeRoot: 'C:\\ProgramData\\Talking Quill Acceptance Native\\random',
+      descriptorSha256: 'aa'.repeat(32),
+    };
+    const failure = new Error('later stage failed') as Error & {
+      nativePublication?: typeof nativePublication;
+    };
+    await expect(
+      buildWindowsInstalledAcceptanceArtifacts(
+        {},
+        {},
+        {
+          runStage: (stage: string) => {
+            if (stage === 'prepare-signing-identities') {
+              return Promise.resolve({ nativePublication });
+            }
+            if (stage === 'source-bound-synthetic-sender') throw failure;
+            return Promise.resolve({ result: 'passed' });
+          },
+        },
+      ),
+    ).rejects.toBe(failure);
+    expect(failure.nativePublication).toBe(nativePublication);
+  });
+
   it('forces failure only after the first real producer stage has started', async () => {
     const stages: string[] = [];
     process.env.TQ_ACCEPTANCE_E2E_FORCE_BUILD_FAILURE = '1';

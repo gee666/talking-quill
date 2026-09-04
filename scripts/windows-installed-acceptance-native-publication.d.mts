@@ -10,9 +10,11 @@ export interface NativePublicationDescriptor {
   readonly schemaVersion: 1;
   readonly purpose: string;
   readonly buildId: string;
+  readonly publicationId: string;
   readonly layout: 'producer' | 'bundle';
   readonly removeNativeBase: boolean;
   readonly nativeBase: string;
+  readonly nativeBaseIdentity: string;
   readonly nativeRoot: string;
   readonly userSid: string;
   readonly rootIdentity: string;
@@ -24,6 +26,7 @@ export interface NativePublicationDescriptor {
     readonly identity: string;
   };
   readonly descriptorPath: string;
+  readonly descriptorSha256: string;
 }
 
 export function publishAcceptanceNative(options: {
@@ -35,10 +38,10 @@ export function publishAcceptanceNative(options: {
 }): Promise<Readonly<NativePublicationDescriptor>>;
 export function cleanupAcceptanceNative(
   descriptor: NativePublicationDescriptor,
-  options?: { programData?: string },
+  options?: { programData?: string; descriptorSha256?: string },
 ): Promise<Readonly<{ result: string }>>;
 export function cleanupAcceptanceNativeDescriptor(
   descriptorPath: string,
-  options?: { programData?: string },
+  options: { programData?: string; descriptorSha256: string },
 ): Promise<Readonly<{ result: string }>>;
 export function validateDescriptor(value: unknown): NativePublicationDescriptor;

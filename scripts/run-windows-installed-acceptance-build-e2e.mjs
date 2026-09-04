@@ -16,6 +16,7 @@ const required = (name) => {
 const roots = [
   resolve(process.env.ProgramW6432 ?? 'C:/Program Files', 'Talking Quill'),
   resolve(process.env.ProgramData ?? 'C:/ProgramData', 'Talking Quill'),
+  resolve(process.env.ProgramData ?? 'C:/ProgramData', 'Talking Quill Acceptance Native'),
 ];
 const before = await Promise.all(roots.map(treeHash));
 const notBeforeMs = Date.now() + 5 * 60_000;
@@ -56,6 +57,15 @@ console.log(
 
 async function treeHash(path) {
   const digest = createHash('sha256');
+  const root = await lstat(path).catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (root === null) return digest.update('absent').digest('hex');
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error('Production snapshot root is not a directory');
+  }
+  digest.update('directory');
   const visit = async (directory, prefix) => {
     const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
       if (error?.code === 'ENOENT') return [];

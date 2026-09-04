@@ -86,6 +86,7 @@ jobs:
           $nativeBuildId = node -e "process.stdout.write(require('node:crypto').createHash('sha256').update('${{ github.run_id }}:'+process.env.ACCEPTANCE_PRODUCER_ARTIFACT_SET_IDENTITY).digest('hex'))"
           $nativePublication = node scripts/windows-installed-acceptance-native-publication.mjs publish-bundle --source $sourceNative --output tmp/windows-installed-acceptance --build-id $nativeBuildId | ConvertFrom-Json
           $native = [string]$nativePublication.nativeRoot
+          "TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR_SHA256=$($nativePublication.descriptorSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR=$($nativePublication.descriptorPath)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if (-not (Test-Path -LiteralPath $native)) { throw 'Protected acceptance native publication is absent.' }
           "ACCEPTANCE_MANIFEST_SHA256=$($extraction.manifestSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -131,5 +132,7 @@ jobs:
         run: |
           $descriptor = if ([string]::IsNullOrWhiteSpace($env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR)) { 'tmp/windows-installed-acceptance/native-publication-cleanup.json' } else { $env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR }
           if (Test-Path -LiteralPath $descriptor) {
-            node scripts/windows-installed-acceptance-native-publication.mjs cleanup --descriptor $descriptor
+            if ($env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Authenticated native cleanup receipt is unavailable.' }
+            $descriptor = (Resolve-Path -LiteralPath $descriptor).Path
+            node scripts/windows-installed-acceptance-native-publication.mjs cleanup --descriptor $descriptor --descriptor-sha256 $env:TQ_ACCEPTANCE_NATIVE_CLEANUP_DESCRIPTOR_SHA256
           }

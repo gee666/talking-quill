@@ -15,14 +15,17 @@ describe('sanitized subprocess diagnostics', () => {
     expect(error.message.length).toBeLessThan(1_200);
   });
 
-  it('handles absent spawn streams and redacts Unix paths', () => {
+  it('handles absent streams and never returns child-controlled diagnostics', () => {
     expect(subprocessFailure('stage', { status: null, signal: null }).message).toBe(
       'stage failed (status=none, signal=none, spawn=none)',
     );
-    expect(redactDiagnostic('open /home/runner/private/key.der failed')).toBe('<redacted>');
-    expect(redactDiagnostic('open "C:\\Users\\Jane Doe\\private\\key.der" failed')).toBe(
-      '<redacted>',
-    );
-    expect(redactDiagnostic('open \\\\server\\share\\private\\key.der failed')).toBe('<redacted>');
+    for (const diagnostic of [
+      'secret-without-a-path',
+      'open /home/runner/private/key.der failed',
+      'open "C:\\Users\\Jane Doe\\private\\key.der" failed',
+      '🔐'.repeat(2_000),
+    ]) {
+      expect(redactDiagnostic(diagnostic)).toBe('<redacted>');
+    }
   });
 });

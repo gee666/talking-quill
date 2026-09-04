@@ -7,7 +7,10 @@ import { signAcceptancePayload } from './windows-installed-acceptance-signer.mjs
 import { canonicalAcceptanceJson } from './windows-installed-acceptance-probe.mjs';
 import { ACCEPTANCE_FAULT_PHASES } from './windows-installed-acceptance-schedule.mjs';
 import { readAcceptanceSecretPaths } from './acceptance-secret-path-frame.mjs';
-import { publishAcceptanceNative } from './windows-installed-acceptance-native-publication.mjs';
+import {
+  cleanupAcceptanceNative,
+  publishAcceptanceNative,
+} from './windows-installed-acceptance-native-publication.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const mode = process.argv[2];
@@ -15,17 +18,6 @@ const outputRoot = resolve(valueAfter('--output') ?? '');
 const secrets = readAcceptanceSecretPaths();
 const sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '';
 const sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '';
-const nativePublicationBase = resolve(
-  process.env.ProgramData ?? 'C:/ProgramData',
-  'Talking Quill Acceptance Native',
-);
-const nativeRoot = resolve(
-  nativePublicationBase,
-  process.env.TALKING_QUILL_ACCEPTANCE_BUILD_ID ?? '',
-);
-const signerPath = resolve(nativeRoot, 'talking-quill-acceptance-signer.exe');
-const acceptanceBrokerPath = resolve(nativeRoot, 'talking-quill-windows-acceptance-broker.exe');
-const acceptanceBootstrapPath = resolve(nativeRoot, 'talking-quill-helper.exe');
 const nativePublication =
   mode === 'identities'
     ? await publishAcceptanceNative({
@@ -34,59 +26,58 @@ const nativePublication =
         outputRoot,
       })
     : undefined;
-const signerSha256 = await hashFile(signerPath);
-const signerBytes = (await lstat(signerPath)).size;
-const acceptanceBrokerSha256 = await hashFile(acceptanceBrokerPath);
-const acceptanceBrokerBytes = (await lstat(acceptanceBrokerPath)).size;
-const acceptanceBootstrapSha256 = await hashFile(acceptanceBootstrapPath);
-const acceptanceBootstrapBytes = (await lstat(acceptanceBootstrapPath)).size;
-const signWith = (privateKeyPath, payloadBytes) =>
-  signAcceptancePayload({
-    signerPath,
-    signerSha256,
-    signerBytes,
-    brokerPath: acceptanceBrokerPath,
-    brokerSha256: acceptanceBrokerSha256,
-    brokerBytes: acceptanceBrokerBytes,
-    bootstrapIdentity: {
-      path: acceptanceBootstrapPath,
-      sha256: acceptanceBootstrapSha256,
-      bytes: acceptanceBootstrapBytes,
-    },
-    signerSourceCommit: sourceCommit,
-    signerSourceTree: sourceTree,
-    privateKeyPath,
-    payloadBytes,
-  });
+const nativeRoot = resolve(
+  nativePublication?.nativeRoot ?? process.env.TALKING_QUILL_ACCEPTANCE_NATIVE_ROOT ?? '',
+);
+if (nativeRoot === resolve('')) throw new Error('Protected native publication root is unavailable');
+let nativeContext;
+try {
+  nativeContext = await readNativeContext(nativeRoot);
+} catch (error) {
+  await failAfterPublication(error);
+}
+const {
+  signerPath,
+  signerSha256,
+  acceptanceBrokerPath,
+  acceptanceBrokerSha256,
+  acceptanceBootstrapPath,
+  acceptanceBootstrapSha256,
+  signWith,
+} = nativeContext;
 
 if (mode === 'identities') {
-  const probe = Buffer.from('talking-quill/installed-acceptance/key-identity/v1');
-  const manifest = signWith(secrets.manifestPrivateKeyPath, probe);
-  const request = signWith(secrets.requestPrivateKeyPath, probe);
-  const validation = signWith(secrets.validationPrivateKeyPath, probe);
-  const update = signWith(secrets.updatePrivateKeyPath, probe);
-  const identities = {
-    manifestPublicKeySpkiBase64url: manifest.publicKeySpkiBase64url,
-    requestPublicKeySpkiBase64url: request.publicKeySpkiBase64url,
-    validationPublicKeySpkiBase64url: validation.publicKeySpkiBase64url,
-    updatePublicKeySpkiBase64url: update.publicKeySpkiBase64url,
-    signerPath,
-    signerSha256,
-    acceptanceBrokerPath,
-    acceptanceBrokerSha256,
-    acceptanceBootstrapPath,
-    acceptanceBootstrapSha256,
-    sourceCommit,
-    sourceTree,
-    nativePublication,
-  };
-  await mkdir(outputRoot, { recursive: true });
-  await writeFile(
-    resolve(outputRoot, 'signing-identities.json'),
-    `${canonicalAcceptanceJson(identities)}\n`,
-    { flag: 'wx', mode: 0o600 },
-  );
-  console.log(canonicalAcceptanceJson(identities));
+  try {
+    const probe = Buffer.from('talking-quill/installed-acceptance/key-identity/v1');
+    const manifest = signWith(secrets.manifestPrivateKeyPath, probe);
+    const request = signWith(secrets.requestPrivateKeyPath, probe);
+    const validation = signWith(secrets.validationPrivateKeyPath, probe);
+    const update = signWith(secrets.updatePrivateKeyPath, probe);
+    const identities = {
+      manifestPublicKeySpkiBase64url: manifest.publicKeySpkiBase64url,
+      requestPublicKeySpkiBase64url: request.publicKeySpkiBase64url,
+      validationPublicKeySpkiBase64url: validation.publicKeySpkiBase64url,
+      updatePublicKeySpkiBase64url: update.publicKeySpkiBase64url,
+      signerPath,
+      signerSha256,
+      acceptanceBrokerPath,
+      acceptanceBrokerSha256,
+      acceptanceBootstrapPath,
+      acceptanceBootstrapSha256,
+      sourceCommit,
+      sourceTree,
+      nativePublication,
+    };
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(
+      resolve(outputRoot, 'signing-identities.json'),
+      `${canonicalAcceptanceJson(identities)}\n`,
+      { flag: 'wx', mode: 0o600 },
+    );
+    console.log(canonicalAcceptanceJson(identities));
+  } catch (error) {
+    await failAfterPublication(error);
+  }
 } else if (mode === 'manifest') {
   const payloadPath = resolve(outputRoot, 'unsigned-acceptance-manifest.json');
   const payloadBytes = await readFile(payloadPath);
@@ -115,6 +106,57 @@ if (mode === 'identities') {
   console.log(canonicalAcceptanceJson(artifactSet));
 } else {
   throw new Error('Unknown acceptance artifact sealing mode');
+}
+
+async function readNativeContext(nativeRoot) {
+  const signerPath = resolve(nativeRoot, 'talking-quill-acceptance-signer.exe');
+  const acceptanceBrokerPath = resolve(nativeRoot, 'talking-quill-windows-acceptance-broker.exe');
+  const acceptanceBootstrapPath = resolve(nativeRoot, 'talking-quill-helper.exe');
+  const signerSha256 = await hashFile(signerPath);
+  const signerBytes = (await lstat(signerPath)).size;
+  const acceptanceBrokerSha256 = await hashFile(acceptanceBrokerPath);
+  const acceptanceBrokerBytes = (await lstat(acceptanceBrokerPath)).size;
+  const acceptanceBootstrapSha256 = await hashFile(acceptanceBootstrapPath);
+  const acceptanceBootstrapBytes = (await lstat(acceptanceBootstrapPath)).size;
+  return {
+    signerPath,
+    signerSha256,
+    acceptanceBrokerPath,
+    acceptanceBrokerSha256,
+    acceptanceBootstrapPath,
+    acceptanceBootstrapSha256,
+    signWith: (privateKeyPath, payloadBytes) =>
+      signAcceptancePayload({
+        signerPath,
+        signerSha256,
+        signerBytes,
+        brokerPath: acceptanceBrokerPath,
+        brokerSha256: acceptanceBrokerSha256,
+        brokerBytes: acceptanceBrokerBytes,
+        bootstrapIdentity: {
+          path: acceptanceBootstrapPath,
+          sha256: acceptanceBootstrapSha256,
+          bytes: acceptanceBootstrapBytes,
+        },
+        signerSourceCommit: sourceCommit,
+        signerSourceTree: sourceTree,
+        privateKeyPath,
+        payloadBytes,
+      }),
+  };
+}
+
+async function failAfterPublication(primaryError) {
+  if (nativePublication === undefined) throw primaryError;
+  try {
+    await cleanupAcceptanceNative(nativePublication);
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      'Acceptance identity sealing and native cleanup failed',
+    );
+  }
+  throw primaryError;
 }
 
 async function sealArtifactSet() {
