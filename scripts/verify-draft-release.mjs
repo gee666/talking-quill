@@ -6,7 +6,10 @@ import { parseReleaseTag, releaseConfig } from './release-config.mjs';
 import { validateReleaseManifest } from './release-manifest.mjs';
 
 export function verifyDraftRelease(rawArguments) {
-  const args = rawArguments.filter((argument) => argument !== '--');
+  const ordinaryUnsigned = rawArguments.includes('--ordinary-unsigned');
+  const args = rawArguments.filter(
+    (argument) => argument !== '--' && argument !== '--ordinary-unsigned',
+  );
   if (args.length !== 6)
     throw new Error(
       'Usage: verify-draft-release <tag> <commit> <manifest> <checksums> <GitHub-API-response> <downloaded-assets>.',
@@ -32,7 +35,7 @@ export function verifyDraftRelease(rawArguments) {
   const expectedNames = [
     ...manifest.assets.map((asset) => asset.name),
     'release-manifest.json',
-    'release-publication-manifest-v1.json',
+    ...(ordinaryUnsigned ? [] : ['release-publication-manifest-v1.json']),
     'SHA256SUMS.txt',
   ].sort();
   const actualAssets = response.assets?.map((asset) => asset.name).sort();

@@ -1,15 +1,13 @@
-# Unsigned Windows release CI
+# Ordinary unsigned Windows release
 
-Run **Build Windows x64 and ARM64 native setup release candidates** on the protected default branch. The dispatch has no inputs. The version comes from the coordinated application source, not a fixed tag.
+Dispatch **Build Windows x64 and ARM64 native setup release candidates** on `master`. There are no inputs, repository secrets, protected environments or baseline-workflow prerequisites. Versions must agree across the source packages.
 
-A successful run automatically starts **Publish Windows x64 and ARM64 unsigned owner installers** through `workflow_run`. The publisher checks the producing workflow, repository, default branch, commit and successful conclusion before downloading its artifacts. It creates a draft, verifies the remote bytes, then publishes an immutable stable GitHub release. The publisher's manual dispatch remains available for retrying publication of a successful candidate run with its exact tag.
+The workflow runs source validation and security audits, builds the current fresh Windows x64 and ARM64 native installers, inspects packages, preserves provenance and runs cancellation smoke tests on architecture-native hosted runners. Ordinary assembly consumes the stage script's four-file output, including `RELEASE.json`, without passing it through the incompatible signed/update assembler.
 
-Source validation, security audits, package inspection, provenance, architecture-native UI smoke tests, fresh-install lifecycle tests and the protected local migration baseline checks remain required. Signed publication inventories, attestations, rollback checks and protected publication controls also remain in place.
+A successful run automatically starts **Publish Windows x64 and ARM64 unsigned owner installers**. Only that publisher has `contents: write`. It authenticates the canonical repository's successful default-branch producer, requires its commit to remain the current `master` tip, and downloads artifacts from that exact run. It binds the manifest to the producer, rejects an existing release/tag, uploads a draft, downloads and byte-verifies all assets, then publishes and verifies the public latest release and tag commit. The publisher rechecks the current tip before creating and publishing the draft.
 
-The release no longer requires x64/ARM64 real-reboot run IDs or an x64 protected installed-acceptance run ID. Those workflows remain separate diagnostics. CI does not manufacture their evidence or claim they passed. `windows-release-validation.json` inventories the automated lifecycle evidence and explicitly records real reboot and protected installed acceptance as `not-collected`. The signed publication envelope's existing `promotionEvidenceSha256` field binds this report for fresh releases, preserving the installed client's envelope format. Historical signed lifecycle evidence remains supported by the publication tooling.
+Only the automatically supplied `GITHUB_TOKEN` is needed. GitHub Actions must be enabled and repository policy must permit the publisher's declared write permission. Both Windows hosted runner architectures must be available.
 
-## Repository prerequisites
+The release is unsigned. It includes hashes, provenance and automated native smoke results, not a signed publication envelope or update feed. It does not claim real-reboot, migration or protected installed-acceptance checks passed. The separate signed/manual tools remain available but are not prerequisites for this ordinary fresh-install release.
 
-Input-free dispatch does not bypass protected environments. The existing `release-trust`, `release-signing`, `release-publication` and `windows-local-migration-trust` configuration, required approvals, control-plane token, publication-manifest signing key, local 0.0.67 baseline variables and runner availability still apply. The promotion-evidence signing key is no longer required by release-control preflight. Other existing release-control checks were not relaxed. A missing secret, baseline, approval or immutable-release setting still fails closed.
-
-Use a new coordinated version before publishing a new release. Rerunning publication does not overwrite an existing tag or release.
+Use a new coordinated version for a new release. Failed publication may leave a draft for inspection; existing releases and tags are never overwritten.

@@ -17,7 +17,6 @@ const realRebootWorkflow = readFileSync(
 );
 const stageScript = readFileSync('scripts/stage-unsigned-release.mjs', 'utf8');
 const assembleScript = readFileSync('scripts/assemble-release.mjs', 'utf8');
-const promotionScript = readFileSync('scripts/windows-promotion-evidence.mjs', 'utf8');
 
 function section(start: string, end?: string): string {
   const startIndex = workflow.indexOf(`\n  ${start}:`);
@@ -28,27 +27,24 @@ function section(start: string, end?: string): string {
 }
 
 describe('Windows native release workflow', () => {
-  it('needs no manual evidence inputs and automatically starts publication after success', () => {
+  it('uses an input-free, secret-free ordinary release path', () => {
     expect(workflow.slice(0, workflow.indexOf('permissions:'))).not.toContain('inputs:');
-    expect(workflow).not.toContain('reboot_evidence_');
-    expect(workflow).not.toContain('installed_acceptance_x64_run_id');
-    expect(workflow).not.toContain('windows-promotion-evidence.mjs');
-    expect(workflow).not.toContain('v0.0.69');
-    expect(workflow).toContain('targetVersion=$targetManifest.version');
-    expect(workflow).toContain('node scripts/windows-release-validation.mjs release-artifacts');
-    expect(publishWorkflow).toContain('workflow_run:');
+    for (const source of [workflow, publishWorkflow]) {
+      expect(source).not.toContain('secrets.');
+      expect(source).not.toContain('environment:');
+      expect(source).not.toContain('release-control-preflight.mjs');
+      expect(source).not.toContain('windows-promotion-evidence.mjs');
+      expect(source).not.toContain('publication-manifest.mjs');
+      expect(source).not.toContain('reboot_evidence_');
+      expect(source).not.toContain('installed_acceptance_x64_run_id');
+      expect(source).not.toContain('v0.0.69');
+    }
     const producerName = /^name: (.+)$/mu.exec(workflow)?.[1];
-    if (producerName === undefined) throw new Error('Candidate workflow name is missing');
-    expect(publishWorkflow).toContain(`workflows: [${producerName}]`);
+    expect(publishWorkflow).toContain(`workflows: [${String(producerName)}]`);
     expect(publishWorkflow).toContain('types: [completed]');
     expect(publishWorkflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(publishWorkflow).toContain('github.event.workflow_run.id');
-    expect(publishWorkflow).toContain('gh release create');
-    expect(publishWorkflow).not.toContain('windows-reboot-acceptance-$arch.json');
-    expect(publishWorkflow).not.toContain('windows-promotion-evidence.mjs');
-    expect(publishWorkflow).toContain(
-      'node scripts/windows-release-validation.mjs release-artifacts --verify',
-    );
+    expect(publishWorkflow).toContain('gh release edit');
   });
 
   it('runs validation and builds only the current fresh trust-root package', () => {
@@ -135,38 +131,6 @@ describe('Windows native release workflow', () => {
     );
   });
 
-  it('uses an actual same-repository local baseline artifact and proves preservation', () => {
-    const migration = section('migration-lifecycle', 'fresh-lifecycle');
-    expect(migration).toContain('environment: windows-local-migration-trust');
-    expect(migration).toContain('TALKING_QUILL_LOCAL_0067_X64_BASELINE_RUN_ID');
-    expect(migration).toContain('TALKING_QUILL_LOCAL_0067_ARM64_BASELINE_RUN_ID');
-    expect(migration).toContain(
-      "gh run download $env:BASELINE_RUN_ID --repo '${{ github.repository }}'",
-    );
-    expect(migration).toContain(
-      "$run.path -cne '.github/workflows/windows-local-0067-baseline.yml'",
-    );
-    expect(migration).toContain('BASELINE_ARTIFACT_DIGEST');
-    expect(migration).toContain('BASELINE_MANIFEST_SHA256');
-    expect(migration).not.toContain('Invoke-WebRequest');
-    expect(migration).toContain("mode='local-uninstall-preserve-fresh'");
-    expect(migration).toContain("provenance='local-non-public'");
-    expect(migration).toContain('installedManifestUtf8Base64');
-    expect(migration).toContain('installedManifest=$installedManifest');
-    expect(migration).toContain('installedReleaseBuildDigest');
-    expect(migration).toContain('installedGatewaySha256');
-    expect(migration).toContain('installedOwnerSha256');
-    expect(migration).toContain('updaterMarkerPresent=$false');
-    expect(migration).toContain('profileInventoryAfterUninstall');
-    expect(migration).toContain('modelInventoryAfterFresh');
-    expect(migration).toContain('sentinelInventoryAfterUninstall');
-    expect(migration).toContain('sentinelInventoryAfterFresh');
-    expect(migration).toContain('machineQuitObserved');
-    expect(migration).toContain('singletonReleased');
-    expect(migration).toContain('uninstallResidue=@($machineResidue)');
-    expect(migration).toContain('windows-${{ matrix.arch }}-local-migration-evidence');
-  });
-
   it('hands the reboot to Windows and binds accepted shutdown evidence', () => {
     expect(realRebootWorkflow).toContain("Join-Path $env:SystemRoot 'System32\\shutdown.exe'");
     expect(realRebootWorkflow).toContain('& $shutdown /r /t 30');
@@ -194,23 +158,17 @@ describe('Windows native release workflow', () => {
     );
   });
 
-  it('signs and publishes migration evidence while excluding updater and fault binaries', () => {
+  it('requires native smoke and exact staged provenance before ordinary assembly', () => {
     const assemble = section('assemble');
-    expect(assemble).toContain(
-      'needs: [validate, package, smoke, migration-lifecycle, fresh-lifecycle]',
-    );
-    expect(assemble).toContain('windows-*-local-migration-evidence');
-    expect(assemble).toContain('windows-terminal-fault-candidate-${process.env.ARCH}.json');
-    expect(assemble).not.toContain('cp installed-evidence/*.json');
-    expect(assemble).not.toContain('Talking-Quill-*-win-$arch-update.exe');
-    expect(promotionScript).toContain("mode: 'fresh-trust-root'");
-    expect(promotionScript).toContain("provenance: 'local-non-public'");
-    expect(promotionScript).toContain("operation === 'local-uninstall-preserve-fresh'");
-    expect(publishWorkflow).toContain('windows-local-migration-$arch.json');
-    expect(publishWorkflow).toContain(
-      'Fresh trust-root publication contains forbidden updater lineage assets.',
-    );
-    expect(workflow).toContain('Nonpromotable terminal acceptance setup entered release assembly.');
-    expect(workflow).not.toMatch(/cp .*terminalAcceptance.* release-artifacts/u);
+    expect(assemble).toContain('needs: [validate, package, smoke]');
+    expect(assemble).toContain('assemble-ordinary-unsigned-release.mjs');
+    expect(assemble).toContain('node scripts/release-checksums.mjs');
+    expect(workflow).not.toContain('migration-lifecycle');
+    expect(workflow).not.toContain('windows-terminal-fault-artifacts');
+    const smoke = section('smoke', 'assemble');
+    expect(smoke).toContain('runner: windows-11-arm');
+    expect(smoke).toContain('runner: windows-latest');
+    expect(smoke).toContain('run-windows-installer-ui-smoke.mjs');
+    expect(smoke).toContain('windows-installer-ui-evidence.mjs');
   });
 });

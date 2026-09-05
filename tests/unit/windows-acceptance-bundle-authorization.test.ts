@@ -53,9 +53,9 @@ describe('Windows acceptance bundle authorization', () => {
     expect(producerWorkflow).toContain('Get-FileHash -LiteralPath $release');
     expect(producerWorkflow).toContain('Get-FileHash -LiteralPath $provenance');
     const releaseWorkflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
-    expect(releaseWorkflow).toContain('installed-acceptance-x64/producer-result.json');
-    expect(releaseWorkflow).toContain('--authorization-sha256');
-    expect(releaseWorkflow).toContain('--manifest-sha256');
+    expect(releaseWorkflow).not.toContain('installed-acceptance-x64/producer-result.json');
+    expect(releaseWorkflow).not.toContain('--authorization-sha256');
+    expect(releaseWorkflow).not.toContain('--manifest-sha256');
   });
   it('requires a pinned P-256 signature bound to URL, digest, architecture, and time', () => {
     const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });

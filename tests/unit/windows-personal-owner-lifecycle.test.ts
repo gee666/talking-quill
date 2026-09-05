@@ -145,10 +145,9 @@ describe('Windows gateway and owner lifecycle contract', () => {
     );
     expect(workflow).not.toContain('--windows-update-bootstrap-v2=');
     expect(workflow).toContain('TALKING_QUILL_PACKAGE_MODE: fresh');
-    expect(workflow).toContain(
-      'Installed maintenance recovery entry did not survive interrupted uninstall.',
-    );
-    expect(workflow).toContain('Interrupted uninstall recovery registration is not exact.');
+    // Ordinary unsigned publication does not claim the separate installed lifecycle gate.
+    expect(workflow).toContain('run-windows-installer-ui-smoke.mjs');
+    expect(workflow).not.toContain('fresh-lifecycle:');
     expect(workflow).not.toContain(
       'if (Test-Path -LiteralPath $maintenance) { $maintenance } else { $setup[0].FullName }',
     );

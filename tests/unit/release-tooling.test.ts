@@ -25,80 +25,91 @@ beforeEach(() => {
 });
 
 describe('active release tooling', () => {
-  it('verifies exact draft identity, inventory, checksums, and downloaded bytes', () => {
-    const artifact = 'Talking-Quill-1.0.0-win-x64.exe';
-    writeFileSync(resolve(fixture, artifact), 'installer bytes');
-    const manifest = sealReleaseManifest({
-      schemaVersion: 2,
-      repository: 'gee666/talking-quill',
-      tag: 'v1.0.0',
-      version: '1.0.0',
-      sourceCommit: commit,
-      sourceTree,
-      platform: 'win',
-      architecture: 'x64',
-      promotable: true,
-      workflowRunId: null,
-      generatedAt: null,
-      provenance: [
-        {
-          name: 'provenance-win-x64-setup.json',
-          platform: 'win',
-          arch: 'x64',
-          mode: 'setup',
-          sourceTree,
-          sourceTreeSha256: 'a'.repeat(64),
-        },
-        {
-          name: 'provenance-win-x64-update.json',
-          platform: 'win',
-          arch: 'x64',
-          mode: 'update',
-          sourceTree,
-          sourceTreeSha256: 'a'.repeat(64),
-        },
-      ],
-      assets: [{ name: artifact, bytes: 15, sha256: sha256(resolve(fixture, artifact)) }],
-    });
-    const manifestPath = resolve(fixture, 'release-manifest.json');
-    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
-    const publicationManifestPath = resolve(fixture, 'release-publication-manifest-v1.json');
-    writeFileSync(publicationManifestPath, '{"signed":"publication"}\n');
-    const checksumsPath = resolve(fixture, 'SHA256SUMS.txt');
-    writeFileSync(
-      checksumsPath,
-      `${sha256(resolve(fixture, artifact))}  ${artifact}\n${sha256(manifestPath)}  release-manifest.json\n${sha256(publicationManifestPath)}  release-publication-manifest-v1.json\n`,
-    );
-    const names = [
-      artifact,
-      'release-manifest.json',
-      'release-publication-manifest-v1.json',
-      'SHA256SUMS.txt',
-    ];
-    for (const name of names) cpSync(resolve(fixture, name), resolve(downloaded, name));
-    const responsePath = resolve(fixture, 'draft-response.json');
-    const response = {
-      draft: true,
-      prerelease: false,
-      tag_name: 'v1.0.0',
-      target_commitish: commit,
-      html_url: 'https://github.com/gee666/talking-quill/releases/tag/untagged-0123456789abcdef',
-      assets: names.map((name) => ({
-        name,
-        size: readFileSync(resolve(fixture, name)).length,
-        digest: `sha256:${sha256(resolve(fixture, name))}`,
-      })),
-    };
-    writeFileSync(responsePath, JSON.stringify(response));
-    const args = ['v1.0.0', commit, manifestPath, checksumsPath, responsePath, downloaded];
+  it.each([false, true])(
+    'verifies exact draft identity and bytes, ordinary unsigned=%s',
+    (ordinaryUnsigned) => {
+      const artifact = 'Talking-Quill-1.0.0-win-x64.exe';
+      writeFileSync(resolve(fixture, artifact), 'installer bytes');
+      const manifest = sealReleaseManifest({
+        schemaVersion: 2,
+        repository: 'gee666/talking-quill',
+        tag: 'v1.0.0',
+        version: '1.0.0',
+        sourceCommit: commit,
+        sourceTree,
+        platform: 'win',
+        architecture: 'x64',
+        promotable: true,
+        workflowRunId: null,
+        generatedAt: null,
+        provenance: [
+          {
+            name: 'provenance-win-x64-setup.json',
+            platform: 'win',
+            arch: 'x64',
+            mode: 'setup',
+            sourceTree,
+            sourceTreeSha256: 'a'.repeat(64),
+          },
+          {
+            name: 'provenance-win-x64-update.json',
+            platform: 'win',
+            arch: 'x64',
+            mode: 'update',
+            sourceTree,
+            sourceTreeSha256: 'a'.repeat(64),
+          },
+        ],
+        assets: [{ name: artifact, bytes: 15, sha256: sha256(resolve(fixture, artifact)) }],
+      });
+      const manifestPath = resolve(fixture, 'release-manifest.json');
+      writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+      const publicationManifestPath = resolve(fixture, 'release-publication-manifest-v1.json');
+      if (!ordinaryUnsigned) writeFileSync(publicationManifestPath, '{"signed":"publication"}\n');
+      const checksumsPath = resolve(fixture, 'SHA256SUMS.txt');
+      writeFileSync(
+        checksumsPath,
+        `${sha256(resolve(fixture, artifact))}  ${artifact}\n${sha256(manifestPath)}  release-manifest.json\n${ordinaryUnsigned ? '' : `${sha256(publicationManifestPath)}  release-publication-manifest-v1.json\n`}`,
+      );
+      const names = [
+        artifact,
+        'release-manifest.json',
+        ...(ordinaryUnsigned ? [] : ['release-publication-manifest-v1.json']),
+        'SHA256SUMS.txt',
+      ];
+      for (const name of names) cpSync(resolve(fixture, name), resolve(downloaded, name));
+      const responsePath = resolve(fixture, 'draft-response.json');
+      const response = {
+        draft: true,
+        prerelease: false,
+        tag_name: 'v1.0.0',
+        target_commitish: commit,
+        html_url: 'https://github.com/gee666/talking-quill/releases/tag/untagged-0123456789abcdef',
+        assets: names.map((name) => ({
+          name,
+          size: readFileSync(resolve(fixture, name)).length,
+          digest: `sha256:${sha256(resolve(fixture, name))}`,
+        })),
+      };
+      writeFileSync(responsePath, JSON.stringify(response));
+      const args = [
+        ...(ordinaryUnsigned ? ['--ordinary-unsigned'] : []),
+        'v1.0.0',
+        commit,
+        manifestPath,
+        checksumsPath,
+        responsePath,
+        downloaded,
+      ];
 
-    expect(runVerifyDraft(args)).toContain('Authenticated draft release verified.');
-    writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, promotable: false })}\n`);
-    expect(() => runVerifyDraft(args)).toThrow();
-    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
-    writeFileSync(resolve(downloaded, artifact), 'changed bytes');
-    expect(() => runVerifyDraft(args)).toThrow();
-  });
+      expect(runVerifyDraft(args)).toContain('Authenticated draft release verified.');
+      writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, promotable: false })}\n`);
+      expect(() => runVerifyDraft(args)).toThrow();
+      writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+      writeFileSync(resolve(downloaded, artifact), 'changed bytes');
+      expect(() => runVerifyDraft(args)).toThrow();
+    },
+  );
 
   it('assembles the canonical Windows x64 identity and provenance set', () => {
     createAssemblyFixture();

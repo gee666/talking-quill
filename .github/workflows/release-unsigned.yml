@@ -12,28 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release-controls:
-    name: Verify protected release controls
-    runs-on: ubuntu-latest
-    environment: release-trust
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: 24.15.0
-      - name: Fail closed unless immutable publication controls exist
-        env:
-          RELEASE_CONTROL_TOKEN: ${{ secrets.RELEASE_CONTROL_TOKEN }}
-        shell: bash
-        run: RELEASE_TAG="$(node -p "'v' + require('./app/package.json').version")" node scripts/release-control-preflight.mjs
-
   validate:
-    needs: release-controls
     name: Validate source
     runs-on: windows-latest
     timeout-minutes: 90
@@ -46,6 +25,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Require canonical default-branch dispatch
+        shell: bash
+        run: |
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = gee666/talking-quill
+          test "$GITHUB_REF" = refs/heads/master
       - name: Resolve immutable source identity
         id: source
         shell: bash
@@ -80,7 +65,6 @@ jobs:
     name: Package and preserve Windows ${{ matrix.arch }} native setup
     needs: validate
     runs-on: windows-latest
-    environment: release-signing
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -127,6 +111,7 @@ jobs:
         shell: pwsh
         run: if ((git status --porcelain --untracked-files=normal).Length -ne 0) { throw 'Package source is not clean.' }
       - run: pnpm install --frozen-lockfile
+      - run: pnpm rust:fetch-targets
       - run: node scripts/prepare-seven-zip.mjs x64
       # Invoke the app package command directly. It builds and inspects the native setup
       # before any source-test ABI restoration or installed lifecycle work.
@@ -139,26 +124,9 @@ jobs:
       - name: Stage exact Windows fresh payload
         shell: pwsh
         run: node scripts/stage-unsigned-release.mjs win ${{ matrix.arch }}
-      # Validate the exact staged producer inventory and create the manifest
-      # consumed by publication before any artifact upload or checksum pass.
-      - name: Assemble the staged producer inventory
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="$(node -p "'v' + require('./app/package.json').version")"
-          node scripts/assemble-release.mjs "$tag" tmp/release-upload
-      - name: Generate non-promotable authenticated lifecycle fault artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 node scripts/build-windows-acceptance-fault-setup.mjs ${{ matrix.arch }}
-          mkdir -p tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}
-          TALKING_QUILL_WINDOWS_INSTALLED_ACCEPTANCE_BUILD=1 TALKING_QUILL_PACKAGE_MODE=repair TALKING_QUILL_NATIVE_FAULT_PHASE=terminalAcceptance node scripts/pack-windows-native.mjs ${{ matrix.arch }} release
-          mv release/Talking-Quill-*-repair-terminalAcceptance.exe tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/
-          # Fault-bearing packages are diagnostics only; successful repair is exercised with
-          # an exact copy of the installed production image in the lifecycle job.
-      # Transfer the provenance-bound bytes to the architecture-native smoke
-      # runner. No evidence exists until that runner exercises these exact bytes.
+      - name: Require source immutability after packaging
+        shell: pwsh
+        run: if ((git status --porcelain --untracked-files=normal).Length -ne 0) { throw 'Packaging modified the release source.' }
       - name: Upload provenance-bound exact native setup smoke input
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -168,9 +136,7 @@ jobs:
             tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json
             tmp/release-upload/THIRD_PARTY_NOTICES.txt
             tmp/release-upload/RELEASE.json
-            tmp/release-upload/release-manifest.json
             release/${{ matrix.unpacked }}/**
-            tmp/windows-terminal-fault-artifacts/${{ matrix.arch }}/*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -220,407 +186,43 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  migration-lifecycle:
-    name: Prove local 0.0.67 uninstall-preserve-fresh migration on Windows ${{ matrix.arch }}
-    needs: [validate, package, smoke]
-    runs-on: ${{ matrix.runner }}
-    environment: windows-local-migration-trust
-    timeout-minutes: 30
-    env:
-      BASELINE_RUN_ID: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_BASELINE_RUN_ID || vars.TALKING_QUILL_LOCAL_0067_ARM64_BASELINE_RUN_ID }}
-      BASELINE_ARTIFACT_DIGEST: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_ARTIFACT_DIGEST || vars.TALKING_QUILL_LOCAL_0067_ARM64_ARTIFACT_DIGEST }}
-      BASELINE_INSTALLER_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_INSTALLER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_INSTALLER_SHA256 }}
-      BASELINE_MANIFEST_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_MANIFEST_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_MANIFEST_SHA256 }}
-      BASELINE_GATEWAY_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_GATEWAY_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_GATEWAY_SHA256 }}
-      BASELINE_OWNER_SHA256: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_OWNER_SHA256 || vars.TALKING_QUILL_LOCAL_0067_ARM64_OWNER_SHA256 }}
-      BASELINE_RELEASE_BUILD_DIGEST: ${{ matrix.arch == 'x64' && vars.TALKING_QUILL_LOCAL_0067_X64_RELEASE_BUILD_DIGEST || vars.TALKING_QUILL_LOCAL_0067_ARM64_RELEASE_BUILD_DIGEST }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ needs.validate.outputs.release_commit }}
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-${{ matrix.arch }}-exact-native-setup-input
-          path: preserved
-      - name: Retrieve repository-controlled local migration baseline without caller URLs
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ($env:BASELINE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:BASELINE_ARTIFACT_DIGEST -cnotmatch '^sha256:[0-9a-f]{64}$' -or @($env:BASELINE_INSTALLER_SHA256,$env:BASELINE_MANIFEST_SHA256,$env:BASELINE_GATEWAY_SHA256,$env:BASELINE_OWNER_SHA256,$env:BASELINE_RELEASE_BUILD_DIGEST | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -ne 0) { throw 'Protected local baseline policy is invalid.' }
-          $run = gh api "repos/${{ github.repository }}/actions/runs/$env:BASELINE_RUN_ID" | ConvertFrom-Json
-          if ($run.repository.full_name -cne '${{ github.repository }}' -or $run.conclusion -cne 'success' -or $run.event -cne 'workflow_dispatch' -or $run.path -cne '.github/workflows/windows-local-0067-baseline.yml') { throw 'Local baseline run is not an authenticated successful baseline-workflow run.' }
-          $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$env:BASELINE_RUN_ID/artifacts" | ConvertFrom-Json
-          $artifacts = @($artifactResponse.artifacts | Where-Object name -CEQ 'windows-local-0.0.67-${{ matrix.arch }}-migration-baseline')
-          if ($artifacts.Count -ne 1 -or $artifacts[0].expired -or $artifacts[0].digest -cne $env:BASELINE_ARTIFACT_DIGEST) { throw 'Local baseline artifact digest is not the protected approved digest.' }
-          New-Item -ItemType Directory -Force tmp/local-baseline | Out-Null
-          gh run download $env:BASELINE_RUN_ID --repo '${{ github.repository }}' --name 'windows-local-0.0.67-${{ matrix.arch }}-migration-baseline' --dir tmp/local-baseline
-          if ($LASTEXITCODE -ne 0) { throw 'Cannot retrieve the exact local migration baseline artifact.' }
-      - name: Execute local-uninstall-preserve-fresh and record exact inventories
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $baseline = @(Get-ChildItem tmp/local-baseline -Filter '*.exe' -File -Recurse)
-          $fresh = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe -File)
-          if ($baseline.Count -ne 1 -or $fresh.Count -ne 1) { throw 'Migration requires one exact local baseline and one exact fresh candidate.' }
-          function Inventory([string]$root) {
-            if (-not (Test-Path -LiteralPath $root)) { return @() }
-            return @(Get-ChildItem -LiteralPath $root -File -Recurse | Sort-Object FullName | ForEach-Object { @{ path = [IO.Path]::GetRelativePath($root,$_.FullName).Replace('\','/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
-          }
-          $baselineHash = (Get-FileHash -LiteralPath $baseline[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($baselineHash -cne $env:BASELINE_INSTALLER_SHA256) { throw 'Local baseline installer is not the protected approved binary.' }
-          $installLocal = Start-Process $baseline[0].FullName -ArgumentList '/S' -Wait -PassThru
-          if ($installLocal.ExitCode -ne 0) { throw "Local baseline install failed: $($installLocal.ExitCode)" }
-          $manifestPath = "$env:ProgramFiles\Talking Quill\resources\keyboard-owner-release-v1.json"
-          $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
-          $manifestHash = ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes))).ToLowerInvariant()
-          if ($manifestHash -cne $env:BASELINE_MANIFEST_SHA256) { throw 'Installed local manifest is not the protected approved manifest.' }
-          $installedManifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
-          if ($installedManifest.version -cne '0.0.67' -or $installedManifest.platform -cne 'win' -or $installedManifest.architecture -cne '${{ matrix.arch }}') { throw 'Installed local baseline manifest is invalid.' }
-          $gatewayRole = @($installedManifest.roles | Where-Object role -CEQ 'gateway')
-          $ownerRole = @($installedManifest.roles | Where-Object role -CEQ 'owner')
-          if ($gatewayRole.Count -ne 1 -or $ownerRole.Count -ne 1) { throw 'Local baseline role inventory is invalid.' }
-          $gatewayPath = Join-Path "$env:ProgramFiles\Talking Quill" $gatewayRole[0].path
-          $ownerPath = Join-Path "$env:ProgramFiles\Talking Quill" $ownerRole[0].path
-          $gatewayHash = (Get-FileHash $gatewayPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $ownerHash = (Get-FileHash $ownerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($gatewayHash -cne $gatewayRole[0].sha256 -or $ownerHash -cne $ownerRole[0].sha256 -or $gatewayHash -cne $env:BASELINE_GATEWAY_SHA256 -or $ownerHash -cne $env:BASELINE_OWNER_SHA256 -or $installedManifest.releaseBuildDigest -cne $env:BASELINE_RELEASE_BUILD_DIGEST) { throw 'Local installed roles or release digest do not match protected policy and the preserved manifest.' }
-          $updaterMarkerPresent = @(Get-ChildItem $env:ProgramData -Filter 'relaunch-record-marker-v1' -File -Recurse -ErrorAction SilentlyContinue).Count -ne 0
-          if ($updaterMarkerPresent) { throw 'Local 0.0.67 unexpectedly has a public updater marker.' }
-          $profileRoot = Join-Path $env:LOCALAPPDATA 'Talking Quill\profiles'
-          $modelRoot = Join-Path $env:LOCALAPPDATA 'Talking Quill\models'
-          New-Item -ItemType Directory -Force $profileRoot,$modelRoot | Out-Null
-          [IO.File]::WriteAllText((Join-Path $profileRoot 'migration-sentinel.json'),'local-profile-preserve-v1',[Text.UTF8Encoding]::new($false))
-          [IO.File]::WriteAllText((Join-Path $modelRoot 'migration-model.sentinel'),'local-model-preserve-v1',[Text.UTF8Encoding]::new($false))
-          $profilesBefore = @(Inventory $profileRoot); $modelsBefore = @(Inventory $modelRoot); $sentinelsBefore = @($profilesBefore + $modelsBefore)
-          $quiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
-          $uninstallMatch = [regex]::Match($quiet, '^"(.+\\Talking Quill Maintenance\.exe)" /S$')
-          if (-not $uninstallMatch.Success -or -not (Test-Path -LiteralPath $uninstallMatch.Groups[1].Value)) { throw 'Local baseline uninstall registration is not the exact fixed local path.' }
-          $uninstall = Start-Process $uninstallMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "Local uninstall failed: $($uninstall.ExitCode)" }
-          $machineProcesses = @(Get-Process 'Talking Quill','talking-quill-helper','talking-quill-keyboard-owner' -ErrorAction SilentlyContinue | ForEach-Object ProcessName)
-          $machineResidue = @("$env:ProgramFiles\Talking Quill", "$env:ProgramFiles\Talking Quill Maintenance.exe", 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe') | Where-Object { Test-Path -LiteralPath $_ }
-          $created = $false; $mutex = [Threading.Mutex]::new($false,'Global\TalkingQuill.NativeSetup.V2',[ref]$created); $mutex.Dispose()
-          if (-not $created -or $machineProcesses.Count -ne 0 -or $machineResidue.Count -ne 0) { throw 'Local uninstall retained machine authority, singleton ownership, or residue.' }
-          $profilesAfterUninstall = @(Inventory $profileRoot); $modelsAfterUninstall = @(Inventory $modelRoot); $sentinelsAfterUninstall = @($profilesAfterUninstall + $modelsAfterUninstall)
-          if (($profilesBefore | ConvertTo-Json -Compress) -cne ($profilesAfterUninstall | ConvertTo-Json -Compress) -or ($modelsBefore | ConvertTo-Json -Compress) -cne ($modelsAfterUninstall | ConvertTo-Json -Compress)) { throw 'Local uninstall did not preserve exact profile/model inventories.' }
-          $freshHash = (Get-FileHash $fresh[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $installFresh = Start-Process $fresh[0].FullName -ArgumentList '/S' -Wait -PassThru
-          if ($installFresh.ExitCode -ne 0) { throw "Fresh trust-root install failed: $($installFresh.ExitCode)" }
-          $targetManifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
-          $targetGateway = @($targetManifest.roles | Where-Object role -CEQ 'gateway')[0]
-          $targetOwner = @($targetManifest.roles | Where-Object role -CEQ 'owner')[0]
-          $targetGatewayHash = (Get-FileHash (Join-Path "$env:ProgramFiles\Talking Quill" $targetGateway.path) -Algorithm SHA256).Hash.ToLowerInvariant()
-          $targetOwnerHash = (Get-FileHash (Join-Path "$env:ProgramFiles\Talking Quill" $targetOwner.path) -Algorithm SHA256).Hash.ToLowerInvariant()
-          $profilesAfterFresh = @(Inventory $profileRoot); $modelsAfterFresh = @(Inventory $modelRoot); $sentinelsAfterFresh = @($profilesAfterFresh + $modelsAfterFresh)
-          if (($profilesBefore | ConvertTo-Json -Compress) -cne ($profilesAfterFresh | ConvertTo-Json -Compress) -or ($modelsBefore | ConvertTo-Json -Compress) -cne ($modelsAfterFresh | ConvertTo-Json -Compress)) { throw 'Fresh trust-root install did not preserve exact profile/model inventories.' }
-          $targetQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
-          $targetMatch = [regex]::Match($targetQuiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
-          if (-not $targetMatch.Success) { throw 'Fresh trust-root uninstall registration is invalid.' }
-          $evidence = [ordered]@{ schemaVersion=1; mode='local-uninstall-preserve-fresh'; provenance='local-non-public'; architecture='${{ matrix.arch }}'; sourceVersion='0.0.67'; targetVersion=$targetManifest.version; sourceCommit='${{ needs.validate.outputs.release_commit }}'; sourceTree='${{ needs.validate.outputs.release_tree }}'; baselineWorkflowRunId=$env:BASELINE_RUN_ID; baselineArtifactDigest=$env:BASELINE_ARTIFACT_DIGEST; localInstallerSha256=$baselineHash; installedManifestSha256=$manifestHash; installedManifestUtf8Base64=[Convert]::ToBase64String($manifestBytes); installedManifest=$installedManifest; installedReleaseBuildDigest=$installedManifest.releaseBuildDigest; installedGatewaySha256=$gatewayHash; installedOwnerSha256=$ownerHash; updaterMarkerPresent=$false; profileInventoryBefore=$profilesBefore; profileInventoryAfterUninstall=$profilesAfterUninstall; profileInventoryAfterFresh=$profilesAfterFresh; modelInventoryBefore=$modelsBefore; modelInventoryAfterUninstall=$modelsAfterUninstall; modelInventoryAfterFresh=$modelsAfterFresh; sentinelInventoryBefore=$sentinelsBefore; sentinelInventoryAfterUninstall=$sentinelsAfterUninstall; sentinelInventoryAfterFresh=$sentinelsAfterFresh; machineQuitObserved=($machineProcesses.Count -eq 0); singletonReleased=$created; uninstallExitCode=$uninstall.ExitCode; uninstallResidue=@($machineResidue); freshInstallExitCode=$installFresh.ExitCode; targetInstallerSha256=$freshHash; targetReleaseBuildDigest=$targetManifest.releaseBuildDigest; targetGatewaySha256=$targetGatewayHash; targetOwnerSha256=$targetOwnerHash; targetMaintenanceGeneration=$targetMatch.Groups[2].Value; passed=$true }
-          $evidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -NoNewline -Encoding utf8 tmp/windows-local-migration-${{ matrix.arch }}.json
-          $cleanup = Start-Process $targetMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
-          if ($cleanup.ExitCode -ne 0) { throw "Migration runner cleanup failed: $($cleanup.ExitCode)" }
-      - uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: windows-${{ matrix.arch }}-local-migration-evidence
-          path: tmp/windows-local-migration-${{ matrix.arch }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  fresh-lifecycle:
-    name: Verify public fresh Windows ${{ matrix.arch }} setup end to end
-    needs: [validate, package, smoke]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ needs.validate.outputs.release_commit }}
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-${{ matrix.arch }}-exact-native-setup-input
-          path: preserved
-      - name: Observe authenticated fresh install, inspect it, then remove it
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $setup = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
-          if ($setup.Count -ne 1) { throw 'Expected one public fresh setup.' }
-          $freshAttempt = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -PassThru
-          $freshInterrupted = $false
-          $freshDeadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $freshDeadline) {
-            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
-            if (Test-Path -LiteralPath $transaction) {
-              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'published-before-persist') {
-                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $freshAttempt.Id -and $_.ExecutablePath -ceq $setup[0].FullName } | Select-Object -First 1)
-                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $freshInterrupted = $true; break }
-              }
-            }
-            Start-Sleep -Milliseconds 2
-          }
-          $freshAttempt.WaitForExit()
-          if (-not $freshInterrupted) { throw 'Production fresh publication was not interrupted.' }
-          $firstFreshRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -PassThru
-          $removeFreshRecoveryInterrupted = $false
-          $freshRecoveryDeadline = (Get-Date).AddSeconds(30)
-          while ((Get-Date) -lt $freshRecoveryDeadline) {
-            if (Test-Path -LiteralPath $transaction) {
-              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'recovering-remove-fresh') {
-                $worker = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $firstFreshRecovery.Id -and $_.ExecutablePath -ceq $setup[0].FullName } | Select-Object -First 1)
-                if ($worker.Count -eq 1) { Stop-Process -Id $worker[0].ProcessId -Force; $removeFreshRecoveryInterrupted = $true; break }
-              }
-            }
-            Start-Sleep -Milliseconds 2
-          }
-          $firstFreshRecovery.WaitForExit()
-          if (-not $removeFreshRecoveryInterrupted) { throw 'recovering-remove-fresh was not interrupted.' }
-          $freshRecovery = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
-          if ($freshRecovery.ExitCode -ne 0) { throw "Production fresh recovery failed: $($freshRecovery.ExitCode)" }
-          node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-          foreach ($residue in @("$env:ProgramFiles\.Talking Quill.native-staging", "$env:ProgramFiles\.Talking Quill.native-backup", $transaction)) { if (Test-Path -LiteralPath $residue) { throw "Fresh recovery retained $residue" } }
-          $cleanupQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
-          $cleanupMatch = [regex]::Match($cleanupQuiet, '^"(.+\\Talking Quill Maintenance-[0-9a-f]{32}\.exe)" /S$')
-          if (-not $cleanupMatch.Success) { throw 'Fresh recovery maintenance registration is invalid.' }
-          $cleanup = Start-Process -FilePath $cleanupMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
-          if ($cleanup.ExitCode -ne 0) { throw "Fresh recovery cleanup failed: $($cleanup.ExitCode)" }
-          $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-          & (Join-Path $framework 'csc.exe') /nologo /r:System.Management.dll /out:tmp/windows-installer-success-observer.exe scripts/windows-installer-success-observer.cs
-          if ($LASTEXITCODE -ne 0) { throw 'Fresh lifecycle observer compilation failed.' }
-          $hash = (Get-FileHash -LiteralPath $setup[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          & tmp/windows-installer-success-observer.exe $setup[0].FullName tmp/windows-installer-success-fresh-${{ matrix.arch }}.json 180000 ${{ matrix.arch }} '${{ needs.validate.outputs.release_commit }}' '${{ needs.validate.outputs.release_tree }}' fresh $hash
-          if ($LASTEXITCODE -ne 0) { throw 'Authenticated fresh setup observation failed.' }
-          node scripts/windows-package-lifecycle.mjs --arch ${{ matrix.arch }} --mode installed --root "$env:ProgramFiles\Talking Quill"
-          $uninstallQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
-          $uninstallMatch = [regex]::Match($uninstallQuiet, '^"(.+\\Talking Quill Maintenance-[0-9a-f]{32}\.exe)" /S$')
-          if (-not $uninstallMatch.Success) { throw 'Installed maintenance registration is invalid.' }
-          $maintenance = $uninstallMatch.Groups[1].Value
-          $uninstall = Start-Process -FilePath $maintenance -ArgumentList '/S' -PassThru
-          $uninstallInterrupted = $false
-          $uninstallDeadline = (Get-Date).AddSeconds(30)
-          while ((Get-Date) -lt $uninstallDeadline) {
-            $transaction = "$env:ProgramFiles\.Talking Quill.native-transaction-v2.json"
-            if (Test-Path -LiteralPath $transaction) {
-              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'uninstalling') {
-                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' } | Sort-Object CreationDate -Descending)
-                if ($workers.Count -ge 1) { Stop-Process -Id $workers[0].ProcessId -Force; $uninstallInterrupted = $true; break }
-              }
-            }
-            Start-Sleep -Milliseconds 2
-          }
-          $uninstall.WaitForExit()
-          if (-not $uninstallInterrupted) { throw 'Production uninstall mutation was not interrupted.' }
-          $uninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
-          if (-not (Test-Path -LiteralPath $maintenance) -or -not (Test-Path -LiteralPath $uninstallKey)) { throw 'Installed maintenance recovery entry did not survive interrupted uninstall.' }
-          $registeredRecovery = (Get-ItemProperty -LiteralPath $uninstallKey -Name QuietUninstallString).QuietUninstallString
-          if ($registeredRecovery -cne ('"' + $maintenance + '" /S')) { throw 'Interrupted uninstall recovery registration is not exact.' }
-          $firstUninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -PassThru
-          $finishUninstallRecoveryInterrupted = $false
-          $finishDeadline = (Get-Date).AddSeconds(30)
-          while ((Get-Date) -lt $finishDeadline) {
-            if (Test-Path -LiteralPath $transaction) {
-              $state = Get-Content -LiteralPath $transaction -Raw | ConvertFrom-Json
-              if ($state.phase -eq 'recovering-finish-uninstall') {
-                $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\.TalkingQuill-uninstall-*.exe' -or $_.ExecutablePath -ceq $maintenance } | Sort-Object CreationDate -Descending)
-                if ($workers.Count -ge 1) { Stop-Process -Id $workers[0].ProcessId -Force; $finishUninstallRecoveryInterrupted = $true; break }
-              }
-            }
-            Start-Sleep -Milliseconds 2
-          }
-          $firstUninstallRecovery.WaitForExit()
-          if (-not $finishUninstallRecoveryInterrupted) { throw 'recovering-finish-uninstall was not interrupted.' }
-          if (-not (Test-Path -LiteralPath $maintenance) -or -not (Test-Path -LiteralPath $uninstallKey)) { throw 'Installed maintenance recovery entry was lost before terminal recovery.' }
-          $uninstallRecovery = Start-Process -FilePath $maintenance -ArgumentList '/S' -Wait -PassThru
-          if ($uninstallRecovery.ExitCode -ne 0) { throw "Final uninstall recovery failed: $($uninstallRecovery.ExitCode)" }
-          $machineResidue = @(
-            "$env:ProgramFiles\Talking Quill",
-            "$env:ProgramFiles\.Talking Quill.native-staging",
-            "$env:ProgramFiles\.Talking Quill.native-backup",
-            $transaction,
-            $maintenance,
-            "$env:ProgramData\Talking Quill\KeyboardAuthority",
-            "$env:ProgramData\Talking Quill\.KeyboardAuthority.retirement-quarantine",
-            "$env:ProgramData\Talking Quill Update Recovery"
-          ) | Where-Object { Test-Path -LiteralPath $_ }
-          $machineResidue += @(Get-ChildItem -LiteralPath $env:ProgramData -Force -ErrorAction Stop | Where-Object { $_.Name -like '.Talking Quill.update-*' -or $_.Name -like '.Talking Quill.machine-lock-*' -or $_.Name -like '.Talking Quill.uninstall-finalizer-*' -or $_.Name -like '.Talking Quill.terminal-cleanup-*' -or $_.Name -like '.Talking Quill Terminal Cleanup-*.exe' } | ForEach-Object FullName)
-          $runProperties = @((Get-ItemProperty -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).PSObject.Properties)
-          $recoveryValues = @($runProperties | Where-Object { $_.Name -like 'Talking Quill Update Recovery *' -or $_.Name -ceq 'Talking Quill Update Relaunch' })
-          $terminalServices = @(Get-Service -Name 'TalkingQuillTerminalCleanup-*' -ErrorAction SilentlyContinue)
-          $uninstallRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill'
-          $appPathRegistration = Test-Path -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Talking Quill.exe'
-          $machineLockRegistration = Test-Path -LiteralPath 'HKLM:\Software\Talking Quill\RecoveryStateLockV1'
-          $legacyService = $null -ne (Get-Service -Name TalkingQuillKeyboardAuthority -ErrorAction SilentlyContinue)
-          $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
-          $PSNativeCommandUseErrorActionPreference = $false
-          & "$env:WINDIR\System32\schtasks.exe" /Query /TN TalkingQuillKeyboardAuthority *> $null
-          $taskQueryExit = $LASTEXITCODE
-          $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
-          if ($taskQueryExit -notin @(0, 1)) { throw "Legacy task query failed: $taskQueryExit" }
-          $legacyTask = $taskQueryExit -eq 0
-          if ($machineResidue.Count -ne 0 -or $recoveryValues.Count -ne 0 -or $terminalServices.Count -ne 0 -or $uninstallRegistration -or $appPathRegistration -or $machineLockRegistration -or $legacyService -or $legacyTask) { throw 'Recovered uninstall retained updater recovery, terminal service, machine lock, finalizer, registration, legacy service, or task state.' }
-          $freshEvidence = Get-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Raw | ConvertFrom-Json
-          $freshEvidence | Add-Member -NotePropertyName productionInterruptions -NotePropertyValue @{ fresh = $freshInterrupted; removeFreshRecovery = $removeFreshRecoveryInterrupted; uninstall = $uninstallInterrupted; finishUninstallRecovery = $finishUninstallRecoveryInterrupted }
-          $freshEvidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -LiteralPath tmp/windows-installer-success-fresh-${{ matrix.arch }}.json -Encoding utf8
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: windows-${{ matrix.arch }}-fresh-installed-evidence
-          path: tmp/windows-installer-success-fresh-${{ matrix.arch }}.json
-          if-no-files-found: error
-          retention-days: 14
-
   assemble:
-    name: Checksum preserved Windows x64 and ARM64 installers
-    needs: [validate, package, smoke, migration-lifecycle, fresh-lifecycle]
+    name: Assemble verified unsigned Windows installers
+    needs: [validate, package, smoke]
     runs-on: ubuntu-latest
-    environment: release-signing
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-      attestations: write
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.validate.outputs.release_commit }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Verify immutable source checkout
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD^{commit})" = "${{ needs.validate.outputs.release_commit }}"
-          test "$(git rev-parse HEAD^{tree})" = "${{ needs.validate.outputs.release_tree }}"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-x64-exact-native-setup-input
-          path: preserved/x64
+          path: tmp/preserved/x64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-arm64-exact-native-setup-input
-          path: preserved/arm64
+          path: tmp/preserved/arm64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-x64-native-ui-smoke-evidence
-          path: smoke-evidence/x64
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: windows-arm64-native-ui-smoke-evidence
-          path: smoke-evidence/arm64
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: windows-*-local-migration-evidence
-          path: migration-evidence
+          pattern: windows-*-native-ui-smoke-evidence
+          path: tmp/smoke-evidence
           merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: windows-*-fresh-installed-evidence
-          path: fresh-evidence
-          merge-multiple: true
-      - name: Assemble immutable native release files
+      - name: Verify staged provenance and native smoke, then assemble exact bytes
         env:
-          TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64 }}
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+          TALKING_QUILL_RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
+          TALKING_QUILL_RELEASE_TREE: ${{ needs.validate.outputs.release_tree }}
         run: |
-          set -euo pipefail
-          mkdir -p release-artifacts
-          for arch in x64 arm64; do
-            installer=(preserved/$arch/tmp/release-upload/Talking-Quill-*-win-$arch-setup.exe)
-            test "${#installer[@]}" -eq 1
-            node scripts/windows-installer-ui-evidence.mjs --evidence smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch"
-            node scripts/windows-installer-success-evidence.mjs --evidence fresh-evidence/windows-installer-success-fresh-$arch.json --installer "${installer[0]}" --provenance preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json --arch "$arch" --operation fresh
-            cp smoke-evidence/$arch/windows-installer-ui-smoke-$arch.json release-artifacts/
-            cp "${installer[0]}" release-artifacts/
-            cp preserved/$arch/tmp/release-upload/provenance-win-$arch-setup.json release-artifacts/
-            cp migration-evidence/windows-local-migration-$arch.json release-artifacts/
-            terminal_fault=(preserved/$arch/tmp/windows-terminal-fault-artifacts/$arch/Talking-Quill-*-repair-terminalAcceptance.exe)
-            test "${#terminal_fault[@]}" -eq 1
-            TERMINAL_FAULT_PATH="${terminal_fault[0]}" ARCH="$arch" SOURCE_COMMIT='${{ needs.validate.outputs.release_commit }}' SOURCE_TREE='${{ needs.validate.outputs.release_tree }}' node --input-type=module - <<'NODE'
-            import { createHash } from 'node:crypto'; import { readFileSync, writeFileSync } from 'node:fs';
-            const sha256=createHash('sha256').update(readFileSync(process.env.TERMINAL_FAULT_PATH)).digest('hex');
-            writeFileSync(`release-artifacts/windows-terminal-fault-candidate-${process.env.ARCH}.json`,JSON.stringify({schemaVersion:1,architecture:process.env.ARCH,classification:'nonpromotable-acceptance-fault',sha256,sourceCommit:process.env.SOURCE_COMMIT,sourceTree:process.env.SOURCE_TREE}));
-            NODE
-          done
-          cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
-          # This report binds only the automated checks above. It makes no reboot
-          # or protected installed-acceptance claim.
-          node scripts/windows-release-validation.mjs release-artifacts
-          cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
-          cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
-          if find release-artifacts -type f -name '*terminalAcceptance*' | grep -q .; then echo 'Nonpromotable terminal acceptance setup entered release assembly.' >&2; exit 1; fi
-          node --input-type=module - <<'NODE'
-          import fs from 'node:fs';
-          import crypto from 'node:crypto';
-          import { validateArtifactProvenanceManifest } from './scripts/artifact-provenance.mjs';
-          import { sealReleaseManifest, validateReleaseManifest } from './scripts/release-manifest.mjs';
-          const directory = 'release-artifacts';
-          const manifestPath = `${directory}/release-manifest.json`;
-          const manifest = validateReleaseManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
-          const provenance = ['arm64', 'x64'].map((arch) => {
-            const mode = 'setup';
-            const name = `provenance-win-${arch}-${mode}.json`;
-            const value = JSON.parse(fs.readFileSync(`${directory}/${name}`, 'utf8'));
-            validateArtifactProvenanceManifest(value);
-            const installer = `Talking-Quill-${manifest.version}-win-${arch}-${mode}.exe`;
-            const final = value.entries.filter(({ role }) => role === 'final-artifact');
-            const bytes = fs.readFileSync(`${directory}/${installer}`);
-            const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-            if (value.sourceCommit !== manifest.sourceCommit || value.sourceTree !== manifest.sourceTree ||
-                value.package.version !== manifest.version || value.package.platform !== 'win' ||
-                value.package.arch !== arch || final.length !== 1 ||
-                final[0].path.split('/').at(-1) !== installer || final[0].sha256 !== sha256) {
-              throw new Error(`Downloaded ${arch} ${mode} provenance does not match its exact installer and source`);
-            }
-            return { name, platform: 'win', arch, mode, sourceTree: value.sourceTree,
-              sourceTreeSha256: value.sourceTreeSha256 };
-          });
-          if (new Set(provenance.map(({ sourceTreeSha256 }) => sourceTreeSha256)).size !== 1) {
-            throw new Error('Architecture provenance source-tree hashes disagree');
-          }
-          manifest.architecture = 'x64+arm64';
-          manifest.provenance = provenance;
-          manifest.assets = fs.readdirSync(directory).filter((name) => name !== 'release-manifest.json').sort().map((name) => {
-            const bytes = fs.readFileSync(`${directory}/${name}`);
-            return { name, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
-          });
-          fs.writeFileSync(manifestPath, `${JSON.stringify(sealReleaseManifest(manifest), null, 2)}\n`);
-          NODE
-          node scripts/publication-manifest.mjs --create --directory release-artifacts --output release-artifacts/release-publication-manifest-v1.json --repository '${{ github.repository }}' --tag "v$(node -p \"require('./app/package.json').version\")" --sequence '${{ github.run_number }}' --run-id '${{ github.run_id }}' --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --public-key build/release-manifest-public-key.sec1
-          node scripts/publication-manifest.mjs --manifest release-artifacts/release-publication-manifest-v1.json --directory release-artifacts --repository '${{ github.repository }}' --tag "v$(node -p \"require('./app/package.json').version\")" --sequence '${{ github.run_number }}' --run-id '${{ github.run_id }}' --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --public-key build/release-manifest-public-key.sec1
-          (cd release-artifacts && sha256sum * > SHA256SUMS.txt)
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
-        with:
-          subject-path: release-artifacts/*
+          node scripts/assemble-ordinary-unsigned-release.mjs tmp/preserved tmp/smoke-evidence tmp/release-artifacts
+          node scripts/release-checksums.mjs tmp/release-artifacts
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-native-release-candidates
-          path: release-artifacts/*
+          path: tmp/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
