@@ -47,6 +47,12 @@ describe('Windows native release workflow', () => {
     expect(publishWorkflow).toContain('gh release edit');
   });
 
+  it('disables automatic package caching in dependency-free Node jobs', () => {
+    expect(section('smoke', 'assemble')).toContain('package-manager-cache: false');
+    expect(section('assemble')).toContain('package-manager-cache: false');
+    expect(publishWorkflow.match(/package-manager-cache: false/gu)).toHaveLength(2);
+  });
+
   it('runs validation and builds only the current fresh trust-root package', () => {
     const validate = section('validate', 'package');
     const packageJob = section('package', 'smoke');
