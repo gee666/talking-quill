@@ -502,10 +502,26 @@ describe('conditional settings v27/v28 compatibility', () => {
   });
 
   it('keeps frozen settings and transfer boundaries independent from mutable shortcut schemas', () => {
-    for (const path of [
-      'app/src/main/persistence/settings-migrations/legacy-settings-v27.ts',
-      'app/src/shared/schemas/settings-transfer-v1.ts',
-    ]) {
+    const frozenModules = [
+      'legacy-settings-v27',
+      'legacy-v27-profiles',
+      'legacy-v27-providers',
+      'legacy-v27-text',
+    ];
+    for (const module of frozenModules) {
+      const path = `app/src/main/persistence/settings-migrations/${module}.ts`;
+      const source = readFileSync(resolve(path), 'utf8');
+      const dependencies = Array.from(
+        source.matchAll(/from ['"]([^'"]+)['"]/gu),
+        (match) => match[1],
+      );
+      for (const dependency of dependencies) {
+        expect(['zod', ...frozenModules.map((name) => `./${name}`)], path).toContain(dependency);
+      }
+      expect(source, path).not.toMatch(/shared[\\/]schemas/u);
+    }
+
+    for (const path of ['app/src/shared/schemas/settings-transfer-v1.ts']) {
       const source = readFileSync(resolve(path), 'utf8');
       expect(
         Array.from(source.matchAll(/^import .*;$/gmu), ([statement]) => statement),
@@ -523,6 +539,7 @@ describe('conditional settings v27/v28 compatibility', () => {
 
     for (const path of [
       'app/src/main/persistence/settings-migrations/transforms.ts',
+      'app/src/main/persistence/settings-migrations/legacy-transforms.ts',
       'app/src/main/persistence/settings-migrations/legacy-shortcut-contract.ts',
     ]) {
       const source = readFileSync(resolve(path), 'utf8');

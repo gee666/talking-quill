@@ -160,9 +160,13 @@ pub fn validate_spawned_sec_code_identity(
         release(requirement_text.cast());
         return Err(IdentityError);
     }
-    let dynamic_cdhash = code_directory_hash(dynamic)?;
-    let static_cdhash = code_directory_hash(static_code.cast())?;
-    if dynamic_cdhash != expected_code_directory_hash || static_cdhash != dynamic_cdhash {
+    // Keep hash failures on the cleanup path while these CF objects are owned.
+    let hashes = code_directory_hash(dynamic).and_then(|dynamic_cdhash| {
+        code_directory_hash(static_code.cast()).map(|static_cdhash| (dynamic_cdhash, static_cdhash))
+    });
+    if !matches!(hashes, Ok((dynamic_cdhash, static_cdhash))
+        if dynamic_cdhash == expected_code_directory_hash && static_cdhash == dynamic_cdhash)
+    {
         release(dynamic.cast());
         release(static_code.cast());
         release(requirement_ref.cast());

@@ -1,27 +1,21 @@
 #![cfg(windows)]
 
-use std::io::{Read, Seek};
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
-use windows_sys::Win32::Security::{
-    GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_GROUPS,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_TYPE, TOKEN_USER, TokenIntegrityLevel, TokenLogonSid,
-    TokenPrimary, TokenSessionId, TokenType, TokenUser,
-};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, IsWow64Process2, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetProcessTimes, IsWow64Process2, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 
 use crate::image_policy::WindowsArchitecture;
 
 const SYNCHRONIZE: u32 = 0x0010_0000;
-const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
-const SOURCE_MARKER_PREFIX: &[u8] = b"TALKING_QUILL_SOURCE_";
+mod image;
+use crate::token::Token;
+use image::inspect_image;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileIdentity {
@@ -85,7 +79,7 @@ impl VerifiedPeer {
         let file_identity = file_identity(&image)?;
         let (image_sha256, source_identity) = inspect_image(&mut image)?;
         let (user_sid, logon_sid, token_session_id, integrity_rid) =
-            token_facts(process.as_raw_handle())?;
+            Token::open(process.as_raw_handle())?.facts()?;
         let mut wts_session_id = 0;
         if unsafe {
             windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(
@@ -233,182 +227,6 @@ fn file_identity(file: &std::fs::File) -> Result<FileIdentity, PeerError> {
         volume_serial: info.dwVolumeSerialNumber,
         file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
     })
-}
-
-fn inspect_image(
-    file: &mut std::fs::File,
-) -> Result<([u8; 32], Option<SourceIdentity>), PeerError> {
-    let length = file.metadata().map_err(|_| PeerError::Image)?.len();
-    if !(1..=MAX_IMAGE_BYTES).contains(&length) {
-        return Err(PeerError::Image);
-    }
-    file.rewind().map_err(|_| PeerError::Image)?;
-    let mut hash = Sha256::new();
-    let mut commit = MarkerScan::new(b"COMMIT=");
-    let mut tree = MarkerScan::new(b"TREE=");
-    let mut tail = Vec::new();
-    let mut copied = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|_| PeerError::Image)?;
-        if read == 0 {
-            break;
-        }
-        let before = copied;
-        copied += read as u64;
-        if copied > MAX_IMAGE_BYTES {
-            return Err(PeerError::Image);
-        }
-        hash.update(&buffer[..read]);
-        let origin = before.saturating_sub(tail.len() as u64);
-        tail.extend_from_slice(&buffer[..read]);
-        commit.scan(&tail, origin)?;
-        tree.scan(&tail, origin)?;
-        const RETAINED_MARKER_BYTES: usize = 96;
-        if tail.len() > RETAINED_MARKER_BYTES {
-            tail.drain(..tail.len() - RETAINED_MARKER_BYTES);
-        }
-    }
-    if copied != length {
-        return Err(PeerError::Image);
-    }
-    file.rewind().map_err(|_| PeerError::Image)?;
-    let source_identity = match (commit.finish(), tree.finish()) {
-        (Ok(commit), Ok(tree)) => Some(SourceIdentity { commit, tree }),
-        (Err(_), Err(_)) => None,
-        _ => return Err(PeerError::Image),
-    };
-    Ok((hash.finalize().into(), source_identity))
-}
-
-struct MarkerScan {
-    marker: Vec<u8>,
-    offset: Option<u64>,
-    value: Option<String>,
-}
-
-impl MarkerScan {
-    fn new(suffix: &[u8]) -> Self {
-        let mut marker = Vec::with_capacity(SOURCE_MARKER_PREFIX.len() + suffix.len());
-        marker.extend_from_slice(SOURCE_MARKER_PREFIX);
-        marker.extend_from_slice(suffix);
-        Self {
-            marker,
-            offset: None,
-            value: None,
-        }
-    }
-
-    fn scan(&mut self, bytes: &[u8], origin: u64) -> Result<(), PeerError> {
-        for (local, window) in bytes.windows(self.marker.len()).enumerate() {
-            if window != self.marker.as_slice() {
-                continue;
-            }
-            let offset = origin
-                .checked_add(u64::try_from(local).map_err(|_| PeerError::Image)?)
-                .ok_or(PeerError::Image)?;
-            if self.offset == Some(offset) {
-                continue;
-            }
-            if self.offset.is_some() {
-                return Err(PeerError::Image);
-            }
-            let start = local
-                .checked_add(self.marker.len())
-                .ok_or(PeerError::Image)?;
-            let Some(value) = bytes.get(start..start + 40) else {
-                continue;
-            };
-            if !value
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-            {
-                return Err(PeerError::Image);
-            }
-            self.offset = Some(offset);
-            self.value = Some(String::from_utf8(value.to_vec()).map_err(|_| PeerError::Image)?);
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> Result<String, PeerError> {
-        self.value.ok_or(PeerError::Image)
-    }
-}
-
-fn query_token(token: HANDLE, class: i32) -> Result<Vec<u8>, PeerError> {
-    let mut length = 0;
-    unsafe { GetTokenInformation(token, class, std::ptr::null_mut(), 0, &mut length) };
-    if length == 0 || length > 64 * 1024 {
-        return Err(PeerError::Token);
-    }
-    let mut buffer = vec![0_u8; length as usize];
-    if unsafe {
-        GetTokenInformation(
-            token,
-            class,
-            buffer.as_mut_ptr().cast(),
-            length,
-            &mut length,
-        )
-    } == 0
-    {
-        return Err(PeerError::Token);
-    }
-    Ok(buffer)
-}
-
-fn sid_bytes(sid: windows_sys::Win32::Security::PSID) -> Result<Vec<u8>, PeerError> {
-    let length = unsafe { GetLengthSid(sid) };
-    if !(8..=68).contains(&length) {
-        return Err(PeerError::Token);
-    }
-    Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), length as usize) }.to_vec())
-}
-
-fn token_facts(process: HANDLE) -> Result<(Vec<u8>, Vec<u8>, u32, u32), PeerError> {
-    let mut token = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-        return Err(PeerError::Token);
-    }
-    struct Token(HANDLE);
-    impl Drop for Token {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let token = Token(token);
-    let token_type = query_token(token.0, TokenType)?;
-    if token_type.len() < std::mem::size_of::<TOKEN_TYPE>()
-        || unsafe { *token_type.as_ptr().cast::<TOKEN_TYPE>() } != TokenPrimary
-    {
-        return Err(PeerError::Token);
-    }
-    let user = query_token(token.0, TokenUser)?;
-    let user_sid = sid_bytes(unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid })?;
-    let logon = query_token(token.0, TokenLogonSid)?;
-    let groups = unsafe { &*logon.as_ptr().cast::<TOKEN_GROUPS>() };
-    if groups.GroupCount != 1 {
-        return Err(PeerError::Token);
-    }
-    let logon_sid = sid_bytes(groups.Groups[0].Sid)?;
-    let session = query_token(token.0, TokenSessionId)?;
-    if session.len() < 4 {
-        return Err(PeerError::Token);
-    }
-    let wts_session_id = unsafe { *session.as_ptr().cast::<u32>() };
-    let integrity = query_token(token.0, TokenIntegrityLevel)?;
-    let sid = unsafe {
-        (*integrity.as_ptr().cast::<TOKEN_MANDATORY_LABEL>())
-            .Label
-            .Sid
-    };
-    let count = unsafe { *GetSidSubAuthorityCount(sid) };
-    if count == 0 {
-        return Err(PeerError::Token);
-    }
-    let integrity_rid = unsafe { *GetSidSubAuthority(sid, u32::from(count - 1)) };
-    Ok((user_sid, logon_sid, wts_session_id, integrity_rid))
 }
 
 fn process_architecture(process: HANDLE) -> Result<WindowsArchitecture, PeerError> {

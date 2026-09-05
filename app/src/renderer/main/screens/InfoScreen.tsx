@@ -4,6 +4,7 @@ import type { BootstrapData } from '../../../shared/bridge/api';
 import type { InfoStatus, UpdateCheckResult } from '../../../shared/schemas/info';
 import { Button, Card, Dialog, Status, Toast } from '../../design';
 import { publicErrorMessage } from '../public-error';
+import { PermissionRow } from './PermissionRow';
 
 let updateSequence = 0;
 export function InfoScreen({
@@ -312,40 +313,6 @@ export function InfoScreen({
       {notice === null ? null : (
         <Toast tone="error" message={notice} onDismiss={() => setNotice(null)} />
       )}
-    </div>
-  );
-}
-function PermissionRow({
-  label,
-  value,
-  open,
-  onError,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly open: () => Promise<void>;
-  readonly onError: () => void;
-}) {
-  const ready = value === 'granted' || value === 'not_applicable';
-  return (
-    <div className="readiness-row">
-      <span>{label}</span>
-      <div className="info-actions provider-actions">
-        <Status tone={ready ? 'success' : value === 'denied' ? 'error' : 'warning'}>
-          {ready ? 'Allowed' : value === 'denied' ? 'Blocked' : 'Not decided yet'}
-        </Status>
-        {ready ? null : (
-          <Button
-            variant="quiet"
-            aria-label={`Open ${label} settings`}
-            onClick={() => {
-              void open().catch(onError);
-            }}
-          >
-            Open settings
-          </Button>
-        )}
-      </div>
     </div>
   );
 }

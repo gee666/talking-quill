@@ -187,55 +187,41 @@ impl TransactionEngine {
             );
         };
         let bit = letter_bit(key);
+        let already_owned = candidate.owned_letters & bit != 0;
+        let valid_phase = match event.phase {
+            PhysicalPhase::Down => !already_owned,
+            PhysicalPhase::Repeat | PhysicalPhase::Up => already_owned,
+        };
+        if !valid_phase {
+            self.state = ActivationState::Candidate(candidate);
+            return self.request_candidate_cancellation(
+                event,
+                EventDisposition::PassCurrent,
+                CancelReason::InvalidContinuation,
+                false,
+                false,
+            );
+        }
+        // Validate ownership before appending; every accepted letter phase
+        // records exactly one edge before changing ownership or matching.
+        if candidate.journal.push(replay_record(event)).is_err() {
+            self.state = ActivationState::Candidate(candidate);
+            return self.request_candidate_cancellation(
+                event,
+                EventDisposition::PassCurrent,
+                CancelReason::JournalOverflow,
+                false,
+                false,
+            );
+        }
+        self.metrics.observe_journal(candidate.journal.len());
 
         match event.phase {
             PhysicalPhase::Repeat => {
-                if candidate.owned_letters & bit == 0 {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::InvalidContinuation,
-                        false,
-                        false,
-                    );
-                }
-                if candidate.journal.push(replay_record(event)).is_err() {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::JournalOverflow,
-                        false,
-                        false,
-                    );
-                }
-                self.metrics.observe_journal(candidate.journal.len());
                 self.state = ActivationState::Candidate(candidate);
                 self.complete_event(event, EventDisposition::CaptureCurrent, None)
             }
             PhysicalPhase::Down => {
-                if candidate.owned_letters & bit != 0 {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::InvalidContinuation,
-                        false,
-                        false,
-                    );
-                }
-                if candidate.journal.push(replay_record(event)).is_err() {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::JournalOverflow,
-                        false,
-                        false,
-                    );
-                }
-                self.metrics.observe_journal(candidate.journal.len());
                 candidate.owned_letters |= bit;
                 let result = self.config.matcher().advance(candidate.cursor, key);
                 let Some(cursor) = result.cursor() else {
@@ -262,27 +248,6 @@ impl TransactionEngine {
                 }
             }
             PhysicalPhase::Up => {
-                if candidate.owned_letters & bit == 0 {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::InvalidContinuation,
-                        false,
-                        false,
-                    );
-                }
-                if candidate.journal.push(replay_record(event)).is_err() {
-                    self.state = ActivationState::Candidate(candidate);
-                    return self.request_candidate_cancellation(
-                        event,
-                        EventDisposition::PassCurrent,
-                        CancelReason::JournalOverflow,
-                        false,
-                        false,
-                    );
-                }
-                self.metrics.observe_journal(candidate.journal.len());
                 candidate.owned_letters &= !bit;
                 if let Some(pending) = candidate.pending_exact
                     && pending.trigger == key

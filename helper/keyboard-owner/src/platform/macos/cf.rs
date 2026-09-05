@@ -11,7 +11,10 @@ use crate::platform::{
 pub(super) struct OwnedCf(ffi::CFTypeRef);
 
 impl OwnedCf {
-    pub(super) fn from_created(value: ffi::CFTypeRef) -> Result<Self, PlatformError> {
+    /// # Safety
+    /// A non-null value must be a live CF object with one owned retain count
+    /// transferred to this wrapper. Null is accepted and returns an error.
+    pub(super) unsafe fn from_created(value: ffi::CFTypeRef) -> Result<Self, PlatformError> {
         if value.is_null() {
             Err(PlatformError::NativeFailure)
         } else {
@@ -26,7 +29,7 @@ impl OwnedCf {
     pub(super) fn retained_clone(&self) -> Result<Self, PlatformError> {
         // SAFETY: the source reference is valid and retained for this call.
         // CFRetain returns another owned reference to the same CF identity.
-        Self::from_created(unsafe { ffi::CFRetain(self.0) })
+        unsafe { Self::from_created(ffi::CFRetain(self.0)) }
     }
 }
 
@@ -44,14 +47,16 @@ pub(super) fn create_cf_string(value: &CStr) -> Result<OwnedCf, PlatformError> {
     let string = unsafe {
         ffi::CFStringCreateWithCString(null(), value.as_ptr(), ffi::K_CF_STRING_ENCODING_UTF8)
     };
-    OwnedCf::from_created(string)
+    // SAFETY: the Create-rule reference above transfers its ownership here.
+    unsafe { OwnedCf::from_created(string) }
 }
 
 pub(super) fn cf_string_sha256_bounded(
-    value: ffi::CFTypeRef,
+    value: &OwnedCf,
     conversion_deadline: Instant,
 ) -> Result<ClipboardTextHash, PlatformError> {
-    // SAFETY: both functions only inspect a non-null Core Foundation object.
+    let value = value.as_type_ref();
+    // SAFETY: the borrowed owner keeps this non-null CF object retained.
     if unsafe { ffi::CFGetTypeID(value) } != unsafe { ffi::CFStringGetTypeID() } {
         return Err(PlatformError::NativeFailure);
     }
@@ -118,8 +123,9 @@ pub(super) fn cf_string_sha256_bounded(
     Ok(ClipboardTextHash::from_bytes(digest.finalize().into()))
 }
 
-pub(super) fn cf_string_to_string(value: ffi::CFTypeRef) -> Result<String, PlatformError> {
-    // SAFETY: both functions only inspect a non-null Core Foundation object.
+pub(super) fn cf_string_to_string(value: &OwnedCf) -> Result<String, PlatformError> {
+    let value = value.as_type_ref();
+    // SAFETY: the borrowed owner keeps this non-null CF object retained.
     if unsafe { ffi::CFGetTypeID(value) } != unsafe { ffi::CFStringGetTypeID() } {
         return Err(PlatformError::NativeFailure);
     }
@@ -166,11 +172,8 @@ mod tests {
         let source_c = std::ffi::CString::new(source).unwrap();
         let value = create_cf_string(&source_c).unwrap();
         assert!(
-            cf_string_sha256_bounded(
-                value.as_type_ref(),
-                Instant::now() + std::time::Duration::from_secs(1),
-            )
-            .is_err()
+            cf_string_sha256_bounded(&value, Instant::now() + std::time::Duration::from_secs(1),)
+                .is_err()
         );
     }
 
@@ -180,11 +183,8 @@ mod tests {
         let source_c = std::ffi::CString::new(source).unwrap();
         let value = create_cf_string(&source_c).unwrap();
         assert_eq!(
-            cf_string_sha256_bounded(
-                value.as_type_ref(),
-                Instant::now() + std::time::Duration::from_secs(1),
-            )
-            .unwrap(),
+            cf_string_sha256_bounded(&value, Instant::now() + std::time::Duration::from_secs(1),)
+                .unwrap(),
             ClipboardTextHash::from_bytes(Sha256::digest(source.as_bytes()).into())
         );
     }
@@ -194,7 +194,7 @@ mod tests {
         let source = "🦀".repeat(MAX_FRONT_APP_FIELD_ESCAPED_BYTES);
         let source_c = std::ffi::CString::new(source.as_str()).unwrap();
         let value = create_cf_string(&source_c).unwrap();
-        let converted = cf_string_to_string(value.as_type_ref()).unwrap();
+        let converted = cf_string_to_string(&value).unwrap();
 
         assert!(!converted.is_empty());
         assert!(converted.len() <= MAX_FRONT_APP_FIELD_ESCAPED_BYTES);

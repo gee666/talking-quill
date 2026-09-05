@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readApplicationSource } from '../helpers/application-source';
 import {
   StartupCancelledError,
   StartupCleanupStack,
@@ -137,15 +138,18 @@ describe('application lifecycle hardening', () => {
   });
 
   it('routes failed reset aborts through the bounded Electron quit path', () => {
-    const source = readFileSync('app/src/main/app/application.ts', 'utf8');
-    const abortStart = source.indexOf('  #abortAfterFailedReset(');
-    const abortEnd = source.indexOf('#acknowledgeDataReset(', abortStart);
-    const abortMethod = source.slice(abortStart, abortEnd);
-    const requestStart = source.indexOf('  #requestQuit(\n');
+    const reset = readFileSync('app/src/main/app/application-reset.ts', 'utf8');
+    const source = readFileSync('app/src/main/app/application-shutdown.ts', 'utf8');
+    const abortStart = reset.indexOf('  #abortAfterFailedReset(');
+    const abortEnd = reset.indexOf('acknowledgeDataReset(', abortStart);
+    const abortMethod = reset.slice(abortStart, abortEnd);
+    const requestStart = source.indexOf('  requestQuit(');
     const requestEnd = source.indexOf('handleBeforeQuit(', requestStart);
     const requestMethod = source.slice(requestStart, requestEnd);
 
-    expect(abortMethod).toContain('this.#requestQuit({ deadline, skipDependentShutdown: true })');
+    expect(abortMethod).toContain(
+      'this.#shutdown.requestQuit({ deadline, skipDependentShutdown: true })',
+    );
     expect(abortMethod).not.toMatch(/app\.(?:quit|exit)\(/u);
     expect(requestMethod).toContain('createBoundedElectronQuit');
     expect(source).not.toMatch(/app\.exit\(/u);
@@ -179,7 +183,7 @@ describe('application lifecycle hardening', () => {
   });
 
   it('prepares normal application renderers before helper activation and profile sync', () => {
-    const source = readFileSync('app/src/main/app/application.ts', 'utf8');
+    const source = readApplicationSource();
     const renderersReady = source.indexOf('await windows.createAll()');
     const helperReady = source.indexOf('await helper.start()');
     const activationReady = source.indexOf('await echo.initialize()');

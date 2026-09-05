@@ -24,9 +24,9 @@ describe('native paste failure diagnostics', () => {
       'caret-position',
       'input-mode',
     ]) {
-      expect(nativePasteFailureCategory(`keyboard-owner paste target validation: ${category}`)).toBe(
-        `target-${category}`,
-      );
+      expect(
+        nativePasteFailureCategory(`keyboard-owner paste target validation: ${category}`),
+      ).toBe(`target-${category}`);
     }
     for (const line of [
       'private text',

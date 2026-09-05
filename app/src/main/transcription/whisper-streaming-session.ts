@@ -1,23 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import {
-  WHISPER_CHUNK_SECONDS,
-  WHISPER_HOP_SECONDS,
   WHISPER_MAX_PUSH_SAMPLES,
   WHISPER_MAX_SAMPLES,
   WHISPER_PROTOCOL_VERSION,
-  WHISPER_SAMPLE_RATE,
 } from '../../shared/constants/whisper';
 import type { TranscriptionOptions, TranscriptionResult } from '../../shared/schemas/transcription';
-import type {
-  WhisperAcknowledgedOperation,
-  WhisperWorkerResult,
-} from '../../shared/schemas/whisper-protocol';
 import { WhisperClientError } from './errors';
-import { CONTROL_REQUEST_TIMEOUT_MS } from './whisper-worker-supervisor';
 import type { WhisperWorkerSupervisor } from './whisper-worker-supervisor';
+import {
+  CONTROL_REQUEST_TIMEOUT_MS,
+  acceptsAcknowledgement,
+  assertAcknowledged,
+  waitForDispatchTurn,
+} from './whisper-worker-requests-support';
+import {
+  inferenceTimeoutMs,
+  combineAbortSignals,
+  streamingPushPlan,
+  assertPcmLength,
+  copyPcm,
+  once,
+} from './whisper-streaming-audio';
 
-const INFERENCE_STARTUP_TIMEOUT_MS = 5 * 60_000;
-const INFERENCE_REALTIME_MULTIPLIER = 3;
+export { inferenceTimeoutMs } from './whisper-streaming-audio';
+
 const MAX_PENDING_PUSHES = 8;
 
 export interface WhisperStreamingSession {
@@ -231,7 +237,7 @@ export async function openWhisperStreamingSession(options: {
                   ? CONTROL_REQUEST_TIMEOUT_MS
                   : inferenceTimeoutMs(bufferedSamples),
               expectedGeneration: sessionGeneration,
-              accepts: isTranscriptionResult,
+              accepts: (result) => result.type === 'transcription',
             },
           );
           if (result.type !== 'transcription') {
@@ -310,104 +316,4 @@ export async function openWhisperStreamingSession(options: {
     supervisor.releaseUseWhenSafe(sessionGeneration, () => use.release());
     throw error;
   }
-}
-
-export function inferenceTimeoutMs(sampleCount: number): number {
-  const audioDurationMs = Math.ceil((sampleCount * 1_000) / WHISPER_SAMPLE_RATE);
-  return INFERENCE_STARTUP_TIMEOUT_MS + audioDurationMs * INFERENCE_REALTIME_MULTIPLIER;
-}
-
-function acceptsAcknowledgement(
-  operation: WhisperAcknowledgedOperation,
-): (result: WhisperWorkerResult) => boolean {
-  return (result) => result.type === 'acknowledged' && result.operation === operation;
-}
-
-function isTranscriptionResult(result: WhisperWorkerResult): boolean {
-  return result.type === 'transcription';
-}
-
-function assertAcknowledged(
-  result: WhisperWorkerResult,
-  operation: WhisperAcknowledgedOperation,
-): void {
-  if (result.type !== 'acknowledged' || result.operation !== operation) {
-    throw new WhisperClientError(
-      'PROTOCOL_ERROR',
-      `Whisper worker returned the wrong acknowledgement for ${operation}.`,
-    );
-  }
-}
-
-function combineAbortSignals(first: AbortSignal | undefined, second: AbortSignal): AbortSignal {
-  return first === undefined ? second : AbortSignal.any([first, second]);
-}
-
-function streamingPushPlan(
-  bufferedSamples: number,
-  pushedSamples: number,
-): {
-  readonly remainingSamples: number;
-  readonly timeoutMs: number;
-} {
-  const chunkSamples = WHISPER_SAMPLE_RATE * WHISPER_CHUNK_SECONDS;
-  const hopSamples = WHISPER_SAMPLE_RATE * WHISPER_HOP_SECONDS;
-  let remainingSamples = bufferedSamples + pushedSamples;
-  let inferenceSamples = 0;
-  while (remainingSamples >= chunkSamples) {
-    inferenceSamples += chunkSamples;
-    remainingSamples -= hopSamples;
-  }
-  return {
-    remainingSamples,
-    timeoutMs:
-      inferenceSamples === 0 ? CONTROL_REQUEST_TIMEOUT_MS : inferenceTimeoutMs(inferenceSamples),
-  };
-}
-
-function waitForDispatchTurn(
-  precedingRequest: Promise<void>,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  if (signal?.aborted === true) {
-    return Promise.reject(new WhisperClientError('CANCELLED', 'Transcription was cancelled.'));
-  }
-  if (signal === undefined) return precedingRequest;
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (operation: () => void): void => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', abort);
-      operation();
-    };
-    const abort = (): void =>
-      finish(() => reject(new WhisperClientError('CANCELLED', 'Transcription was cancelled.')));
-    signal.addEventListener('abort', abort, { once: true });
-    void precedingRequest.then(
-      () => finish(resolve),
-      () => finish(resolve),
-    );
-  });
-}
-
-function assertPcmLength(pcm: Float32Array, maximum: number, message: string): void {
-  if (pcm.length === 0 || pcm.length > maximum) {
-    throw new WhisperClientError('INVALID_AUDIO', message);
-  }
-}
-
-function copyPcm(pcm: Float32Array): ArrayBuffer {
-  const copy = new Float32Array(pcm.length);
-  copy.set(pcm);
-  return copy.buffer;
-}
-
-function once(operation: () => void): () => void {
-  let called = false;
-  return () => {
-    if (called) return;
-    called = true;
-    operation();
-  };
 }

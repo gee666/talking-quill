@@ -794,6 +794,76 @@ describe('single-use supported Pi RPC operation', () => {
     await expect(operation.prompt('prompt')).rejects.toMatchObject({ code: 'REMOTE_FAILURE' });
   });
 
+  it.each(['prompt-response', 'agent-settled'] as const)(
+    'continues answering cleanup UI after a valid remote failure at %s',
+    async (failureAt) => {
+      const fixture = readinessFixture({
+        onCommand: (command, current) => {
+          if (command.type !== 'prompt') return;
+          const failed = assistantMessage('error', []);
+          const records =
+            failureAt === 'prompt-response'
+              ? [
+                  {
+                    id: command.id,
+                    type: 'response',
+                    command: 'prompt',
+                    success: false,
+                    error: 'remote failure',
+                  },
+                ]
+              : [
+                  { id: command.id, type: 'response', command: 'prompt', success: true },
+                  { type: 'agent_start' },
+                  { type: 'turn_start' },
+                  { type: 'message_start', message: assistantMessage('pending', []) },
+                  { type: 'message_end', message: failed },
+                  { type: 'turn_end', message: failed, toolResults: [] },
+                  { type: 'agent_end', messages: [failed] },
+                  { type: 'agent_settled' },
+                ];
+          current.sendRecords([
+            ...records,
+            { type: 'extension_ui_request', id: 'cleanup-ui', method: 'input', title: 'ignored' },
+          ]);
+        },
+      });
+      const operation = await prewarmPiRpcOperation(fixtureOptions(fixture));
+      await expect(operation.prompt('prompt')).rejects.toMatchObject({
+        code: 'REMOTE_FAILURE',
+        fallbackEligible: false,
+      });
+      await expect(operation.cleanup).resolves.toBeUndefined();
+      await expect(operation.retirement).resolves.toBeUndefined();
+      expect(fixture.commands).toContainEqual({
+        type: 'extension_ui_response',
+        id: 'cleanup-ui',
+        cancelled: true,
+      });
+      expect(fixture.commands.filter(({ type }) => type === 'abort')).toHaveLength(1);
+    },
+  );
+
+  it('honors cancellation from a settlement timing observer before sealing completion', async () => {
+    const controller = new AbortController();
+    const fixture = readinessFixture({
+      onCommand: (command, current) => {
+        if (command.type === 'prompt') emitSuccessfulRun(current, command.id as string);
+      },
+    });
+    const operation = await prewarmPiRpcOperation(
+      fixtureOptions(fixture, {
+        signal: controller.signal,
+        onTiming: (stage) => {
+          if (stage === PiRpcTimingStage.AgentSettled) controller.abort();
+        },
+      }),
+    );
+    await expect(operation.prompt('prompt')).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(operation.cleanup).resolves.toBeUndefined();
+    expect(fixture.commands.filter(({ type }) => type === 'prompt')).toHaveLength(1);
+  });
+
   it('bounds stdout, stderr, outbound records, EOF, and hung retirement', async () => {
     const oversized = new ScriptedPiRpcFixture({ closeOnStdinEnd: false });
     const oversizedStart = prewarmPiRpcOperation(

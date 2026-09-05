@@ -4,12 +4,13 @@ import { describe, expect, it } from 'vitest';
 describe('PowerToys Keyboard Manager attribution', () => {
   it('keeps source attribution, the complete MIT grant, and the generated notice together', async () => {
     const [source, attribution, notices, generator] = await Promise.all([
-      readFile('helper/keyboard-owner/src/platform/windows/injection.rs', 'utf8'),
+      readFile('helper/keyboard-owner/src/platform/windows/injection/replay.rs', 'utf8'),
       readFile('docs/attribution/powertoys-mit.txt', 'utf8'),
       readFile('app/assets/THIRD_PARTY_NOTICES.txt', 'utf8'),
       readFile('scripts/generate-notices.mjs', 'utf8'),
     ]);
 
+    expect(source).toContain('fn neutralize_menu(');
     expect(source).toContain('adapted from Microsoft PowerToys Keyboard');
     expect(source).toContain('docs/attribution/powertoys-mit.txt');
     expect(attribution).toContain('Copyright (c) Microsoft Corporation');

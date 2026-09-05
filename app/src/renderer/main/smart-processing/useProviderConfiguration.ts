@@ -187,7 +187,6 @@ export function useProviderConfiguration({
         setSaveState('idle');
         setCredentialSnapshot(null);
         setCredentialActionState('idle');
-        repairSelectionRef.current = null;
         void refreshCredentialStatus(
           authoritativeId,
           credentialBindingKey(authoritativeId, authoritativeDraft),
@@ -293,8 +292,6 @@ export function useProviderConfiguration({
         const applied = applySelection(provider, saved.settings, ticket);
         if (applied === null) return;
         onSettingsSaved(saved.settings);
-        setCredentialSnapshot(null);
-        setCredentialActionState('idle');
         setSaveState('success');
         if (provider.id === 'pi') {
           void operations.discoverPiImmediately(applied.draft, applied.lease);

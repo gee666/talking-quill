@@ -1,16 +1,15 @@
-import { app as electronApp, BrowserWindow, screen, type WebContents } from 'electron';
-import { join } from 'node:path';
-import { CAPTURE_PARTITION, UI_PARTITION, type WindowRole } from '../../shared/constants/app';
-import { WIDGET_DIMENSIONS } from '../../shared/constants/echo-session';
+import { createNativeWindow } from './native-window';
+import { RendererRecovery } from './renderer-recovery';
+import type { BrowserWindow, WebContents } from 'electron';
+import type { WindowRole } from '../../shared/constants/app';
 import type { HelperFrontApp } from '../../shared/helper/protocol';
 import type { Settings } from '../../shared/schemas/settings';
 import type { SettingsStore } from '../persistence/settings-store';
 import { hardenWebContents } from '../security/web-contents-policy';
 import type { WindowRoleRegistry } from './window-role-registry';
 import type { RendererLoader } from './renderer-loader';
-import { physicalBoundsToDip } from './display-bounds';
 import type { WidgetVisibilityLease } from './widget-capture-exclusion';
-import { widgetContentBounds } from './widget-geometry';
+import { WidgetPresentation } from './widget-presentation';
 
 export interface WindowManagerCallbacks {
   readonly requestQuit: () => void;
@@ -19,15 +18,7 @@ export interface WindowManagerCallbacks {
   readonly showMainOnFirstLoad: boolean;
 }
 
-const MAX_RENDERER_RECOVERY_ATTEMPTS = 2;
-const RENDERER_RECOVERY_BACKOFF_MS = 250;
-const RENDERER_STABILITY_WINDOW_MS = 30_000;
-export const RENDERER_LOAD_TIMEOUT_MS = 10_000;
-
-interface DesiredWidgetVisibility {
-  readonly size: Settings['app']['widgetSize'];
-  readonly targetBounds: HelperFrontApp['windowBounds'];
-}
+export { RENDERER_LOAD_TIMEOUT_MS } from './renderer-recovery';
 
 export class WindowManager {
   readonly #loader: RendererLoader;
@@ -35,15 +26,8 @@ export class WindowManager {
   readonly #settings: SettingsStore;
   readonly #callbacks: WindowManagerCallbacks;
   readonly #windows = new Map<WindowRole, BrowserWindow>();
-  readonly #recoveryAttempts = new Map<WindowRole, number>();
-  readonly #recoveryTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
-  readonly #stabilityTimers = new Map<WindowRole, ReturnType<typeof setTimeout>>();
-  readonly #pendingRendererLoads = new Map<BrowserWindow, () => void>();
-  readonly #rendererReadyWebContents = new Set<number>();
-  readonly #pendingRendererReady = new Map<number, (ready: boolean) => void>();
-  #desiredWidgetVisibility: DesiredWidgetVisibility | null = null;
-  #widgetVisibilityGeneration = 0;
-  #widgetExcludedFromCapture = false;
+  readonly #recovery: RendererRecovery;
+  readonly #widget: WidgetPresentation;
   #widgetCreation: Promise<boolean> | null = null;
   #pendingMainClose: Promise<void> | null = null;
   #mainInitialLoadHandled = false;
@@ -57,11 +41,22 @@ export class WindowManager {
     settings: SettingsStore,
     callbacks: WindowManagerCallbacks,
   ) {
+    this.#widget = new WidgetPresentation(() => this.#windows.get('widget'));
     this.#loader = loader;
     this.#roles = roles;
     this.#settings = settings;
     this.#callbacks = callbacks;
     this.#foregroundAllowed = callbacks.showMainOnFirstLoad;
+    this.#recovery = new RendererRecovery({
+      windows: this.#windows,
+      roles,
+      loader,
+      requestQuit: () => this.#callbacks.requestQuit(),
+      onMainFailed: () => {
+        this.#mainInitialLoadHandled = true;
+      },
+      createAndLoad: (role) => this.#createAndLoad(role),
+    });
   }
 
   async createAll(): Promise<void> {
@@ -95,8 +90,7 @@ export class WindowManager {
     if (window === undefined || window.isDestroyed() || window.webContents.id !== webContentsId) {
       return;
     }
-    this.#rendererReadyWebContents.add(webContentsId);
-    this.#pendingRendererReady.get(webContentsId)?.(true);
+    this.#recovery.markReady(webContentsId);
   }
 
   getWebContents(): readonly WebContents[] {
@@ -129,23 +123,15 @@ export class WindowManager {
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'] = null,
   ): boolean {
-    this.#widgetVisibilityGeneration += 1;
-    this.#setDesiredWidgetVisibility(size, targetBounds);
-    return this.#showDesiredWidget();
+    return this.#widget.showWidget(size, targetBounds);
   }
 
   isWidgetVisible(): boolean {
-    const widget = this.#windows.get('widget');
-    const visible = widget !== undefined && !widget.isDestroyed() && widget.isVisible();
-    // A renderer recovery gap, including a not-yet-loaded replacement, must not make screenshot
-    // exclusion forget that an active session expects the widget to become visible.
-    return visible || (this.#desiredWidgetVisibility !== null && !this.#widgetExcludedFromCapture);
+    return this.#widget.isWidgetVisible();
   }
 
   acquireWidgetVisibilityLease(): WidgetVisibilityLease | null {
-    return this.isWidgetVisible()
-      ? Object.freeze({ generation: this.#widgetVisibilityGeneration })
-      : null;
+    return this.#widget.acquireWidgetVisibilityLease();
   }
 
   restoreWidgetVisibility(
@@ -153,46 +139,19 @@ export class WindowManager {
     size: Settings['app']['widgetSize'],
     targetBounds: HelperFrontApp['windowBounds'],
   ): boolean {
-    if (
-      (lease !== null && lease.generation !== this.#widgetVisibilityGeneration) ||
-      this.#desiredWidgetVisibility === null
-    ) {
-      return false;
-    }
-    if (lease !== null) {
-      this.#desiredWidgetVisibility = {
-        size,
-        targetBounds: targetBounds === null ? null : { ...targetBounds },
-      };
-    }
-    this.#widgetExcludedFromCapture = false;
-    return this.#showDesiredWidget();
+    return this.#widget.restoreWidgetVisibility(lease, size, targetBounds);
   }
 
   excludeWidgetFromCapture(): void {
-    this.#widgetExcludedFromCapture = true;
-    const widget = this.#windows.get('widget');
-    if (widget !== undefined && !widget.isDestroyed()) {
-      widget.hide();
-    }
+    this.#widget.excludeWidgetFromCapture();
   }
 
   removeWidget(): void {
-    this.#widgetVisibilityGeneration += 1;
-    this.#desiredWidgetVisibility = null;
-    this.#widgetExcludedFromCapture = false;
-    const widget = this.#windows.get('widget');
-    if (widget !== undefined && !widget.isDestroyed()) {
-      widget.hide();
-    }
+    this.#widget.removeWidget();
   }
 
   setWidgetInteractive(webContentsId: number, interactive: boolean): void {
-    const widget = this.#windows.get('widget');
-    if (widget?.webContents.id !== webContentsId || widget.isDestroyed()) return;
-    // focusable:false is fixed at construction. Reapplying it to a visible Windows widget
-    // calls Electron's native Deactivate(), which can move focus away from the dictation target.
-    widget.setIgnoreMouseEvents(!interactive, { forward: !interactive });
+    this.#widget.setWidgetInteractive(webContentsId, interactive);
   }
 
   showMain(): void {
@@ -218,10 +177,7 @@ export class WindowManager {
   beginQuit(): void {
     if (this.#quitting) return;
     this.#quitting = true;
-    for (const invalidate of [...this.#pendingRendererLoads.values()]) invalidate();
-    for (const complete of [...this.#pendingRendererReady.values()]) complete(false);
-    this.#clearTimers(this.#recoveryTimers);
-    this.#clearTimers(this.#stabilityTimers);
+    this.#recovery.stop();
   }
 
   destroyAll(): void {
@@ -230,7 +186,7 @@ export class WindowManager {
       if (!window.isDestroyed()) window.destroy();
     }
     this.#windows.clear();
-    this.#rendererReadyWebContents.clear();
+    this.#recovery.clearReady();
   }
 
   async #createAndLoad(role: WindowRole): Promise<boolean> {
@@ -240,14 +196,14 @@ export class WindowManager {
     const expectedUrl = this.#loader.urlFor(role);
     this.#roles.register(window.webContents, role, expectedUrl);
     hardenWebContents(window.webContents, expectedUrl);
-    this.#attachRecovery(window, role);
-    const loadOutcome = await this.#loadRenderer(window, role);
+    this.#recovery.attachRecovery(window, role);
+    const loadOutcome = await this.#recovery.loadRenderer(window, role);
     if (loadOutcome === 'failed') {
-      this.#recover(role, window);
+      this.#recovery.recover(role, window);
       return false;
     }
     if (loadOutcome === 'loaded') {
-      if (role !== 'main' && !(await this.#waitForRendererReady(window))) return false;
+      if (role !== 'main' && !(await this.#recovery.waitForRendererReady(window))) return false;
       this.#restoreDesiredWidgetAfterLoad(role, window);
       return true;
     }
@@ -263,83 +219,13 @@ export class WindowManager {
   #destroyWidgetWindow(): void {
     const widget = this.#windows.get('widget');
     if (widget !== undefined) {
-      this.#pendingRendererLoads.get(widget)?.();
-      this.#forgetRendererReady(widget);
+      this.#recovery.invalidate(widget);
+      this.#recovery.forgetRendererReady(widget);
       this.#windows.delete('widget');
       this.#roles.unregister(widget.webContents.id);
       if (!widget.isDestroyed()) widget.destroy();
     }
-    this.#clearRoleTimer(this.#recoveryTimers, 'widget');
-    this.#clearRoleTimer(this.#stabilityTimers, 'widget');
-    this.#recoveryAttempts.delete('widget');
-  }
-
-  #loadRenderer(
-    window: BrowserWindow,
-    role: WindowRole,
-  ): Promise<'loaded' | 'failed' | 'invalidated'> {
-    return new Promise((resolve) => {
-      let finished = false;
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const finish = (outcome: 'loaded' | 'failed' | 'invalidated'): void => {
-        if (finished) return;
-        finished = true;
-        if (timer !== null) clearTimeout(timer);
-        if (this.#pendingRendererLoads.get(window) === invalidate) {
-          this.#pendingRendererLoads.delete(window);
-        }
-        resolve(outcome);
-      };
-      const invalidate = (): void => finish('invalidated');
-      this.#pendingRendererLoads.set(window, invalidate);
-      timer = setTimeout(() => finish('failed'), RENDERER_LOAD_TIMEOUT_MS);
-      timer.unref();
-      try {
-        void this.#loader.load(window, role).then(
-          () => finish('loaded'),
-          () => finish('failed'),
-        );
-      } catch {
-        finish('failed');
-      }
-    });
-  }
-
-  #waitForRendererReady(window: BrowserWindow): Promise<boolean> {
-    const webContentsId = window.webContents.id;
-    if (this.#rendererReadyWebContents.has(webContentsId)) return Promise.resolve(true);
-    return new Promise((resolve) => {
-      let finished = false;
-      const finish = (ready: boolean): void => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        if (this.#pendingRendererReady.get(webContentsId) === finish) {
-          this.#pendingRendererReady.delete(webContentsId);
-        }
-        resolve(ready);
-      };
-      const timer = setTimeout(() => finish(false), RENDERER_LOAD_TIMEOUT_MS);
-      timer.unref();
-      this.#pendingRendererReady.set(webContentsId, finish);
-      if (this.#rendererReadyWebContents.has(webContentsId)) finish(true);
-    });
-  }
-
-  #forgetRendererReady(window: BrowserWindow): void {
-    const webContentsId = window.webContents.id;
-    this.#rendererReadyWebContents.delete(webContentsId);
-    this.#pendingRendererReady.get(webContentsId)?.(false);
-  }
-
-  #setDesiredWidgetVisibility(
-    size: Settings['app']['widgetSize'],
-    targetBounds: HelperFrontApp['windowBounds'],
-  ): void {
-    this.#desiredWidgetVisibility = {
-      size,
-      targetBounds: targetBounds === null ? null : { ...targetBounds },
-    };
+    this.#recovery.resetRole('widget');
   }
 
   #restoreDesiredWidgetAfterLoad(role: WindowRole, window: BrowserWindow): void {
@@ -347,71 +233,15 @@ export class WindowManager {
       role === 'widget' &&
       !this.#quitting &&
       this.#windows.get(role) === window &&
-      !this.#widgetExcludedFromCapture
+      !this.#widget.excludedFromCapture
     ) {
-      this.#showDesiredWidget();
+      this.#widget.showDesiredWidget();
     }
   }
 
-  #showDesiredWidget(): boolean {
-    const desired = this.#desiredWidgetVisibility;
-    const widget = this.#windows.get('widget');
-    if (desired === null || widget === undefined || widget.isDestroyed()) return false;
-    if (this.#widgetExcludedFromCapture) return true;
-    const displayBounds =
-      desired.targetBounds !== null && process.platform === 'win32'
-        ? physicalBoundsToDip(desired.targetBounds, (point) => screen.screenToDipPoint(point))
-        : desired.targetBounds;
-    const display =
-      displayBounds === null
-        ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
-        : screen.getDisplayMatching(displayBounds);
-    widget.setContentBounds(widgetContentBounds(desired.size, display.workArea), false);
-    // Electron's default Windows level places the widget behind the taskbar. If the taskbar
-    // is temporarily not topmost, that also demotes the widget behind ordinary app windows.
-    // Keep it in the topmost band without touching the foreground window.
-    widget.setAlwaysOnTop(true, process.platform === 'win32' ? 'screen-saver' : 'floating');
-    widget.showInactive();
-    widget.webContents.invalidate();
-    // Preserve renderer-selected hit testing across screenshot-only hide/show cycles so a
-    // stationary pointer can still click Stop or Cancel.
-    return widget.isVisible();
-  }
-
   #create(role: WindowRole): BrowserWindow {
-    const common: Electron.BrowserWindowConstructorOptions = {
-      show: false,
-      frame: false,
-      backgroundColor: '#161B23',
-      icon: electronApp.isPackaged
-        ? join(process.resourcesPath, 'app-icon.png')
-        : join(electronApp.getAppPath(), 'assets', 'app-icon.png'),
-      webPreferences: {
-        preload: join(__dirname, '..', 'preload', `${role}.js`),
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        nodeIntegrationInWorker: false,
-        nodeIntegrationInSubFrames: false,
-        webSecurity: true,
-        allowRunningInsecureContent: false,
-        webviewTag: false,
-        devTools: this.#loader.allowsDevTools,
-        partition: role === 'capture' ? CAPTURE_PARTITION : UI_PARTITION,
-        // Keep the active widget responsive while the user's foreground app has focus.
-        backgroundThrottling: role === 'main',
-      },
-    };
-
+    const window = createNativeWindow(role, this.#loader.allowsDevTools);
     if (role === 'main') {
-      const window = new BrowserWindow({
-        ...common,
-        title: 'Talking Quill',
-        width: 1100,
-        height: 720,
-        minWidth: 960,
-        minHeight: 600,
-      });
       window.once('ready-to-show', () => {
         const initialLoad = !this.#mainInitialLoadHandled;
         this.#mainInitialLoadHandled = true;
@@ -438,33 +268,7 @@ export class WindowManager {
       return window;
     }
 
-    if (role === 'widget') {
-      return new BrowserWindow({
-        ...common,
-        title: 'Talking Quill Widget',
-        // An opaque background colour defeats `transparent`, so the widget window
-        // must clear it for the floating pill to sit directly on the desktop.
-        backgroundColor: '#00000000',
-        width: WIDGET_DIMENSIONS.default.width,
-        height: WIDGET_DIMENSIONS.default.height,
-        resizable: false,
-        hasShadow: false,
-        transparent: true,
-        alwaysOnTop: true,
-        focusable: false,
-        skipTaskbar: true,
-      });
-    }
-
-    return new BrowserWindow({
-      ...common,
-      title: 'Talking Quill Capture',
-      width: 1,
-      height: 1,
-      resizable: false,
-      focusable: false,
-      skipTaskbar: true,
-    });
+    return window;
   }
 
   #coordinateMainClose(window: BrowserWindow): Promise<void> {
@@ -489,66 +293,5 @@ export class WindowManager {
       this.#pendingMainClose = null;
     });
     return this.#pendingMainClose;
-  }
-
-  #attachRecovery(window: BrowserWindow, role: WindowRole): void {
-    window.webContents.once('did-finish-load', () => {
-      if (this.#quitting || this.#windows.get(role) !== window) return;
-      this.#clearRoleTimer(this.#stabilityTimers, role);
-      const timer = setTimeout(() => {
-        if (this.#stabilityTimers.get(role) !== timer) return;
-        this.#stabilityTimers.delete(role);
-        if (!this.#quitting && this.#windows.get(role) === window) {
-          this.#recoveryAttempts.delete(role);
-        }
-      }, RENDERER_STABILITY_WINDOW_MS);
-      this.#stabilityTimers.set(role, timer);
-      timer.unref();
-    });
-    window.webContents.on('did-fail-load', (_event, errorCode) => {
-      if (errorCode !== -3) this.#recover(role, window);
-    });
-    window.webContents.on('render-process-gone', () => this.#recover(role, window));
-    window.on('unresponsive', () => {
-      if (role === 'widget') this.#recover(role, window);
-    });
-  }
-
-  #recover(role: WindowRole, failed: BrowserWindow): void {
-    if (this.#quitting || this.#windows.get(role) !== failed) return;
-    if (role === 'main') this.#mainInitialLoadHandled = true;
-    this.#pendingRendererLoads.get(failed)?.();
-    this.#forgetRendererReady(failed);
-    this.#clearRoleTimer(this.#stabilityTimers, role);
-    const attempts = (this.#recoveryAttempts.get(role) ?? 0) + 1;
-    this.#recoveryAttempts.set(role, attempts);
-    this.#windows.delete(role);
-    this.#roles.unregister(failed.webContents.id);
-    if (!failed.isDestroyed()) failed.destroy();
-    if (attempts > MAX_RENDERER_RECOVERY_ATTEMPTS) {
-      this.#callbacks.requestQuit();
-      return;
-    }
-    this.#clearRoleTimer(this.#recoveryTimers, role);
-    const timer = setTimeout(() => {
-      if (this.#recoveryTimers.get(role) !== timer) return;
-      this.#recoveryTimers.delete(role);
-      if (this.#quitting) return;
-      void this.#createAndLoad(role).catch(() => undefined);
-    }, RENDERER_RECOVERY_BACKOFF_MS * attempts);
-    this.#recoveryTimers.set(role, timer);
-    timer.unref();
-  }
-
-  #clearRoleTimer(timers: Map<WindowRole, ReturnType<typeof setTimeout>>, role: WindowRole): void {
-    const timer = timers.get(role);
-    if (timer === undefined) return;
-    clearTimeout(timer);
-    timers.delete(role);
-  }
-
-  #clearTimers(timers: Map<WindowRole, ReturnType<typeof setTimeout>>): void {
-    for (const timer of timers.values()) clearTimeout(timer);
-    timers.clear();
   }
 }

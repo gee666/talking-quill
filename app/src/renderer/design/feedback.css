@@ -1,0 +1,183 @@
+/* ---------------------------------------------------------------- Dialog */
+.me-dialog {
+  width: min(480px, calc(100vw - 48px));
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-1);
+}
+.me-dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+  backdrop-filter: blur(2px);
+}
+.me-dialog__body {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.me-dialog__title {
+  margin: 0;
+  font-size: var(--fs-lg);
+}
+.me-dialog__description {
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+.me-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* -------------------------------------------------------------- Progress */
+.me-progress {
+  display: grid;
+  gap: var(--space-1);
+}
+.me-progress__header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+}
+.me-progress__label {
+  color: var(--color-secondary);
+  font-weight: 500;
+}
+.me-progress__value {
+  color: var(--color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.me-progress__bar {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+}
+.me-progress__bar::-webkit-progress-bar {
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+}
+.me-progress__bar::-webkit-progress-value {
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  transition: width var(--transition-fast);
+}
+.me-progress--disabled {
+  opacity: 0.5;
+}
+
+/* ---------------------------------------------------------------- Status */
+/* The app shows many of these, so the neutral chip is plain text with a dot;
+   only the tones that carry meaning get a tint. */
+.me-status {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.me-status__icon {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentcolor;
+  font-size: 0;
+}
+.me-status--success,
+.me-status--warning,
+.me-status--error,
+.me-status--info {
+  padding: 0 var(--space-2);
+  min-height: 20px;
+}
+.me-status--success {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+}
+.me-status--warning {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+.me-status--error {
+  color: var(--color-error);
+  background: var(--color-error-soft);
+}
+.me-status--info {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+/* ----------------------------------------------------------------- Toast */
+.me-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  box-shadow: var(--shadow-1);
+}
+.me-toast--success {
+  border-left-color: var(--color-success);
+}
+.me-toast--warning {
+  border-left-color: var(--color-warning);
+}
+.me-toast--error {
+  border-left-color: var(--color-error);
+}
+.me-toast__message {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------ EmptyState */
+.me-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-1);
+  padding: var(--space-5) var(--space-4);
+  border: 0;
+  background: transparent;
+  text-align: center;
+}
+.me-empty__icon {
+  color: var(--color-muted);
+}
+.me-empty__title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.me-empty__description {
+  max-width: 52ch;
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: var(--fs-sm);
+}
+
+/* ------------------------------------------------------------------ Icon */
+.me-icon {
+  display: block;
+  flex: none;
+}

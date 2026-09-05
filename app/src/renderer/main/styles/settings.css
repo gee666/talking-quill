@@ -107,13 +107,9 @@
   min-width: 9rem;
   text-align: center;
 }
-.settings-results {
-  display: grid;
-  gap: var(--space-5);
-}
 
 /* ========================================================== Gesture test */
-/* The shell itself is the `.panel` rule set in `design/components.css`; the
+/* The shell itself is the `.panel` rule set in `design/layout.css`; the
    user asked to keep this block and the profile editor bordered. */
 .gesture-test {
   justify-items: start;
@@ -281,60 +277,19 @@ fieldset.gesture-test > div:not(.me-field) {
   opacity: 0.55;
   cursor: not-allowed;
 }
-.provider-option__pending {
-  color: var(--color-warning);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  white-space: nowrap;
-}
 .provider-summary,
-.provider-actions,
-.credential-panel__heading {
+.provider-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-.provider-summary,
-.credential-panel__heading {
+.provider-summary {
   justify-content: space-between;
-}
-/* Ordinary content: no border, no fill. Hierarchy comes from spacing. */
-.provider-form,
-.credential-panel,
-.connection-panel,
-.provider-pending {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-}
-.provider-form {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.provider-form > .provider-actions,
-.provider-form > .model-field {
-  grid-column: 1 / -1;
 }
 .model-field {
   display: grid;
   gap: var(--space-1);
-}
-.credential-panel h3,
-.connection-panel h3 {
-  margin: 0;
-  font-size: var(--fs-md);
-  font-weight: 600;
-}
-.credential-panel p,
-.connection-panel p,
-.provider-pending p {
-  max-width: var(--measure);
-  margin: 0;
-  color: var(--color-secondary);
-  font-size: var(--fs-sm);
 }
 .vision-test-code {
   padding: var(--space-3);
@@ -361,12 +316,6 @@ fieldset.gesture-test > div:not(.me-field) {
     grid-auto-flow: column;
     grid-auto-columns: max-content;
     overflow-x: auto;
-  }
-  .provider-form {
-    grid-template-columns: 1fr;
-  }
-  .provider-form > * {
-    grid-column: 1;
   }
   .inline-field-action {
     grid-template-columns: minmax(0, 1fr);

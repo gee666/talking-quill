@@ -1,13 +1,37 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, rm, unlink } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { constants, existsSync } from 'node:fs';
+import { mkdir, open, readFile, rm, unlink } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import {
+  createFreshEnvironment,
+  PERSONAL_TARGETS,
+  requireHost,
+  sanitizePersonalConsumerEnvironment,
+  requireFreshMacAbsence,
+  waitForExactMacProcesses,
+} from './personal-host-policy.mjs';
+import {
+  WINDOWS_ELEVATION_WRAPPER,
+  WINDOWS_STAGED_PATH_ENV,
+  WINDOWS_STAGED_SHA256_ENV,
+  withStagedWindowsInstaller,
+} from './personal-windows-installer.mjs';
+export {
+  createFreshEnvironment,
+  PERSONAL_TARGETS,
+  sanitizePersonalConsumerEnvironment,
+  detectPhysicalMacArchitecture,
+  readMacSigningConfiguration,
+  requireNotRegisteredMacStatus,
+} from './personal-host-policy.mjs';
+export {
+  WINDOWS_ELEVATION_WRAPPER,
+  removeWindowsInstallerStaging,
+  withStagedWindowsInstaller,
+} from './personal-windows-installer.mjs';
 import {
   RELEASE_PACKAGE_METADATA_NAME,
   verifyMatchingPackageReleaseMetadataBytes,
@@ -19,55 +43,6 @@ const manifest = JSON.parse(await readFile(resolve(root, 'app/package.json'), 'u
 const version = manifest.version;
 const command = process.argv[2];
 const target = process.argv[3];
-
-const WINDOWS_STAGED_PATH_ENV = 'TALKING_QUILL_PERSONAL_STAGED_INSTALLER';
-const WINDOWS_STAGED_SHA256_ENV = 'TALKING_QUILL_PERSONAL_STAGED_SHA256';
-const WINDOWS_STAGING_CLEANUP_ATTEMPTS = 10;
-
-export const WINDOWS_ELEVATION_WRAPPER = [
-  '$ErrorActionPreference="Stop"',
-  '$stream=$null',
-  '$hasher=$null',
-  'try{',
-  '$path=[Environment]::GetEnvironmentVariable("TALKING_QUILL_PERSONAL_STAGED_INSTALLER","Process")',
-  '$expected=[Environment]::GetEnvironmentVariable("TALKING_QUILL_PERSONAL_STAGED_SHA256","Process")',
-  'if([string]::IsNullOrWhiteSpace($path)-or[string]::IsNullOrWhiteSpace($expected)-or$expected-cnotmatch "^[0-9a-f]{64}$"){exit 70}',
-  '[Environment]::SetEnvironmentVariable("TALKING_QUILL_PERSONAL_STAGED_INSTALLER",$null,"Process")',
-  '[Environment]::SetEnvironmentVariable("TALKING_QUILL_PERSONAL_STAGED_SHA256",$null,"Process")',
-  '$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)',
-  '$hasher=[Security.Cryptography.SHA256]::Create()',
-  '$actual=-join($hasher.ComputeHash($stream)|ForEach-Object{$_.ToString("x2")})',
-  '$hasher.Dispose()',
-  '$hasher=$null',
-  'if($actual-cne$expected){exit 70}',
-  '$process=Start-Process -FilePath $path -PassThru -ErrorAction Stop',
-  'if($null-eq$process){exit 70}',
-  '$process.WaitForExit()',
-  'exit $process.ExitCode',
-  '}catch{exit 70}',
-  'finally{if($null-ne$hasher){$hasher.Dispose()};if($null-ne$stream){$stream.Dispose()}}',
-].join('\n');
-
-export const PERSONAL_TARGETS = Object.freeze({
-  win: { packageTarget: 'win-unsigned', platform: 'win', architecture: 'x64' },
-  'win-arm64': { packageTarget: 'win-arm64-unsigned', platform: 'win', architecture: 'arm64' },
-  'mac-x64': { packageTarget: 'mac-owner-x64', platform: 'mac', architecture: 'x64' },
-  'mac-arm64': { packageTarget: 'mac-owner-arm64', platform: 'mac', architecture: 'arm64' },
-});
-
-export function sanitizePersonalConsumerEnvironment(source = process.env) {
-  return sanitizedSubprocessEnvironment(source);
-}
-
-export function createFreshEnvironment(configuration, source = process.env) {
-  const environment = sanitizePersonalConsumerEnvironment(source);
-  if (configuration.platform === 'mac') {
-    Object.assign(environment, readMacSigningConfiguration(source));
-  }
-  environment.TALKING_QUILL_PACKAGE_MODE = 'fresh';
-  environment.TALKING_QUILL_PERSONAL_FRESH_INSTALL = '1';
-  return environment;
-}
 
 export function packagePaths(configuration) {
   const stem = `Talking-Quill-${version}-${configuration.platform}-${configuration.architecture}`;
@@ -340,244 +315,9 @@ async function verify(configuration) {
   );
 }
 
-export function readMacSigningConfiguration(source = process.env) {
-  const path =
-    source.TALKING_QUILL_MACOS_LOCAL_CONFIG ??
-    resolve(
-      homedir(),
-      'Library',
-      'Application Support',
-      'Talking Quill Local Build',
-      'signing.json',
-    );
-  if (!existsSync(path)) throw new Error(`Run pnpm personal:mac:setup first; missing ${path}`);
-  const value = JSON.parse(readFileSync(path, 'utf8'));
-  const required = [
-    'TALKING_QUILL_MACOS_POLICY_SIGNER_SHA256',
-    'TALKING_QUILL_MACOS_POLICY_CMS_IDENTITY',
-    'TALKING_QUILL_MACOS_INSTALLATION_ID',
-    'TALKING_QUILL_MACOS_LOCAL_IDENTITY',
-    'TALKING_QUILL_MACOS_LOCAL_CERT_SHA256',
-    'TALKING_QUILL_MACOS_LOCAL_CERT_SHA1',
-  ];
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    Object.keys(value).some((name) => !required.includes(name))
-  ) {
-    throw new Error('macOS local configuration contains unknown fields');
-  }
-  for (const name of required)
-    if (typeof value[name] !== 'string' || value[name] === '')
-      throw new Error(`Invalid macOS local configuration: ${name}`);
-  for (const name of [
-    'TALKING_QUILL_MACOS_POLICY_SIGNER_SHA256',
-    'TALKING_QUILL_MACOS_INSTALLATION_ID',
-    'TALKING_QUILL_MACOS_LOCAL_CERT_SHA256',
-  ]) {
-    if (!/^[0-9a-f]{64}$/u.test(value[name]))
-      throw new Error(`Invalid macOS local digest: ${name}`);
-  }
-  if (!/^[0-9a-f]{40}$/u.test(value.TALKING_QUILL_MACOS_LOCAL_CERT_SHA1)) {
-    throw new Error('Invalid macOS local SHA-1 certificate fingerprint');
-  }
-  const mode = source.TALKING_QUILL_MACOS_LOCAL_SIGNING_MODE ?? 'self-signed';
-  if (!['self-signed', 'adhoc'].includes(mode)) throw new Error('Invalid local signing mode');
-  return Object.fromEntries([
-    ...required.map((name) => [name, value[name]]),
-    ['TALKING_QUILL_MACOS_LOCAL_SIGNING_MODE', mode],
-  ]);
-}
-
 export function requireMatchingArtifactSha256(expected, actual) {
   if (!/^[0-9a-f]{64}$/u.test(expected) || actual !== expected) {
     throw new Error('Package artifact changed after verification');
-  }
-}
-
-export async function removeWindowsInstallerStaging(
-  staging,
-  remove = rm,
-  wait = delay,
-  attempts = WINDOWS_STAGING_CLEANUP_ATTEMPTS,
-) {
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      await remove(staging, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt < attempts) await wait(attempt * 100);
-    }
-  }
-  throw new Error('Windows installer staging cleanup failed after bounded retries', {
-    cause: lastError,
-  });
-}
-
-export async function withStagedWindowsInstaller(
-  checked,
-  launch,
-  stagingParent = resolve(root, 'tmp'),
-  cleanup = removeWindowsInstallerStaging,
-) {
-  await mkdir(stagingParent, { recursive: true, mode: 0o700 });
-  const staging = await mkdtemp(resolve(stagingParent, 'personal-use-win-install-'));
-  const stagedInstaller = resolve(staging, 'checked-package.exe');
-  let stagedHandle;
-  let primaryError;
-  let launchResult;
-  try {
-    stagedHandle = await open(
-      stagedInstaller,
-      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
-      0o600,
-    );
-    await stagedHandle.writeFile(checked.artifactBytes);
-    await stagedHandle.sync();
-    await stagedHandle.close();
-    stagedHandle = undefined;
-    // The launcher must verify through a retained read-only FileStream and keep
-    // that same object open until the elevated installer process has exited.
-    launchResult = await launch(stagedInstaller, checked.sha256);
-  } catch (error) {
-    primaryError = error;
-  }
-  await stagedHandle?.close().catch(() => undefined);
-  let cleanupError;
-  try {
-    await cleanup(staging);
-  } catch (error) {
-    cleanupError = error;
-  }
-  if (primaryError !== undefined) {
-    if (cleanupError !== undefined) {
-      console.error(
-        'Windows installer staging cleanup also failed; the primary install error is retained.',
-      );
-    }
-    throw primaryError;
-  }
-  if (cleanupError !== undefined) throw cleanupError;
-  return launchResult;
-}
-
-export function requireNotRegisteredMacStatus(status, output) {
-  if (status !== 0 || output.trim() !== '0') {
-    throw new Error('Fresh installation requires authoritative SMAppService notRegistered status');
-  }
-}
-
-function requireFreshMacAbsence(serviceBridge, environment) {
-  const service = 'com.talkingquill.app.keyboard-owner';
-  for (const account of ['owner-ipc-v1', 'maintenance-latch-v1']) {
-    const result = spawnSync(
-      '/usr/bin/security',
-      ['find-generic-password', '-s', service, '-a', account],
-      { env: environment },
-    );
-    if (result.status === 0) {
-      throw new Error(
-        `Fresh installation refuses existing Keyboard Owner Keychain item: ${account}`,
-      );
-    }
-    if (result.status !== 44) throw new Error('Could not prove Keyboard Owner Keychain absence');
-  }
-  const ownerRoot = resolve(
-    homedir(),
-    'Library',
-    'Application Support',
-    'Talking Quill',
-    'KeyboardOwner',
-  );
-  if (existsSync(ownerRoot)) {
-    throw new Error(`Fresh installation refuses pending owner state or cleanup: ${ownerRoot}`);
-  }
-  const serviceStatus = spawnSync(serviceBridge, ['status'], {
-    encoding: 'utf8',
-    env: environment,
-  });
-  requireNotRegisteredMacStatus(serviceStatus.status, serviceStatus.stdout);
-  const processes = spawnSync('/bin/ps', ['-axo', 'command='], {
-    encoding: 'utf8',
-    env: environment,
-  });
-  if (
-    processes.status !== 0 ||
-    /talking-quill-(?:helper|keyboard-owner)|Talking Quill Keyboard Owner/u.test(processes.stdout)
-  ) {
-    throw new Error(
-      'Fresh installation cannot prove that previous gateway/owner processes are absent',
-    );
-  }
-}
-
-function waitForExactMacProcesses(paths, environment) {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const result = spawnSync('/bin/ps', ['-axo', 'command='], {
-      encoding: 'utf8',
-      env: environment,
-    });
-    const commands = result.stdout.split('\n');
-    if (
-      result.status === 0 &&
-      paths.every((path) =>
-        commands.some((command) => command === path || command.startsWith(`${path} `)),
-      )
-    )
-      return;
-    spawnSync('/bin/sleep', ['1'], { env: environment });
-  }
-  throw new Error(`Timed out waiting for exact installed processes: ${paths.join(', ')}`);
-}
-
-export function detectPhysicalMacArchitecture({
-  environment = sanitizePersonalConsumerEnvironment(),
-  spawnProcess = spawnSync,
-  sysctlCommand = { executable: '/usr/sbin/sysctl', arguments: [] },
-  unameCommand = { executable: '/usr/bin/uname', arguments: [] },
-} = {}) {
-  const translated = spawnProcess(
-    sysctlCommand.executable,
-    [...sysctlCommand.arguments, '-in', 'sysctl.proc_translated'],
-    { encoding: 'utf8', env: environment },
-  );
-  const machine = spawnProcess(unameCommand.executable, [...unameCommand.arguments, '-m'], {
-    encoding: 'utf8',
-    env: environment,
-  });
-  if (machine.status !== 0) throw new Error('Cannot determine physical Mac architecture');
-  return translated.status === 0 && translated.stdout.trim() === '1'
-    ? 'arm64'
-    : machine.stdout.trim() === 'x86_64'
-      ? 'x64'
-      : machine.stdout.trim();
-}
-
-function requireHost(configuration, requireNativeArchitecture) {
-  const expected = configuration.platform === 'win' ? 'win32' : 'darwin';
-  if (process.platform !== expected)
-    throw new Error(
-      `${configuration.platform} personal-use commands require a native ${expected} host`,
-    );
-  if (configuration.platform === 'win') {
-    if (requireNativeArchitecture && process.arch !== configuration.architecture) {
-      throw new Error(
-        `Installed ${configuration.architecture} verification requires matching Windows hardware; this host is ${process.arch}`,
-      );
-    }
-    return;
-  }
-  if (configuration.platform === 'mac') {
-    const physical = detectPhysicalMacArchitecture();
-    if (physical !== configuration.architecture) {
-      throw new Error(
-        `${configuration.architecture} personal-use command requires matching physical hardware; this Mac is ${physical}`,
-      );
-    }
   }
 }
 

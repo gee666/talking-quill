@@ -26,9 +26,9 @@ describe('Windows verified-child launcher', () => {
   });
 
   it('rejects omitted identities and oversized child arguments', () => {
-    expect(() =>
-      verifiedChildArguments({ ...bootstrap, sha256: '' }, child, 10_000),
-    ).toThrow('identity is invalid');
+    expect(() => verifiedChildArguments({ ...bootstrap, sha256: '' }, child, 10_000)).toThrow(
+      'identity is invalid',
+    );
     expect(() =>
       verifiedChildArguments(bootstrap, { ...child, arguments: ['x'.repeat(32_769)] }, 10_000),
     ).toThrow('identity is invalid');

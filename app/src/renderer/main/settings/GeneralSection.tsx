@@ -4,7 +4,11 @@ import {
   type ActivationTestState,
 } from '../../../shared/schemas/activation-test';
 import type { DictationProfileId } from '../../../shared/schemas/dictation-profiles';
-import type { PublicSettingsPatch, Settings } from '../../../shared/schemas/settings';
+import {
+  WidgetSizeSchema,
+  type PublicSettingsPatch,
+  type Settings,
+} from '../../../shared/schemas/settings';
 import { Button, Card, Select, Status, Toggle } from '../../design';
 import { formatKeyboardShortcut } from '../format-keyboard-shortcut';
 
@@ -143,12 +147,10 @@ export function GeneralSection({
         hint="The small window that appears while you dictate. Make it bigger if it is hard to see."
         value={settings.app.widgetSize}
         disabled={disabled}
-        onChange={(event) =>
-          void onSave(
-            { app: { widgetSize: event.currentTarget.value as Settings['app']['widgetSize'] } },
-            'Widget size saved.',
-          )
-        }
+        onChange={(event) => {
+          const size = WidgetSizeSchema.safeParse(event.currentTarget.value);
+          if (size.success) void onSave({ app: { widgetSize: size.data } }, 'Widget size saved.');
+        }}
       >
         <option value="default">Default</option>
         <option value="large">Large</option>

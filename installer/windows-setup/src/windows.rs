@@ -109,156 +109,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::owned_tree::{owned_tree_identity, remove_owned_tree};
 use crate::package::{self, ParsedPackage};
 
-#[cfg(any(
-    not(any(test, feature = "machine-lock-test-namespace")),
-    feature = "stale-schema2-cleanup"
-))]
-const MACHINE_LOCK_DIRECTORY_SDDL: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-const MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-const TEST_MACHINE_LOCK_DIRECTORY_SDDL: &str =
-    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;AU)";
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-const TEST_MACHINE_LOCK_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)";
+mod machine_lock_namespace;
+use machine_lock_namespace::*;
 
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_directory_sddl() -> &'static str {
-    TEST_MACHINE_LOCK_DIRECTORY_SDDL
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_directory_sddl() -> &'static str {
-    MACHINE_LOCK_DIRECTORY_SDDL
-}
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_file_sddl() -> &'static str {
-    TEST_MACHINE_LOCK_FILE_SDDL
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_file_sddl() -> &'static str {
-    MACHINE_LOCK_FILE_SDDL
-}
-
-const MACHINE_LOCK_RETIRED_PREFIX: &str = "retired:";
-const MACHINE_LOCK_REGISTRY_KEY: &str = r"Software\Talking Quill\RecoveryStateLockV1";
-const MACHINE_LOCK_REGISTRY_VALUE: &str = "DirectorySuffix";
-const MACHINE_LOCK_DIRECTORY_PREFIX: &str = ".Talking Quill.machine-lock-";
-const MACHINE_LOCK_PENDING_PREFIX: &str = ".Talking Quill.machine-lock-pending-";
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-const MACHINE_LOCK_TEST_ID_ENV: &str = "TQ_MACHINE_LOCK_TEST_NAMESPACE_ID";
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_test_id() -> Result<&'static str> {
-    static ID: OnceLock<String> = OnceLock::new();
-    let value = ID.get_or_init(|| {
-        std::env::var(MACHINE_LOCK_TEST_ID_ENV)
-            .expect("machine-lock tests require the wrapper namespace environment")
-    });
-    validate_machine_lock_suffix(value)?;
-    Ok(value)
-}
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_registry_hive() -> HKEY {
-    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_some() {
-        HKEY_CURRENT_USER
-    } else {
-        HKEY_LOCAL_MACHINE
-    }
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_registry_hive() -> HKEY {
-    HKEY_LOCAL_MACHINE
-}
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_registry_key() -> Result<String> {
-    match std::env::var_os(MACHINE_LOCK_TEST_ID_ENV) {
-        Some(_) => Ok(format!(
-            r"Software\Talking Quill Tests\{}\RecoveryStateLockV1",
-            machine_lock_test_id()?
-        )),
-        None => Ok(MACHINE_LOCK_REGISTRY_KEY.to_owned()),
-    }
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_registry_key() -> Result<String> {
-    Ok(MACHINE_LOCK_REGISTRY_KEY.to_owned())
-}
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_registry_parent() -> Result<String> {
-    match std::env::var_os(MACHINE_LOCK_TEST_ID_ENV) {
-        Some(_) => Ok(format!(
-            r"Software\Talking Quill Tests\{}",
-            machine_lock_test_id()?
-        )),
-        None => Ok(r"Software\Talking Quill".to_owned()),
-    }
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_registry_parent() -> Result<String> {
-    Ok(r"Software\Talking Quill".to_owned())
-}
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_program_data(production: &Path) -> Result<PathBuf> {
-    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_none() {
-        return Ok(production.to_owned());
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("tmp/machine-lock-tests/windows-setup")
-        .join(machine_lock_test_id()?);
-    if !root.is_dir() {
-        return Err(fail(EXIT_FAILURE, "machine-lock test outer root is absent"));
-    }
-    Ok(root)
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_program_data(production: &Path) -> Result<PathBuf> {
-    Ok(production.to_owned())
-}
-
-#[cfg(any(test, feature = "machine-lock-test-namespace"))]
-fn machine_lock_mutex_names() -> Result<[String; 2]> {
-    if std::env::var_os(MACHINE_LOCK_TEST_ID_ENV).is_none() {
-        return Ok([
-            r"Global\TalkingQuill.NativeSetup.V2".to_owned(),
-            r"Global\TalkingQuill.UpdateRecovery.State.V1".to_owned(),
-        ]);
-    }
-    let id = machine_lock_test_id()?;
-    Ok([
-        format!(r"Local\TalkingQuill.Tests.{id}.NativeSetup.V2"),
-        format!(r"Local\TalkingQuill.Tests.{id}.UpdateRecovery.State.V1"),
-    ])
-}
-#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]
-fn machine_lock_mutex_names() -> Result<[String; 2]> {
-    Ok([
-        r"Global\TalkingQuill.NativeSetup.V2".to_owned(),
-        r"Global\TalkingQuill.UpdateRecovery.State.V1".to_owned(),
-    ])
-}
-
-const TERMINAL_UNINSTALL_RECORD_NAME: &str = "terminal-uninstall-record-v1.json";
-const TERMINAL_RECOVERY_TOMBSTONE_PREFIX: &str = ".Talking Quill.recovery-tombstone-";
-const TERMINAL_FINAL_LAUNCHER_PREFIX: &str = ".Talking Quill Terminal Relaunch-";
-const TERMINAL_SERVICE_PREFIX: &str = "TalkingQuillTerminalCleanup-";
-const TERMINAL_SERVICE_IMAGE_PREFIX: &str = ".Talking Quill Terminal Cleanup-";
-const TERMINAL_SERVICE_PENDING_PREFIX: &str = ".Talking Quill.terminal-cleanup-pending-";
-const TERMINAL_SERVICE_FILE_SDDL: &str = MACHINE_LOCK_FILE_SDDL;
-const TERMINAL_SERVICE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LC;;;AU)";
-const UNINSTALL_FINALIZER_PENDING_PREFIX: &str = ".Talking Quill.uninstall-finalizer-pending-";
-const UNINSTALL_FINALIZER_PREFIX: &str = ".Talking Quill.uninstall-finalizer-";
-const UNINSTALL_FINALIZER_NAME: &str = "Talking Quill Uninstall Finalizer.exe";
-const MEDIUM_FINALIZER_DIRECTORY_SDDL: &str =
-    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)";
-const MEDIUM_FINALIZER_FILE_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;AU)";
-const MEDIUM_LAUNCHER_DIRECTORY_SDDL: &str = MEDIUM_FINALIZER_DIRECTORY_SDDL;
-const MEDIUM_LAUNCHER_FILE_SDDL: &str = MEDIUM_FINALIZER_FILE_SDDL;
-const LEGACY_LOCK_RETIREMENT_EPOCH: u8 = 3;
+mod terminal_policy;
+use terminal_policy::*;
 
 const EXIT_USAGE: i32 = 64;
 const EXIT_FAILURE: i32 = 70;
@@ -271,8 +126,6 @@ unsafe extern "system" {
     fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
     fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
-
-static TERMINAL_SERVICE_GENERATION: OnceLock<String> = OnceLock::new();
 
 pub fn run() -> i32 {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -322,174 +175,11 @@ fn fail(code: i32, message: impl Into<String>) -> SetupError {
     }
 }
 
-#[cfg(feature = "acceptance-faults")]
-fn take_terminal_acceptance_fault(phase: &str) -> Result<bool> {
-    const KEY: &str = r"Software\Talking Quill\AcceptanceTerminalFault";
-    let mut key = ptr::null_mut();
-    let opened = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide(OsStr::new(KEY)).as_ptr(),
-            0,
-            KEY_READ | KEY_WRITE,
-            &mut key,
-        )
-    };
-    if opened == 2 {
-        return Ok(false);
-    }
-    if opened != 0 {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Cannot inspect terminal acceptance fault.",
-        ));
-    }
-    let selected = read_registry_value(key, "Phase", 128)?;
-    unsafe { RegCloseKey(key) };
-    if selected.as_deref() != Some(phase) {
-        return Ok(false);
-    }
-    let deleted = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, wide(OsStr::new(KEY)).as_ptr()) };
-    let mut parent = ptr::null_mut();
-    let flushed = deleted == 0
-        && unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                wide(OsStr::new(r"Software")).as_ptr(),
-                0,
-                KEY_READ,
-                &mut parent,
-            )
-        } == 0
-        && unsafe { RegFlushKey(parent) } == 0;
-    if !parent.is_null() {
-        unsafe { RegCloseKey(parent) };
-    }
-    if !flushed {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Cannot consume terminal acceptance fault.",
-        ));
-    }
-    Ok(true)
-}
+mod acceptance_faults;
+use acceptance_faults::*;
 
-#[cfg(feature = "acceptance-faults")]
-fn terminal_maintenance_crash_at(phase: &str) {
-    if std::env::var("TQ_TERMINAL_FAULT").as_deref() == Ok(phase)
-        || take_terminal_acceptance_fault(phase).unwrap_or(false)
-    {
-        std::process::exit(197);
-    }
-}
-
-#[cfg(not(feature = "acceptance-faults"))]
-fn terminal_maintenance_crash_at(_phase: &str) {}
-
-#[cfg(feature = "acceptance-faults")]
-fn terminal_force_pending_delete() -> bool {
-    std::env::var("TQ_TERMINAL_FAULT").as_deref() == Ok("reboot-pending-delete")
-        || take_terminal_acceptance_fault("reboot-pending-delete").unwrap_or(false)
-}
-
-#[cfg(not(feature = "acceptance-faults"))]
-fn terminal_force_pending_delete() -> bool {
-    false
-}
-
-#[cfg(feature = "acceptance-faults")]
-fn terminal_service_fail_once(phase: &str) -> Result<()> {
-    if take_terminal_acceptance_fault(phase)? {
-        Err(fail(EXIT_FAILURE, "Injected terminal service failure."))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(feature = "acceptance-faults"))]
-fn terminal_service_fail_once(_phase: &str) -> Result<()> {
-    Ok(())
-}
-
-fn terminal_service_name(generation: &str) -> Result<String> {
-    validate_machine_lock_suffix(generation)?;
-    Ok(format!("{TERMINAL_SERVICE_PREFIX}{generation}"))
-}
-
-fn run_terminal_service_dispatcher(generation: &str) -> Result<i32> {
-    validate_machine_lock_suffix(generation)?;
-    TERMINAL_SERVICE_GENERATION
-        .set(generation.to_owned())
-        .map_err(|_| {
-            fail(
-                EXIT_REJECTED,
-                "Terminal service generation was already set.",
-            )
-        })?;
-    let mut service_name = wide(OsStr::new(&terminal_service_name(generation)?));
-    let table = [
-        SERVICE_TABLE_ENTRYW {
-            lpServiceName: service_name.as_mut_ptr(),
-            lpServiceProc: Some(terminal_service_main),
-        },
-        SERVICE_TABLE_ENTRYW::default(),
-    ];
-    if unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) } == 0 {
-        return Err(fail(
-            EXIT_FAILURE,
-            "Terminal cleanup service dispatcher failed.",
-        ));
-    }
-    Ok(0)
-}
-
-unsafe extern "system" fn terminal_service_control(_control: u32) {}
-
-unsafe extern "system" fn terminal_service_main(_argc: u32, _argv: *mut *mut u16) {
-    let Some(generation) = TERMINAL_SERVICE_GENERATION.get() else {
-        return;
-    };
-    let service_name = match terminal_service_name(generation) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let handle = unsafe {
-        RegisterServiceCtrlHandlerW(
-            wide(OsStr::new(&service_name)).as_ptr(),
-            Some(terminal_service_control),
-        )
-    };
-    if handle.is_null() {
-        return;
-    }
-    let mut status = SERVICE_STATUS {
-        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
-        dwCurrentState: SERVICE_START_PENDING,
-        dwControlsAccepted: 0,
-        dwWin32ExitCode: 0,
-        dwServiceSpecificExitCode: 0,
-        dwCheckPoint: 1,
-        dwWaitHint: 120_000,
-    };
-    unsafe { SetServiceStatus(handle, &status) };
-    status.dwCurrentState = SERVICE_RUNNING;
-    status.dwCheckPoint = 0;
-    status.dwWaitHint = 0;
-    unsafe { SetServiceStatus(handle, &status) };
-    let result = run_terminal_cleanup_service(generation);
-    status.dwCurrentState = SERVICE_STOPPED;
-    match result {
-        Ok(()) => {
-            status.dwWin32ExitCode = 0;
-            status.dwServiceSpecificExitCode = 0;
-        }
-        Err(error) => {
-            status.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-            status.dwServiceSpecificExitCode = error.code as u32;
-        }
-    }
-    unsafe { SetServiceStatus(handle, &status) };
-}
+mod terminal_service_host;
+use terminal_service_host::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -501,45 +191,8 @@ enum Action {
     CleanStaleSchema2,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Transaction {
-    schema_version: u8,
-    phase: String,
-    action: String,
-    had_predecessor: bool,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct TerminalUninstallRecord {
-    schema_version: u8,
-    generation: String,
-    phase: String,
-    maintenance_sha256: String,
-    uninstall_command: String,
-    quiet_uninstall_command: String,
-    service_name: String,
-    service_image: String,
-    service_sha256: String,
-    service_file_identity: String,
-    record_file_identity: String,
-}
-
-struct Paths {
-    install: PathBuf,
-    staging: PathBuf,
-    backup: PathBuf,
-    transaction: PathBuf,
-    maintenance_generation_record: PathBuf,
-    maintenance_uninstaller: PathBuf,
-    recovery_launcher: PathBuf,
-    profile: PathBuf,
-    legacy_authority: PathBuf,
-    legacy_quarantine: PathBuf,
-    legacy_task_file: PathBuf,
-    program_data: PathBuf,
-}
+mod state;
+use state::*;
 
 #[cfg(feature = "stale-schema2-cleanup")]
 fn direct_cleanup_arguments(arguments: &[OsString], elevated: bool) -> bool {

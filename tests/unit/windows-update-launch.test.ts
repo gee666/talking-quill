@@ -11,6 +11,15 @@ import {
   wrapWindowsUpdateRelaunchRequest,
 } from '../../app/src/main/info/windows-update-relaunch-intent';
 
+async function setupFunction(module: string, name: string): Promise<string> {
+  const source = await readFile(`installer/windows-setup/src/windows/${module}.rs`, 'utf8');
+  const start = source.indexOf(`fn ${name}(`);
+  expect(start, `missing ${name} in ${module}`).toBeGreaterThanOrEqual(0);
+  const end = source.indexOf('\n}', start);
+  expect(end, `missing end of ${name} in ${module}`).toBeGreaterThan(start);
+  return source.slice(start, end + 2);
+}
+
 const candidate = {
   version: '0.0.69',
   platform: 'win' as const,
@@ -88,14 +97,11 @@ describe('Windows elevated updater launch', () => {
       expect(source).toContain('MACHINE_LOCK_PENDING_PREFIX');
       expect(source).toContain('publication-pending-v1');
       expect(source).toContain('LEGACY_LOCK_RETIREMENT_EPOCH');
-      const productionNamesStart = source.lastIndexOf(
-        '#[cfg(not(any(test, feature = "machine-lock-test-namespace")))]\nfn machine_lock_mutex_names',
-      );
-      const productionNames = source.slice(
-        productionNamesStart,
-        source.indexOf('\n}\n', productionNamesStart) + 3,
-      );
-      expect(productionNamesStart).toBeGreaterThanOrEqual(0);
+      const productionNames =
+        /#\[cfg\(not\(any\(test, feature = "machine-lock-test-namespace"\)\)\)\]\n(?:pub\([^)]*\) )?fn machine_lock_mutex_names\([\s\S]*?\n\}/u.exec(
+          source,
+        )?.[0] ?? '';
+      expect(productionNames, 'missing production mutex namespace').not.toBe('');
       expect(productionNames).toContain('r"Global\\TalkingQuill.NativeSetup.V2"');
       expect(productionNames).toContain('r"Global\\TalkingQuill.UpdateRecovery.State.V1"');
       expect(productionNames.indexOf('NativeSetup.V2')).toBeLessThan(
@@ -125,9 +131,9 @@ describe('Windows elevated updater launch', () => {
     expect(setup).not.toContain('schedule_delayed_deletion_plan');
     expect(setup).toContain('fn relocated_uninstall_matches_maintenance');
     expect(setup).toContain('authenticated_relocated_image');
-    const publication = setup.slice(
-      setup.indexOf('fn publish_terminal_uninstall_record'),
-      setup.indexOf('fn write_terminal_uninstall_phase'),
+    const publication = await setupFunction(
+      'terminal_service',
+      'publish_terminal_uninstall_record',
     );
     expect(publication.indexOf('install_terminal_service(paths, &record, false)?')).toBeLessThan(
       publication.indexOf('write_terminal_uninstall_record(paths, &record)?'),
@@ -140,19 +146,16 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('record_file_identity');
     expect(setup).toContain('SERVICE_CONFIG_FAILURE_ACTIONS_FLAG');
     expect(setup).toContain('ERROR_SERVICE_SPECIFIC_ERROR');
-    const retirement = setup.slice(
-      setup.indexOf('fn retire_terminal_machine_state'),
-      setup.indexOf('enum RecoveryPlan'),
-    );
+    const retirement = await setupFunction('recovery/uninstall', 'retire_terminal_machine_state');
     expect(retirement.indexOf('recover_with_adapter(paths, system)?')).toBeLessThan(
       retirement.indexOf('system.unregister_app_path()?'),
     );
     expect(retirement).not.toContain('remove_transaction(paths)?');
     expect(retirement).not.toContain('system.unregister_uninstall()');
     expect(retirement).toContain('register_uninstall_executable(&paths.maintenance_uninstaller)?');
-    const serviceCleanup = setup.slice(
-      setup.indexOf('fn run_terminal_cleanup_service'),
-      setup.indexOf('fn remove_retired_terminal_service_image'),
+    const serviceCleanup = await setupFunction(
+      'terminal_service/cleanup',
+      'run_terminal_cleanup_service',
     );
     expect(serviceCleanup).toContain('"cleanup-complete"');
     expect(serviceCleanup).not.toContain('DeleteService(');
@@ -160,10 +163,7 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain(
       'RegCreateKeyExW(\n            HKEY_LOCAL_MACHINE,\n            wide(OsStr::new(UNINSTALL_KEY))',
     );
-    const terminalCleanup = setup.slice(
-      setup.indexOf('fn finish_terminal_uninstall'),
-      setup.indexOf('fn clear_machine_relaunch_owner'),
-    );
+    const terminalCleanup = await setupFunction('terminal_finalizer', 'finish_terminal_uninstall');
     expect(terminalCleanup.indexOf('clear_legacy_profile_relaunch_owners(paths)?')).toBeLessThan(
       terminalCleanup.lastIndexOf('clear_machine_relaunch_owner(paths)'),
     );
@@ -189,9 +189,9 @@ describe('Windows elevated updater launch', () => {
     expect(setup).not.toContain('retire_legacy_fixed_maintenance');
     expect(setup).not.toContain('Legacy fixed maintenance predecessor policy');
     expect(setup).toContain('talking-quill-update-recovery-launcher-{maintenance_generation}.exe');
-    const maintenanceRetirement = setup.slice(
-      setup.indexOf('fn wait_for_terminal_service_retirement'),
-      setup.indexOf('fn enumerate_registry_subkeys'),
+    const maintenanceRetirement = await setupFunction(
+      'terminal_service/cleanup/retirement',
+      'wait_for_terminal_service_retirement',
     );
     expect(maintenanceRetirement).toContain('DeleteService(service.0)');
     expect(maintenanceRetirement).toContain('if error != 1060');
@@ -214,14 +214,14 @@ describe('Windows elevated updater launch', () => {
     expect(pendingRecovery).toContain('if requested_action == Some(Action::Uninstall)');
     expect(pendingRecovery).toContain('paths = self::paths()?;');
     expect(pendingRecovery).not.toContain('lifecycle_parent)| *lifecycle_parent != 0');
-    const lockRetirement = setup.slice(
-      setup.indexOf('fn retire_machine_lock_publication'),
-      setup.indexOf('fn reclaim_unpublished_machine_lock_directories'),
+    const lockRetirement = await setupFunction(
+      'machine_lock/publication',
+      'retire_machine_lock_publication',
     );
     expect(lockRetirement).toContain('delete_machine_lock_registry_durable(');
-    const machineRegistryDelegate = setup.slice(
-      setup.indexOf('fn delete_machine_lock_registry_durable'),
-      setup.indexOf('fn delete_registry_tree_durable('),
+    const machineRegistryDelegate = await setupFunction(
+      'filesystem/registry',
+      'delete_machine_lock_registry_durable',
     );
     expect(machineRegistryDelegate).toContain('fn delete_machine_lock_registry_durable');
     expect(machineRegistryDelegate).toMatch(
@@ -229,9 +229,9 @@ describe('Windows elevated updater launch', () => {
     );
     expect(machineRegistryDelegate).not.toContain('HKEY_LOCAL_MACHINE');
     expect(machineRegistryDelegate).not.toContain('RegDeleteTreeW');
-    const durableRegistryDeletion = setup.slice(
-      setup.indexOf('fn delete_registry_tree_durable_in_hive'),
-      setup.indexOf('fn transaction_action'),
+    const durableRegistryDeletion = await setupFunction(
+      'filesystem/registry',
+      'delete_registry_tree_durable_in_hive',
     );
     expect(durableRegistryDeletion).toContain('RegDeleteTreeW(hive');
     expect(durableRegistryDeletion.match(/RegOpenKeyExW\(\n\s+hive,/gu)).toHaveLength(2);

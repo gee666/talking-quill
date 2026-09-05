@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = readRustModuleSync('installer/windows-setup/src/windows.rs');
+const cleanupSource = readFileSync('installer/windows-setup/src/windows/stale_cleanup.rs', 'utf8');
+const auditSource = readFileSync('installer/windows-setup/src/windows/stale_audit.rs', 'utf8');
 const cargo = readFileSync('installer/windows-setup/Cargo.toml', 'utf8');
 const helperCargo = readFileSync('helper/Cargo.toml', 'utf8');
 const helperSource = readRustModuleSync('helper/src/windows_update.rs');
@@ -12,6 +14,14 @@ const testGuard = readFileSync('scripts/run-machine-lock-isolated-tests.mjs', 'u
 const packageJson = readFileSync('package.json', 'utf8');
 const productionBuild = readFileSync('scripts/build-windows-setup.mjs', 'utf8');
 const helperBuild = readFileSync('scripts/build-helper.mjs', 'utf8');
+
+function cleanupFunction(): string {
+  const start = cleanupSource.indexOf('fn reclaim_exact_schema2_orphan_v2(');
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = cleanupSource.indexOf('\n}', start);
+  expect(end).toBeGreaterThan(start);
+  return cleanupSource.slice(start, end + 2);
+}
 
 function index(text: string): number {
   const value = source.indexOf(text);
@@ -157,10 +167,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     ]) {
       expect(source).toContain(check);
     }
-    const cleanup = source.slice(
-      index('fn reclaim_exact_schema2_orphan_v2('),
-      index('fn reclaim_exact_schema2_orphan_with_audit('),
-    );
+    const cleanup = cleanupFunction();
     expect(cleanup.indexOf('let legacy = LegacyMutexPair::acquire()?;')).toBeLessThan(
       cleanup.indexOf(
         'RetainedStaleObject::open_lifecycle(&lock_directory.join("recovery-state-v1.lock"))?',
@@ -207,7 +214,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(source).toContain('publication_pending.delete()?');
     expect(source).toContain('pending.delete()?');
     expect(source).toContain('lifecycle.finish_deleted()?');
-    const reclaim = source.slice(index('fn reclaim_exact_schema2_orphan_v2('));
+    const reclaim = cleanupFunction();
     const schemaMutation = reclaim.indexOf('pending.delete()?');
     const schemaRegistryDelete = reclaim.indexOf(
       'stale machine lifecycle publication',
@@ -245,18 +252,18 @@ describe('Windows schema-2 stale coordination cleanup', () => {
   });
 
   it('requires a protected completion audit and full zero proof on every successful branch', () => {
-    const reclaimStart = index('fn reclaim_exact_schema2_orphan_v2(');
-    const reclaim = source.slice(reclaimStart, source.indexOf('\n}', reclaimStart) + 2);
+    const reclaim = cleanupFunction();
     expect(reclaim).not.toContain('StaleCleanupAudit::open()');
     expect(reclaim).toContain('audit: &mut StaleCleanupAudit');
     expect(source.match(/let mut audit = StaleCleanupAudit::open\(\)\?;/g)).toHaveLength(1);
     expect(source).toContain('audit.record("inspected", &binding, &admission)?;');
     expect(source).toContain('audit.record("commit-intent", &binding, &second)?;');
     expect(source).toContain('audit.record(stage, &empty, &empty)');
-    const auditImplementation = source.slice(
-      index('impl StaleCleanupAudit {'),
-      index('fn retained_binding('),
-    );
+    const auditStart = auditSource.indexOf('impl StaleCleanupAudit {');
+    const auditEnd = auditSource.indexOf('\n}', auditStart);
+    expect(auditStart).toBeGreaterThanOrEqual(0);
+    expect(auditEnd).toBeGreaterThan(auditStart);
+    const auditImplementation = auditSource.slice(auditStart, auditEnd + 2);
     expect(auditImplementation).not.toContain('FILE_SHARE_WRITE');
     expect(source).toContain('force_stale_cleanup_rejection("post-inspected")?;');
     expect(source).toContain('force_stale_cleanup_rejection("post-commit-intent")?;');

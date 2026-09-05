@@ -203,7 +203,7 @@
 
 /* ======================================================= Shared patterns */
 /* `.stack`, `.rows`, `.group`, `.subhead`, `.hint`, `.body-copy`, `.panel` and
-   `.setting-divider` are defined once in `design/components.css`. */
+   `.setting-divider` are defined once in `design/layout.css`. */
 .readiness-row,
 .setting-action {
   display: flex;

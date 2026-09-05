@@ -1,9 +1,21 @@
-import { createHash, randomUUID } from 'node:crypto';
-import type { BigIntStats } from 'node:fs';
-import { homedir } from 'node:os';
-import { lstat, readFile, realpath, rename, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, parse, relative, resolve, sep } from 'node:path';
-import { z } from 'zod';
+import {
+  OwnedDataLocation,
+  OwnershipMarkerSchema,
+  ownershipMarker,
+  rootIdentity,
+  fileIdentity,
+  lstatOrNull,
+  isNodeError,
+  resetJournalPath,
+  resetTombstonePath,
+  resetDisposalPath,
+} from './owned-data-location';
+import { recoverReset } from './reset-recovery';
+export { resetJournalPath, validateUserDataRoot } from './owned-data-location';
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile, rename, rm } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import type { z } from 'zod';
 import { syncDirectory, writeJsonAtomic } from '../persistence/atomic-json';
 import {
   APP_OWNERSHIP_ID,
@@ -12,14 +24,6 @@ import {
   type ResetJournal,
 } from './reset-journal';
 
-const OWNERSHIP_MARKER_VERSION = 1 as const;
-const OwnershipMarkerSchema = z
-  .object({
-    schemaVersion: z.literal(OWNERSHIP_MARKER_VERSION),
-    appId: z.literal(APP_OWNERSHIP_ID),
-    rootIdentity: z.string().regex(/^[a-f0-9]{64}$/),
-  })
-  .strict();
 export type ResetFaultPhase =
   | 'after-journal-write'
   | 'before-live-rename'
@@ -60,8 +64,7 @@ export interface ResetRecoveryResult {
 
 export class DataLifecycleService {
   readonly #root: string;
-  readonly #allowedBase: string;
-  readonly #home: string;
+  readonly #location: OwnedDataLocation;
   readonly #journalPath: string;
   readonly #markerPath: string;
   readonly #writeResetJournal: (path: string, value: unknown) => Promise<void>;
@@ -72,11 +75,12 @@ export class DataLifecycleService {
   #prepared = false;
 
   constructor(userDataRoot: string, options: DataLifecycleOptions) {
-    this.#root = validateUserDataRoot(userDataRoot);
-    this.#allowedBase = validateUserDataRoot(options.allowedBase, true);
-    this.#home = resolve(options.homeDirectory ?? homedir());
-    assertNotHomeOrProfileAncestor(this.#root, this.#home);
-    assertLexicallyContained(this.#allowedBase, this.#root);
+    this.#location = new OwnedDataLocation(
+      userDataRoot,
+      options.allowedBase,
+      options.homeDirectory,
+    );
+    this.#root = this.#location.root;
     this.#journalPath = resetJournalPath(this.#root);
     this.#markerPath = resolve(this.#root, '.talking-quill-owner.json');
     this.#writeResetJournal = options.writeResetJournal ?? writeJsonAtomic;
@@ -97,7 +101,7 @@ export class DataLifecycleService {
    * settings, models, commands, history, and credentials remain untouched.
    */
   async reconcileCopiedProfile(): Promise<boolean> {
-    const canonicalRoot = await this.#assertCanonicalOwnedLocation();
+    const canonicalRoot = await this.#location.assertCanonicalOwnedLocation();
     // These directories are app-owned process state, never profile data. Clear
     // them on every cold start, including copies that keep the same Windows
     // user name and therefore the same lexical AppData path.
@@ -129,7 +133,7 @@ export class DataLifecycleService {
   }
 
   async initializeOwnership(): Promise<void> {
-    const canonicalRoot = await this.#assertCanonicalOwnedLocation();
+    const canonicalRoot = await this.#location.assertCanonicalOwnedLocation();
     const expected = ownershipMarker(canonicalRoot);
     let source: string | null = null;
     try {
@@ -148,159 +152,27 @@ export class DataLifecycleService {
   }
 
   async recoverPendingReset(): Promise<ResetRecoveryResult> {
-    let journal = await this.#readJournal();
-    if (journal === null) return { recovered: false };
-    const { tombstonePath, disposalPath } = this.#validateJournalBinding(journal);
-    const [liveMetadata, tombstoneMetadata, disposalMetadata] = await Promise.all([
-      lstatOrNull(this.#root),
-      lstatOrNull(tombstonePath),
-      lstatOrNull(disposalPath),
-    ]);
-    if ([liveMetadata, tombstoneMetadata, disposalMetadata].filter(Boolean).length > 1) {
-      throw new Error(
-        'Reset recovery is ambiguous because multiple live, tombstone, or disposal roots exist',
-      );
-    }
-    if (
-      (journal.phase === 'disposal-pending' && liveMetadata !== null) ||
-      (journal.phase === 'rename-pending' && disposalMetadata !== null)
-    ) {
-      throw new Error('Reset journal phase does not match its live filesystem state');
-    }
-
-    if (liveMetadata !== null) {
-      if (liveMetadata.isSymbolicLink()) {
-        throw new Error('Refusing a symbolic-link or junction application data root');
-      }
-      const canonicalRoot = await this.#assertCanonicalOwnedLocation();
-      const marker = await this.#readOwnershipMarker(this.#markerPath);
-      const expectedIdentity = rootIdentity(canonicalRoot);
-      if (
-        marker.rootIdentity !== expectedIdentity ||
-        journal.rootIdentity !== expectedIdentity ||
-        journal.rootFileIdentity !== fileIdentity(liveMetadata)
-      ) {
-        throw new Error('Reset journal ownership could not be verified');
-      }
-      await this.#injectResetFault('before-live-rename');
-      await this.#durableRename(this.#root, tombstonePath);
-      await this.#injectResetFault('before-renamed-identity-check');
-      const renamedMetadata = await lstat(tombstonePath, { bigint: true });
-      if (
-        renamedMetadata.isSymbolicLink() ||
-        fileIdentity(renamedMetadata) !== journal.rootFileIdentity
-      ) {
-        await this.#restoreUnverifiedRename(tombstonePath, this.#root, renamedMetadata);
-        throw new Error(
-          'Application data root changed during atomic reset rename; reset remains quarantined',
-        );
-      }
-      await this.#injectResetFault('after-live-rename');
-    } else if (tombstoneMetadata !== null) {
-      await this.#assertSafeResetDirectory(
-        tombstonePath,
-        tombstoneMetadata,
-        journal.rootFileIdentity,
-        'tombstone',
-      );
-    } else if (disposalMetadata !== null) {
-      await this.#assertSafeResetDirectory(
-        disposalPath,
-        disposalMetadata,
-        journal.rootFileIdentity,
-        'disposal',
-      );
-    }
-
-    const currentTombstone = await lstatOrNull(tombstonePath);
-    if (currentTombstone !== null) {
-      await this.#assertSafeResetDirectory(
-        tombstonePath,
-        currentTombstone,
-        journal.rootFileIdentity,
-        'tombstone',
-      );
-      await this.#injectResetFault('before-tombstone-remove');
-      const transitionMetadata = await lstatOrNull(tombstonePath);
-      if (transitionMetadata === null) {
-        throw new Error('Reset tombstone disappeared before disposal transition');
-      }
-      await this.#assertSafeResetDirectory(
-        tombstonePath,
-        transitionMetadata,
-        journal.rootFileIdentity,
-        'tombstone',
-      );
-      if (journal.phase !== 'disposal-pending') {
-        journal = { ...journal, phase: 'disposal-pending' };
-        await this.#writeResetJournal(this.#journalPath, journal);
-      }
-      await this.#injectResetFault('before-tombstone-disposal-transition');
-      await this.#durableRename(tombstonePath, disposalPath);
-      await this.#injectResetFault('after-tombstone-disposal-transition');
-      const transitionedMetadata = await lstat(disposalPath, { bigint: true });
-      if (
-        transitionedMetadata.isSymbolicLink() ||
-        !transitionedMetadata.isDirectory() ||
-        fileIdentity(transitionedMetadata) !== journal.rootFileIdentity
-      ) {
-        await this.#restoreUnverifiedRename(disposalPath, tombstonePath, transitionedMetadata);
-        throw new Error(
-          'Reset tombstone changed during atomic disposal transition; reset remains quarantined',
-        );
-      }
-    }
-
-    const currentDisposal = await lstatOrNull(disposalPath);
-    if (currentDisposal !== null) {
-      await this.#assertSafeResetDirectory(
-        disposalPath,
-        currentDisposal,
-        journal.rootFileIdentity,
-        'disposal',
-      );
-      await this.#injectResetFault('before-disposal-remove');
-      const deletionMetadata = await lstatOrNull(disposalPath);
-      if (deletionMetadata === null) {
-        throw new Error('Reset disposal directory disappeared before deletion');
-      }
-      await this.#assertSafeResetDirectory(
-        disposalPath,
-        deletionMetadata,
-        journal.rootFileIdentity,
-        'disposal',
-      );
-      await this.#injectResetFault('before-identity-bound-remove');
-      await this.#removeIdentityBoundDirectory({
-        path: disposalPath,
-        expectedFileIdentity: journal.rootFileIdentity,
-      });
-      if ((await lstatOrNull(disposalPath)) !== null) {
-        throw new Error('Identity-bound reset boundary did not remove the recorded directory');
-      }
-      await this.#syncResetDirectory(dirname(disposalPath));
-      await this.#injectResetFault('after-tombstone-remove');
-    }
-    const finalEntries = await Promise.all([
-      lstatOrNull(this.#root),
-      lstatOrNull(tombstonePath),
-      lstatOrNull(disposalPath),
-    ]);
-    if (finalEntries.some((entry) => entry !== null)) {
-      throw new Error(
-        'Reset cannot publish completion while a live, tombstone, or disposal root exists',
-      );
-    }
-    await this.#injectResetFault('before-journal-remove');
-    await this.#durableRemove(this.#journalPath);
-    this.#prepared = false;
-    await this.#injectResetFault('after-journal-remove');
-    return { recovered: true };
+    return recoverReset({
+      journal: await this.#readJournal(),
+      journalPath: this.#journalPath,
+      markerPath: this.#markerPath,
+      location: this.#location,
+      readOwnershipMarker: (path) => this.#readOwnershipMarker(path),
+      writeResetJournal: (path, value) => this.#writeResetJournal(path, value),
+      injectResetFault: (phase) => this.#injectResetFault(phase),
+      removeIdentityBoundDirectory: (request) => this.#removeIdentityBoundDirectory(request),
+      syncResetDirectory: (path) => this.#syncResetDirectory(path),
+      durableRename: (source, destination) => this.#durableRename(source, destination),
+      durableRemove: (path) => this.#durableRemove(path),
+      onCompleted: () => {
+        this.#prepared = false;
+      },
+    });
   }
 
   async prepareReset(): Promise<void> {
     if (!this.#canPrepareDestructiveReset) await failClosedIdentityBoundRemoval();
-    const canonicalRoot = await this.#assertCanonicalOwnedLocation();
+    const canonicalRoot = await this.#location.assertCanonicalOwnedLocation();
     const marker = await this.#readOwnershipMarker(this.#markerPath);
     const identity = rootIdentity(canonicalRoot);
     if (marker.rootIdentity !== identity) {
@@ -335,7 +207,7 @@ export class DataLifecycleService {
   async cancelPreparedReset(): Promise<void> {
     const journal = await this.#readJournal();
     if (journal !== null) {
-      const { tombstonePath, disposalPath } = this.#validateJournalBinding(journal);
+      const { tombstonePath, disposalPath } = this.#location.validateJournalBinding(journal);
       if (
         (await lstatOrNull(tombstonePath)) !== null ||
         (await lstatOrNull(disposalPath)) !== null
@@ -345,7 +217,7 @@ export class DataLifecycleService {
     }
     await this.#durableRemove(this.#journalPath);
     if (journal !== null) {
-      const { tombstonePath, disposalPath } = this.#validateJournalBinding(journal);
+      const { tombstonePath, disposalPath } = this.#location.validateJournalBinding(journal);
       if (
         (await lstatOrNull(tombstonePath)) !== null ||
         (await lstatOrNull(disposalPath)) !== null
@@ -361,99 +233,6 @@ export class DataLifecycleService {
 
   get resetPrepared(): boolean {
     return this.#prepared;
-  }
-
-  #validateJournalBinding(journal: ResetJournal): {
-    tombstonePath: string;
-    disposalPath: string;
-  } {
-    if (resolve(journal.userDataRoot) !== this.#root) {
-      throw new Error('Reset journal does not match the application data root');
-    }
-    const tombstonePath = resetTombstonePath(this.#root, journal.rootIdentity, journal.nonce);
-    const disposalPath = resetDisposalPath(this.#root, journal.rootIdentity, journal.nonce);
-    if (
-      resolve(journal.tombstonePath) !== tombstonePath ||
-      resolve(journal.disposalPath) !== disposalPath ||
-      dirname(tombstonePath) !== dirname(this.#root) ||
-      dirname(disposalPath) !== dirname(this.#root) ||
-      tombstonePath === disposalPath
-    ) {
-      throw new Error('Reset journal tombstone or disposal binding is invalid');
-    }
-    return { tombstonePath, disposalPath };
-  }
-
-  async #assertCanonicalOwnedLocation(): Promise<string> {
-    const rootMetadata = await lstat(this.#root);
-    if (rootMetadata.isSymbolicLink()) {
-      throw new Error('Refusing a symbolic-link or junction application data root');
-    }
-    const [canonicalBase, canonicalRoot, canonicalHome] = await Promise.all([
-      realpath(this.#allowedBase),
-      realpath(this.#root),
-      realpath(this.#home).catch(() => this.#home),
-    ]);
-    assertCanonicallyContained(canonicalBase, canonicalRoot);
-    assertNotHomeOrProfileAncestor(canonicalRoot, canonicalHome);
-    return canonicalRoot;
-  }
-
-  async #restoreUnverifiedRename(
-    sourcePath: string,
-    destinationPath: string,
-    movedMetadata: BigIntStats,
-  ): Promise<void> {
-    if (movedMetadata.isSymbolicLink() || !movedMetadata.isDirectory()) return;
-    if ((await lstatOrNull(destinationPath)) !== null || process.platform !== 'win32') return;
-    const currentTombstone = await lstatOrNull(sourcePath);
-    if (
-      currentTombstone === null ||
-      currentTombstone.isSymbolicLink() ||
-      !currentTombstone.isDirectory() ||
-      fileIdentity(currentTombstone) !== fileIdentity(movedMetadata)
-    ) {
-      return;
-    }
-    try {
-      // rename is intentionally attempted only with a vacant destination. On Windows an occupied
-      // destination fails rather than replacing it; either outcome retains the journal.
-      await rename(sourcePath, destinationPath);
-      const restored = await lstatOrNull(destinationPath);
-      if (
-        restored === null ||
-        restored.isSymbolicLink() ||
-        fileIdentity(restored) !== fileIdentity(movedMetadata)
-      ) {
-        return;
-      }
-    } catch {
-      // Preserve the exact moved directory as a journal-bound quarantine for manual recovery.
-    }
-  }
-
-  async #assertSafeResetDirectory(
-    path: string,
-    metadata: BigIntStats,
-    expectedFileIdentity: string,
-    kind: 'tombstone' | 'disposal',
-  ): Promise<void> {
-    if (
-      !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
-      fileIdentity(metadata) !== expectedFileIdentity
-    ) {
-      throw new Error(`Reset ${kind} is not the journal-recorded directory`);
-    }
-    const [canonicalBase, canonicalParent, canonicalTombstone] = await Promise.all([
-      realpath(this.#allowedBase),
-      realpath(dirname(path)),
-      realpath(path),
-    ]);
-    assertCanonicalParentContained(canonicalBase, canonicalParent);
-    if (dirname(canonicalTombstone) !== canonicalParent) {
-      throw new Error(`Reset ${kind} escaped its journal-bound sibling directory`);
-    }
   }
 
   async #durableRename(source: string, destination: string): Promise<void> {
@@ -538,113 +317,8 @@ export async function resetOwnedApplicationData(
   return true;
 }
 
-export function resetJournalPath(userDataRoot: string): string {
-  const root = validateUserDataRoot(userDataRoot);
-  const identity = createHash('sha256').update(root).digest('hex').slice(0, 24);
-  return resolve(dirname(root), `.talking-quill-reset-${identity}.json`);
-}
-
-function resetTombstonePath(userDataRoot: string, identity: string, nonce: string): string {
-  if (!/^[a-f0-9]{64}$/u.test(identity) || !z.uuid().safeParse(nonce).success) {
-    throw new Error('Reset tombstone identity is invalid');
-  }
-  const root = validateUserDataRoot(userDataRoot);
-  return resolve(
-    dirname(root),
-    `.talking-quill-reset-tombstone-${identity.slice(0, 24)}-${nonce.toLowerCase()}`,
-  );
-}
-
-function resetDisposalPath(userDataRoot: string, identity: string, nonce: string): string {
-  if (!/^[a-f0-9]{64}$/u.test(identity) || !z.uuid().safeParse(nonce).success) {
-    throw new Error('Reset disposal identity is invalid');
-  }
-  const root = validateUserDataRoot(userDataRoot);
-  return resolve(
-    dirname(root),
-    `.talking-quill-reset-disposal-${identity.slice(0, 24)}-${nonce.toLowerCase()}`,
-  );
-}
-
-export function validateUserDataRoot(userDataRoot: string, allowProfileBase = false): string {
-  const root = resolve(userDataRoot);
-  const parsed = parse(root);
-  if (root === parsed.root || dirname(root) === root || (!allowProfileBase && root === homedir())) {
-    throw new Error('Refusing to manage an unsafe application data root');
-  }
-  return root;
-}
-
-function ownershipMarker(canonicalRoot: string): z.infer<typeof OwnershipMarkerSchema> {
-  return {
-    schemaVersion: OWNERSHIP_MARKER_VERSION,
-    appId: APP_OWNERSHIP_ID,
-    rootIdentity: rootIdentity(canonicalRoot),
-  };
-}
-
-function rootIdentity(canonicalRoot: string): string {
-  return createHash('sha256').update(`${APP_OWNERSHIP_ID}\0${canonicalRoot}`).digest('hex');
-}
-
-function fileIdentity(metadata: BigIntStats): string {
-  return `${String(metadata.dev)}:${String(metadata.ino)}`;
-}
-
-async function lstatOrNull(path: string): Promise<BigIntStats | null> {
-  try {
-    return await lstat(path, { bigint: true });
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-function assertLexicallyContained(base: string, candidate: string): void {
-  const path = relative(base, candidate);
-  if (path.length === 0 || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) {
-    throw new Error('Application data root is outside its allowed base');
-  }
-}
-
-function assertCanonicallyContained(base: string, candidate: string): void {
-  const path = relative(base, candidate);
-  if (
-    path.length === 0 ||
-    path === '..' ||
-    path.startsWith('../') ||
-    path.startsWith('..\\') ||
-    isAbsolute(path)
-  ) {
-    throw new Error('Canonical application data root is outside its allowed base');
-  }
-}
-
-function assertCanonicalParentContained(base: string, candidate: string): void {
-  const path = relative(base, candidate);
-  if (path === '..' || path.startsWith('../') || path.startsWith('..\\') || isAbsolute(path)) {
-    throw new Error('Reset tombstone parent is outside its allowed base');
-  }
-}
-
-function assertNotHomeOrProfileAncestor(candidate: string, home: string): void {
-  const homeFromCandidate = relative(candidate, home);
-  if (
-    homeFromCandidate.length === 0 ||
-    (!homeFromCandidate.startsWith('../') &&
-      !homeFromCandidate.startsWith('..\\') &&
-      !isAbsolute(homeFromCandidate))
-  ) {
-    throw new Error('Refusing to manage a home or profile ancestor');
-  }
-}
-
 function failClosedIdentityBoundRemoval(): Promise<void> {
   return Promise.reject(
     new Error('Identity-bound recursive reset deletion is unavailable on this build'),
   );
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && 'code' in error;
 }

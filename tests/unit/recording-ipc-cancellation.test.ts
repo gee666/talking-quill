@@ -29,6 +29,34 @@ function pendingUntilAborted(signal: AbortSignal) {
 }
 
 describe('recording IPC cancellation', () => {
+  it('removes the destruction listener after successful completion', async () => {
+    const result = { status: 'idle', permission: 'granted' } as const;
+    const handlers = createHandlers({
+      recording: { stopTest: vi.fn().mockResolvedValue(result) },
+    } as unknown as HandlerDependencies);
+    const cancellation = cancellationContext();
+
+    await expect(handlers['recording:stop-test']({}, cancellation.context)).resolves.toBe(result);
+
+    expect(cancellation.remove).toHaveBeenCalledOnce();
+  });
+
+  it('removes the destruction listener when the operation throws synchronously', async () => {
+    const failure = new Error('recording unavailable');
+    const handlers = createHandlers({
+      recording: {
+        stopTest: () => {
+          throw failure;
+        },
+      },
+    } as unknown as HandlerDependencies);
+    const cancellation = cancellationContext();
+
+    await expect(handlers['recording:stop-test']({}, cancellation.context)).rejects.toBe(failure);
+
+    expect(cancellation.remove).toHaveBeenCalledOnce();
+  });
+
   it('cancels recording:start-test when shutdown invalidates its invocation', async () => {
     const owner = { id: 42 };
     const startTest = vi.fn((_owner: unknown, signal: AbortSignal) => pendingUntilAborted(signal));

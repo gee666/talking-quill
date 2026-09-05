@@ -138,7 +138,7 @@ describe('runtime immutable publication selection', () => {
 
   it('pins the dedicated repository publication key in the updater verifier', async () => {
     const [source, pin] = await Promise.all([
-      readFile('app/src/main/info/publication-selection.ts', 'utf8'),
+      readFile('app/src/main/info/publication-envelope.ts', 'utf8'),
       readFile('build/release-manifest-public-key.sec1', 'utf8'),
     ]);
     expect(source).toContain(pin.trim());

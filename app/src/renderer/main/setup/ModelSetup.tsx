@@ -143,7 +143,15 @@ export function ModelSetup({
         disabled={
           busy || state === 'downloading' || state === 'verifying' || state === 'installing'
         }
-        onChange={(event) => void saveModelSelection(event.currentTarget.value as WhisperModelId)}
+        onChange={(event) => {
+          const nextModelId = event.currentTarget.value;
+          if (
+            nextModelId === 'Xenova/whisper-small' ||
+            nextModelId === 'onnx-community/whisper-large-v3-turbo'
+          ) {
+            void saveModelSelection(nextModelId);
+          }
+        }}
       >
         <option value="Xenova/whisper-small">{MODEL_ENTRIES['Xenova/whisper-small'].name}</option>
         <option value="onnx-community/whisper-large-v3-turbo">

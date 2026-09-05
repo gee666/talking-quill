@@ -2,6 +2,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { currentSourceIdentity } from '../../scripts/source-identity.mjs';
 
 const root = resolve(`tmp/release-secrets/cleanup-integration-${String(process.pid)}`);
 const keyPath = resolve(root, 'protected-key.pkcs8.der');
@@ -12,7 +13,23 @@ const descriptorPath = resolve(
 );
 const descriptorArgument = `${resolve('tmp')}\\discarded-segment\\..\\cleanup-integration-${String(process.pid)}\\descriptor.json`;
 
-const nativeTest = process.platform === 'win32' && process.arch === 'x64' ? it : it.skip;
+const nativeHost = process.platform === 'win32' && process.arch === 'x64';
+let cleanSource = false;
+if (nativeHost) {
+  try {
+    currentSourceIdentity({ requireClean: true });
+    cleanSource = true;
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      error.message !== 'Release provenance requires a clean source tree'
+    ) {
+      throw error;
+    }
+  }
+}
+// Key generation builds a provenance-bound native chain. Never bypass its clean-tree guard.
+const nativeTest = nativeHost && cleanSource ? it : it.skip;
 
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
@@ -20,6 +37,29 @@ afterAll(() => {
 });
 
 describe('Windows protected update-key failure cleanup', () => {
+  it.skipIf(!nativeHost || cleanSource)(
+    'rejects key generation from a dirty checkout before creating key material',
+    () => {
+      const generated = spawnSync(
+        process.execPath,
+        [
+          'scripts/windows-update-native-chain.mjs',
+          'key-generate',
+          '--key-path',
+          keyPath,
+          '--descriptor',
+          descriptorArgument,
+        ],
+        { cwd: resolve('.'), encoding: 'utf8', timeout: 30_000 },
+      );
+      expect(generated.error).toBeUndefined();
+      expect(generated.status).toBe(1);
+      expect(generated.stderr).toContain('Release provenance requires a clean source tree');
+      expect(existsSync(keyPath)).toBe(false);
+      expect(existsSync(descriptorPath)).toBe(false);
+    },
+  );
+
   nativeTest(
     'deletes through the retained descriptor after a forced producer failure with Cargo unavailable',
     () => {

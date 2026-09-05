@@ -1,4 +1,5 @@
 import { ipcRenderer } from 'electron';
+import { deepFreeze as freezeValue } from '../shared/deep-freeze';
 import {
   eventRegistry,
   failureResponseSchema,
@@ -64,8 +65,5 @@ export function forwardTransferredPort(channel: PortTransferChannel): () => void
 }
 
 export function deepFreeze<Value>(value: Value): Readonly<Value> {
-  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
-  Object.freeze(value);
-  for (const child of Object.values(value)) deepFreeze(child);
-  return value;
+  return freezeValue(value);
 }

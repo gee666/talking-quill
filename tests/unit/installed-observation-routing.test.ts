@@ -8,7 +8,13 @@ describe('installed observation routing', () => {
     const bootstrap = readFileSync('app/src/main/bootstrap.ts', 'utf8');
     const application = readFileSync('app/src/main/app/application.ts', 'utf8');
     const entry = readFileSync('app/src/main/entries/windows-installed-acceptance.ts', 'utf8');
-    const observation = readFileSync('app/src/main/acceptance/installed-observation.ts', 'utf8');
+    const observation = [
+      'installed-observation',
+      'installed-readiness-observation',
+      'installed-physical-observation',
+    ]
+      .map((name) => readFileSync(`app/src/main/acceptance/${name}.ts`, 'utf8'))
+      .join('\n');
     for (const canonical of [index, bootstrap, application]) {
       expect(canonical).not.toContain('authorizeInstalledAcceptance');
       expect(canonical).not.toContain('runInstalledObservation');

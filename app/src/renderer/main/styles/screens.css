@@ -2,7 +2,7 @@
 
 /* ============================================================ Row groups */
 /* `.group`, `.rows` and `.section__body` share the hairline row treatment
-   defined in `design/components.css`; only the row content is styled here. */
+   defined in `design/layout.css`; only the row content is styled here. */
 .group > .readiness-row {
   min-height: var(--row-height);
   font-size: var(--fs-md);
@@ -86,7 +86,6 @@
   font-size: var(--fs-sm);
 }
 
-.notices,
 .notices-text {
   max-height: 260px;
   min-width: 0;

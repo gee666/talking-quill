@@ -1,6 +1,15 @@
 //! Durable filesystem, registry deletion, and basic Windows utilities.
 use super::*;
 
+mod registry;
+pub(super) use registry::*;
+
+mod journal;
+pub(super) use journal::*;
+
+mod platform;
+pub(super) use platform::*;
+
 pub(super) fn flush_file(path: &Path) -> Result<()> {
     // FlushFileBuffers requires a handle opened for writing on Windows.
     OpenOptions::new()
@@ -28,164 +37,6 @@ pub(super) fn remove_machine_lock_residue(paths: &Paths, suffix: &str) -> Result
         owned_tree_identity(&path).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
     remove_owned_tree(&path, &identity).map_err(|error| fail(EXIT_REJECTED, error.to_string()))?;
     flush_setup_directory(&paths.program_data)
-}
-
-pub(super) fn unregister_uninstall() -> Result<()> {
-    delete_registry_tree_durable(
-        UNINSTALL_KEY,
-        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-        "native uninstall registration",
-    )
-}
-
-pub(super) fn delete_machine_lock_registry_durable(
-    path: &str,
-    parent: &str,
-    label: &str,
-) -> Result<()> {
-    delete_registry_tree_durable_in_hive(machine_lock_registry_hive(), path, parent, label)
-}
-
-pub(super) fn delete_registry_tree_durable(path: &str, parent: &str, label: &str) -> Result<()> {
-    delete_registry_tree_durable_in_hive(HKEY_LOCAL_MACHINE, path, parent, label)
-}
-
-pub(super) fn delete_registry_tree_durable_in_hive(
-    hive: HKEY,
-    path: &str,
-    parent: &str,
-    label: &str,
-) -> Result<()> {
-    let status = unsafe { RegDeleteTreeW(hive, wide(OsStr::new(path)).as_ptr()) };
-    if status != 0 && status != 2 {
-        return Err(fail(EXIT_FAILURE, format!("Cannot remove the {label}.")));
-    }
-    let mut deleted = ptr::null_mut();
-    let observed = unsafe {
-        RegOpenKeyExW(
-            hive,
-            wide(OsStr::new(path)).as_ptr(),
-            0,
-            KEY_READ,
-            &mut deleted,
-        )
-    };
-    if observed == 0 {
-        unsafe { RegCloseKey(deleted) };
-        return Err(fail(EXIT_FAILURE, format!("Windows retained the {label}.")));
-    }
-    if observed != 2 {
-        return Err(fail(
-            EXIT_FAILURE,
-            format!("Cannot verify removal of the {label}."),
-        ));
-    }
-    let mut parent_key = ptr::null_mut();
-    if unsafe {
-        RegOpenKeyExW(
-            hive,
-            wide(OsStr::new(parent)).as_ptr(),
-            0,
-            KEY_READ,
-            &mut parent_key,
-        )
-    } != 0
-    {
-        return Err(fail(
-            EXIT_FAILURE,
-            format!("Cannot open the {label} parent."),
-        ));
-    }
-    let flushed = unsafe { RegFlushKey(parent_key) } == 0;
-    unsafe { RegCloseKey(parent_key) };
-    if flushed {
-        Ok(())
-    } else {
-        Err(fail(
-            EXIT_FAILURE,
-            format!("Cannot flush removal of the {label}."),
-        ))
-    }
-}
-
-pub(super) fn transaction_action(value: &Transaction) -> Result<Action> {
-    match value.action.as_str() {
-        "install" => Ok(Action::Install),
-        "update" => Ok(Action::Update),
-        "repair" => Ok(Action::Repair),
-        "uninstall" => Ok(Action::Uninstall),
-        _ => Err(fail(
-            EXIT_REJECTED,
-            "Installer transaction action is invalid.",
-        )),
-    }
-}
-
-pub(super) fn write_transaction(
-    paths: &Paths,
-    phase: &str,
-    action: Action,
-    had_predecessor: bool,
-) -> Result<()> {
-    let temporary = paths
-        .transaction
-        .with_extension(format!("tmp-{}", std::process::id()));
-    let action = match action {
-        Action::Install => "install",
-        Action::Update => "update",
-        Action::Repair => "repair",
-        Action::Uninstall => "uninstall",
-        #[cfg(feature = "stale-schema2-cleanup")]
-        Action::CleanStaleSchema2 => {
-            return Err(fail(EXIT_REJECTED, "Cleanup cannot create a transaction."));
-        }
-    };
-    let bytes = serde_json::to_vec(&Transaction {
-        schema_version: TRANSACTION_SCHEMA,
-        phase: phase.into(),
-        action: action.into(),
-        had_predecessor,
-    })
-    .map_err(|_| fail(EXIT_FAILURE, "Cannot encode installer transaction."))?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(io_failure)?;
-    output
-        .write_all(&bytes)
-        .and_then(|_| output.sync_all())
-        .map_err(io_failure)?;
-    durable_replace(&temporary, &paths.transaction)
-}
-
-pub(super) fn cleanup_transaction_residue(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root).map_err(io_failure)? {
-        let entry = entry.map_err(io_failure)?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(pid) = name.strip_prefix(".Talking Quill.native-transaction-v2.tmp-") else {
-            continue;
-        };
-        if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-        let file = open_plain_handle(&entry.path(), false, true)?;
-        delete_retained(&file)?;
-    }
-    Ok(())
-}
-
-pub(super) fn remove_transaction(paths: &Paths) -> Result<()> {
-    if paths.transaction.exists() {
-        let file = open_plain_handle(&paths.transaction, false, true)?;
-        delete_retained(&file)?;
-    }
-    if paths.maintenance_generation_record.exists() {
-        let file = open_plain_handle(&paths.maintenance_generation_record, false, true)?;
-        delete_retained(&file)?;
-    }
-    Ok(())
 }
 
 pub(super) fn create_plain_directories(root: &Path, target: &Path) -> Result<()> {
@@ -324,83 +175,6 @@ pub(super) fn canonical(path: &Path) -> Result<String> {
 
 pub(super) fn io_failure(error: std::io::Error) -> SetupError {
     fail(EXIT_FAILURE, error.to_string())
-}
-
-pub(super) fn known_folder(identifier: *const windows_sys::core::GUID) -> Result<PathBuf> {
-    let mut raw = ptr::null_mut();
-    if unsafe { SHGetKnownFolderPath(identifier, 0, ptr::null_mut(), &mut raw) } != 0
-        || raw.is_null()
-    {
-        return Err(fail(EXIT_FAILURE, "Windows known-folder lookup failed."));
-    }
-    let length = unsafe { (0..).position(|index| *raw.add(index) == 0).unwrap_or(0) };
-    let value = OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) });
-    unsafe { CoTaskMemFree(raw.cast()) };
-    Ok(PathBuf::from(value))
-}
-
-pub(super) fn token_is_elevated() -> Result<bool> {
-    let mut token = ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(fail(EXIT_REJECTED, "Cannot inspect the setup token."));
-    }
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut returned = 0;
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut returned,
-        )
-    } == 0
-    {
-        return Err(fail(EXIT_REJECTED, "Cannot read setup elevation."));
-    }
-    Ok(elevation.TokenIsElevated != 0)
-}
-
-pub(super) fn message_box(text: &str, flags: u32) -> i32 {
-    let caption = wide(OsStr::new(concat!(
-        "Talking Quill ",
-        env!("CARGO_PKG_VERSION"),
-        " setup"
-    )));
-    let text = wide(OsStr::new(text));
-    unsafe {
-        MessageBoxW(
-            ptr::null_mut(),
-            text.as_ptr(),
-            caption.as_ptr(),
-            flags | MB_SETFOREGROUND,
-        )
-    }
-}
-pub(super) fn report(message: &str) {
-    message_box(message, 0x10);
-}
-pub(super) fn wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain([0]).collect()
-}
-
-#[cfg(any(test, feature = "stale-schema2-cleanup"))]
-pub(super) fn registry_key_present(root: HKEY, path: &str) -> Result<bool> {
-    let mut key = ptr::null_mut();
-    let status =
-        unsafe { RegOpenKeyExW(root, wide(OsStr::new(path)).as_ptr(), 0, KEY_READ, &mut key) };
-    if status == 0 {
-        unsafe { RegCloseKey(key) };
-        Ok(true)
-    } else if status == 2 {
-        Ok(false)
-    } else {
-        Err(fail(
-            EXIT_REJECTED,
-            "Cannot inspect stale coordination registry state.",
-        ))
-    }
 }
 
 #[cfg(test)]

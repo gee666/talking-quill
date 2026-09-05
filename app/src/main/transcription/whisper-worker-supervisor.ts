@@ -1,179 +1,49 @@
-import { utilityProcess } from 'electron';
-import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { kill as forceKillProcess } from 'node:process';
 import { WHISPER_PROTOCOL_VERSION } from '../../shared/constants/whisper';
-import {
-  WhisperWorkerRequestSchema,
-  WhisperWorkerResponseSchema,
-  type WhisperAcknowledgedOperation,
-  type WhisperWorkerRequest,
-  type WhisperWorkerResult,
+import type {
+  WhisperWorkerRequest,
+  WhisperWorkerResult,
 } from '../../shared/schemas/whisper-protocol';
 import { WhisperClientError } from './errors';
+import type {
+  WhisperWorkerSupervisorOptions,
+  WorkerRequestOptions,
+  TerminationKind,
+} from './whisper-worker-contracts';
+import { WhisperWorkerProcess } from './whisper-worker-process';
+import { WhisperWorkerRequests } from './whisper-worker-requests';
+import {
+  CONTROL_REQUEST_TIMEOUT_MS,
+  acceptsAcknowledgement,
+  assertAcknowledged,
+  delay,
+} from './whisper-worker-requests-support';
 
-const MAX_AUTOMATIC_RESTARTS = 5;
-const MAX_RESTART_DELAY_MS = 2_000;
-const HEALTH_TIMEOUT_MS = 5_000;
-const STABILITY_RESET_MS = 30_000;
+export { CONTROL_REQUEST_TIMEOUT_MS } from './whisper-worker-requests-support';
+export type { WhisperWorkerSpawner, WorkerRequestOptions } from './whisper-worker-contracts';
+
 const SHUTDOWN_GRACE_MS = 1_000;
-const FORCE_KILL_AFTER_MS = 1_500;
-const FORCE_KILL_RETRY_MS = 1_500;
-const TERMINATION_DEADLINE_MS = FORCE_KILL_AFTER_MS + FORCE_KILL_RETRY_MS + 1_500;
-export const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 
-interface WorkerProcess {
-  readonly pid: number | undefined;
-  postMessage(message: unknown): void;
-  kill(): boolean;
-  on(event: 'message', listener: (message: unknown) => void): this;
-  on(event: 'exit', listener: (code: number) => void): this;
-}
-
-export type WhisperWorkerSpawner = (modulePath: string, args: readonly string[]) => WorkerProcess;
-
-interface PendingRequest {
-  readonly generation: number;
-  readonly accepts: (result: WhisperWorkerResult) => boolean;
-  readonly resolve: (result: WhisperWorkerResult) => void;
-  readonly reject: (error: Error) => void;
-}
-
-export interface WorkerRequestOptions {
-  readonly timeoutMs: number;
-  readonly signal?: AbortSignal | undefined;
-  readonly allowClosing?: boolean;
-  readonly expectedGeneration?: number | undefined;
-  readonly accepts?: (result: WhisperWorkerResult) => boolean;
-  readonly captureGeneration?: (generation: number) => void;
-  readonly captureRequestId?: (requestId: string) => void;
-  readonly onDispatched?: (requestId: string) => void;
-}
-
-type TerminationKind = 'cancel' | 'close' | 'health' | 'protocol' | 'unavailable';
-
-interface TerminationIntent {
-  readonly generation: number;
-  kind: TerminationKind;
-  error: WhisperClientError;
-  restart: boolean;
-  readonly settled: Promise<void>;
-  readonly cancelledRequestIds: ReadonlySet<string> | null;
-  terminationConfirmed: boolean;
-  forceTimer: ReturnType<typeof setTimeout> | null;
-  retryTimer: ReturnType<typeof setTimeout> | null;
-  deadlineTimer: ReturnType<typeof setTimeout> | null;
-}
-
+/** Coordinates worker requests, generation lifetime, and graceful close. */
 export class WhisperWorkerSupervisor {
-  readonly #cacheDirectory: string;
-  readonly #workerPath: string;
-  readonly #spawn: WhisperWorkerSpawner;
-  readonly #forceKill: (pid: number) => void;
-  readonly #pending = new Map<string, PendingRequest>();
-  readonly #sessionLeaseReleases = new Map<number, Set<() => void>>();
-  readonly #retiredProcesses = new Map<number, WorkerProcess>();
-  #dispatchTail: Promise<void> = Promise.resolve();
-  #process: WorkerProcess | null = null;
-  #generation = 0;
-  #lastExitedGeneration = 0;
-  #healthyGeneration = 0;
-  #generationExit: Promise<void> | null = null;
-  #resolveGenerationExit: (() => void) | null = null;
-  #termination: TerminationIntent | null = null;
-  #closing = false;
+  readonly #worker: WhisperWorkerProcess;
+  readonly #requests: WhisperWorkerRequests;
   #closePromise: Promise<void> | null = null;
-  #restartAttempts = 0;
-  #restartTimer: ReturnType<typeof setTimeout> | null = null;
-  #healthTimer: ReturnType<typeof setTimeout> | null = null;
-  #stabilityTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(options: {
-    readonly cacheDirectory: string;
-    readonly workerPath?: string | undefined;
-    readonly spawn?: WhisperWorkerSpawner | undefined;
-    readonly forceKill?: ((pid: number) => void) | undefined;
-  }) {
-    this.#cacheDirectory = options.cacheDirectory;
-    this.#workerPath =
-      options.workerPath ?? join(__dirname, '..', 'workers', 'whisper-bootstrap.cjs');
-    this.#spawn = options.spawn ?? defaultSpawner;
-    this.#forceKill = options.forceKill ?? defaultForceKill;
-  }
-
-  captureActiveGeneration(): number | undefined {
-    return this.#process === null ? undefined : this.#generation;
-  }
-
-  hasProcess(): boolean {
-    return this.#process !== null;
-  }
-
-  isCurrentGeneration(generation: number): boolean {
-    return this.#generation === generation && this.#process !== null;
-  }
-
-  isOperationalGeneration(generation: number): boolean {
-    return (
-      this.#generation === generation &&
-      this.#process !== null &&
-      this.#termination === null &&
-      !this.#closing
+  constructor(options: WhisperWorkerSupervisorOptions) {
+    this.#worker = new WhisperWorkerProcess(
+      options,
+      (generation, message) => this.#requests.handleMessage(generation, message),
+      (generation, termination, error) =>
+        this.#requests.rejectGeneration(generation, termination, error),
     );
+    this.#requests = new WhisperWorkerRequests(this.#worker);
   }
 
-  async request(
+  request(
     create: (requestId: string) => WhisperWorkerRequest,
     options: WorkerRequestOptions,
   ): Promise<WhisperWorkerResult> {
-    const deadline = createRequestDeadline(options.timeoutMs, options.signal);
-    let dispatched = false;
-    let releaseTurn = (): void => undefined;
-    try {
-      await this.#waitForTermination(deadline.signal);
-      this.#assertRequestAllowed(options);
-      if (this.#closing && this.#process === null) {
-        throw new WhisperClientError('CANCELLED', 'Whisper worker is closing.');
-      }
-      let process: WorkerProcess;
-      try {
-        process = this.#ensureProcess();
-      } catch {
-        this.#scheduleRestart();
-        throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker could not start.');
-      }
-      const generation = this.#generation;
-      const requestId = randomUUID();
-      options.captureRequestId?.(requestId);
-      const request = WhisperWorkerRequestSchema.parse(create(requestId));
-
-      const precedingRequest = this.#dispatchTail;
-      const turn = new Promise<void>((resolve) => {
-        releaseTurn = resolve;
-      });
-      this.#dispatchTail = precedingRequest.catch(() => undefined).then(() => turn);
-      await waitForDispatchTurn(precedingRequest, deadline.signal);
-      if (deadline.timedOut()) throw requestQueueTimeoutError();
-      this.#assertRequestAllowed(options, process, generation);
-      options.captureGeneration?.(generation);
-      dispatched = true;
-      return await this.#dispatchRequest(
-        process,
-        generation,
-        requestId,
-        request,
-        options,
-        deadline.signal,
-      );
-    } catch (error: unknown) {
-      if (!dispatched && deadline.timedOut() && options.signal?.aborted !== true) {
-        throw requestQueueTimeoutError();
-      }
-      throw error;
-    } finally {
-      releaseTurn();
-      deadline.dispose();
-    }
+    return this.#requests.request(create, options);
   }
 
   beginTermination(
@@ -183,107 +53,44 @@ export class WhisperWorkerSupervisor {
     restart: boolean,
     cancelledRequestIds: ReadonlySet<string> | null = null,
   ): Promise<void> {
-    if (generation !== this.#generation || this.#process === null) return Promise.resolve();
-    const existing = this.#termination;
-    if (existing?.generation === generation) {
-      if (kind === 'close') {
-        existing.kind = kind;
-        existing.error = error;
-        existing.restart = false;
-      }
-      return existing.settled;
-    }
-    const process = this.#process;
-    const generationExited = this.#generationExit ?? Promise.resolve();
-    let resolveDeadline!: () => void;
-    const deadlineReached = new Promise<void>((resolve) => {
-      resolveDeadline = resolve;
-    });
-    const terminationSettled = Promise.race([generationExited, deadlineReached]);
-    const termination: TerminationIntent = {
-      generation,
-      kind,
-      error,
-      restart,
-      settled: terminationSettled,
-      cancelledRequestIds,
-      terminationConfirmed: false,
-      forceTimer: null,
-      retryTimer: null,
-      deadlineTimer: null,
-    };
-    this.#termination = termination;
-    termination.terminationConfirmed = this.#tryKill(process);
-    if (this.#termination !== termination || this.#process !== process) return terminationSettled;
-    termination.forceTimer = setTimeout(() => {
-      if (this.#termination !== termination || this.#process !== process) return;
-      const pid = process.pid;
-      if (pid === undefined) {
-        termination.terminationConfirmed =
-          this.#tryKill(process) || termination.terminationConfirmed;
-      } else {
-        try {
-          this.#forceKill(pid);
-        } catch {
-          termination.terminationConfirmed =
-            this.#tryKill(process) || termination.terminationConfirmed;
-        }
-      }
-      termination.retryTimer = setTimeout(() => {
-        if (this.#termination === termination && this.#process === process) {
-          termination.terminationConfirmed =
-            this.#tryKill(process) || termination.terminationConfirmed;
-        }
-      }, FORCE_KILL_RETRY_MS);
-      termination.retryTimer.unref();
-    }, FORCE_KILL_AFTER_MS);
-    termination.forceTimer.unref();
-    termination.deadlineTimer = setTimeout(() => {
-      if (this.#termination !== termination || this.#process !== process) return;
-      // Electron can terminate a utility process without emitting its exit event. Quarantine an
-      // unconfirmed generation so replacement readers can proceed while its leases remain held.
-      if (!termination.terminationConfirmed) this.#retiredProcesses.set(generation, process);
-      this.#handleExit(generation, termination.terminationConfirmed);
-      resolveDeadline();
-    }, TERMINATION_DEADLINE_MS);
-    termination.deadlineTimer.unref();
-    return terminationSettled;
+    return this.#worker.beginTermination(generation, kind, error, restart, cancelledRequestIds);
   }
 
   async waitForTermination(signal?: AbortSignal): Promise<void> {
-    await this.#waitForTermination(signal);
-  }
-
-  async #waitForTermination(signal?: AbortSignal): Promise<void> {
-    const termination = this.#termination;
-    if (termination !== null) await waitForDispatchTurn(termination.settled, signal);
+    await this.#requests.waitForTermination(signal);
   }
 
   releaseUseWhenSafe(generation: number, release: () => void): void {
-    const terminatingCurrentGeneration =
-      this.#generation === generation &&
-      this.#process !== null &&
-      this.#termination?.generation === generation;
-    if (
-      generation > 0 &&
-      (terminatingCurrentGeneration || this.#retiredProcesses.has(generation))
-    ) {
-      this.registerSessionLease(generation, release);
-      return;
-    }
-    release();
+    this.#worker.termination.releaseUseWhenSafe(generation, release);
   }
 
   registerSessionLease(generation: number, release: () => void): void {
-    const releases = this.#sessionLeaseReleases.get(generation) ?? new Set<() => void>();
-    releases.add(release);
-    this.#sessionLeaseReleases.set(generation, releases);
+    this.#worker.termination.registerSessionLease(generation, release);
   }
 
   unregisterSessionLease(generation: number, release: () => void): void {
-    const releases = this.#sessionLeaseReleases.get(generation);
-    releases?.delete(release);
-    if (releases?.size === 0) this.#sessionLeaseReleases.delete(generation);
+    this.#worker.termination.unregisterSessionLease(generation, release);
+  }
+
+  captureActiveGeneration(): number | undefined {
+    return this.#worker.process === null ? undefined : this.#worker.generation;
+  }
+
+  hasProcess(): boolean {
+    return this.#worker.process !== null;
+  }
+
+  isCurrentGeneration(generation: number): boolean {
+    return this.#worker.generation === generation && this.#worker.process !== null;
+  }
+
+  isOperationalGeneration(generation: number): boolean {
+    return (
+      this.#worker.generation === generation &&
+      this.#worker.process !== null &&
+      this.#worker.termination.current === null &&
+      !this.#worker.closing
+    );
   }
 
   close(): Promise<void> {
@@ -292,17 +99,17 @@ export class WhisperWorkerSupervisor {
   }
 
   async #closeInternal(): Promise<void> {
-    this.#closing = true;
-    this.#clearSupervisionTimers();
-    this.#retryRetiredProcessCleanup();
-    const process = this.#process;
-    const generation = this.#generation;
-    const exited = this.#generationExit;
+    this.#worker.closing = true;
+    this.#worker.clearSupervisionTimers();
+    this.#worker.termination.retryRetiredProcessCleanup();
+    const process = this.#worker.process;
+    const generation = this.#worker.generation;
+    const exited = this.#worker.generationExit;
     if (process === null || exited === null) {
-      this.#rejectPending(new WhisperClientError('CANCELLED', 'Whisper worker closed.'));
+      this.#requests.rejectPending(new WhisperClientError('CANCELLED', 'Whisper worker closed.'));
       return;
     }
-    if (this.#termination !== null) {
+    if (this.#worker.termination.current !== null) {
       await this.beginTermination(
         generation,
         'close',
@@ -331,7 +138,7 @@ export class WhisperWorkerSupervisor {
       });
     await Promise.race([shutdown, delay(SHUTDOWN_GRACE_MS)]);
     await Promise.race([exited, delay(100)]);
-    if (this.#process !== null && this.#generation === generation) {
+    if (this.#worker.process !== null && this.#worker.generation === generation) {
       await this.beginTermination(
         generation,
         'close',
@@ -343,400 +150,4 @@ export class WhisperWorkerSupervisor {
     }
     if (shutdownState.protocolError !== null) throw shutdownState.protocolError;
   }
-
-  #assertRequestAllowed(
-    options: WorkerRequestOptions,
-    process?: WorkerProcess,
-    generation?: number,
-  ): void {
-    if (options.signal?.aborted === true) {
-      throw new WhisperClientError('CANCELLED', 'Transcription was cancelled.');
-    }
-    if (this.#closing && options.allowClosing !== true) {
-      throw new WhisperClientError('CANCELLED', 'Whisper worker is closing.');
-    }
-    if (
-      process !== undefined &&
-      generation !== undefined &&
-      (this.#process !== process || this.#generation !== generation || this.#termination !== null)
-    ) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker generation changed.');
-    }
-    if (this.#termination !== null) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker is terminating.');
-    }
-    if (
-      options.expectedGeneration !== undefined &&
-      (this.#generation !== options.expectedGeneration || this.#process === null)
-    ) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Streaming worker generation changed.');
-    }
-  }
-
-  #dispatchRequest(
-    process: WorkerProcess,
-    generation: number,
-    requestId: string,
-    request: WhisperWorkerRequest,
-    options: WorkerRequestOptions,
-    requestSignal: AbortSignal,
-  ): Promise<WhisperWorkerResult> {
-    options.onDispatched?.(requestId);
-    return new Promise((resolve, reject) => {
-      const cleanup = (): void => {
-        requestSignal.removeEventListener('abort', onAbort);
-      };
-      const onAbort = () => {
-        const callerCancelled = options.signal?.aborted === true;
-        void this.beginTermination(
-          generation,
-          callerCancelled ? 'cancel' : 'health',
-          callerCancelled
-            ? new WhisperClientError('CANCELLED', 'Transcription was cancelled.')
-            : new WhisperClientError('WORKER_CRASHED', 'Whisper worker request timed out.'),
-          !callerCancelled,
-          new Set([requestId]),
-        );
-      };
-      this.#pending.set(requestId, {
-        generation,
-        accepts: options.accepts ?? (() => true),
-        resolve: (result) => {
-          cleanup();
-          resolve(result);
-        },
-        reject: (error) => {
-          cleanup();
-          reject(error);
-        },
-      });
-      if (requestSignal.aborted) onAbort();
-      else requestSignal.addEventListener('abort', onAbort, { once: true });
-      try {
-        process.postMessage(request);
-      } catch {
-        void this.beginTermination(
-          generation,
-          'unavailable',
-          new WhisperClientError('WORKER_CRASHED', 'Whisper worker was unavailable.'),
-          true,
-        );
-      }
-    });
-  }
-
-  #ensureProcess(): WorkerProcess {
-    this.#retryRetiredProcessCleanup();
-    if (this.#termination !== null) {
-      throw new WhisperClientError('WORKER_CRASHED', 'Whisper worker is still terminating.');
-    }
-    if (this.#process !== null) return this.#process;
-    this.#generation += 1;
-    const generation = this.#generation;
-    const process = this.#spawn(this.#workerPath, [`--model-cache=${this.#cacheDirectory}`]);
-    this.#generationExit = new Promise<void>((resolve) => {
-      this.#resolveGenerationExit = resolve;
-    });
-    process.on('message', (message) => this.#handleMessage(generation, message));
-    process.on('exit', () => this.#handleExit(generation));
-    this.#process = process;
-    this.#healthTimer = setTimeout(() => {
-      if (this.#healthyGeneration !== generation) {
-        void this.beginTermination(
-          generation,
-          'health',
-          new WhisperClientError('WORKER_CRASHED', 'Whisper worker health handshake timed out.'),
-          true,
-        );
-      }
-    }, HEALTH_TIMEOUT_MS);
-    this.#healthTimer.unref();
-    return process;
-  }
-
-  #handleMessage(generation: number, raw: unknown): void {
-    if (
-      generation !== this.#generation ||
-      this.#lastExitedGeneration === generation ||
-      this.#termination?.generation === generation
-    ) {
-      return;
-    }
-    const response = WhisperWorkerResponseSchema.safeParse(raw);
-    if (!response.success) {
-      void this.beginTermination(
-        generation,
-        'protocol',
-        new WhisperClientError('PROTOCOL_ERROR', 'Whisper worker sent an invalid response.'),
-        true,
-      );
-      return;
-    }
-    if (
-      response.data.requestId === 'worker-ready' &&
-      response.data.ok &&
-      response.data.result.type === 'ready'
-    ) {
-      this.#markHealthy(generation);
-      return;
-    }
-    if (!response.data.ok && response.data.error.code === 'WORKER_CRASHED') {
-      void this.beginTermination(
-        generation,
-        'unavailable',
-        new WhisperClientError('WORKER_CRASHED', response.data.error.message),
-        true,
-      );
-      return;
-    }
-    const pending = this.#pending.get(response.data.requestId);
-    if (pending?.generation !== generation) return;
-    if (response.data.ok && !pending.accepts(response.data.result)) {
-      void this.beginTermination(
-        generation,
-        'protocol',
-        new WhisperClientError('PROTOCOL_ERROR', 'Whisper worker returned the wrong response.'),
-        true,
-      );
-      return;
-    }
-    this.#pending.delete(response.data.requestId);
-    if (response.data.ok) pending.resolve(response.data.result);
-    else {
-      pending.reject(new WhisperClientError(response.data.error.code, response.data.error.message));
-    }
-  }
-
-  #markHealthy(generation: number): void {
-    if (generation !== this.#generation || this.#termination?.generation === generation) return;
-    this.#healthyGeneration = generation;
-    if (this.#healthTimer !== null) clearTimeout(this.#healthTimer);
-    this.#healthTimer = null;
-    if (this.#stabilityTimer !== null) clearTimeout(this.#stabilityTimer);
-    this.#stabilityTimer = setTimeout(() => {
-      if (this.#healthyGeneration === generation && this.#process !== null) {
-        this.#restartAttempts = 0;
-      }
-    }, STABILITY_RESET_MS);
-    this.#stabilityTimer.unref();
-  }
-
-  #handleExit(generation: number, confirmed = true): void {
-    if (confirmed && this.#retiredProcesses.has(generation)) {
-      this.#confirmRetiredGeneration(generation);
-      return;
-    }
-    if (generation !== this.#generation || this.#lastExitedGeneration === generation) return;
-    this.#lastExitedGeneration = generation;
-    const termination = this.#termination?.generation === generation ? this.#termination : null;
-    this.#clearGenerationTimers(termination);
-    this.#process = null;
-    this.#healthyGeneration = 0;
-    this.#termination = null;
-    this.#resolveGenerationExit?.();
-    this.#resolveGenerationExit = null;
-    this.#generationExit = null;
-    const fallbackError = this.#closing
-      ? new WhisperClientError('CANCELLED', 'Whisper worker closed.')
-      : new WhisperClientError('WORKER_CRASHED', 'Whisper worker exited unexpectedly.');
-    this.#rejectGeneration(generation, termination, fallbackError, confirmed);
-    if (!this.#closing && (termination === null || termination.restart)) this.#scheduleRestart();
-  }
-
-  #tryKill(process: WorkerProcess): boolean {
-    try {
-      return process.kill();
-    } catch {
-      // The bounded termination deadline handles a process API that keeps failing.
-      return false;
-    }
-  }
-
-  #retryRetiredProcessCleanup(): void {
-    for (const [generation, process] of this.#retiredProcesses) {
-      try {
-        if (process.kill()) this.#confirmRetiredGeneration(generation);
-      } catch {
-        // Keep the quarantined handle so a later request or close can retry cleanup. Do not
-        // force-kill by cached PID here because the exited process's PID may have been reused.
-      }
-    }
-  }
-
-  #confirmRetiredGeneration(generation: number): void {
-    if (!this.#retiredProcesses.delete(generation)) return;
-    this.#releaseGenerationLeases(generation);
-  }
-
-  #rejectGeneration(
-    generation: number,
-    termination: TerminationIntent | null,
-    fallbackError: WhisperClientError,
-    releaseLeases = true,
-  ): void {
-    for (const [id, pending] of this.#pending) {
-      if (pending.generation !== generation) continue;
-      this.#pending.delete(id);
-      const collateralCancellation =
-        termination?.kind === 'cancel' &&
-        termination.cancelledRequestIds !== null &&
-        !termination.cancelledRequestIds.has(id);
-      pending.reject(
-        collateralCancellation
-          ? new WhisperClientError(
-              'WORKER_CRASHED',
-              'Whisper worker stopped for another cancelled operation.',
-            )
-          : (termination?.error ?? fallbackError),
-      );
-    }
-    if (releaseLeases) this.#releaseGenerationLeases(generation);
-  }
-
-  #releaseGenerationLeases(generation: number): void {
-    const releases = this.#sessionLeaseReleases.get(generation);
-    if (releases === undefined) return;
-    this.#sessionLeaseReleases.delete(generation);
-    for (const release of releases) release();
-  }
-
-  #scheduleRestart(): void {
-    if (
-      this.#restartTimer !== null ||
-      this.#closing ||
-      this.#restartAttempts >= MAX_AUTOMATIC_RESTARTS
-    ) {
-      return;
-    }
-    const delayMs = Math.min(MAX_RESTART_DELAY_MS, 100 * 2 ** this.#restartAttempts);
-    this.#restartAttempts += 1;
-    this.#restartTimer = setTimeout(() => {
-      this.#restartTimer = null;
-      if (!this.#closing && this.#process === null && this.#termination === null) {
-        try {
-          this.#ensureProcess();
-        } catch {
-          this.#scheduleRestart();
-        }
-      }
-    }, delayMs);
-    this.#restartTimer.unref();
-  }
-
-  #clearGenerationTimers(termination: TerminationIntent | null): void {
-    for (const timer of [this.#healthTimer, this.#stabilityTimer]) {
-      if (timer !== null) clearTimeout(timer);
-    }
-    this.#healthTimer = null;
-    this.#stabilityTimer = null;
-    if (termination !== null) {
-      if (termination.forceTimer !== null) clearTimeout(termination.forceTimer);
-      if (termination.retryTimer !== null) clearTimeout(termination.retryTimer);
-      if (termination.deadlineTimer !== null) clearTimeout(termination.deadlineTimer);
-    }
-  }
-
-  #clearSupervisionTimers(): void {
-    for (const timer of [this.#restartTimer, this.#healthTimer, this.#stabilityTimer]) {
-      if (timer !== null) clearTimeout(timer);
-    }
-    this.#restartTimer = null;
-    this.#healthTimer = null;
-    this.#stabilityTimer = null;
-  }
-
-  #rejectPending(error: Error): void {
-    for (const pending of this.#pending.values()) pending.reject(error);
-    this.#pending.clear();
-  }
-}
-
-function acceptsAcknowledgement(
-  operation: WhisperAcknowledgedOperation,
-): (result: WhisperWorkerResult) => boolean {
-  return (result) => result.type === 'acknowledged' && result.operation === operation;
-}
-
-function assertAcknowledged(
-  result: WhisperWorkerResult,
-  operation: WhisperAcknowledgedOperation,
-): void {
-  if (result.type !== 'acknowledged' || result.operation !== operation) {
-    throw new WhisperClientError(
-      'PROTOCOL_ERROR',
-      `Whisper worker returned the wrong acknowledgement for ${operation}.`,
-    );
-  }
-}
-
-function createRequestDeadline(
-  timeoutMs: number,
-  callerSignal: AbortSignal | undefined,
-): {
-  readonly signal: AbortSignal;
-  readonly timedOut: () => boolean;
-  readonly dispose: () => void;
-} {
-  const timeoutController = new AbortController();
-  const timeout = setTimeout(() => timeoutController.abort('worker request timeout'), timeoutMs);
-  timeout.unref();
-  return {
-    signal:
-      callerSignal === undefined
-        ? timeoutController.signal
-        : AbortSignal.any([callerSignal, timeoutController.signal]),
-    timedOut: () => timeoutController.signal.aborted,
-    dispose: () => clearTimeout(timeout),
-  };
-}
-
-function requestQueueTimeoutError(): WhisperClientError {
-  return new WhisperClientError(
-    'WORKER_CRASHED',
-    'Whisper worker request timed out while waiting for dispatch.',
-  );
-}
-
-function waitForDispatchTurn(
-  precedingRequest: Promise<void>,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  if (signal?.aborted === true) {
-    return Promise.reject(new WhisperClientError('CANCELLED', 'Transcription was cancelled.'));
-  }
-  if (signal === undefined) return precedingRequest;
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (operation: () => void): void => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', abort);
-      operation();
-    };
-    const abort = (): void =>
-      finish(() => reject(new WhisperClientError('CANCELLED', 'Transcription was cancelled.')));
-    signal.addEventListener('abort', abort, { once: true });
-    void precedingRequest.then(
-      () => finish(resolve),
-      () => finish(resolve),
-    );
-  });
-}
-
-function defaultSpawner(modulePath: string, args: readonly string[]): WorkerProcess {
-  return utilityProcess.fork(modulePath, [...args], {
-    serviceName: 'Talking Quill Whisper',
-    stdio: 'ignore',
-  });
-}
-
-function defaultForceKill(pid: number): void {
-  forceKillProcess(pid, 'SIGKILL');
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    timer.unref();
-  });
 }

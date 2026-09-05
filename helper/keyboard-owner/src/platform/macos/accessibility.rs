@@ -43,7 +43,7 @@ pub(super) fn front_app() -> Result<FrontApp, PlatformError> {
     let attributes = AxAttributes::new()?;
     // SAFETY: AXUIElementCreateSystemWide follows the Core Foundation Create
     // rule and returns an owned reference when non-null.
-    let system = OwnedCf::from_created(unsafe { ffi::AXUIElementCreateSystemWide() }.cast_const())?;
+    let system = unsafe { OwnedCf::from_created(ffi::AXUIElementCreateSystemWide().cast_const()) }?;
     let application = ax_copy_attribute(
         system.as_type_ref().cast_mut(),
         attributes.focused_application.as_type_ref(),
@@ -184,7 +184,8 @@ fn ax_copy_attribute(
     if error != 0 {
         return Err(PlatformError::NativeFailure);
     }
-    OwnedCf::from_created(value)
+    // SAFETY: a successful CopyAttributeValue transfers an owned reference.
+    unsafe { OwnedCf::from_created(value) }
 }
 
 fn ax_string_attribute(
@@ -192,7 +193,7 @@ fn ax_string_attribute(
     attribute: ffi::CFStringRef,
 ) -> Result<String, PlatformError> {
     let value = ax_copy_attribute(element, attribute)?;
-    cf_string_to_string(value.as_type_ref())
+    cf_string_to_string(&value)
 }
 
 pub(super) fn permission_snapshot() -> Permissions {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RecordingSection } from '../../app/src/renderer/main/settings/RecordingSection';
@@ -102,6 +102,90 @@ describe('Recording settings', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Include system audio' }));
     expect(update).toHaveBeenCalledWith({ recording: { autoSubmitOnSilence: false } });
     expect(update).toHaveBeenCalledWith({ recording: { includeSystemAudio: true } });
+  });
+
+  it.each([
+    [
+      'How long a pause ends a dictation',
+      'relaxed',
+      'That pause length couldn’t be saved. Please try again.',
+    ],
+    ['Automatically finish after a pause', null, 'That finishing option couldn’t be saved.'],
+    ['Include system audio', null, 'That audio-source option couldn’t be saved.'],
+  ] as const)(
+    'keeps the saved value and failure message for %s',
+    async (label, option, message) => {
+      const user = userEvent.setup();
+      update.mockRejectedValueOnce(new Error('private disk detail'));
+      render(<RecordingSection settings={settings} platform="win32" />);
+      await screen.findByRole('option', { name: 'Studio microphone' });
+      const control = screen.getByRole(option === null ? 'checkbox' : 'combobox', { name: label });
+      if (option === null) await user.click(control);
+      else await user.selectOptions(control, option);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message);
+      expect(control).toBeEnabled();
+      if (option !== null) expect(control).toHaveValue(settings.recording.silencePreset);
+      else if (label === 'Automatically finish after a pause') expect(control).toBeChecked();
+      else expect(control).not.toBeChecked();
+      expect(screen.queryByText('private disk detail')).not.toBeInTheDocument();
+      expect(startTest).not.toHaveBeenCalled();
+      expect(stopTest).not.toHaveBeenCalled();
+    },
+  );
+
+  it('shares the recording save lock without starting or stopping microphone capture', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Settings>();
+    update.mockReturnValueOnce(pending.promise);
+    render(<RecordingSection settings={settings} platform="win32" />);
+    await screen.findByRole('option', { name: 'Studio microphone' });
+    await user.click(screen.getByRole('checkbox', { name: 'Include system audio' }));
+
+    const controls = [
+      screen.getByRole('combobox', { name: 'Microphone' }),
+      screen.getByRole('combobox', { name: 'How long a pause ends a dictation' }),
+      screen.getByRole('checkbox', { name: 'Automatically finish after a pause' }),
+      screen.getByRole('checkbox', { name: 'Include system audio' }),
+      screen.getByRole('button', { name: 'Test my microphone' }),
+    ];
+    for (const control of controls) expect(control).toBeDisabled();
+    await act(async () => {
+      pending.resolve(settings);
+      await pending.promise;
+    });
+    expect(await screen.findByText('System audio will be captured.')).toBeVisible();
+    for (const control of controls) expect(control).toBeEnabled();
+    expect(startTest).not.toHaveBeenCalled();
+    expect(stopTest).not.toHaveBeenCalled();
+  });
+
+  it('keeps an active microphone test running while saving recording options', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Settings>();
+    update.mockReturnValueOnce(pending.promise);
+    render(<RecordingSection settings={settings} platform="win32" />);
+    await user.click(await screen.findByRole('button', { name: 'Test my microphone' }));
+    await screen.findByText('Listening — say something');
+    await user.click(screen.getByRole('checkbox', { name: 'Include system audio' }));
+
+    expect(update).toHaveBeenCalledWith({ recording: { includeSystemAudio: true } });
+    expect(screen.getByRole('checkbox', { name: 'Include system audio' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop test' })).toBeDisabled();
+    expect(screen.getByText('Listening — say something')).toBeVisible();
+    expect(startTest).toHaveBeenCalledOnce();
+    expect(stopTest).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pending.resolve(settings);
+      await pending.promise;
+    });
+    expect(await screen.findByText('System audio will be captured.')).toBeVisible();
+    expect(screen.getByRole('checkbox', { name: 'Include system audio' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Stop test' })).toBeEnabled();
+    expect(screen.getByText('Listening — say something')).toBeVisible();
+    expect(startTest).toHaveBeenCalledOnce();
+    expect(stopTest).not.toHaveBeenCalled();
   });
 
   it('shows manual finishing and disables unsupported system audio', async () => {

@@ -1,19 +1,17 @@
 import {
-  helperParamsSchemas,
   type ActivationBinding,
   type HelperParams,
   type HelperResult,
 } from '../../shared/helper/protocol';
 import { type HelperReadinessReason } from '../../shared/schemas/helper-readiness';
-import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
+import {
+  activationAcknowledgementMatches,
+  createActivationConfiguration,
+  type ActivationConfiguration,
+} from './activation-configuration';
 import { type HelperRpcSession } from './helper-rpc-channel';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3_000;
-
-interface ActivationConfiguration {
-  readonly enabled: boolean;
-  readonly bindings: readonly ActivationBinding[];
-}
 
 interface ActivationReconcileOptions {
   readonly allowUnavailable: boolean;
@@ -70,21 +68,7 @@ export class HelperActivationReconciler {
     enabled: boolean,
     bindings: readonly ActivationBinding[],
   ): Promise<ActivationConfiguration> {
-    const configured = helperParamsSchemas['activation.configure'].parse({
-      enabled,
-      bindings: [...bindings],
-    });
-    const desired = Object.freeze({
-      enabled: configured.enabled,
-      bindings: Object.freeze(
-        configured.bindings.map((binding) =>
-          Object.freeze({
-            profileId: binding.profileId,
-            shortcut: deepFreezeShortcut(binding.shortcut),
-          }),
-        ),
-      ),
-    });
+    const desired = createActivationConfiguration(enabled, bindings);
     const apply = async (): Promise<ActivationConfiguration> => {
       const previous = this.#desired;
       this.#desired = desired;
@@ -338,19 +322,4 @@ export class HelperActivationReconciler {
       }
     }
   }
-}
-
-function activationAcknowledgementMatches(
-  requested: HelperParams<'activation.configure'>,
-  effective: HelperResult<'activation.configure'>,
-): boolean {
-  if (effective.enabled !== requested.enabled) return false;
-  if (effective.bindings.length !== requested.bindings.length) return false;
-  return effective.bindings.every((binding, index) => {
-    const candidate = requested.bindings[index];
-    return (
-      binding.profileId === candidate?.profileId &&
-      shortcutsEqual(binding.shortcut, candidate.shortcut)
-    );
-  });
 }

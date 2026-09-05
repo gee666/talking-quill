@@ -50,6 +50,39 @@ describe('release audit agent-plan handling', () => {
     expect(() => runAudit()).toThrow('Required release trust path is missing');
   });
 
+  it('limits the relocated deny-list exceptions to their exact owning file', () => {
+    const policyPath = 'scripts/package-path-policy.mjs';
+    const configuration = JSON.parse(
+      readFileSync(resolve(root, 'release.config.json'), 'utf8'),
+    ) as {
+      textAuditExceptions: Record<string, string[]>;
+    };
+    const fixtureConfiguration = JSON.parse(
+      readFileSync(resolve(fixture, 'release.config.json'), 'utf8'),
+    ) as {
+      textAuditExceptions: Record<string, string[]>;
+    };
+    for (const rule of ['legacy-brand', 'legacy-commercial-phrases']) {
+      expect(configuration.textAuditExceptions[rule]).toContain(policyPath);
+      fixtureConfiguration.textAuditExceptions[rule] = [
+        ...(fixtureConfiguration.textAuditExceptions[rule] ?? []),
+        policyPath,
+      ];
+    }
+    expect(configuration.textAuditExceptions['legacy-brand']).toContain(
+      'scripts/package-policy.mjs',
+    );
+    expect(configuration.textAuditExceptions['legacy-commercial-phrases']).not.toContain(
+      'scripts/package-policy.mjs',
+    );
+    writeFileSync(resolve(fixture, 'release.config.json'), JSON.stringify(fixtureConfiguration));
+    copyFileSync(resolve(root, policyPath), resolve(fixture, policyPath));
+    expect(() => runAudit()).not.toThrow();
+
+    copyFileSync(resolve(root, policyPath), resolve(fixture, 'scripts/unreviewed-policy.mjs'));
+    expect(() => runAudit()).toThrow('Forbidden tracked text requires review');
+  });
+
   it('fails closed when an agent plan is added to the index', () => {
     mkdirSync(resolve(fixture, '.agent-plans'), { recursive: true });
     writeFileSync(resolve(fixture, '.agent-plans/tracked.md'), 'must not ship\n');

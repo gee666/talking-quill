@@ -3,7 +3,6 @@ import {
   RunnableProviderConfigSchema,
   type Destination,
   type ProviderCatalogEntry,
-  type RunnableProviderConfig,
   type RunnableProviderId,
 } from '../../../shared/schemas/providers';
 import {
@@ -55,13 +54,6 @@ export function createDraft(
     }
   }
   return ProviderSettingsDraftSchema.parse({ ...defaults, ...stored });
-}
-
-export function configFromDraft(
-  providerId: RunnableProviderId,
-  draft: ProviderSettingsDraft,
-): RunnableProviderConfig {
-  return RunnableProviderConfigSchema.parse({ providerId, ...draft });
 }
 
 export function requiresEndpointRepair(

@@ -72,8 +72,7 @@ export function WidgetShell() {
       const point = lastPointer.current;
       const target =
         cancelable && point !== null ? document.elementFromPoint(point.x, point.y) : null;
-      const button = target instanceof Element ? target.closest('button') : null;
-      setInteractive(button !== null && !button.hasAttribute('disabled'));
+      setInteractive(isEnabledButtonTarget(target));
     });
     return () => cancelAnimationFrame(frame);
   }, [cancelable, recording, session.phase, setInteractive]);
@@ -84,15 +83,15 @@ export function WidgetShell() {
       viewport.height / WIDGET_DIMENSIONS.default.height,
     ),
   );
-  const layoutStyle = {
+  const layoutStyle: CSSProperties &
+    Record<'--widget-scale' | '--widget-layout-width' | '--widget-layout-height', string> = {
     '--widget-scale': String(scale),
     '--widget-layout-width': `${String(viewport.width / scale)}px`,
     '--widget-layout-height': `${String(viewport.height / scale)}px`,
-  } as CSSProperties;
+  };
   const updatePointerMode = (target: EventTarget | null, x: number, y: number) => {
     lastPointer.current = { x, y };
-    const button = target instanceof Element ? target.closest('button') : null;
-    setInteractive(button !== null && !button.hasAttribute('disabled'));
+    setInteractive(isEnabledButtonTarget(target));
   };
   return (
     <main
@@ -174,6 +173,11 @@ export function WidgetShell() {
       </div>
     </main>
   );
+}
+
+function isEnabledButtonTarget(target: EventTarget | null): boolean {
+  const button = target instanceof Element ? target.closest('button') : null;
+  return button !== null && !button.hasAttribute('disabled');
 }
 
 function usePerceptualMicrophoneLevel(rms: number, active: boolean): number {

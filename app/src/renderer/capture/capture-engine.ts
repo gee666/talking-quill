@@ -2,23 +2,23 @@ import {
   CAPTURE_WORKLET_FLUSH_TIMEOUT_MS,
   CAPTURE_WORKLET_PROCESSOR_NAME,
   DEVICE_CHANGE_DEBOUNCE_MS,
-  MAX_MICROPHONE_DEVICES,
-  MAX_MICROPHONE_ID_LENGTH,
-  MAX_MICROPHONE_LABEL_LENGTH,
   PCM_CHANNEL_COUNT,
-  PCM_FRAME_SAMPLES,
   PCM_SAMPLE_RATE,
 } from '../../shared/constants/audio';
 import type { MicrophoneDevice } from '../../shared/schemas/audio';
 
-export type CaptureFailureCode =
-  | 'permission-denied'
-  | 'no-device'
-  | 'device-unavailable'
-  | 'unsupported-audio-format'
-  | 'worklet-unavailable'
-  | 'system-audio-unavailable'
-  | 'capture-failed';
+import { sanitizeDeviceId, sanitizeMicrophoneDevices } from './capture-devices';
+import {
+  allowsDefaultFallback,
+  captureFailureCode,
+  CaptureEngineError,
+  mapCaptureError,
+  type CaptureStopReason,
+} from './capture-errors';
+import { readCaptureWorkletMessage } from './capture-worklet-message';
+
+export { CaptureEngineError, mapCaptureError } from './capture-errors';
+export type { CaptureFailureCode, CaptureStopReason } from './capture-errors';
 
 export interface CaptureStartResult {
   readonly activeMicrophoneId: string | null;
@@ -33,8 +33,6 @@ export interface CaptureRebindResult {
   readonly activeMicrophoneId: string | null;
   readonly bindingGeneration: number;
 }
-
-export type CaptureStopReason = 'device-lost' | 'system-audio-lost' | 'error';
 
 export interface CaptureEngineCallbacks {
   readonly onDevicesChanged: (defaultInvalidated: boolean) => void;
@@ -83,16 +81,6 @@ interface ActiveCapture {
   rebindPromise: Promise<CaptureRebindResult> | null;
 }
 
-export class CaptureEngineError extends Error {
-  readonly code: CaptureFailureCode;
-
-  constructor(code: CaptureFailureCode) {
-    super(code);
-    this.name = 'CaptureEngineError';
-    this.code = code;
-  }
-}
-
 export class CaptureEngine {
   readonly #environment: CaptureEnvironment;
   readonly #callbacks: CaptureEngineCallbacks;
@@ -113,27 +101,7 @@ export class CaptureEngine {
 
   async listDevices(): Promise<readonly MicrophoneDevice[]> {
     const devices = await this.#environment.mediaDevices.enumerateDevices();
-    const sanitized = new Map<string, MicrophoneDevice>();
-    let anonymousIndex = 0;
-    for (const device of devices) {
-      if (device.kind !== 'audioinput') continue;
-      const deviceId = sanitizeDeviceId(device.deviceId);
-      if (deviceId === null || sanitized.has(deviceId)) continue;
-      anonymousIndex += 1;
-      sanitized.set(deviceId, {
-        deviceId,
-        label: sanitizeDeviceLabel(device.label, anonymousIndex),
-        isDefault: deviceId === 'default',
-      });
-    }
-    return [...sanitized.values()]
-      .sort((first, second) => {
-        if (first.isDefault !== second.isDefault) return first.isDefault ? -1 : 1;
-        return (
-          first.label.localeCompare(second.label) || first.deviceId.localeCompare(second.deviceId)
-        );
-      })
-      .slice(0, MAX_MICROPHONE_DEVICES);
+    return sanitizeMicrophoneDevices(devices);
   }
 
   start(
@@ -200,7 +168,7 @@ export class CaptureEngine {
         stopStream(stream);
         throw new CaptureEngineError('device-unavailable');
       }
-      const reportedDeviceId = sanitizeOptionalDeviceId(initialTrack.getSettings().deviceId);
+      const reportedDeviceId = sanitizeDeviceId(initialTrack.getSettings().deviceId);
       if (
         preferredDeviceId !== null &&
         !preferredUnavailable &&
@@ -478,7 +446,7 @@ export class CaptureEngine {
     retired.source.disconnect();
     stopStream(retired.stream);
     return {
-      activeMicrophoneId: sanitizeOptionalDeviceId(track.getSettings().deviceId),
+      activeMicrophoneId: sanitizeDeviceId(track.getSettings().deviceId),
       bindingGeneration: replacement.generation,
     };
   }
@@ -599,30 +567,13 @@ export class CaptureEngine {
   #handleWorkletMessage(event: MessageEvent<unknown>): void {
     const active = this.#active;
     if (active === null) return;
-    const value = event.data;
-    if (typeof value !== 'object' || value === null) return;
-    const record = value as Readonly<Record<string, unknown>>;
-    const type = record.type;
-    if (type === 'flushed') {
+    const message = readCaptureWorkletMessage(event.data);
+    if (message === null) return;
+    if (message.type === 'flushed') {
       active.flushResolver?.();
       return;
     }
-    if (type !== 'frame') return;
-    const samples = record.samples;
-    const rms = record.rms;
-    if (
-      !(samples instanceof Float32Array) ||
-      samples.length === 0 ||
-      samples.length > PCM_FRAME_SAMPLES ||
-      !hasNormalizedSamples(samples) ||
-      typeof rms !== 'number' ||
-      !Number.isFinite(rms) ||
-      rms < 0 ||
-      rms > 1
-    ) {
-      return;
-    }
-    this.#callbacks.onFrame(samples, rms);
+    this.#callbacks.onFrame(message.samples, message.rms);
   }
 
   #handleMicrophoneTrackEnded(generation: number, binding: MicrophoneBinding): void {
@@ -723,77 +674,10 @@ export function createBrowserCaptureEnvironment(workletModuleUrl: string): Captu
   };
 }
 
-function captureFailureCode(reason: CaptureStopReason | null): CaptureFailureCode {
-  if (reason === 'device-lost') return 'device-unavailable';
-  if (reason === 'system-audio-lost') return 'system-audio-unavailable';
-  return 'worklet-unavailable';
-}
-
 function stopStream(stream: MediaStream): void {
   for (const track of stream.getTracks()) track.stop();
 }
 
 function liveAudioTrack(stream: MediaStream): MediaStreamTrack | null {
   return stream.getAudioTracks().find((track) => track.readyState !== 'ended') ?? null;
-}
-
-function sanitizeOptionalDeviceId(deviceId: string | undefined): string | null {
-  return deviceId === undefined ? null : sanitizeDeviceId(deviceId);
-}
-
-function sanitizeDeviceId(deviceId: string): string | null {
-  if (
-    deviceId.trim().length === 0 ||
-    deviceId.length > MAX_MICROPHONE_ID_LENGTH ||
-    /\p{Cc}/u.test(deviceId)
-  ) {
-    return null;
-  }
-  return deviceId;
-}
-
-function sanitizeDeviceLabel(label: string, anonymousIndex: number): string {
-  let cleaned = '';
-  for (const character of label) {
-    cleaned += isControlCharacter(character) ? ' ' : character;
-  }
-  const sanitized = cleaned
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, MAX_MICROPHONE_LABEL_LENGTH)
-    .trim();
-  return sanitized || `Microphone ${String(anonymousIndex)}`;
-}
-
-function isControlCharacter(value: string): boolean {
-  return /\p{Cc}/u.test(value);
-}
-
-function hasNormalizedSamples(samples: Float32Array): boolean {
-  for (const sample of samples) {
-    if (!Number.isFinite(sample) || sample < -1 || sample > 1) return false;
-  }
-  return true;
-}
-
-function allowsDefaultFallback(error: unknown): boolean {
-  return (
-    error instanceof DOMException &&
-    (error.name === 'NotFoundError' ||
-      error.name === 'OverconstrainedError' ||
-      error.name === 'NotReadableError')
-  );
-}
-
-export function mapCaptureError(error: unknown): CaptureFailureCode {
-  if (error instanceof DOMException) {
-    if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
-      return 'permission-denied';
-    }
-    if (error.name === 'NotFoundError') return 'no-device';
-    if (error.name === 'NotReadableError' || error.name === 'OverconstrainedError') {
-      return 'device-unavailable';
-    }
-  }
-  return 'capture-failed';
 }

@@ -17,6 +17,82 @@ function deferred<Value>() {
 }
 
 describe('profile IPC handlers', () => {
+  it.each(['throw', 'reject'] as const)(
+    'continues settings and profile mutations after a profile %s',
+    async (failureMode) => {
+      const settings = structuredClone(DEFAULT_SETTINGS);
+      const failure = new Error('profile write failed');
+      const calls: string[] = [];
+      const handlers = createHandlers({
+        echo: {
+          resetProfile: () => {
+            calls.push('reset');
+            if (failureMode === 'throw') throw failure;
+            return Promise.reject(failure);
+          },
+          deleteProfile: () => {
+            calls.push('delete');
+            return Promise.resolve(settings);
+          },
+        },
+        state: {
+          getSettings: () => settings,
+          updateSettings: () => {
+            calls.push('settings');
+            return Promise.resolve(settings);
+          },
+        },
+      } as unknown as HandlerDependencies);
+
+      const failed = handlers['profile:reset']({ id: 'general' }, context);
+      const updated = handlers['settings:update']({ app: { closeToTray: true } }, context);
+      const deleted = handlers['profile:delete']({ id: 'custom' }, context);
+
+      await expect(failed).rejects.toBe(failure);
+      await Promise.all([updated, deleted]);
+      expect(calls).toEqual(['reset', 'settings', 'delete']);
+    },
+  );
+
+  it('queues profile imports behind settings but checks the dialog owner immediately', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    const writing = deferred<Settings>();
+    const owner = { id: context.webContentsId };
+    const getByWebContentsId = vi.fn(() => owner);
+    const importDictationProfiles = vi.fn(() => Promise.resolve({ status: 'cancelled' }));
+    const handlers = createHandlers({
+      state: { getSettings: () => settings, updateSettings: () => writing.promise },
+      windows: { getByWebContentsId },
+      settingsTransferFiles: { importDictationProfiles },
+    } as unknown as HandlerDependencies);
+
+    const write = handlers['settings:update']({ app: { closeToTray: true } }, context);
+    const imported = handlers['profile:import-file']({}, context);
+    expect(getByWebContentsId).toHaveBeenCalledWith(context.webContentsId);
+    await Promise.resolve();
+    expect(importDictationProfiles).not.toHaveBeenCalled();
+
+    writing.resolve(settings);
+    await Promise.all([write, imported]);
+    expect(importDictationProfiles).toHaveBeenCalledExactlyOnceWith(owner);
+  });
+
+  it('does not share a mutation queue between independently created handler maps', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    const writing = deferred<Settings>();
+    const first = createHandlers({
+      echo: { resetProfile: () => writing.promise },
+    } as unknown as HandlerDependencies);
+    const resetProfile = vi.fn(() => Promise.resolve(settings));
+    const second = createHandlers({ echo: { resetProfile } } as unknown as HandlerDependencies);
+
+    const pending = first['profile:reset']({ id: 'general' }, context);
+    await second['profile:reset']({ id: 'general' }, context);
+    expect(resetProfile).toHaveBeenCalledOnce();
+    writing.resolve(settings);
+    await pending;
+  });
+
   it('routes profile mutations without Welcome activation prerequisites', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS);
     const echo = {

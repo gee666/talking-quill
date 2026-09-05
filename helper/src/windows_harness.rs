@@ -4,9 +4,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, INVALID_HANDLE_VALUE, WAIT_ABANDONED, WAIT_OBJECT_0,
-};
+use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows_sys::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
     TOKEN_QUERY, TokenIntegrityLevel,
@@ -64,28 +62,33 @@ fn current_integrity_rid() -> Result<u32, String> {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err("unable to inspect the Windows harness token".into());
     }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut bytes = 0;
     unsafe {
         GetTokenInformation(
-            token,
+            token.as_raw_handle(),
             TokenIntegrityLevel,
             std::ptr::null_mut(),
             0,
             &mut bytes,
         )
     };
-    let mut buffer = vec![0_u8; bytes as usize];
+    let capacity = bytes;
+    // Pointer-sized words align both the label and the trailing DWORD-aligned SID.
+    // Keep the entire allocation alive while following the returned SID pointer.
+    let mut buffer = vec![0_usize; (capacity as usize).div_ceil(std::mem::size_of::<usize>())];
     let ok = unsafe {
         GetTokenInformation(
-            token,
+            token.as_raw_handle(),
             TokenIntegrityLevel,
             buffer.as_mut_ptr().cast(),
-            bytes,
+            capacity,
             &mut bytes,
         )
     };
-    unsafe { CloseHandle(token) };
-    if ok == 0 || buffer.len() < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() {
+    drop(token);
+    // Preserve the original allocation-length check, not the returned byte count.
+    if ok == 0 || (capacity as usize) < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() {
         return Err("unable to read the Windows harness integrity label".into());
     }
     let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid };

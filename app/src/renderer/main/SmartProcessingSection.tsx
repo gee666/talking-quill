@@ -1,23 +1,22 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ProviderCatalogEntry } from '../../shared/schemas/providers';
-import type { ProviderSettingsDraft, Settings } from '../../shared/schemas/settings';
-import { Button, Card, EmptyState, Status } from '../design';
-import { ProviderFieldControl } from './smart-processing/ProviderFieldControl';
+import type { Settings } from '../../shared/schemas/settings';
+import { Button, Card, EmptyState } from '../design';
+import { ProviderConfigurationForm } from './smart-processing/ProviderConfigurationForm';
 import {
   ConnectionTestPanel,
   CredentialPanel,
   DestinationSummary,
-  OnScreenAwarenessPanel,
   PiInstallationPanel,
-  VisionVerificationDialog,
 } from './smart-processing/ProviderPanels';
+import { OnScreenAwarenessPanel, VisionVerificationDialog } from './smart-processing/VisionPanels';
 import { ProviderPicker } from './smart-processing/ProviderPicker';
 import { useOnScreenAwareness } from './smart-processing/useOnScreenAwareness';
 import { usePiInstallation } from './smart-processing/usePiInstallation';
 import { useProviderConfiguration } from './smart-processing/useProviderConfiguration';
 import { useProviderOperations } from './smart-processing/useProviderOperations';
 import { useProviderUiCoordinator } from './smart-processing/useProviderUiCoordinator';
-import { ENDPOINT_REPAIR_MESSAGE, type RequestState } from './smart-processing/provider-utils';
+import type { RequestState } from './smart-processing/provider-utils';
 import { autoDiscoveryKey, claimAutoDiscovery } from './smart-processing/auto-discovery-memory';
 
 interface SmartProcessingSectionProps {
@@ -173,12 +172,6 @@ export function SmartProcessingSection({
     operations,
   ]);
 
-  const saveConfiguration = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => {
-    event.preventDefault();
-    pi.clearMessage();
-    void configuration.saveConfiguration(pi.pathState === 'loading' || osa.mutationPending);
-  };
-
   return (
     <Card
       {...(heading === null ? {} : { title: heading })}
@@ -251,79 +244,15 @@ export function SmartProcessingSection({
             />
           ) : null}
 
-          <form className="stack" onSubmit={saveConfiguration}>
-            {selected.fields
-              .filter((field) => !field.secret)
-              .map((field) => (
-                <ProviderFieldControl
-                  key={`${configuration.selectedId}-${field.key}`}
-                  field={field}
-                  value={configuration.draft[field.key as keyof ProviderSettingsDraft]}
-                  models={operations.models}
-                  modelState={operations.modelState}
-                  modelElapsedMs={operations.modelElapsedMs}
-                  modelDiscovery={selected.modelDiscovery}
-                  error={
-                    field.key === 'baseUrl' && configuration.endpointRepairRequired
-                      ? ENDPOINT_REPAIR_MESSAGE
-                      : configuration.fieldErrors[field.key]
-                  }
-                  controlsDisabled={
-                    configuration.saveState === 'loading' ||
-                    pi.pathState === 'loading' ||
-                    configuration.credentialMutationPending ||
-                    osa.mutationPending
-                  }
-                  operationsDisabled={
-                    !configuration.providerSelectionPersisted ||
-                    configuration.endpointRepairRequired ||
-                    configuration.dirty
-                  }
-                  onChange={(value) => {
-                    pi.clearMessage();
-                    configuration.updateDraft(field.key as keyof ProviderSettingsDraft, value);
-                  }}
-                  onDiscover={() => {
-                    pi.clearMessage();
-                    void operations.discoverModels({
-                      providerId: configuration.selectedId,
-                      draft: configuration.draft,
-                      configurationDirty:
-                        configuration.dirty ||
-                        configuration.endpointRepairRequired ||
-                        !configuration.providerSelectionPersisted,
-                    });
-                  }}
-                  onCancel={operations.cancelModelDiscovery}
-                />
-              ))}
-            {selected.modelDiscovery === 'provider-managed' ? (
-              <Status tone="info">
-                This service uses the model it already has loaded, so there is no model to choose.
-              </Status>
-            ) : null}
-            <div className="provider-actions">
-              <Button
-                type="submit"
-                busy={configuration.saveState === 'loading'}
-                disabled={
-                  !configuration.dirty ||
-                  configuration.endpointRepairRequired ||
-                  pi.pathState === 'loading' ||
-                  osa.mutationPending
-                }
-              >
-                Save configuration
-              </Button>
-              {configuration.dirty ? (
-                <Status tone="warning">Save your changes before testing</Status>
-              ) : null}
-              {configuration.saveState === 'success' ? <Status tone="success">Saved</Status> : null}
-              {configuration.saveState === 'error' ? (
-                <Status tone="error">That did not save. Check the settings and try again.</Status>
-              ) : null}
-            </div>
-          </form>
+          <ProviderConfigurationForm
+            selected={selected}
+            configuration={configuration}
+            operations={operations}
+            controlsDisabled={providerMutationPending}
+            configurationDirty={configurationDirty}
+            externalMutationPending={pi.pathState === 'loading' || osa.mutationPending}
+            clearMessage={pi.clearMessage}
+          />
 
           {selected.fields.some((field) => field.secret) ? (
             <CredentialPanel
@@ -358,11 +287,7 @@ export function SmartProcessingSection({
             message={operations.connectionMessage}
             elapsedMs={operations.connectionElapsedMs}
             disabled={connectionBlocked}
-            configurationDirty={
-              configuration.dirty ||
-              configuration.endpointRepairRequired ||
-              !configuration.providerSelectionPersisted
-            }
+            configurationDirty={configurationDirty}
             missingModel={missingRequiredModel}
             providerManagedModel={providerManagedModel}
             onTest={() =>

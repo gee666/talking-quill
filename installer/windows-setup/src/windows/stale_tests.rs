@@ -207,7 +207,7 @@ fn stale_concurrent_installer_lifecycle_lock_is_rejected() {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "windows::tests::stale_concurrent_installer_lifecycle_lock_is_rejected",
+            "windows::stale_tests::stale_concurrent_installer_lifecycle_lock_is_rejected",
             "--nocapture",
         ])
         .env("TQ_STALE_LOCK_CHILD", &lock)
@@ -256,7 +256,7 @@ fn stale_active_process_state_is_rejected() {
     let mut child = Command::new(&image)
         .args([
             "--exact",
-            "windows::tests::stale_active_process_state_is_rejected",
+            "windows::stale_tests::stale_active_process_state_is_rejected",
             "--nocapture",
         ])
         .env("TQ_STALE_ACTIVE_CHILD", "1")
@@ -286,7 +286,7 @@ fn stale_cleanup_authorization_is_authenticated_cross_process() {
     let mut child = Command::new(&image)
         .args([
             "--exact",
-            "windows::tests::stale_cleanup_authorization_is_authenticated_cross_process",
+            "windows::stale_tests::stale_cleanup_authorization_is_authenticated_cross_process",
             "--nocapture",
         ])
         .env("TQ_STALE_AUTH_CHILD", "1")

@@ -4,11 +4,24 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = readRustModuleSync('installer/windows-setup/src/windows.rs');
-const rustPackage = readFileSync('installer/windows-setup/src/package.rs', 'utf8');
+const rustPackage = readRustModuleSync('installer/windows-setup/src/package.rs');
+const diagnostic = readRustModuleSync('installer/windows-setup/src/windows/stale_diagnostic.rs');
+const diagnosticSource = readFileSync(
+  'installer/windows-setup/src/windows/stale_diagnostic.rs',
+  'utf8',
+);
 const productionBuild = readFileSync('scripts/build-windows-setup.mjs', 'utf8');
 const cleanupBuild = readFileSync('scripts/build-windows-stale-schema2-cleanup-setup.mjs', 'utf8');
 const pack = readFileSync('scripts/pack-windows-native.mjs', 'utf8');
 const e2e = readFileSync('scripts/run-windows-stale-schema2-diagnostic-e2e.mjs', 'utf8');
+
+function diagnosticFunction(): string {
+  const start = diagnosticSource.indexOf('fn run_direct_stale_schema2_diagnostic_inner(');
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = diagnosticSource.indexOf('\n}', start);
+  expect(end).toBeGreaterThan(start);
+  return diagnosticSource.slice(start, end + 2);
+}
 
 describe('packaged stale schema-2 diagnosis', () => {
   it('gates the exact noninteractive command with the cleanup feature', () => {
@@ -62,10 +75,7 @@ describe('packaged stale schema-2 diagnosis', () => {
   });
 
   it('wraps each diagnostic operation with its exact stage', () => {
-    const diagnostic = source.slice(
-      source.indexOf('fn run_direct_stale_schema2_diagnostic_inner('),
-      source.indexOf('fn force_stale_cleanup_rejection('),
-    );
+    const diagnostic = diagnosticFunction();
     expect(diagnostic).not.toContain('diagnostic.record(');
     expect(diagnostic).not.toContain('diagnostic.rejected');
     for (const stage of [
@@ -93,10 +103,7 @@ describe('packaged stale schema-2 diagnosis', () => {
   });
 
   it('publishes audit completion only after final image stability', () => {
-    const diagnostic = source.slice(
-      source.indexOf('fn run_direct_stale_schema2_diagnostic_inner('),
-      source.indexOf('fn force_stale_cleanup_rejection('),
-    );
+    const diagnostic = diagnosticFunction();
     const stability = [...diagnostic.matchAll(/"image\.stability"/gu)].map((match) => match.index);
     const auditCompletion = [...diagnostic.matchAll(/audit\.record\("diagnostic-complete"/gu)].map(
       (match) => match.index,
@@ -114,10 +121,6 @@ describe('packaged stale schema-2 diagnosis', () => {
   });
 
   it('keeps diagnosis out of mutation APIs', () => {
-    const diagnostic = source.slice(
-      source.indexOf('fn run_direct_stale_schema2_diagnostic('),
-      source.indexOf('fn run_direct_elevated_stale_schema2_cleanup()'),
-    );
     for (const mutation of [
       'apply_lock_dacl(',
       'protect_stale_registry_key(',

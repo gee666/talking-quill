@@ -12,7 +12,11 @@ export function signAcceptancePayload(options: {
   readonly brokerPath?: string;
   readonly brokerSha256: string;
   readonly brokerBytes: number;
-  readonly bootstrapIdentity: { readonly path: string; readonly sha256: string; readonly bytes: number };
+  readonly bootstrapIdentity: {
+    readonly path: string;
+    readonly sha256: string;
+    readonly bytes: number;
+  };
   readonly payloadBytes: Buffer;
   readonly launchProcess?: (...arguments_: any[]) => any;
 }): NativeSignerResult;

@@ -3,18 +3,15 @@
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
+use crate::token::Token;
 use thiserror::Error;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
 };
-use windows_sys::Win32::Security::{
-    GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY, TokenLogonSid,
-};
+use windows_sys::Win32::Security::{SECURITY_ATTRIBUTES, TokenLogonSid};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcessToken,
-};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 
 pub const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
 pub const PIPE_OPEN_MODE: u32 = windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX
@@ -156,42 +153,22 @@ fn create_server_instance_with_mode(
 }
 
 fn current_logon_sid_string() -> Result<String, EndpointError> {
-    let mut token: HANDLE = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    // SAFETY: GetCurrentProcess returns a borrowed pseudo-handle.
+    let token =
+        Token::open(unsafe { GetCurrentProcess() }).map_err(|_| EndpointError::Unavailable)?;
+    let information = token
+        .query(TokenLogonSid, u32::MAX)
+        .map_err(|_| EndpointError::Unavailable)?;
+    let sid = information
+        .logon_sid()
+        .map_err(|_| EndpointError::Unavailable)?;
+    // The native SID reader needs DWORD alignment, unlike the byte-slice readers.
+    if !(sid.as_ptr() as usize).is_multiple_of(4) {
         return Err(EndpointError::Unavailable);
     }
-    struct Token(HANDLE);
-    impl Drop for Token {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let token = Token(token);
-    let mut length = 0;
-    unsafe { GetTokenInformation(token.0, TokenLogonSid, std::ptr::null_mut(), 0, &mut length) };
-    if length < std::mem::size_of::<TOKEN_GROUPS>() as u32 {
-        return Err(EndpointError::Unavailable);
-    }
-    let mut buffer = vec![0_u8; length as usize];
-    if unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenLogonSid,
-            buffer.as_mut_ptr().cast(),
-            length,
-            &mut length,
-        )
-    } == 0
-    {
-        return Err(EndpointError::Unavailable);
-    }
-    let groups = unsafe { &*buffer.as_ptr().cast::<TOKEN_GROUPS>() };
-    if groups.GroupCount != 1 {
-        return Err(EndpointError::Unavailable);
-    }
-    let sid = groups.Groups[0].Sid;
     let mut text = std::ptr::null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+    // SAFETY: the complete SID is borrowed from live token storage and DWORD-aligned.
+    if unsafe { ConvertSidToStringSidW(sid.as_ptr() as _, &mut text) } == 0 || text.is_null() {
         return Err(EndpointError::Unavailable);
     }
     struct LocalString(*mut u16);

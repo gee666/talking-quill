@@ -195,18 +195,18 @@ function transformDiagnosticLogger(source: string): string {
 function transformHelperClient(source: string): string {
   let output = replaceExact(
     source,
-    "import { z } from 'zod';",
-    "import { z, type ZodType } from 'zod';",
+    "import { HelperClientRuntime } from './helper-client-runtime';",
+    "import { HelperClientRuntime } from './helper-client-runtime';\nimport type { ZodType } from 'zod';",
   );
   output = replaceExact(
     output,
     '  async getRuntimeObservability(): Promise<HelperRuntimeObservability> {',
     `  requestAcceptance(method: string, resultSchema: ZodType, timeoutMs: number): Promise<unknown> {
-    const session = this.#rpcSession;
-    if (session === null || !this.#ordinaryRequestsAvailable() || !this.#desiredRunning) {
+    const session = this.#runtime.rpcSession;
+    if (session === null || !this.#runtime.ordinaryRequestsAvailable() || !this.#runtime.desiredRunning) {
       return Promise.reject(new HelperClientError('not-running', 'Native helper is terminating'));
     }
-    return this.#rpcChannel.requestAcceptance(session, method, resultSchema, {
+    return this.#runtime.rpcChannel.requestAcceptance(session, method, resultSchema, {
       timeoutMs,
       timeoutReason: 'request-timeout',
       allowDraining: false,

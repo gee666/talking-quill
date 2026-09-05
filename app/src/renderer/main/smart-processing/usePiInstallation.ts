@@ -174,5 +174,3 @@ export function usePiInstallation({
     run,
   } as const;
 }
-
-export type PiInstallationController = ReturnType<typeof usePiInstallation>;

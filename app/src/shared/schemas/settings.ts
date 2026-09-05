@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { deepFreeze } from '../deep-freeze';
 import { WelcomeSettingsSchema } from './welcome';
 import { VoiceCommandListSchema } from './commands';
 import { VocabularyListSchema } from './vocabulary';
@@ -295,12 +296,4 @@ function hasDefinedLeaf(value: unknown): boolean {
 
 function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function deepFreeze<Value>(value: Value): Value {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const nested of Object.values(value)) deepFreeze(nested);
-  }
-  return value;
 }

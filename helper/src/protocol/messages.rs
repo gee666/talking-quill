@@ -1,15 +1,11 @@
-use std::fmt;
-
-use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{self, Visitor},
-};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
+use talking_quill_keyboard_core::KeyboardEvent;
 
-use crate::framing::MAX_FRAME_BYTES;
-use talking_quill_keyboard_core::{
-    ActivationBinding, ActivationContext, EventPhase, KeyboardEvent, SessionKey,
-};
+mod encoding;
+mod parsing;
+#[cfg(test)]
+mod tests;
 
 #[cfg(not(feature = "windows-installed-acceptance"))]
 pub const INBOUND_METHODS: [&str; 11] = BASE_INBOUND_METHODS;
@@ -70,92 +66,6 @@ impl RequestId {
     }
 }
 
-/// Strict JSON-RPC 2.0 request ID. Commands require an ID; an absent ID marks
-/// an otherwise valid envelope as a notification. Explicit `null` is invalid.
-#[derive(Debug, Default)]
-enum IdField {
-    #[default]
-    Missing,
-    Null,
-    Value(RequestId),
-}
-
-impl<'de> Deserialize<'de> for IdField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct IdVisitor;
-
-        impl<'de> Visitor<'de> for IdVisitor {
-            type Value = IdField;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a non-null string or nonnegative safe-integer request ID")
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(IdField::Null)
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(IdField::Null)
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(IdField::Value(RequestId::Number(value)))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                u64::try_from(value)
-                    .map(RequestId::Number)
-                    .map(IdField::Value)
-                    .map_err(|_| E::custom("request ID must be nonnegative"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(IdField::Value(RequestId::String(value.to_owned())))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(IdField::Value(RequestId::String(value)))
-            }
-        }
-
-        deserializer.deserialize_any(IdVisitor)
-    }
-}
-
-/// Typed second-pass envelope. Required field types, unknown fields, and
-/// duplicate fields are rejected before notification classification.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RequestEnvelope {
-    jsonrpc: String,
-    #[serde(default)]
-    id: IdField,
-    method: String,
-    params: Box<RawValue>,
-}
-
 #[derive(Debug)]
 pub struct Request {
     pub id: RequestId,
@@ -171,56 +81,7 @@ pub enum ParseRequest {
 }
 
 pub fn parse_request(payload: &[u8]) -> ParseRequest {
-    // Establish that the payload is exactly one syntactically valid JSON value
-    // before typed decoding can stop early on a schema error.
-    let raw = match serde_json::from_slice::<Box<RawValue>>(payload) {
-        Ok(raw) => raw,
-        Err(_) => {
-            return ParseRequest::Error(RpcResponse::error(None, RpcError::parse_error()));
-        }
-    };
-
-    match serde_json::from_str::<RequestEnvelope>(raw.get()) {
-        Ok(envelope) => {
-            // A missing ID is a notification only after every other envelope
-            // invariant, including object-shaped params, has passed.
-            let id_is_valid = match &envelope.id {
-                IdField::Missing => true,
-                IdField::Null => false,
-                IdField::Value(id) => id.is_valid(),
-            };
-            if envelope.jsonrpc != "2.0"
-                || !id_is_valid
-                || envelope.method.is_empty()
-                || envelope.method.len() > 64
-                || !raw_value_is_object(&envelope.params)
-            {
-                return ParseRequest::Error(RpcResponse::error(None, RpcError::invalid_request()));
-            }
-
-            let id = match envelope.id {
-                IdField::Missing => return ParseRequest::IgnoreNotification,
-                IdField::Null => unreachable!("null ID rejected above"),
-                IdField::Value(id) => id,
-            };
-            ParseRequest::Request(Request {
-                id,
-                method: envelope.method,
-                params: envelope.params,
-            })
-        }
-        Err(_) => ParseRequest::Error(RpcResponse::error(None, RpcError::invalid_request())),
-    }
-}
-
-fn raw_value_is_object(value: &RawValue) -> bool {
-    value
-        .get()
-        .as_bytes()
-        .iter()
-        .copied()
-        .find(|byte| !byte.is_ascii_whitespace())
-        == Some(b'{')
+    parsing::parse_request(payload)
 }
 
 #[derive(Debug)]
@@ -232,73 +93,6 @@ pub enum Outbound {
     InputDevicesChanged,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum SerializableOutbound<'a> {
-    Response(&'a RpcResponse),
-    Notification(RpcNotification<'a>),
-}
-
-#[derive(Debug, Serialize)]
-struct RpcNotification<'a> {
-    jsonrpc: &'static str,
-    method: &'static str,
-    params: NotificationParams<'a>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum NotificationParams<'a> {
-    Activation(ActivationEventParams),
-    ActivationComplete(ActivationCompleteParams),
-    Session(SessionKeyEventParams<'a>),
-    RegisteredObservation(RegisteredObservationParams),
-    PasteCommitted(PasteCommittedParams<'a>),
-    InputDevicesChanged(EmptyNotificationParams),
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PasteCommittedParams<'a> {
-    request_id: &'a RequestId,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-struct EmptyNotificationParams {}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisteredObservationParams {
-    generation: u64,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-struct ActivationEventParams {
-    phase: EventPhase,
-    #[serde(flatten)]
-    binding: ActivationBinding,
-    #[serde(flatten)]
-    context: ActivationContext,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ActivationCompleteParams {
-    phase: &'static str,
-    #[serde(flatten)]
-    binding: ActivationBinding,
-    #[serde(flatten)]
-    context: ActivationContext,
-    held_ms: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionKeyEventParams<'a> {
-    key: &'a SessionKey,
-    phase: EventPhase,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OutboundEncodingError {
     #[error("outbound JSON serialization failed: {0}")]
@@ -308,70 +102,7 @@ pub enum OutboundEncodingError {
 }
 
 pub fn encode_outbound(message: &Outbound) -> Result<Vec<u8>, OutboundEncodingError> {
-    let serializable = match message {
-        Outbound::Response(response) => SerializableOutbound::Response(response),
-        Outbound::Event(KeyboardEvent::Activation {
-            binding,
-            context,
-            phase,
-        }) => SerializableOutbound::Notification(RpcNotification {
-            jsonrpc: "2.0",
-            method: "activation.event",
-            params: NotificationParams::Activation(ActivationEventParams {
-                phase: *phase,
-                binding: *binding,
-                context: *context,
-            }),
-        }),
-        Outbound::Event(KeyboardEvent::ActivationComplete {
-            binding,
-            context,
-            held_ms,
-        }) => SerializableOutbound::Notification(RpcNotification {
-            jsonrpc: "2.0",
-            method: "activation.event",
-            params: NotificationParams::ActivationComplete(ActivationCompleteParams {
-                phase: "complete",
-                binding: *binding,
-                context: *context,
-                held_ms: *held_ms,
-            }),
-        }),
-        Outbound::Event(KeyboardEvent::SessionKey { key, phase }) => {
-            SerializableOutbound::Notification(RpcNotification {
-                jsonrpc: "2.0",
-                method: "session.key",
-                params: NotificationParams::Session(SessionKeyEventParams { key, phase: *phase }),
-            })
-        }
-        Outbound::RegisteredObservation(generation) => {
-            SerializableOutbound::Notification(RpcNotification {
-                jsonrpc: "2.0",
-                method: "registered_input.observed",
-                params: NotificationParams::RegisteredObservation(RegisteredObservationParams {
-                    generation: *generation,
-                }),
-            })
-        }
-        Outbound::PasteCommitted(request_id) => {
-            SerializableOutbound::Notification(RpcNotification {
-                jsonrpc: "2.0",
-                method: "paste.committed",
-                params: NotificationParams::PasteCommitted(PasteCommittedParams { request_id }),
-            })
-        }
-        Outbound::InputDevicesChanged => SerializableOutbound::Notification(RpcNotification {
-            jsonrpc: "2.0",
-            method: "audio.input_devices_changed",
-            params: NotificationParams::InputDevicesChanged(EmptyNotificationParams {}),
-        }),
-    };
-    let payload = serde_json::to_vec(&serializable)?;
-    if payload.len() > MAX_FRAME_BYTES {
-        Err(OutboundEncodingError::FrameTooLarge(payload.len()))
-    } else {
-        Ok(payload)
-    }
+    encoding::encode_outbound(message)
 }
 
 #[derive(Debug, Serialize)]
@@ -519,91 +250,6 @@ impl RpcError {
         Self {
             code: -32_012,
             message: "Keyboard owner singleton collision",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gateway::FrontApp;
-    use talking_quill_keyboard_core::{ActivationGeneration, ActivationKey, ProfileId, Shortcut};
-
-    fn string_response(length: usize) -> Outbound {
-        Outbound::Response(
-            RpcResponse::success(RequestId::for_test(1), "a".repeat(length)).unwrap(),
-        )
-    }
-
-    #[test]
-    fn outbound_encoding_accepts_exact_max_and_rejects_max_plus_one() {
-        let overhead = encode_outbound(&string_response(0)).unwrap().len();
-        let exact = encode_outbound(&string_response(MAX_FRAME_BYTES - overhead)).unwrap();
-        assert_eq!(exact.len(), MAX_FRAME_BYTES);
-        assert!(matches!(
-            encode_outbound(&string_response(MAX_FRAME_BYTES - overhead + 1)),
-            Err(OutboundEncodingError::FrameTooLarge(size)) if size == MAX_FRAME_BYTES + 1
-        ));
-    }
-
-    #[test]
-    fn worst_case_front_app_escaping_stays_inside_one_frame() {
-        let front_app = FrontApp {
-            process_name: "\u{0001}".repeat(10_000),
-            window_title: "\u{0001}".repeat(10_000),
-            window_bounds: None,
-        }
-        .bounded();
-        let outbound = Outbound::Response(
-            RpcResponse::success(RequestId::String("\u{0001}".repeat(64)), front_app).unwrap(),
-        );
-        let payload = encode_outbound(&outbound).unwrap();
-        assert!(payload.len() <= MAX_FRAME_BYTES);
-    }
-
-    #[test]
-    fn input_device_change_notification_contains_no_endpoint_identifier() {
-        let payload = encode_outbound(&Outbound::InputDevicesChanged).unwrap();
-        let notification: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(
-            notification,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "audio.input_devices_changed",
-                "params": {},
-            })
-        );
-    }
-
-    #[test]
-    fn every_keyboard_notification_is_frame_bounded() {
-        for event in [
-            KeyboardEvent::Activation {
-                binding: ActivationBinding::new(
-                    ProfileId::GENERAL,
-                    Shortcut::legacy_alt_letter(ActivationKey::Z, false),
-                ),
-                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
-                phase: EventPhase::Down,
-            },
-            KeyboardEvent::Activation {
-                binding: ActivationBinding::new(
-                    ProfileId::PROMPT,
-                    Shortcut::legacy_alt_letter(ActivationKey::Z, true),
-                ),
-                context: ActivationContext::target_unavailable(ActivationGeneration::FIRST),
-                phase: EventPhase::Up,
-            },
-            KeyboardEvent::SessionKey {
-                key: SessionKey::Escape,
-                phase: EventPhase::Down,
-            },
-            KeyboardEvent::SessionKey {
-                key: SessionKey::Enter,
-                phase: EventPhase::Up,
-            },
-        ] {
-            assert!(encode_outbound(&Outbound::Event(event)).is_ok());
         }
     }
 }

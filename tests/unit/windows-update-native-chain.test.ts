@@ -7,8 +7,9 @@ import { publicKeySha256FromSec1Hex } from '../../scripts/windows-update-public-
 
 const chain = readFileSync('scripts/windows-update-native-chain.mjs', 'utf8');
 const ceremony = readFileSync('scripts/windows-update-key-ceremony.mjs', 'utf8');
-const broker = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+const broker = readFileSync('helper/acceptance-signer/src/broker/sign.rs', 'utf8');
 const keySecurity = readFileSync('helper/acceptance-signer/src/windows_key_security.rs', 'utf8');
+const keyAcl = readFileSync('helper/acceptance-signer/src/windows_key_security/acl.rs', 'utf8');
 
 describe('reviewed Windows update native chain', () => {
   it('builds fixed locked binaries from clean source and publishes source-bound provenance', () => {
@@ -29,9 +30,9 @@ describe('reviewed Windows update native chain', () => {
     expect(broker.indexOf('open_validated_private_key(&input.private_key_path)')).toBeLessThan(
       broker.indexOf('make_inheritable(key.as_raw_handle())'),
     );
-    expect(keySecurity).toContain('SE_DACL_PROTECTED');
-    expect(keySecurity).toContain('AceCount } != 3');
-    expect(keySecurity).toContain('ace.Mask != FILE_GENERIC_READ');
+    expect(keyAcl).toContain('SE_DACL_PROTECTED');
+    expect(keyAcl).toContain('AceCount } != 3');
+    expect(keyAcl).toContain('ace.Mask != FILE_GENERIC_READ');
     expect(keySecurity).toContain('info.nNumberOfLinks != 1');
     expect(keySecurity).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
     expect(keySecurity).toContain('retain_ancestors(path)?');

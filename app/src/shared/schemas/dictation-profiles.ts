@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { deepFreeze } from '../deep-freeze';
 import { ProcessingModeSchema } from './history';
 import {
   ShortcutSchema,
@@ -202,16 +203,16 @@ export type DictationProfile = z.infer<typeof DictationProfileSchema>;
 export type DictationProfileCreate = z.infer<typeof DictationProfileCreateSchema>;
 export type DictationProfilePatch = z.infer<typeof DictationProfilePatchSchema>;
 
-export const DEFAULT_GENERAL_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[0]
-  .defaultProfile as DictationProfile;
-export const DEFAULT_PROMPT_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[1]
-  .defaultProfile as DictationProfile;
-export const DEFAULT_PROMPT_TO_ENGLISH_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[2]
-  .defaultProfile as DictationProfile;
-export const DEFAULT_MARKDOWN_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[3]
-  .defaultProfile as DictationProfile;
-export const DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE = BUILT_IN_DICTATION_PROFILE_METADATA[4]
-  .defaultProfile as DictationProfile;
+export const DEFAULT_GENERAL_PROFILE: DictationProfile =
+  BUILT_IN_DICTATION_PROFILE_METADATA[0].defaultProfile;
+export const DEFAULT_PROMPT_PROFILE: DictationProfile =
+  BUILT_IN_DICTATION_PROFILE_METADATA[1].defaultProfile;
+export const DEFAULT_PROMPT_TO_ENGLISH_PROFILE: DictationProfile =
+  BUILT_IN_DICTATION_PROFILE_METADATA[2].defaultProfile;
+export const DEFAULT_MARKDOWN_PROFILE: DictationProfile =
+  BUILT_IN_DICTATION_PROFILE_METADATA[3].defaultProfile;
+export const DEFAULT_TRANSLATE_TO_ENGLISH_PROFILE: DictationProfile =
+  BUILT_IN_DICTATION_PROFILE_METADATA[4].defaultProfile;
 
 export function builtInDictationProfileMetadata(
   id: string,
@@ -240,12 +241,4 @@ function builtInAltShortcut(keys: readonly ShortcutKey[]): Shortcut {
     modifiers: { ctrl: false, alt: true, shift: false, meta: false },
     keys: [...keys],
   });
-}
-
-function deepFreeze<Value>(value: Value): Value {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const nested of Object.values(value)) deepFreeze(nested);
-  }
-  return value;
 }

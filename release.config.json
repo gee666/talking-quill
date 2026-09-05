@@ -58,6 +58,7 @@
       "LICENSE",
       "scripts/generate-notices.mjs",
       "scripts/package-policy.mjs",
+      "scripts/package-path-policy.mjs",
       "scripts/reference-independence.mjs",
       "scripts/reference-independence-inventory.json",
       "scripts/release-audit.mjs",
@@ -74,7 +75,7 @@
     "legacy-commercial-phrases": [
       "app/src/renderer/main/screens/InfoScreen.tsx",
       "app/src/renderer/main/welcome/WelcomeWizard.tsx",
-      "scripts/package-policy.mjs",
+      "scripts/package-path-policy.mjs",
       "scripts/reference-independence-inventory.json",
       "scripts/release-audit.mjs",
       "tests/component/app-shell.test.tsx",

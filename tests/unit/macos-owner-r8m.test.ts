@@ -1,4 +1,5 @@
 import { readRustModule } from '../helpers/rust-source';
+import { readApplicationSource } from '../helpers/application-source';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
@@ -11,6 +12,18 @@ import {
 } from '../../scripts/package-policy.mjs';
 
 const digest = (byte: string) => byte.repeat(64);
+
+async function readMacosCoordinator(): Promise<string> {
+  const modules = [
+    'macos-owner-update-coordinator',
+    'macos-finalizer-supervision',
+    'macos-finalizer-status',
+    'macos-update-validation',
+  ];
+  return (
+    await Promise.all(modules.map((name) => readFile(`app/src/main/info/${name}.ts`, 'utf8')))
+  ).join('\n');
+}
 
 describe('macOS R8-M installed owner', () => {
   it('encodes an exact 328-byte enabled macOS policy with one-hop predecessor', () => {
@@ -158,8 +171,10 @@ describe('macOS R8-M installed owner', () => {
     expect(gatewayIdentity).toContain('SecCodeCopyGuestWithAttributes');
     expect(gatewayIdentity).toContain('kSecGuestAttributePid');
     expect(gatewayIdentity).toContain('SecCodeCopySigningInformation');
-    expect(gatewayIdentity).toContain('dynamic_cdhash != expected_code_directory_hash');
-    expect(gatewayIdentity).toContain('static_cdhash != dynamic_cdhash');
+    // Hash-read errors and either CDHash mismatch must take the cleanup/rejection path.
+    expect(gatewayIdentity).toMatch(
+      /if !matches!\(hashes, Ok\(\(dynamic_cdhash, static_cdhash\)\)\s*if dynamic_cdhash == expected_code_directory_hash && static_cdhash == dynamic_cdhash\)\s*\{\s*release\(dynamic\.cast\(\)\);\s*release\(static_code\.cast\(\)\);\s*release\(requirement_ref\.cast\(\)\);\s*release\(requirement_text\.cast\(\)\);\s*return Err\(IdentityError\);\s*\}/u,
+    );
     expect(ownerIdentity).toContain('SecCodeCopyGuestWithAttributes');
     expect(ownerIdentity).toContain('kSecGuestAttributePid');
     expect(gateway).toContain('verify_response');
@@ -200,10 +215,10 @@ describe('macOS R8-M installed owner', () => {
   });
 
   it('wires predecessor-bound update, rollback, held-key postponement, and uninstall cleanup', async () => {
-    const [electron, native, application, helperEntrypoint] = await Promise.all([
-      readFile('app/src/main/info/macos-owner-update-coordinator.ts', 'utf8'),
+    const application = readApplicationSource();
+    const [electron, native, helperEntrypoint] = await Promise.all([
+      readMacosCoordinator(),
       readFile('helper/src/owner/macos/maintenance.rs', 'utf8'),
-      readFile('app/src/main/app/application.ts', 'utf8'),
       readFile('helper/src/main.rs', 'utf8'),
     ]);
     expect(electron).toContain('prepareOwnerMaintenance');
@@ -324,7 +339,7 @@ describe('macOS R8-M installed owner', () => {
 
   it('carries canonical digest bytes and owner handoff without argv exposure', async () => {
     const [coordinator, gateway, owner, schema] = await Promise.all([
-      readFile('app/src/main/info/macos-owner-update-coordinator.ts', 'utf8'),
+      readMacosCoordinator(),
       readFile('helper/src/owner/platform_client.rs', 'utf8'),
       readRustModule('helper/keyboard-owner/src/protocol_server.rs'),
       readFile('app/src/shared/helper/protocol.ts', 'utf8'),
@@ -341,9 +356,9 @@ describe('macOS R8-M installed owner', () => {
   });
 
   it('binds the outer ZIP identity and validates the complete candidate bundle natively', async () => {
-    const [application, coordinator, native, macho] = await Promise.all([
-      readFile('app/src/main/app/application.ts', 'utf8'),
-      readFile('app/src/main/info/macos-owner-update-coordinator.ts', 'utf8'),
+    const application = readApplicationSource();
+    const [coordinator, native, macho] = await Promise.all([
+      readMacosCoordinator(),
       readFile('helper/src/owner/macos/maintenance.rs', 'utf8'),
       readFile('helper/src/macho.rs', 'utf8'),
     ]);
@@ -381,8 +396,8 @@ describe('macOS R8-M installed owner', () => {
     );
   });
 
-  it('gates coordinator availability independently from updater metadata', async () => {
-    const application = await readFile('app/src/main/app/application.ts', 'utf8');
+  it('gates coordinator availability independently from updater metadata', () => {
+    const application = readApplicationSource();
     expect(application).toContain('keyboard-owner-installed-v1');
     expect(application).toContain('keyboard-owner-r5m.json');
     expect(application).toContain('installedMacosOwnerAvailable');

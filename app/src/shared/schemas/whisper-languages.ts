@@ -109,10 +109,7 @@ export const WHISPER_SOURCE_LANGUAGES = [
 
 export type WhisperSourceLanguage = (typeof WHISPER_SOURCE_LANGUAGES)[number][0];
 
-const sourceLanguageCodes = WHISPER_SOURCE_LANGUAGES.map(([code]) => code) as [
-  WhisperSourceLanguage,
-  ...WhisperSourceLanguage[],
-];
+const sourceLanguageCodes = WHISPER_SOURCE_LANGUAGES.map(([code]) => code);
 
 export const WhisperSourceLanguageSchema = z.enum(sourceLanguageCodes);
 export const WhisperLanguageSchema = z.union([

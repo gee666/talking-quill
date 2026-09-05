@@ -3,7 +3,7 @@ import type { Settings } from '../../../shared/schemas/settings';
 import {
   WHISPER_AUTO_LANGUAGE,
   WHISPER_SOURCE_LANGUAGES,
-  type WhisperLanguage,
+  WhisperLanguageSchema,
 } from '../../../shared/schemas/whisper-languages';
 import { Button, Card, Select, Status } from '../../design';
 import { ModelSetup } from '../setup/ModelSetup';
@@ -87,7 +87,9 @@ export function TranscriptionLanguageSetting({
         value={draft}
         disabled={saving}
         onChange={(event) => {
-          setDraft(event.currentTarget.value as WhisperLanguage);
+          const language = WhisperLanguageSchema.safeParse(event.currentTarget.value);
+          if (!language.success) return;
+          setDraft(language.data);
           setMessage(null);
         }}
       >

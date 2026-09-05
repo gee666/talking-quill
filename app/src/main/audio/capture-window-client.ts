@@ -1,9 +1,9 @@
+import { CaptureClientError } from './capture-client-error';
+import { CaptureRequests } from './capture-requests';
+export { CaptureClientError } from './capture-client-error';
 import { MessageChannelMain, type MessagePortMain, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
-import {
-  CAPTURE_COMMAND_TIMEOUT_MS,
-  CAPTURE_PORT_PROTOCOL_VERSION,
-} from '../../shared/constants/audio';
+import { CAPTURE_PORT_PROTOCOL_VERSION } from '../../shared/constants/audio';
 import {
   CapturePortDescriptorSchema,
   CapturePortMessageSchema,
@@ -39,31 +39,6 @@ export interface CaptureFrame {
 export type UnexpectedCaptureStopReason =
   'device-unavailable' | 'system-audio-unavailable' | 'capture-unavailable';
 
-export class CaptureClientError extends Error {
-  readonly code:
-    | 'permission-denied'
-    | 'no-device'
-    | 'device-unavailable'
-    | 'unsupported-audio-format'
-    | 'worklet-unavailable'
-    | 'system-audio-unavailable'
-    | 'capture-failed'
-    | 'capture-unavailable';
-
-  constructor(code: CaptureClientError['code']) {
-    super(code);
-    this.name = 'CaptureClientError';
-    this.code = code;
-  }
-}
-
-interface PendingRequest {
-  readonly resolve: (message: CapturePortMessage) => void;
-  readonly reject: (error: CaptureClientError) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
-  readonly removeAbortListener: () => void;
-}
-
 export interface CaptureMessageChannel {
   readonly port1: MessagePortMain;
   readonly port2: MessagePortMain;
@@ -74,7 +49,7 @@ export type CaptureMessageChannelFactory = () => CaptureMessageChannel;
 export class CaptureWindowClient {
   readonly #channelFactory: CaptureMessageChannelFactory;
   readonly #roleForWebContents: (id: number) => string | null;
-  readonly #pending = new Map<string, PendingRequest>();
+  readonly #requests = new CaptureRequests();
   readonly #frameListeners = new Set<(frame: CaptureFrame) => void>();
   readonly #deviceListeners = new Set<(defaultInvalidated: boolean) => void>();
   readonly #defaultInvalidationListeners = new Set<
@@ -269,42 +244,7 @@ export class CaptureWindowClient {
   }
 
   #request(command: CapturePortCommand, signal?: AbortSignal): Promise<CapturePortMessage> {
-    const port = this.#port;
-    if (port === null || signal?.aborted === true) {
-      return Promise.reject(new CaptureClientError('capture-unavailable'));
-    }
-    return new Promise((resolve, reject) => {
-      let removeAbortListener: () => void = () => undefined;
-      const timer = setTimeout(() => {
-        this.#pending.delete(command.requestId);
-        removeAbortListener();
-        reject(new CaptureClientError('capture-unavailable'));
-      }, CAPTURE_COMMAND_TIMEOUT_MS);
-      timer.unref();
-      if (signal !== undefined) {
-        const abort = () => this.#closePort();
-        signal.addEventListener('abort', abort, { once: true });
-        removeAbortListener = () => signal.removeEventListener('abort', abort);
-      }
-      this.#pending.set(command.requestId, {
-        resolve,
-        reject,
-        timer,
-        removeAbortListener: () => removeAbortListener(),
-      });
-      if (signal?.aborted === true) {
-        this.#closePort();
-        return;
-      }
-      try {
-        port.postMessage(command);
-      } catch {
-        clearTimeout(timer);
-        this.#pending.delete(command.requestId);
-        removeAbortListener();
-        reject(new CaptureClientError('capture-unavailable'));
-      }
-    });
+    return this.#requests.request(this.#port, () => this.#closePort(), command, signal);
   }
 
   #onMessage(input: unknown): void {
@@ -369,18 +309,7 @@ export class CaptureWindowClient {
       return;
     }
 
-    const requestId = message.requestId;
-    if (requestId === null) return;
-    const pending = this.#pending.get(requestId);
-    if (pending === undefined) return;
-    this.#pending.delete(requestId);
-    clearTimeout(pending.timer);
-    pending.removeAbortListener();
-    if (message.type === 'request:error') {
-      pending.reject(new CaptureClientError(message.code));
-    } else {
-      pending.resolve(message);
-    }
+    this.#requests.settle(message);
   }
 
   #handlePortClosed(port: MessagePortMain): void {
@@ -388,12 +317,7 @@ export class CaptureWindowClient {
     this.#port = null;
     const activeCaptureId = this.#activeCaptureId;
     this.#activeCaptureId = null;
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
-      pending.removeAbortListener();
-      pending.reject(new CaptureClientError('capture-unavailable'));
-    }
-    this.#pending.clear();
+    this.#requests.rejectAll();
     if (activeCaptureId !== null) {
       this.#notifyUnexpectedStop(activeCaptureId, 'capture-unavailable');
     }

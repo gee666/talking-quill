@@ -144,6 +144,7 @@ function createManager(
   load: RendererLoader['load'] = vi.fn(() => Promise.resolve()),
   showMainOnFirstLoad = true,
   autoRendererReady = true,
+  settingsOverride?: SettingsStore,
 ): WindowManager {
   const state: { manager: WindowManager | null } = { manager: null };
   const wrappedLoad: RendererLoader['load'] = async (window, role) => {
@@ -162,10 +163,11 @@ function createManager(
       register: vi.fn(),
       unregister: vi.fn(),
     } as unknown as WindowRoleRegistry,
-    {
-      flush: vi.fn(() => Promise.resolve()),
-      get: vi.fn(() => ({ app: { closeToTray: true } })),
-    } as unknown as SettingsStore,
+    settingsOverride ??
+      ({
+        flush: vi.fn(() => Promise.resolve()),
+        get: vi.fn(() => ({ app: { closeToTray: true } })),
+      } as unknown as SettingsStore),
     {
       requestQuit,
       onMaximizedChanged: vi.fn(),
@@ -196,6 +198,95 @@ function captureWindows() {
 }
 
 describe('WindowManager renderer recovery', () => {
+  it('ignores readiness for the wrong window and settles pending readiness on quit', async () => {
+    const manager = createManager(
+      vi.fn(),
+      vi.fn(() => Promise.resolve()),
+      true,
+      false,
+    );
+    let prepared = false;
+    const creating = manager.createAll().then(() => {
+      prepared = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const capture = captureWindows()[0];
+    const widget = widgetWindows()[0];
+    if (capture === undefined || widget === undefined) throw new Error('Renderer windows missing');
+    manager.markRendererReady('capture', widget.webContents.id);
+    manager.markRendererReady('widget', capture.webContents.id);
+    await Promise.resolve();
+    expect(prepared).toBe(false);
+
+    manager.beginQuit();
+    await creating;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(widget.showInactive).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    'waits for one durable close decision with closeToTray=%s',
+    async (closeToTray) => {
+      let finishFlush!: () => void;
+      const flush = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishFlush = resolve;
+          }),
+      );
+      const settings = { flush, get: () => ({ app: { closeToTray } }) } as unknown as SettingsStore;
+      const requestQuit = vi.fn();
+      const manager = createManager(
+        requestQuit,
+        vi.fn(() => Promise.resolve()),
+        true,
+        true,
+        settings,
+      );
+      await manager.createAll();
+      const main = mainWindows()[0];
+      if (main === undefined) throw new Error('Main window missing');
+      await manager.closeMainByWebContentsId(-1);
+      expect(flush).not.toHaveBeenCalled();
+      const first = manager.closeMainByWebContentsId(main.webContents.id);
+      const second = manager.closeMainByWebContentsId(main.webContents.id);
+      expect(flush).toHaveBeenCalledOnce();
+      expect(main.hide).not.toHaveBeenCalled();
+      expect(requestQuit).not.toHaveBeenCalled();
+
+      finishFlush();
+      await Promise.all([first, second]);
+      expect(main.hide).toHaveBeenCalledTimes(closeToTray ? 1 : 0);
+      expect(requestQuit).toHaveBeenCalledTimes(closeToTray ? 0 : 1);
+    },
+  );
+
+  it('leaves the main window visible when its close-time settings flush fails', async () => {
+    const requestQuit = vi.fn();
+    const settings = {
+      flush: () => Promise.reject(new Error('settings unavailable')),
+      get: () => ({ app: { closeToTray: false } }),
+    } as unknown as SettingsStore;
+    const manager = createManager(
+      requestQuit,
+      vi.fn(() => Promise.resolve()),
+      true,
+      true,
+      settings,
+    );
+    await manager.createAll();
+    const main = mainWindows()[0];
+    if (main === undefined) throw new Error('Main window missing');
+
+    await manager.closeMainByWebContentsId(main.webContents.id);
+
+    expect(main.hide).not.toHaveBeenCalled();
+    expect(main.show).toHaveBeenCalledOnce();
+    expect(main.focus).toHaveBeenCalledOnce();
+    expect(requestQuit).not.toHaveBeenCalled();
+  });
+
   it('waits for capture and widget IPC readiness after renderer load', async () => {
     const manager = createManager(
       vi.fn(),

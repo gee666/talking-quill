@@ -1,20 +1,29 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const buildHelper = readFileSync('scripts/build-helper.mjs', 'utf8');
 const prepackage = readFileSync('scripts/prepackage-check.mjs', 'utf8');
 const cargo = readFileSync('helper/Cargo.toml', 'utf8');
-const gateway = readFileSync('helper/src/owner/platform_client.rs', 'utf8');
-const ownerClient = readFileSync('helper/src/owner/client.rs', 'utf8');
+const gateway = readFileSync('helper/src/owner/platform_client/actor_commands.rs', 'utf8');
+const ownerClient = readFileSync('helper/src/owner/client/acceptance.rs', 'utf8');
 const helperMain = readFileSync('helper/src/main.rs', 'utf8');
 const acceptanceLauncher = readFileSync('helper/src/windows_acceptance_launcher.rs', 'utf8');
-const acceptanceBroker = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+const brokerDirectory = 'helper/acceptance-signer/src/broker';
+// Keep the forbidden stdin-launch assertion scoped to the entire broker, not just its entrypoint.
+const acceptanceBroker = [
+  readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8'),
+  ...readdirSync(brokerDirectory)
+    .filter((name) => name.endsWith('.rs'))
+    .map((name) => readFileSync(`${brokerDirectory}/${name}`, 'utf8')),
+].join('\n');
+const acceptanceProbe = readFileSync(`${brokerDirectory}/probe.rs`, 'utf8');
+const acceptanceStartup = readFileSync(`${brokerDirectory}/startup_io.rs`, 'utf8');
 const acceptanceEntry = readFileSync(
   'app/src/main/entries/windows-installed-acceptance.ts',
   'utf8',
 );
 const installerCargo = readFileSync('installer/windows-setup/Cargo.toml', 'utf8');
-const installerPackage = readFileSync('installer/windows-setup/src/package.rs', 'utf8');
+const installerPackage = readFileSync('installer/windows-setup/src/package/validation.rs', 'utf8');
 const faultSetup = readFileSync('scripts/build-windows-acceptance-fault-setup.mjs', 'utf8');
 const repairSetup = readFileSync('scripts/build-windows-acceptance-repair-setup.mjs', 'utf8');
 
@@ -54,8 +63,8 @@ describe('Windows installed-acceptance helper feature gate', () => {
     expect(helperMain).toContain('--windows-installed-acceptance-verified-child-v1');
     expect(acceptanceLauncher).toContain('inherited_handle_list');
     expect(acceptanceLauncher).toContain('open_locked_directory');
-    expect(acceptanceBroker).toContain('create_outbound_server_instance');
-    expect(acceptanceBroker).toContain('named_pipe_client_pid');
+    expect(acceptanceProbe).toContain('create_outbound_server_instance');
+    expect(acceptanceStartup).toContain('named_pipe_client_pid');
     expect(acceptanceBroker).not.toContain(
       'command_line(path, &["--talking-quill-installed-acceptance-stdin-v1"]',
     );
@@ -70,11 +79,9 @@ describe('Windows installed-acceptance helper feature gate', () => {
     expect(gateway).toContain('.force_capture_safe_disabled_until(deadline, cancelled)');
     expect(gateway).toContain('.connect_existing_capture()');
     expect(gateway).toContain('state.acceptance_safe_disabled = true');
-    const observerStart = ownerClient.indexOf('pub fn acceptance_observability_without_lease');
-    const observerEnd = ownerClient.indexOf('#[derive(Clone, Copy', observerStart);
-    const observer = ownerClient.slice(observerStart, observerEnd);
-    expect(observer).toContain('Request::ObservabilityGet(Empty {})');
-    expect(observer).not.toContain('LeaseAcquire');
+    expect(ownerClient).toContain('pub fn acceptance_observability_without_lease');
+    expect(ownerClient).toContain('Request::ObservabilityGet(Empty {})');
+    expect(ownerClient).not.toContain('LeaseAcquire');
   });
 
   it('rejects and strips the acceptance build variable from canonical production packaging', () => {

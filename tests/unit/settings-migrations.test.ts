@@ -427,6 +427,8 @@ describe('frozen settings migrations', () => {
   it('keeps historical source contracts independent from current shared schemas', () => {
     for (const filename of [
       'legacy-settings-contracts.ts',
+      'legacy-provider-contracts.ts',
+      'legacy-text-contracts.ts',
       'legacy-settings-v1-v12.ts',
       'legacy-settings-v13-v18.ts',
       'legacy-settings-v19.ts',

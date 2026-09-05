@@ -83,23 +83,26 @@ describe('Windows installed acceptance packaged probe transport', () => {
   });
 
   it('moves client admission and exact process launch into the native broker', () => {
-    const native = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+    const pipe = readFileSync('helper/acceptance-signer/src/broker/pipe_io.rs', 'utf8');
+    const identity = readFileSync('helper/acceptance-signer/src/broker/identity.rs', 'utf8');
+    const process = readFileSync('helper/acceptance-signer/src/broker/process.rs', 'utf8');
     const adapter = readFileSync('scripts/windows-installed-acceptance-probe.mjs', 'utf8');
-    expect(native).toContain('named_pipe_client_pid');
-    expect(native).toContain('DisconnectNamedPipe');
-    expect(native).toContain('peer_identity_matches');
-    expect(native).toContain('creation_chain_reaches_root');
-    expect(native).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
-    expect(native).toContain('absolute_deadline_ms');
+    expect(pipe).toContain('named_pipe_client_pid');
+    expect(pipe).toContain('DisconnectNamedPipe');
+    expect(identity).toContain('peer_identity_matches');
+    expect(identity).toContain('creation_chain_reaches_root');
+    expect(process).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
+    expect(pipe).toContain('absolute_deadline_ms');
     expect(adapter).toContain("operation: 'probe'");
     expect(adapter).not.toContain('createOneUseJsonChannel(readinessPipe');
   });
 
   it('uses a broker-held job for cancellation instead of terminating by PID', () => {
-    const native = readFileSync('helper/acceptance-signer/src/broker_main.rs', 'utf8');
+    const process = readFileSync('helper/acceptance-signer/src/broker/process.rs', 'utf8');
+    const startup = readFileSync('helper/acceptance-signer/src/broker/startup.rs', 'utf8');
     const adapter = readFileSync('scripts/windows-installed-acceptance-probe.mjs', 'utf8');
-    expect(native).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
-    expect(native).toContain('TerminateJobObject');
+    expect(process).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
+    expect(startup).toContain('TerminateJobObject');
     expect(adapter).toContain("events.action('terminate')");
     expect(adapter).not.toContain('taskkill.exe');
   });
