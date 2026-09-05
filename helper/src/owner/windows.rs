@@ -427,13 +427,21 @@ impl super::client::OwnerConnector for LocalOwnerConnector {
             }
             return Ok(authenticated.connected);
         }
-        let launched = launch_stable_owner()?;
+        // Keep the exact process handle even when startup takes longer than one
+        // connect attempt. Otherwise retries spawn singleton contenders forever.
+        if self
+            .launched
+            .as_ref()
+            .is_none_or(|owner| !owner.still_running())
+        {
+            self.launched = Some(launch_stable_owner()?);
+        }
+        let launched = self.launched.as_ref().ok_or(ConnectError::Unavailable)?;
         let expected = (launched.facts.process_id, launched.facts.creation_marker);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match connect_stable_owner(Arc::clone(&self.streams), Some(expected)) {
                 Ok(authenticated) => {
-                    self.launched = Some(launched);
                     #[cfg(feature = "windows-installed-acceptance")]
                     {
                         self.acceptance_observability =
@@ -469,7 +477,9 @@ fn launch_stable_owner() -> Result<talking_quill_windows_owner_ipc::peer::Verifi
     let child = std::process::Command::new(owner)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Forward bounded failure diagnostics through the gateway's existing
+        // stderr reader, including native owner panics and connection loss.
+        .stderr(std::process::Stdio::inherit())
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .spawn()
         .map_err(|_| ConnectError::Unavailable)?;
@@ -627,7 +637,7 @@ fn authenticate_local_peer(
         },
         Instant::now() + Duration::from_secs(3),
     )
-    .map_err(|_| ConnectError::Authentication)?;
+    .map_err(handshake_connect_error)?;
     #[cfg(feature = "windows-installed-acceptance")]
     let acceptance_observability = crate::gateway::AcceptanceEndpointObservability {
         endpoint_version: 2,
@@ -657,4 +667,46 @@ fn authenticate_local_peer(
         #[cfg(feature = "windows-installed-acceptance")]
         acceptance_observability,
     })
+}
+
+fn handshake_connect_error(error: GatewayHandshakeError) -> ConnectError {
+    match error {
+        GatewayHandshakeError::Timeout
+        | GatewayHandshakeError::PeerClosed
+        | GatewayHandshakeError::Io
+        | GatewayHandshakeError::Transport => ConnectError::Unavailable,
+        GatewayHandshakeError::Framing
+        | GatewayHandshakeError::Protocol
+        | GatewayHandshakeError::Authentication => ConnectError::Authentication,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_handshake_is_retryable_but_invalid_identity_is_not() {
+        for error in [
+            GatewayHandshakeError::Timeout,
+            GatewayHandshakeError::PeerClosed,
+            GatewayHandshakeError::Io,
+            GatewayHandshakeError::Transport,
+        ] {
+            assert!(matches!(
+                handshake_connect_error(error),
+                ConnectError::Unavailable
+            ));
+        }
+        for error in [
+            GatewayHandshakeError::Framing,
+            GatewayHandshakeError::Protocol,
+            GatewayHandshakeError::Authentication,
+        ] {
+            assert!(matches!(
+                handshake_connect_error(error),
+                ConnectError::Authentication
+            ));
+        }
+    }
 }

@@ -78,6 +78,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+getrandom.workspace = true
 proptest.workspace = true
 talking-quill-owner-protocol = { path = "../owner-protocol", features = ["test-transport"] }
 

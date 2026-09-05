@@ -126,7 +126,14 @@ function main() {
   let failure = null;
   try {
     runPnpm(pnpmCli, plan.pnpmArguments, environment);
-    if (plan.platform === 'win' && plan.artifactRequirement === 'native-setup') {
+    // The interactive observer requires privileged WMI event access. Personal
+    // packages can be built by a standard user; release packaging still gates
+    // on this check, which is also available as a separate command.
+    if (
+      plan.platform === 'win' &&
+      plan.artifactRequirement === 'native-setup' &&
+      environment.TALKING_QUILL_PERSONAL_FRESH_INSTALL !== '1'
+    ) {
       runNode('scripts/run-windows-installer-ui-smoke.mjs', environment);
     }
   } catch (error) {

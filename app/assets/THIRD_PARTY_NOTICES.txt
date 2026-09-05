@@ -4,7 +4,7 @@ This inventory is generated from the production @talking-quill/app deployment gr
 
 Source fingerprints
 pnpm-lock.yaml SHA-256: 2f01485d2680096427badf8ea04fa25c0e37b14a0fdd745045be1a2acd67578c
-helper/Cargo.lock SHA-256: e53106b04bc9bcabd93862eb8db96b4911262a73227fb6a66476fb94e0bc3e8c
+helper/Cargo.lock SHA-256: de77c3337a463f5286c4fc9640f0f6b7e1ebd8bff7662ea9e6c04fdfbc2c14c1
 scripts/model-manifest.json SHA-256: e5f139abb8b3baf5a31faf8235d64adc9ff3dc9c7d2b1aae808366e4e6124fff
 
 Production JavaScript/native dependencies (109 records)
@@ -387,22 +387,22 @@ syn@2.0.119 — SPDX: MIT OR Apache-2.0
 syn@3.0.4 — SPDX: MIT OR Apache-2.0
   https://crates.io/crates/syn/3.0.4
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-acceptance-signer@0.0.69 — SPDX: MIT
+talking-quill-acceptance-signer@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-helper@0.0.69 — SPDX: MIT
+talking-quill-helper@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-keyboard-core@0.0.69 — SPDX: MIT
+talking-quill-keyboard-core@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-keyboard-owner@0.0.69 — SPDX: MIT
+talking-quill-keyboard-owner@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-owner-protocol@0.0.69 — SPDX: MIT
+talking-quill-owner-protocol@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc
-talking-quill-windows-owner-ipc@0.0.69 — SPDX: MIT
+talking-quill-windows-owner-ipc@0.0.73 — SPDX: MIT
   https://github.com/gee666/talking-quill
   Targets: x86_64-pc-windows-msvc
 thiserror-impl@2.0.19 — SPDX: MIT OR Apache-2.0
@@ -8855,7 +8855,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --- SHA-256 706e281ee8b8fdb3cbeb92d1dff6937ac4086ab46b1ce54d9c2ead922d24deab
-Applies to: talking-quill-acceptance-signer@0.0.69/LICENSE, talking-quill-helper@0.0.69/LICENSE, talking-quill-keyboard-core@0.0.69/LICENSE, talking-quill-keyboard-owner@0.0.69/LICENSE, talking-quill-owner-protocol@0.0.69/LICENSE, talking-quill-windows-owner-ipc@0.0.69/LICENSE
+Applies to: talking-quill-acceptance-signer@0.0.73/LICENSE, talking-quill-helper@0.0.73/LICENSE, talking-quill-keyboard-core@0.0.73/LICENSE, talking-quill-keyboard-owner@0.0.73/LICENSE, talking-quill-owner-protocol@0.0.73/LICENSE, talking-quill-windows-owner-ipc@0.0.73/LICENSE
 
 The MIT License
 

@@ -34,6 +34,7 @@ export type EchoSessionEvent =
   | { readonly type: 'shortcut-up'; readonly now: number }
   | { readonly type: 'capture-started'; readonly preferredUnavailable?: boolean }
   | { readonly type: 'audio-started' }
+  | { readonly type: 'keyboard-disconnected' }
   | { readonly type: 'level'; readonly rms: number; readonly elapsedMs: number }
   | {
       readonly type: 'submit';
@@ -107,6 +108,17 @@ export function reduceEchoSession(
   event: EchoSessionEvent,
 ): EchoTransition {
   if (event.type === 'reset') return transition(IDLE_ECHO_SESSION);
+  if (event.type === 'keyboard-disconnected') {
+    if (state.activationContext === null) return transition(state);
+    const recovered = {
+      ...state,
+      activationContext: { ...state.activationContext, targetToken: null },
+      message: 'Keyboard connection interrupted. Finishing your recording and copying the text.',
+    };
+    return isRecordingOrArming(state.phase)
+      ? reduceEchoSession(recovered, { type: 'submit', source: 'stop' })
+      : transition(recovered);
+  }
   if (event.type === 'operational-failure') {
     if (state.phase !== 'idle') return transition(state);
     return transition({ ...IDLE_ECHO_SESSION, phase: 'error', message: event.message });
@@ -208,7 +220,10 @@ export function reduceEchoSession(
   if (event.type === 'transcribed') {
     if (state.phase !== 'transcribing') return transition(state);
     const text = event.text.trim();
-    if (text.length === 0) {
+    if (
+      text.length === 0 ||
+      /^(?:\[(?:inaudible|unintelligible|silence|no speech)\]\s*[.!]?\s*)+$/i.test(text)
+    ) {
       return terminalError(state, 'No speech was detected.');
     }
     if (event.smart) {

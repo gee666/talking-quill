@@ -56,7 +56,10 @@ export class InsertionService {
     // delayed completion snapshots/restores a subset of pasteboard formats.
     this.#clipboard.writeText(text);
     const expectedClipboardSha256 = clipboardTextSha256(text);
-    if (activationContext.targetToken === null) return { inserted: false, copied: true };
+    if (activationContext.targetToken === null) {
+      console.error('dictation paste fallback: activation target unavailable');
+      return { inserted: false, copied: true };
+    }
 
     let submitted = false;
     let indeterminate = false;
@@ -74,8 +77,10 @@ export class InsertionService {
         INSERTION_DISPATCH_TIMEOUT_MS,
       );
       submitted = pasteResult.submitted;
+      if (!pasteResult.submitted) console.error('dictation paste fallback:', pasteResult.reason);
       indeterminate = !pasteResult.submitted && pasteResult.reason === 'indeterminate';
     } catch {
+      console.error('dictation paste fallback: native request failed or timed out');
       submitted = false;
     }
     submitted ||= nativeCommitted;

@@ -25,8 +25,6 @@ pub struct WindowsSessionSingleton {
     preserve_until_process_exit: bool,
 }
 
-unsafe impl Send for WindowsSessionSingleton {}
-
 impl fmt::Debug for WindowsSessionSingleton {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("WindowsSessionSingleton(<redacted>)")
@@ -109,7 +107,7 @@ impl WindowsSessionRuntimeSignals {
     pub fn install() -> Result<Self, RuntimeError> {
         let mut session_id = 0;
         if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) } == 0
-            || !session_is_active(session_id)
+            || session_is_active(session_id) != Some(true)
         {
             return Err(RuntimeError::SignalInstall);
         }
@@ -131,11 +129,13 @@ impl RuntimeSignalSource for WindowsSessionRuntimeSignals {
             return None;
         }
         self.next_poll = now + Duration::from_millis(250);
-        (!session_is_active(self.session_id)).then_some(RuntimeSignal::SessionEnded)
+        // A failed WTS query during resume is not evidence of logoff. Keep the
+        // owner and retry; a confirmed disconnect still drains capture.
+        (session_is_active(self.session_id) == Some(false)).then_some(RuntimeSignal::SessionEnded)
     }
 }
 
-fn session_is_active(session_id: u32) -> bool {
+fn session_is_active(session_id: u32) -> Option<bool> {
     let mut buffer = std::ptr::null_mut();
     let mut bytes = 0;
     let ok = unsafe {
@@ -151,11 +151,11 @@ fn session_is_active(session_id: u32) -> bool {
         if !buffer.is_null() {
             unsafe { WTSFreeMemory(buffer.cast()) };
         }
-        return false;
+        return None;
     }
     let state = unsafe { *buffer.cast::<i32>() };
     unsafe { WTSFreeMemory(buffer.cast()) };
-    state == WTSActive
+    Some(state == WTSActive)
 }
 
 #[cfg(test)]
@@ -288,6 +288,6 @@ mod tests {
             unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) },
             0
         );
-        assert!(session_is_active(session));
+        assert_eq!(session_is_active(session), Some(true));
     }
 }

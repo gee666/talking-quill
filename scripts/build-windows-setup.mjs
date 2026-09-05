@@ -50,6 +50,8 @@ const productionBytes = await readFile(published);
 for (const marker of [
   '/TQ-CLEAN-STALE-SCHEMA2',
   '/TQ-DIAGNOSE-STALE-SCHEMA2',
+  'TQ_STALE_SCHEMA2_AUDIT_PATH',
+  '78bd88811b14faf1e11ba59620088aa0',
   'TQ_MACHINE_LOCK_TEST_NAMESPACE_ID',
   'Talking Quill Tests',
   'TalkingQuill.Tests.',

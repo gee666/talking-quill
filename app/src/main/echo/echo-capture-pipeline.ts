@@ -31,6 +31,7 @@ import type { HelperCaptureReconciler } from './helper-capture-reconciler';
 import { concatChunks, discardChunkPrefix, sliceChunks } from './pcm-buffer';
 import type { EchoSessionEvent, EchoSessionState } from './session-reducer';
 import { helperCaptureModeForPhase, isCapturePhase, isTerminalPhase } from './session-phase';
+import { publicSessionError } from './session-errors';
 
 const MAX_EXTENDED_BUFFERED_SAMPLES = WHISPER_MAX_PUSH_SAMPLES * 2;
 const MODEL_USE_SETTLE_TIMEOUT_MS = 1_000;
@@ -66,6 +67,8 @@ export class EchoCapturePipeline {
   #captureId: string | null = null;
   #captureStopCompleted = false;
   #captureStopping = false;
+  #nativeCaptureLost = false;
+  #readyCuePlayed = false;
   #pcmChunks: Float32Array[] = [];
   #totalSamples = 0;
   #streamedSamples = 0;
@@ -122,11 +125,21 @@ export class EchoCapturePipeline {
     return this.#captureId;
   }
 
+  get nativeCaptureLost(): boolean {
+    return this.#nativeCaptureLost;
+  }
+
+  detachNativeCapture(): void {
+    this.#nativeCaptureLost = true;
+  }
+
   beginGeneration(): number {
     if (this.#sessionOwner !== null) this.#sessionOwner.active = false;
     this.#sessionOwner = null;
     this.#generation = this.#captureReconciler.beginGeneration();
     this.#captureStopCompleted = false;
+    this.#nativeCaptureLost = false;
+    this.#readyCuePlayed = false;
     this.#captureStopping = false;
     this.#pcmChunks = [];
     this.#totalSamples = 0;
@@ -223,14 +236,13 @@ export class EchoCapturePipeline {
       this.#windows.showMain();
       throw new Error('Dictation could not start because its status widget is unavailable.');
     }
-    // A shortcut acknowledgement must not wait for model loading, helper IPC, or microphone
-    // startup. Beep first so the user can speak immediately and so the cue is not recorded once
-    // capture begins opening below.
-    this.#playSound();
-
     // Model readiness, native key capture, and microphone startup are independent. Open all three
     // concurrently so none of their latencies are added together and opening speech is retained.
-    const helperCaptureOpening = this.#captureReconciler.request('recording', owner.generation);
+    const helperCaptureOpening = this.#captureReconciler
+      .request('recording', owner.generation)
+      .catch((error: unknown) => {
+        if (!this.#nativeCaptureLost || !this.#ownsSession(owner)) throw error;
+      });
     owner.captureOpening = true;
     let capturePromise: ReturnType<EchoRecordingPort['startDictation']>;
     try {
@@ -281,6 +293,20 @@ export class EchoCapturePipeline {
       type: 'capture-started',
       preferredUnavailable: capture.preferredUnavailable,
     });
+    this.#announceCaptureReady();
+  }
+
+  #announceCaptureReady(): void {
+    const state = this.#getState();
+    if (
+      this.#readyCuePlayed ||
+      !state.captureReady ||
+      !state.audioReady ||
+      !isCapturePhase(state.phase)
+    )
+      return;
+    this.#readyCuePlayed = true;
+    this.#playSound();
   }
 
   async beginExtendedTranscription(): Promise<void> {
@@ -326,7 +352,11 @@ export class EchoCapturePipeline {
       if (ownsSession && this.#ownsSession(owner) && shouldStopRecording) {
         this.#captureStopCompleted = recordingError === null;
       }
-      errors = [recordingError, helperError].filter((error): error is Error => error !== null);
+      // The supervisor owns a disconnected helper. Its failed acknowledgement must not
+      // discard audio that the independent capture renderer successfully drained.
+      errors = [recordingError, this.#nativeCaptureLost ? null : helperError].filter(
+        (error): error is Error => error !== null,
+      );
     } finally {
       if (ownsSession && this.#ownsSession(owner)) this.#captureStopping = false;
     }
@@ -458,7 +488,10 @@ export class EchoCapturePipeline {
       clearTimeout(this.#audioStartTimer);
       this.#audioStartTimer = null;
     }
-    if (!this.#getState().audioReady) this.#dispatch({ type: 'audio-started' });
+    if (!this.#getState().audioReady) {
+      this.#dispatch({ type: 'audio-started' });
+      this.#announceCaptureReady();
+    }
     const elapsedMs = Math.round((this.#totalSamples / PCM_SAMPLE_RATE) * 1_000);
     const now = Date.now();
     if (now - this.#lastLevelAt >= ECHO_LEVEL_EVENT_INTERVAL_MS) {
@@ -634,9 +667,4 @@ export class EchoCapturePipeline {
     if (this.#audioStartTimer !== null) clearTimeout(this.#audioStartTimer);
     this.#audioStartTimer = null;
   }
-}
-
-function publicSessionError(error: unknown): string {
-  void error;
-  return 'Dictation could not be completed.';
 }

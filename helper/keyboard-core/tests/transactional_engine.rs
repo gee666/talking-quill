@@ -9,6 +9,118 @@ use talking_quill_keyboard_core::{
     },
 };
 
+#[test]
+fn configurable_shortcuts_cover_every_modifier_letter_length_side_and_release_order() {
+    let mut engine = TransactionEngine::new(single_config(
+        1,
+        modifiers(true, false, false, false),
+        ActivationKey::A,
+    ));
+    let mut revision = 1;
+    let mut at = 0;
+    let mut cases = 0;
+    for mask in 1..16 {
+        for start in 0..26 {
+            for length in 1..=26 {
+                let keys: Vec<_> = (0..length)
+                    .map(|offset| ActivationKey::from_index((start + offset) % 26).unwrap())
+                    .collect();
+                let binding = binding(
+                    ProfileId::GENERAL,
+                    modifiers(mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0),
+                    &keys,
+                );
+                for right in [false, true] {
+                    for modifiers_first in [false, true] {
+                        revision += 1;
+                        let config = CompiledActivationConfig::compile(
+                            ConfigRevision::new(revision),
+                            true,
+                            ActivationBindings::new(&[binding]).unwrap(),
+                        )
+                        .unwrap();
+                        engine = apply_control(engine, Control::ReplaceConfig(config)).0;
+                        assert!(engine.admission_open());
+                        let sides = if right {
+                            [
+                                ModifierSide::RightCtrl,
+                                ModifierSide::RightAlt,
+                                ModifierSide::RightShift,
+                                ModifierSide::RightMeta,
+                            ]
+                        } else {
+                            [
+                                ModifierSide::LeftCtrl,
+                                ModifierSide::LeftAlt,
+                                ModifierSide::LeftShift,
+                                ModifierSide::LeftMeta,
+                            ]
+                        };
+                        let modifiers: Vec<_> = sides
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(index, _)| mask & (1 << index) != 0)
+                            .map(|(_, side)| KeyIdentity::Modifier(side))
+                            .collect();
+                        let letters: Vec<_> =
+                            keys.iter().copied().map(KeyIdentity::Letter).collect();
+                        let down: Vec<_> =
+                            modifiers.iter().chain(letters.iter()).copied().collect();
+                        let up: Vec<_> = if modifiers_first {
+                            modifiers
+                                .iter()
+                                .rev()
+                                .chain(letters.iter().rev())
+                                .copied()
+                                .collect()
+                        } else {
+                            letters
+                                .iter()
+                                .rev()
+                                .chain(modifiers.iter().rev())
+                                .copied()
+                                .collect()
+                        };
+                        let mut notices = Vec::new();
+                        for (phase, sequence) in
+                            [(PhysicalPhase::Down, down), (PhysicalPhase::Up, up)]
+                        {
+                            for key in sequence {
+                                at += 1;
+                                let (next, _, effects) = apply_event(engine, key, phase, at);
+                                engine = next;
+                                for effect in effects {
+                                    if let EffectRequest::DeliverActivation(notice) = effect {
+                                        assert_eq!(notice.binding(), binding);
+                                        notices.push(notice);
+                                    }
+                                    assert!(
+                                        !matches!(effect, EffectRequest::Replay(_)),
+                                        "completed configured shortcut must never replay into the foreground app"
+                                    );
+                                }
+                            }
+                        }
+                        assert!(
+                            matches!(
+                                notices.as_slice(),
+                                [ActivationNotice::Down { .. }, ActivationNotice::Up { .. }]
+                            ),
+                            "mask={mask}, start={start}, length={length}, right={right}, modifiers_first={modifiers_first}: {notices:?}"
+                        );
+                        assert_eq!(engine.physical_letters(), 0);
+                        assert_eq!(engine.physical_modifiers().bits(), 0);
+                        assert_eq!(engine.owned_letters(), 0);
+                        assert_eq!(engine.journal_len(), 0);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 40_560);
+}
+
 fn modifiers(ctrl: bool, alt: bool, shift: bool, meta: bool) -> ShortcutModifiers {
     ShortcutModifiers {
         ctrl,
@@ -706,6 +818,38 @@ fn activation_up_failure_never_replays_and_enters_exact_ownership_drain() {
 }
 
 #[test]
+fn enabled_configuration_reopens_paused_capture_but_never_shutdown() {
+    let engine = TransactionEngine::new(canonical_config(1, true));
+    let (engine, _, _) = apply_control(engine, Control::CloseAdmission(CancelReason::GateClosed));
+    assert!(!engine.admission_open());
+    let (engine, _, _) = apply_control(engine, Control::ReplaceConfig(canonical_config(2, false)));
+    assert!(!engine.admission_open());
+    let config = single_config(3, modifiers(true, false, false, false), ActivationKey::X);
+    let (engine, _, _) = apply_control(engine, Control::ReplaceConfig(config));
+    assert!(engine.admission_open());
+    let (engine, _, _) = apply_event(
+        engine,
+        KeyIdentity::Modifier(ModifierSide::LeftCtrl),
+        PhysicalPhase::Down,
+        1,
+    );
+    let (engine, _, effects) = apply_event(
+        engine,
+        KeyIdentity::Letter(ActivationKey::X),
+        PhysicalPhase::Down,
+        2,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, EffectRequest::DeliverActivation(_)))
+    );
+    let (engine, _, _) = apply_control(engine, Control::Shutdown);
+    let (engine, _, _) = apply_control(engine, Control::ReplaceConfig(canonical_config(4, true)));
+    assert!(!engine.admission_open());
+}
+
+#[test]
 fn config_replacement_replays_candidate_and_fences_every_held_key_and_modifier() {
     let engine = press_alt(
         TransactionEngine::new(canonical_config(1, true)),
@@ -1146,9 +1290,10 @@ fn observed_deferred_release_discards_an_uncommitted_unbalanced_journal() {
     );
     assert!(matches!(completion, Completion::Control(outcome) if outcome.applied));
     let (engine, completion, effects) = drive(
-        engine.begin(EngineInput::Control(Control::ReconcileObserved(
-            PhysicalSnapshot::default(),
-        ))),
+        engine.begin(EngineInput::Control(Control::ReconcileObserved {
+            snapshot: PhysicalSnapshot::default(),
+            observed_at_ms: 20,
+        })),
         |effect, _| success(effect),
     );
     assert!(effects.is_empty());

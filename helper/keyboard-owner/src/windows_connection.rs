@@ -123,6 +123,10 @@ impl WindowsNamedPipeConnectionSource {
 }
 
 impl AuthenticatedConnectionSource for WindowsNamedPipeConnectionSource {
+    fn retire_after_disconnect(&self) -> bool {
+        true
+    }
+
     fn bind_owner_instance(&mut self, owner: OwnerInstanceId) -> Result<(), ConnectionSourceError> {
         if self.owner_instance.is_some() {
             return Err(ConnectionSourceError);

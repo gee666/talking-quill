@@ -173,7 +173,6 @@ export class WindowManager {
     this.#widgetExcludedFromCapture = true;
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
-      widget.setFocusable(false);
       widget.hide();
     }
   }
@@ -184,7 +183,6 @@ export class WindowManager {
     this.#widgetExcludedFromCapture = false;
     const widget = this.#windows.get('widget');
     if (widget !== undefined && !widget.isDestroyed()) {
-      widget.setFocusable(false);
       widget.hide();
     }
   }
@@ -192,7 +190,8 @@ export class WindowManager {
   setWidgetInteractive(webContentsId: number, interactive: boolean): void {
     const widget = this.#windows.get('widget');
     if (widget?.webContents.id !== webContentsId || widget.isDestroyed()) return;
-    widget.setFocusable(false);
+    // focusable:false is fixed at construction. Reapplying it to a visible Windows widget
+    // calls Electron's native Deactivate(), which can move focus away from the dictation target.
     widget.setIgnoreMouseEvents(!interactive, { forward: !interactive });
   }
 
@@ -368,11 +367,11 @@ export class WindowManager {
         ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
         : screen.getDisplayMatching(displayBounds);
     widget.setContentBounds(widgetContentBounds(desired.size, display.workArea), false);
-    // Windows can drop the topmost band or retain a stale transparent surface after display
-    // sleep/lock. Reassert native presentation and explicitly request a compositor frame.
-    widget.setAlwaysOnTop(true);
+    // Electron's default Windows level places the widget behind the taskbar. If the taskbar
+    // is temporarily not topmost, that also demotes the widget behind ordinary app windows.
+    // Keep it in the topmost band without touching the foreground window.
+    widget.setAlwaysOnTop(true, process.platform === 'win32' ? 'screen-saver' : 'floating');
     widget.showInactive();
-    widget.moveTop();
     widget.webContents.invalidate();
     // Preserve renderer-selected hit testing across screenshot-only hide/show cycles so a
     // stationary pointer can still click Stop or Cancel.

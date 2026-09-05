@@ -9,7 +9,7 @@ import type { HelperClient } from '../helper';
 import {
   furthestObservationBoundary,
   hasCompleteDedicatedTraversal,
-} from '../echo/activation-test-controller';
+} from './physical-observation-progress';
 import type { AcceptanceRunRequestPayload } from './authorization-schema';
 
 const EndpointPeerSchema = z

@@ -316,7 +316,14 @@ impl<P: Platform> PlatformAdapter<P> {
                 },
             ));
         }
-        if !self.terminal_event_emitted && self.terminal_events.try_recv().is_ok() {
+        if !self.terminal_event_emitted
+            && let Ok(reason) = self.terminal_events.try_recv()
+        {
+            eprintln!("keyboard-owner native failure: {reason:?}");
+            eprintln!(
+                "keyboard-owner failure counters: {:?}",
+                self.platform.transaction_observability()
+            );
             self.terminal_event_emitted = true;
             self.push_event(BrokerEvent::RecoverableNativeFault);
         }
@@ -503,14 +510,9 @@ impl<P: Platform> NativeAdapter for PlatformAdapter<P> {
     }
 
     fn orphan_retirement_policy(&self) -> crate::OrphanRetirementPolicy {
-        #[cfg(windows)]
-        {
-            crate::OrphanRetirementPolicy::ObserveUntilNeutral
-        }
-        #[cfg(not(windows))]
-        {
-            crate::OrphanRetirementPolicy::BoundedNativeShutdown
-        }
+        // Once no controller remains, drain through the platform's bounded
+        // shutdown rather than retaining an unreachable singleton indefinitely.
+        crate::OrphanRetirementPolicy::BoundedNativeShutdown
     }
 
     fn bounded_orphan_shutdown(&mut self) -> BoundedShutdownOutcome {

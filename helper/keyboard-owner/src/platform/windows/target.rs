@@ -1,7 +1,11 @@
 use std::ptr::null_mut;
 
+mod monitor;
+pub(super) use monitor::TargetMonitor;
+
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsWindow,
+    GUI_INMENUMODE, GUI_INMOVESIZE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE, GUITHREADINFO,
+    GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsWindow,
 };
 use windows_sys::Win32::{
     Foundation::HWND,
@@ -20,9 +24,8 @@ pub(super) struct FocusTargetEvidence {
     focused_control: isize,
 }
 
-/// Candidate-start evidence. Native focus and caret identities are mandatory
-/// until a nonblocking UI Automation cache can distinguish virtual controls
-/// that share one renderer HWND.
+/// Candidate-start foreground identity with focused-control evidence sampled
+/// by the monitor. The keyboard callback never queries a foreign GUI thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CandidateTargetEvidence {
     focus: FocusTargetEvidence,
@@ -88,7 +91,7 @@ impl TargetRegistry {
     }
 
     /// Registers immutable candidate-start paste evidence at the accepted
-    /// activation boundary. Missing caret evidence deliberately yields a
+    /// activation boundary. Missing focus evidence deliberately yields a
     /// targetless activation and therefore clipboard-only insertion.
     pub(super) fn capture_context(
         &mut self,
@@ -152,16 +155,24 @@ pub(super) fn revalidate_candidate_target(evidence: CandidateTargetEvidence) -> 
     if evidence.is_test_only() {
         return true;
     }
-    revalidate_focus_target(evidence.focus) && evidence.paste.is_none_or(revalidate_target)
+    revalidate_focus_target(evidence.focus, false)
+        && evidence
+            .paste
+            .is_none_or(|target| monitor::cached_paste_evidence(evidence.focus) == Some(target))
 }
 
 #[must_use]
 pub(super) fn revalidate_target(evidence: TargetEvidence) -> bool {
-    if !revalidate_focus_target(evidence.focus) {
+    if !revalidate_focus_target(evidence.focus, true) {
         return false;
     }
     // SAFETY: the retained thread/handle evidence came from User32 and all
     // writable storage belongs to this call.
+    if evidence.caret_window == 0 {
+        // Chromium and other virtual editors often expose only a focused HWND.
+        // The foreground process and focused control were checked above.
+        return true;
+    }
     unsafe {
         let caret = evidence.caret_window as HWND;
         let mut caret_process_id = 0;
@@ -170,17 +181,40 @@ pub(super) fn revalidate_target(evidence: TargetEvidence) -> bool {
             || GetWindowThreadProcessId(caret, &raw mut caret_process_id) == 0
             || caret_process_id != evidence.focus.process_id
         {
-            return false;
+            return target_mismatch("caret-window", true);
         }
         let mut gui = gui_thread_info();
-        GetGUIThreadInfo(evidence.focus.foreground_thread, &raw mut gui) != 0
-            && !gui.hwndCaret.is_null()
-            && gui.hwndCaret as isize == evidence.caret_window
-            && rect_evidence(gui.rcCaret) == evidence.caret_rect
+        if GetGUIThreadInfo(evidence.focus.foreground_thread, &raw mut gui) == 0 {
+            return target_mismatch("caret-query", true);
+        }
+        if has_transient_input_mode(gui.flags) {
+            return target_mismatch("input-mode", true);
+        }
+        if gui.hwndCaret.is_null() {
+            if monitor::cached_paste_evidence(evidence.focus) == Some(evidence) {
+                return true;
+            }
+            return target_mismatch("caret-changed", true);
+        }
+        if gui.hwndCaret as isize != evidence.caret_window {
+            return target_mismatch("caret-changed", true);
+        }
+        if rect_evidence(gui.rcCaret) != evidence.caret_rect {
+            return target_mismatch("caret-position", true);
+        }
+        true
     }
 }
 
-fn revalidate_focus_target(evidence: FocusTargetEvidence) -> bool {
+fn target_mismatch(category: &'static str, diagnostic: bool) -> bool {
+    if diagnostic {
+        // Fixed categories only; never expose window titles, handles, or document contents.
+        eprintln!("keyboard-owner paste target validation: {category}");
+    }
+    false
+}
+
+fn revalidate_focus_target(evidence: FocusTargetEvidence, diagnostic: bool) -> bool {
     // SAFETY: User32 receives only scalar handles captured from User32 and
     // writable process-ID/GUITHREADINFO storage owned by this call.
     unsafe {
@@ -189,31 +223,31 @@ fn revalidate_focus_target(evidence: FocusTargetEvidence) -> bool {
             || foreground as isize != evidence.foreground_window
             || IsWindow(foreground) == 0
         {
-            return false;
+            return target_mismatch("foreground-window", diagnostic);
         }
         let mut process_id = 0;
         let foreground_thread = GetWindowThreadProcessId(foreground, &raw mut process_id);
         if process_id != evidence.process_id || foreground_thread != evidence.foreground_thread {
-            return false;
+            return target_mismatch("foreground-process", diagnostic);
         }
         let focused = evidence.focused_control as HWND;
         if focused.is_null() || IsWindow(focused) == 0 {
-            return false;
+            return target_mismatch("focused-control", diagnostic);
         }
         let mut focused_process_id = 0;
         if GetWindowThreadProcessId(focused, &raw mut focused_process_id) == 0
             || focused_process_id != evidence.process_id
         {
-            return false;
+            return target_mismatch("focused-process", diagnostic);
         }
         if evidence.focused_control == evidence.foreground_window {
             return true;
         }
         let mut gui = gui_thread_info();
         if GetGUIThreadInfo(foreground_thread, &raw mut gui) == 0 || gui.hwndFocus.is_null() {
-            return false;
+            return target_mismatch("focus-query", diagnostic);
         }
-        focus_identity_matches(
+        if !focus_identity_matches(
             evidence,
             FocusTargetEvidence {
                 process_id,
@@ -221,7 +255,10 @@ fn revalidate_focus_target(evidence: FocusTargetEvidence) -> bool {
                 foreground_thread,
                 focused_control: gui.hwndFocus as isize,
             },
-        )
+        ) {
+            return target_mismatch("focus-changed", diagnostic);
+        }
+        true
     }
 }
 
@@ -240,14 +277,15 @@ pub(super) fn capture_candidate_target() -> Option<CandidateTargetEvidence> {
         // WH_KEYBOARD_LL callback. The foreground HWND plus WinEvent epoch is
         // bounded activation evidence; paste authority remains unavailable
         // unless a separately captured caret identity exists.
+        let focus = FocusTargetEvidence {
+            process_id,
+            foreground_window: foreground as isize,
+            foreground_thread,
+            focused_control: foreground as isize,
+        };
         Some(CandidateTargetEvidence {
-            focus: FocusTargetEvidence {
-                process_id,
-                foreground_window: foreground as isize,
-                foreground_thread,
-                focused_control: foreground as isize,
-            },
-            paste: None,
+            focus,
+            paste: monitor::cached_paste_evidence(focus),
         })
     }
 }
@@ -267,6 +305,10 @@ fn gui_thread_info() -> GUITHREADINFO {
         cbSize: u32::try_from(size_of::<GUITHREADINFO>()).expect("GUITHREADINFO size fits u32"),
         ..GUITHREADINFO::default()
     }
+}
+
+const fn has_transient_input_mode(flags: u32) -> bool {
+    flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE) != 0
 }
 
 const fn rect_evidence(rect: windows_sys::Win32::Foundation::RECT) -> [i32; 4] {

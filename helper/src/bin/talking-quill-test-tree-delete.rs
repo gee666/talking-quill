@@ -809,7 +809,10 @@ fn main() {
                 namespace, &inventory,
             ) {
                 Ok(()) => return,
-                Err(_) => std::process::exit(78),
+                Err(error) => {
+                    eprintln!("Cannot delete the retained test registry namespace: {error}");
+                    std::process::exit(78);
+                }
             }
         }
         _ => {}

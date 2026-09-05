@@ -21,7 +21,7 @@ const fixtures = [
   },
 ];
 const shortText =
-  'Talking Quill keeps every spoken word private and local. Clear speech becomes useful text.';
+  'Magic Echo keeps every spoken word private and local. Clear speech becomes useful text.';
 const boundaryClips = [
   [5_000, 'The session begins with a calm natural sentence.'],
   [15_000, 'We continue speaking at a steady pace.'],

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const LOCAL_RUST_PACKAGES = Object.freeze([
+  'talking-quill-acceptance-signer',
   'talking-quill-common-e2e',
   'talking-quill-helper',
   'talking-quill-keyboard-core',
@@ -13,12 +14,14 @@ const LOCAL_RUST_PACKAGES = Object.freeze([
 export async function verifyCoordinatedVersions(
   repositoryRoot = resolve(import.meta.dirname, '..'),
 ) {
-  const [root, app, workspace, common, lock] = await Promise.all([
+  const [root, app, workspace, common, lock, setup, setupLock] = await Promise.all([
     json(resolve(repositoryRoot, 'package.json')),
     json(resolve(repositoryRoot, 'app/package.json')),
     readFile(resolve(repositoryRoot, 'helper/Cargo.toml'), 'utf8'),
     readFile(resolve(repositoryRoot, 'helper/common-e2e/Cargo.toml'), 'utf8'),
     readFile(resolve(repositoryRoot, 'helper/Cargo.lock'), 'utf8'),
+    readFile(resolve(repositoryRoot, 'installer/windows-setup/Cargo.toml'), 'utf8'),
+    readFile(resolve(repositoryRoot, 'installer/windows-setup/Cargo.lock'), 'utf8'),
   ]);
   const version = root.version;
   const versions = new Map([
@@ -26,6 +29,8 @@ export async function verifyCoordinatedVersions(
     ['app/package.json', app.version],
     ['helper/Cargo.toml', tomlVersion(workspace)],
     ['helper/common-e2e/Cargo.toml', tomlVersion(common)],
+    ['installer/windows-setup/Cargo.toml', tomlVersion(setup)],
+    ['installer/windows-setup/Cargo.lock', lockVersion(setupLock, 'talking-quill-windows-setup')],
   ]);
   for (const name of LOCAL_RUST_PACKAGES)
     versions.set(`helper/Cargo.lock:${name}`, lockVersion(lock, name));

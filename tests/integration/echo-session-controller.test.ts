@@ -147,6 +147,15 @@ function fixture(
         })),
   );
   const helper = {
+    // Real helpers also expose passive diagnostics. The shortcut test must
+    // keep capture enabled and consume the normal activation channel.
+    beginPhysicalObservation: vi.fn(() =>
+      Promise.reject(new Error('Passive observation disables shortcuts')),
+    ),
+    samplePhysicalObservation: vi.fn(() =>
+      Promise.reject(new Error('Unexpected passive observation')),
+    ),
+    endPhysicalObservation: vi.fn(() => Promise.resolve()),
     readiness:
       options.helperReadiness ??
       ({
@@ -574,6 +583,40 @@ describe('EchoSessionController integration', () => {
     expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
     await test.controller.shutdown();
   });
+
+  it.each(['unexpected-exit', 'owner-degraded', 'request-timeout'] as const)(
+    'recovers captured speech to the clipboard after %s',
+    async (reason) => {
+      let disconnected = false;
+      const test = fixture({
+        setSessionCapture: (mode) =>
+          disconnected
+            ? Promise.reject(
+                Object.assign(new Error('owner disconnected'), { code: 'not-running' }),
+              )
+            : Promise.resolve({ mode }),
+        insert: (_text, context) =>
+          Promise.resolve({
+            inserted: context.targetToken !== null,
+            copied: context.targetToken === null,
+          }),
+      });
+      await test.initialized;
+      test.notify(activationComplete(50));
+      await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
+      test.frame();
+      await settle();
+      disconnected = true;
+      test.setHelperReadiness({ ...test.helper.readiness, status: 'unavailable', reason });
+      await vi.waitFor(() => expect(test.spies.insert).toHaveBeenCalledOnce());
+      expect(test.spies.transcribe).toHaveBeenCalledOnce();
+      expect(test.spies.insert.mock.calls[0]?.[1]?.targetToken).toBeNull();
+      expect(test.controller.snapshot).toMatchObject({ phase: 'completed', completion: 'copied' });
+      disconnected = false;
+      test.setHelperReadiness({ ...test.helper.readiness, status: 'ready', reason: null });
+      await test.controller.shutdown();
+    },
+  );
 
   it('shows the main window when an error widget renderer is unavailable', async () => {
     const test = fixture();
@@ -1999,6 +2042,8 @@ describe('EchoSessionController integration', () => {
   it('accepts an atomic completion for an exact built-in prefix binding', async () => {
     const test = fixture();
     test.notify(activationComplete(100, DEFAULT_PROMPT_PROFILE.shortcut, 'prompt'));
+    await settle();
+    test.frame();
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('recordingQuick'));
     expect(test.controller.snapshot.processingMode).toBe('smart');
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
@@ -2016,6 +2061,8 @@ describe('EchoSessionController integration', () => {
     await test.controller.updateProfile('prompt', { shortcut: prompt });
 
     test.notify(activationComplete(100, general, 'general', 17, 'shift-prefix-target'));
+    await settle();
+    test.frame();
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('recordingQuick'));
     expect(test.controller.snapshot).toMatchObject({ alternate: true, dictationMode: 'quick' });
     test.frame();
@@ -2037,6 +2084,8 @@ describe('EchoSessionController integration', () => {
     async (heldMs, phase, mode) => {
       const test = fixture();
       test.notify(activationComplete(heldMs));
+      await settle();
+      test.frame();
       await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe(phase));
       expect(test.controller.snapshot.dictationMode).toBe(mode);
       await vi.waitFor(() => expect(test.spies.startDictation).toHaveBeenCalledOnce());
@@ -2219,6 +2268,7 @@ describe('EchoSessionController integration', () => {
     await test.controller.updateProfile('prompt', { shortcut });
     test.notify(chordActivation('down', shortcut, 'prompt'));
     await vi.advanceTimersByTimeAsync(600);
+    test.frame();
     expect(test.controller.snapshot).toMatchObject({
       phase: 'recordingExtended',
       dictationMode: 'extended',
@@ -2240,10 +2290,12 @@ describe('EchoSessionController integration', () => {
     vi.setSystemTime(1_600);
     test.notify(activation('up'));
     expect(test.controller.snapshot).toMatchObject({
-      phase: 'recordingExtended',
+      phase: 'arming',
       dictationMode: 'extended',
       elapsedMs: 600,
     });
+    test.frame();
+    expect(test.controller.snapshot.phase).toBe('recordingExtended');
     await vi.advanceTimersByTimeAsync(0);
     expect(test.spies.startSession).toHaveBeenCalledOnce();
     await test.controller.shutdown();
@@ -2258,6 +2310,10 @@ describe('EchoSessionController integration', () => {
     await vi.advanceTimersByTimeAsync(599);
     expect(test.spies.setSessionCapture).toHaveBeenLastCalledWith('off');
     test.notify(activation('up'));
+    expect(test.controller.activationTestState).toMatchObject({
+      phase: 'quick',
+      profileId: 'general',
+    });
     expect(test.controller.snapshot.phase).toBe('idle');
     expect(test.spies.startDictation).not.toHaveBeenCalled();
     expect(test.spies.insert).not.toHaveBeenCalled();
@@ -3097,7 +3153,7 @@ describe('EchoSessionController integration', () => {
     },
   );
 
-  it('shows and sounds immediate arming feedback, then cleans up if helper capture enable fails', async () => {
+  it('shows arming immediately but only sounds readiness after a successful capture startup', async () => {
     vi.useFakeTimers();
     let enableAttempts = 0;
     const test = fixture({
@@ -3113,14 +3169,16 @@ describe('EchoSessionController integration', () => {
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('error'));
     expect(test.spies.stopDictation).toHaveBeenCalledOnce();
     expect(test.spies.showWidget).toHaveBeenCalledOnce();
-    expect(test.spies.sound).toHaveBeenCalledOnce();
+    expect(test.spies.sound).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1_200);
     await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('idle'));
     test.notify(activation('down'));
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledTimes(2));
-    expect(test.spies.sound).toHaveBeenCalledTimes(2);
+    expect(test.spies.sound).not.toHaveBeenCalled();
+    test.frame();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
     test.controller.cancel();
     await test.controller.shutdown();
   });
@@ -3513,13 +3571,19 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down'));
     await vi.waitFor(() => expect(test.spies.setSessionCapture).toHaveBeenCalledWith('recording'));
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
-    expect(test.spies.sound).toHaveBeenCalledOnce();
+    expect(test.spies.sound).not.toHaveBeenCalled();
 
     model.resolve({ status: { state: 'ready' }, release: vi.fn() });
     await Promise.resolve();
     expect(test.controller.snapshot.phase).toBe('arming');
     helperEnable.resolve({ mode: 'recording' });
-    await vi.waitFor(() => expect(test.controller.snapshot.phase).toBe('arming'));
+    await settle();
+    expect(test.controller.snapshot.phase).toBe('arming');
+    expect(test.spies.sound).not.toHaveBeenCalled();
+    test.frame();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
+    test.frame();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
     test.controller.cancel();
     await test.controller.shutdown();
   });
@@ -3548,7 +3612,7 @@ describe('EchoSessionController integration', () => {
 
     test.notify(activation('down'));
     await vi.waitFor(() => expect(test.spies.showWidget).toHaveBeenCalledOnce());
-    expect(test.spies.sound).toHaveBeenCalledOnce();
+    expect(test.spies.sound).not.toHaveBeenCalled();
     expect(test.spies.showWidget).toHaveBeenCalledWith('default', null);
     expect(test.spies.getFrontApp).not.toHaveBeenCalled();
     test.controller.cancel();
@@ -3568,9 +3632,12 @@ describe('EchoSessionController integration', () => {
     test.notify(activation('down'));
     await Promise.resolve();
     expect(test.spies.startDictation).toHaveBeenCalledOnce();
-    expect(test.spies.sound).toHaveBeenCalledOnce();
+    test.frame();
+    expect(test.controller.snapshot.phase).toBe('arming');
+    expect(test.spies.sound).not.toHaveBeenCalled();
     helperEnable.resolve({ mode: 'recording' });
     await settle();
+    expect(test.spies.sound).toHaveBeenCalledOnce();
 
     test.frame();
     test.notify(key('enter'));

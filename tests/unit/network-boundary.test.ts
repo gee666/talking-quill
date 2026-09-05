@@ -32,7 +32,7 @@ describe('closed networking boundary and privacy-safe egress proof', () => {
         'app/src/main/providers/json-transport.ts',
         'app/src/main/transcription/model-download-transport.ts',
         'app/src/workers/whisper/network-guard.ts',
-        'app/src/main/helper/helper-client.ts',
+        'app/src/main/helper/helper-process.ts',
         'app/src/main/providers/pi-process-runtime.ts',
         'app/src/main/providers/pi-rpc-operation.ts',
         'app/src/main/providers/pi-rpc-transport.ts',

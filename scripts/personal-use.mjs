@@ -90,7 +90,7 @@ export function packagePaths(configuration) {
     installer: resolve(
       root,
       'release',
-      `${stem}.${configuration.platform === 'win' ? 'exe' : 'zip'}`,
+      `${stem}${configuration.platform === 'win' ? '-setup.exe' : '.zip'}`,
     ),
   };
 }
@@ -109,13 +109,9 @@ function build(configuration) {
   requireHost(configuration, false);
   const pnpmCli = process.env.npm_execpath;
   if (!pnpmCli) throw new Error('Run this command through pnpm');
-  run(
-    process.execPath,
-    [pnpmCli, 'exec', 'node', 'scripts/run-package.mjs', configuration.packageTarget],
-    {
-      env: createFreshEnvironment(configuration),
-    },
-  );
+  run(process.execPath, [resolve(root, 'scripts/run-package.mjs'), configuration.packageTarget], {
+    env: { ...createFreshEnvironment(configuration), npm_execpath: pnpmCli },
+  });
 }
 
 async function check(configuration) {

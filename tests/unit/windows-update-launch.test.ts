@@ -1,3 +1,4 @@
+import { readRustModule } from '../helpers/rust-source';
 import { Buffer } from 'node:buffer';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
@@ -75,8 +76,8 @@ describe('Windows elevated updater launch', () => {
 
   it('takes verified predecessor locks in fixed order before the protected file lock', async () => {
     const [helper, setup] = await Promise.all([
-      readFile('helper/src/windows_update.rs', 'utf8'),
-      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
+      readRustModule('helper/src/windows_update.rs'),
+      readRustModule('installer/windows-setup/src/windows.rs'),
     ]);
     for (const source of [helper, setup]) {
       expect(source).toContain('RecoveryStateLockV1');
@@ -104,7 +105,7 @@ describe('Windows elevated updater launch', () => {
   });
 
   it('hands terminal cleanup to an authenticated transient native service', async () => {
-    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const setup = await readRustModule('installer/windows-setup/src/windows.rs');
     expect(setup).toContain('uninstall-finalizer-publishing');
     expect(setup).toContain('uninstall-app-path-retiring');
     expect(setup).toContain('uninstall-app-path-retired');
@@ -202,9 +203,10 @@ describe('Windows elevated updater launch', () => {
     expect(setup).toContain('decode_pending_rename_pairs');
     expect(setup).toContain('destination.is_empty()');
     expect(setup).toContain('Pending deletion data lacks its final terminator.');
-    const pendingRecovery = setup.slice(
-      setup.indexOf('if finishing_existing_uninstall {\n        complete_terminal_uninstall'),
-      setup.indexOf('if uninstall_authorized && !path_present'),
+    const normalizedSetup = setup.replace(/\s+/gu, ' ');
+    const pendingRecovery = normalizedSetup.slice(
+      normalizedSetup.indexOf('if finishing_existing_uninstall { complete_terminal_uninstall'),
+      normalizedSetup.indexOf('if uninstall_authorized && !path_present'),
     );
     expect(pendingRecovery).toContain(
       'complete_terminal_uninstall(&paths, &system, &current, &mut machine_lock)?;',
@@ -244,9 +246,9 @@ describe('Windows elevated updater launch', () => {
   it('persists a nonce-bound native relaunch wrapper before elevation', async () => {
     const [main, helper, application, setup] = await Promise.all([
       readFile('helper/src/main.rs', 'utf8'),
-      readFile('helper/src/windows_update.rs', 'utf8'),
+      readRustModule('helper/src/windows_update.rs'),
       readFile('app/src/main/app/application.ts', 'utf8'),
-      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
+      readRustModule('installer/windows-setup/src/windows.rs'),
     ]);
     expect(main).toContain('--windows-update-bootstrap-v3=');
     expect(main).toContain('--windows-update-app-ready-v1=');
@@ -306,8 +308,8 @@ describe('Windows elevated updater launch', () => {
 
   it('publishes protected marker files through closed handles and verifies identity after rename', async () => {
     const [helper, setup] = await Promise.all([
-      readFile('helper/src/windows_update.rs', 'utf8'),
-      readFile('installer/windows-setup/src/windows.rs', 'utf8'),
+      readRustModule('helper/src/windows_update.rs'),
+      readRustModule('installer/windows-setup/src/windows.rs'),
     ]);
     for (const source of [helper, setup]) {
       expect(source).toContain('.tmp-{}');
@@ -348,7 +350,7 @@ describe('Windows elevated updater launch', () => {
 
   it('reopens and verifies the installer in the elevated installed bootstrap before resume', async () => {
     const [bootstrap, main] = await Promise.all([
-      readFile('helper/src/windows_update.rs', 'utf8'),
+      readRustModule('helper/src/windows_update.rs'),
       readFile('helper/src/main.rs', 'utf8'),
     ]);
     expect(main).toContain('--windows-update-bootstrap-v2=');

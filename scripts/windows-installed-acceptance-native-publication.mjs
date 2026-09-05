@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   readdir,
+  rename,
   rm,
   rmdir,
   writeFile,
@@ -19,7 +20,7 @@ import { subprocessFailure } from './sanitized-subprocess-error.mjs';
 import { launchVerifiedChildSync } from './windows-verified-child-launcher.mjs';
 
 const HEX = /^[0-9a-f]{64}$/u;
-const PURPOSE = 'talking-quill/installed-acceptance-native-publication/v1';
+const PURPOSE = 'talking-quill/installed-acceptance-native-publication/v2';
 const LAYOUTS = Object.freeze({
   producer: Object.freeze({
     signer: 'talking-quill-acceptance-signer.exe',
@@ -34,128 +35,153 @@ const LAYOUTS = Object.freeze({
   }),
 });
 
-export async function publishAcceptanceNative({
+export const ACCEPTANCE_NATIVE_PUBLICATION_SEAMS = Object.freeze([
+  'before:create-base',
+  'after:create-base',
+  'before:create-root',
+  'after:create-root',
+  'before:initialize-root-acl',
+  'after:initialize-root-acl',
+  ...Object.values(LAYOUTS.producer).flatMap((name) => [`before:copy:${name}`, `after:copy:${name}`]),
+  'before:protect-root',
+  'after:protect-root',
+  'published',
+]);
+
+export async function prepareAcceptanceNativePublication({
   buildId,
   sourceRoot,
   outputRoot,
   programData = process.env.ProgramData ?? 'C:/ProgramData',
   layout = 'producer',
+  sourceCommit = process.env.TALKING_QUILL_RELEASE_COMMIT ?? '',
+  sourceTree = process.env.TALKING_QUILL_RELEASE_TREE ?? '',
 }) {
   if (process.platform !== 'win32') throw new Error('Native publication requires Windows');
-  if (!HEX.test(buildId ?? ''))
-    throw new Error('Protected native publication build identity is invalid');
+  if (!HEX.test(buildId ?? '')) throw new Error('Protected native publication build identity is invalid');
   const files = LAYOUTS[layout];
   if (files === undefined) throw new Error('Native publication layout is invalid');
-  const nativeBase = resolve(programData, 'Talking Quill Acceptance Native');
+  const nonce = randomBytes(32).toString('hex');
   const publicationId = randomBytes(32).toString('hex');
+  const absoluteOutput = resolve(outputRoot);
+  const receiptRoot = resolve(dirname(absoluteOutput), `native-publication-receipt-${nonce}`);
+  const descriptorPath = resolve(receiptRoot, 'native-publication.json');
+  const cleanupLauncherPath = resolve(receiptRoot, 'native-publication-cleanup-helper.exe');
+  const nativeBase = resolve(programData, 'Talking Quill Acceptance Native');
   const nativeRoot = resolve(nativeBase, publicationId);
-  const cleanupLauncherPath = resolve(outputRoot, 'native-publication-cleanup-helper.exe');
-  let nativeBaseCreated = false;
-  let nativeBaseIdentity;
-  let nativeRootIdentity;
-  let cleanupLauncher;
-  let cleanupLauncherCreated = false;
-  let initializedRoot = false;
-  let protectedRoot = false;
+  await requireDirectory(resolve(programData));
+  let initialBaseIdentity = null;
   try {
-    await requireDirectory(resolve(programData));
-    try {
-      nativeBaseIdentity = await directoryIdentity(nativeBase);
-    } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
-      await mkdir(nativeBase, { recursive: false, mode: 0o700 });
-      nativeBaseCreated = true;
-      nativeBaseIdentity = await directoryIdentity(nativeBase);
-    }
-    await copyFile(
-      resolve(sourceRoot, files.bootstrap),
-      cleanupLauncherPath,
-      constants.COPYFILE_EXCL,
-    );
-    cleanupLauncherCreated = true;
-    cleanupLauncher = await fileIdentity(cleanupLauncherPath);
-    await mkdir(nativeRoot, { recursive: false, mode: 0o700 });
-    nativeRootIdentity = await directoryIdentity(nativeRoot);
-    initializeNativeRoot(nativeRoot);
-    initializedRoot = true;
-    for (const name of Object.values(files)) {
-      await copyFile(resolve(sourceRoot, name), resolve(nativeRoot, name), constants.COPYFILE_EXCL);
-    }
-    protectNativeRoot(nativeRoot);
-    protectedRoot = true;
-    const { userSid, rootIdentity, inventory } = await verifyNativeRoot(nativeRoot);
-    const descriptorPath = resolve(outputRoot, 'native-publication-cleanup.json');
+    initialBaseIdentity = await directoryIdentity(nativeBase);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  await mkdir(receiptRoot, { recursive: false, mode: 0o700 });
+  const receiptRootIdentity = await directoryIdentity(receiptRoot);
+  try {
+    await copyFile(resolve(sourceRoot, files.bootstrap), cleanupLauncherPath, constants.COPYFILE_EXCL);
+    const cleanupLauncher = await fileIdentity(cleanupLauncherPath);
+    const sourceInventory = await identities(resolve(sourceRoot), Object.values(files).sort());
     const descriptor = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       purpose: PURPOSE,
       buildId,
       publicationId,
+      nonce,
       layout,
-      removeNativeBase: nativeBaseCreated,
-      nativeBase,
-      nativeBaseIdentity,
-      nativeRoot,
-      userSid,
-      rootIdentity,
-      inventory,
-      cleanupLauncher: { path: cleanupLauncherPath, ...cleanupLauncher },
+      sourceCommit,
+      sourceTree,
+      outputRoot: absoluteOutput,
+      receiptRoot,
+      receiptRootIdentity,
       descriptorPath,
+      nativeBase,
+      initialBaseIdentity,
+      nativeRoot,
+      sourceInventory,
+      cleanupLauncher: { path: cleanupLauncherPath, ...cleanupLauncher },
+      phase: { sequence: 0, name: 'prepared' },
     };
-    const descriptorBytes = Buffer.from(`${JSON.stringify(descriptor)}\n`);
-    await writeFile(descriptorPath, descriptorBytes, { flag: 'wx', mode: 0o600 });
-    return Object.freeze({
-      ...descriptor,
-      descriptorSha256: createHash('sha256').update(descriptorBytes).digest('hex'),
+    const bindingSha256 = publicationBinding(descriptor);
+    await writeFile(descriptorPath, `${JSON.stringify({ ...descriptor, bindingSha256 })}\n`, {
+      flag: 'wx',
+      mode: 0o600,
     });
+    protectNativeRoot(receiptRoot);
+    verifyNativeAcl(receiptRoot);
+    return Object.freeze({ ...descriptor, bindingSha256 });
   } catch (error) {
-    const cleanupErrors = [];
-    if (nativeRootIdentity !== undefined && cleanupLauncher !== undefined) {
-      try {
-        await removeFailedPublication(
-          nativeRoot,
-          nativeRootIdentity,
-          cleanupLauncherPath,
-          cleanupLauncher,
-          layout,
-          initializedRoot,
-          protectedRoot,
-        );
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-    if (cleanupLauncherCreated && !existsSync(nativeRoot)) {
-      try {
-        await removeCleanupFile(cleanupLauncherPath, cleanupLauncher);
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-    if (nativeBaseCreated && nativeBaseIdentity !== undefined && !existsSync(nativeRoot)) {
-      try {
-        await removeEmptyBase(nativeBase, nativeBaseIdentity);
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError([error, ...cleanupErrors], 'Native publication and cleanup failed');
+    await rm(receiptRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function publishPreparedAcceptanceNative(lease) {
+  let descriptor = await readPreparedDescriptor(lease);
+  const files = LAYOUTS[descriptor.layout];
+  if (descriptor.initialBaseIdentity === null) {
+    descriptor = await mutatePublication(descriptor, 'create-base', async () => {
+      await mkdir(descriptor.nativeBase, { recursive: false, mode: 0o700 });
+      return { nativeBaseIdentity: await directoryIdentity(descriptor.nativeBase) };
+    });
+  } else {
+    const identity = await directoryIdentity(descriptor.nativeBase);
+    if (identity !== descriptor.initialBaseIdentity) throw new Error('Native publication base changed');
+    descriptor = await advancePublication(descriptor, 'observed-base', { nativeBaseIdentity: identity });
+  }
+  descriptor = await mutatePublication(descriptor, 'create-root', async () => {
+    await mkdir(descriptor.nativeRoot, { recursive: false, mode: 0o700 });
+    return { nativeRootIdentity: await directoryIdentity(descriptor.nativeRoot) };
+  });
+  descriptor = await mutatePublication(descriptor, 'initialize-root-acl', async () => {
+    initializeNativeRoot(descriptor.nativeRoot);
+    return {};
+  });
+  for (const name of Object.values(files)) {
+    descriptor = await mutatePublication(descriptor, `copy:${name}`, async () => {
+      await copyFile(
+        descriptor.sourceInventory.find((entry) => entry.name === name).path,
+        resolve(descriptor.nativeRoot, name),
+        constants.COPYFILE_EXCL,
+      );
+      return {};
+    });
+  }
+  descriptor = await mutatePublication(descriptor, 'protect-root', async () => {
+    protectNativeRoot(descriptor.nativeRoot);
+    return {};
+  });
+  const verified = await verifyNativeRoot(descriptor.nativeRoot, undefined, descriptor.layout);
+  descriptor = await advancePublication(descriptor, 'published', {
+    userSid: verified.userSid,
+    nativeRootIdentity: verified.rootIdentity,
+    inventory: verified.inventory,
+  });
+  return Object.freeze(descriptor);
+}
+
+export async function publishAcceptanceNative(options) {
+  const lease = await prepareAcceptanceNativePublication(options);
+  try {
+    return await publishPreparedAcceptanceNative(lease);
+  } catch (error) {
+    try {
+      await cleanupAcceptanceNative(lease, { programData: options.programData });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Native publication and cleanup failed');
     }
     throw error;
   }
 }
 
 export async function cleanupAcceptanceNativeDescriptor(descriptorPath, options) {
-  if (!isAbsolute(descriptorPath)) {
-    throw new Error('Native publication descriptor path must be absolute');
-  }
-  const absolute = resolve(descriptorPath);
-  const descriptor = JSON.parse(await readFile(absolute, 'utf8'));
-  if (resolve(descriptor?.descriptorPath ?? '') !== absolute) {
-    throw new Error('Native publication descriptor path is not canonical');
-  }
+  if (!isAbsolute(descriptorPath)) throw new Error('Native publication descriptor path must be absolute');
   return cleanupAcceptanceNative(
-    { ...descriptor, descriptorSha256: options?.descriptorSha256 },
+    {
+      descriptorPath: resolve(descriptorPath),
+      nonce: options?.nonce,
+      bindingSha256: options?.bindingSha256,
+    },
     options,
   );
 }

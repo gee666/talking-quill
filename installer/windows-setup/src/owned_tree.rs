@@ -23,7 +23,7 @@ pub fn owned_tree_identity(path: &Path) -> Result<String, OwnedTreeError> {
     platform::identity(path)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "stale-schema2-cleanup"))]
 pub fn retained_directory_names(
     handle: std::os::windows::io::RawHandle,
 ) -> Result<Vec<String>, OwnedTreeError> {
@@ -196,6 +196,7 @@ mod platform {
         Ok(())
     }
 
+    #[cfg(feature = "stale-schema2-cleanup")]
     pub(super) fn retained_names(handle: HANDLE) -> Result<Vec<String>, OwnedTreeError> {
         directory_names(handle)?
             .into_iter()

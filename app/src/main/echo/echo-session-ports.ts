@@ -21,18 +21,9 @@ export type EchoHelperPort = Pick<
   | 'setSessionCapture'
   | 'getFrontApp'
   | 'resetSessionCapture'
-> &
-  Partial<
-    Pick<
-      HelperClient,
-      | 'beginPhysicalObservation'
-      | 'samplePhysicalObservation'
-      | 'endPhysicalObservation'
-      | 'recordObservationAccepted'
-    >
-  > & {
-    configureActivation(enabled: boolean, bindings: readonly ActivationBinding[]): Promise<unknown>;
-  };
+> & {
+  configureActivation(enabled: boolean, bindings: readonly ActivationBinding[]): Promise<unknown>;
+};
 
 export type EchoRecordingPort = Pick<RecordingService, 'startDictation' | 'stopDictation'>;
 export type EchoWhisperPort = Pick<WhisperWorkerClient, 'transcribe' | 'startSession'> &

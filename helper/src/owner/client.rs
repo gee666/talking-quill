@@ -1184,6 +1184,13 @@ fn client_failure_diagnostic(
     correlation_status: &'static str,
     error: &ClientError,
 ) -> OwnerClientDiagnostic {
+    if let ClientError::Transport(talking_quill_owner_protocol::TransportError::Io(io)) = error {
+        eprintln!(
+            "keyboard-owner {operation} I/O failure: kind={:?}, os={:?}",
+            io.kind(),
+            io.raw_os_error()
+        );
+    }
     let (category, transport_status) = match error {
         ClientError::Transport(talking_quill_owner_protocol::TransportError::PeerClosed) => {
             ("disconnected", "eof")

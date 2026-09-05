@@ -28,7 +28,7 @@ import {
 } from '../../shared/schemas/shortcut-capture';
 import { deepFreezeShortcut, shortcutsEqual } from '../../shared/schemas/shortcut';
 import type { WindowManager } from '../app/window-manager';
-import { CaptureClientError } from '../audio/capture-window-client';
+import { publicSessionError } from './session-errors';
 import type { IpcEventEmitter } from '../ipc/event-emitter';
 import type { SettingsStore } from '../persistence/settings-store';
 import { ProviderError } from '../providers/errors';
@@ -55,7 +55,7 @@ import {
   type EchoSessionState,
 } from './session-reducer';
 import { SessionOutcomeWriter } from './session-outcome-writer';
-import { helperCaptureModeForPhase, isTerminalPhase } from './session-phase';
+import { helperCaptureModeForPhase, isCapturePhase, isTerminalPhase } from './session-phase';
 
 export { discardChunkPrefix } from './pcm-buffer';
 export type {
@@ -173,24 +173,11 @@ export class EchoSessionController {
       history: options.history ?? null,
       smart: options.smartProcessor ?? null,
     });
-    const beginPhysicalObservation = this.#helper.beginPhysicalObservation?.bind(this.#helper);
-    const samplePhysicalObservation = this.#helper.samplePhysicalObservation?.bind(this.#helper);
-    const endPhysicalObservation = this.#helper.endPhysicalObservation?.bind(this.#helper);
     this.#activationTest = new ActivationTestController({
       publish: (state) => this.#publishActivationTest(state),
       requestCaptureOff: () =>
         this.#captureReconciler.requestBestEffort('off', this.#capture.generation),
-      physicalObservationUnavailable: this.#platform !== 'win32',
-      ...(beginPhysicalObservation === undefined ||
-      samplePhysicalObservation === undefined ||
-      endPhysicalObservation === undefined
-        ? {}
-        : {
-            beginPhysicalObservation,
-            samplePhysicalObservation,
-            endPhysicalObservation,
-            onObservationAccepted: () => this.#helper.recordObservationAccepted?.(),
-          }),
+      platformUnavailable: this.#platform !== 'win32',
     });
     this.#capture = new EchoCapturePipeline({
       recording: options.recording,
@@ -222,6 +209,31 @@ export class EchoSessionController {
       this.#captureReconciler.markAppliedUnknown();
       this.#captureReconciler.requestBestEffort('off', this.#capture.generation);
       if (this.#activationTest.state.active) this.#activationTest.stop();
+      if (
+        this.#state.audioReady &&
+        [
+          'arming',
+          'recordingQuick',
+          'recordingExtended',
+          'transcribing',
+          'processingSmart',
+        ].includes(this.#state.phase) &&
+        (readiness.status === 'starting' ||
+          [
+            'unexpected-exit',
+            'owner-missing',
+            'owner-degraded',
+            'request-timeout',
+            'handshake-timeout',
+            'crash-loop',
+            'hook-fault',
+            'spawn-failed',
+          ].includes(readiness.reason ?? ''))
+      ) {
+        this.#capture.detachNativeCapture();
+        this.#dispatch({ type: 'keyboard-disconnected' });
+        return;
+      }
       const message = helperReadinessError(readiness, this.#platform);
       if (message !== null) this.#reportOperationalFailure(message);
       else if (this.#state.phase !== 'idle') this.abort('target-lost');
@@ -251,7 +263,10 @@ export class EchoSessionController {
   get snapshot(): EchoSessionSnapshot {
     return EchoSessionSnapshotSchema.parse({
       sessionId: this.#state.sessionId,
-      phase: this.#state.phase,
+      phase:
+        isCapturePhase(this.#state.phase) && (!this.#state.captureReady || !this.#state.audioReady)
+          ? 'arming'
+          : this.#state.phase,
       dictationMode: this.#state.dictationMode,
       processingMode: this.#state.processingMode,
       alternate: this.#state.alternate,
@@ -850,7 +865,9 @@ export class EchoSessionController {
         const result = await withDeadline(
           this.#insertion.insert(
             effect.text,
-            effect.activationContext,
+            this.#capture.nativeCaptureLost
+              ? { ...effect.activationContext, targetToken: null }
+              : effect.activationContext,
             insertionAbort.signal,
             () => {
               if (acceptsCommit) this.#dispatch({ type: 'insertion-committed' });
@@ -976,6 +993,12 @@ export class EchoSessionController {
 
   #reportOperationalFailure(message: string): void {
     if (this.#disposed) return;
+    if (this.#capture.nativeCaptureLost && this.#state.phase !== 'idle') {
+      // Recovery can also fail a queued profile synchronization. Preserve the
+      // ongoing transcript and clipboard fallback while supervision reconnects.
+      this.#pendingOperationalError = message;
+      return;
+    }
     if (
       this.#state.phase === 'inserting' ||
       this.#state.phase === 'restoringClipboard' ||
@@ -1078,13 +1101,6 @@ function piFallbackCategory(providerId: string, error: unknown): PiFallbackCateg
     default:
       return 'pi-remote-failure';
   }
-}
-
-function publicSessionError(error: unknown): string {
-  if (error instanceof CaptureClientError && error.code === 'device-unavailable') {
-    return 'Your selected microphone is unavailable. Choose another microphone in Settings.';
-  }
-  return 'Dictation could not be completed.';
 }
 
 function activationPrerequisiteError(

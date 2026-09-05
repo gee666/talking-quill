@@ -33,7 +33,7 @@ internal static class Observer
         List<string> starts = new List<string>();
         bool workerEventObserved = false, watcherFailed = false;
         int mediumPid = 0;
-        ManagementEventWatcher watcher = new ManagementEventWatcher(new WqlEventQuery("SELECT ProcessName, ProcessID, ParentProcessID FROM Win32_ProcessStartTrace"));
+        ManagementEventWatcher watcher = new ManagementEventWatcher(new WqlEventQuery("SELECT * FROM Win32_ProcessStartTrace"));
         watcher.EventArrived += delegate(object sender, EventArrivedEventArgs value) {
             try { int pid = Convert.ToInt32(value.NewEvent["ProcessID"]), parent = Convert.ToInt32(value.NewEvent["ParentProcessID"]); lock (starts) { starts.Add(Convert.ToString(value.NewEvent["ProcessName"]) ?? ""); if (mediumPid != 0 && parent == mediumPid && pid != mediumPid) workerEventObserved = true; } }
             catch { lock (starts) watcherFailed = true; }

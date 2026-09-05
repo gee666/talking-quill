@@ -232,30 +232,35 @@ describe('WindowManager renderer recovery', () => {
 
     expect(manager.showWidget('default', null)).toBe(true);
 
-    expect(widget?.setAlwaysOnTop).toHaveBeenCalledWith(true);
+    expect(widget?.setAlwaysOnTop).toHaveBeenCalledWith(
+      true,
+      process.platform === 'win32' ? 'screen-saver' : 'floating',
+    );
     expect(widget?.showInactive).toHaveBeenCalledOnce();
-    expect(widget?.moveTop).toHaveBeenCalledOnce();
+    expect(widget?.moveTop).not.toHaveBeenCalled();
     expect(widget?.webContents.invalidate).toHaveBeenCalledOnce();
     expect(widget?.focus).not.toHaveBeenCalled();
     expect(mainWindows()[0]?.focus).not.toHaveBeenCalled();
   });
 
-  it('keeps widget creation, interaction, and capture restoration non-focusable', async () => {
+  it('keeps the widget non-focusable without native deactivation during session updates', async () => {
     const manager = createManager();
     await manager.createAll();
     await manager.createWidgetForActivation();
     const widget = widgetWindows()[0];
 
     expect((widget?.options as { readonly focusable?: boolean }).focusable).toBe(false);
+    manager.showWidget('default', null);
     manager.setWidgetInteractive(widget?.webContents.id ?? -1, true);
     manager.setWidgetInteractive(widget?.webContents.id ?? -1, false);
     manager.excludeWidgetFromCapture();
     manager.restoreWidgetVisibility(null, 'default', null);
+    manager.removeWidget();
 
-    expect(widget?.setFocusable).toHaveBeenCalledTimes(3);
-    expect(widget?.setFocusable).toHaveBeenNthCalledWith(1, false);
-    expect(widget?.setFocusable).toHaveBeenNthCalledWith(2, false);
-    expect(widget?.setFocusable).toHaveBeenNthCalledWith(3, false);
+    expect(widget?.setFocusable).not.toHaveBeenCalled();
+    expect(widget?.setIgnoreMouseEvents.mock.calls).toContainEqual([false, { forward: false }]);
+    expect(widget?.setIgnoreMouseEvents.mock.calls).toContainEqual([true, { forward: true }]);
+    expect(widget?.show).not.toHaveBeenCalled();
     expect(widget?.focus).not.toHaveBeenCalled();
   });
 

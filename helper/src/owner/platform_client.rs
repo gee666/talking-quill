@@ -278,6 +278,18 @@ impl std::fmt::Debug for OwnerGatewayBackend {
 }
 
 impl OwnerGatewayBackend {
+    fn native_observability(
+        &self,
+        value: &wire::ObservabilityResult,
+    ) -> TransactionObservabilitySnapshot {
+        let mut result = observability_from_wire(value);
+        result.registered_input.gateway_received =
+            self.event_counters.received.load(Ordering::Relaxed);
+        result.registered_input.v10_notification_accepted =
+            self.event_counters.v10_accepted.load(Ordering::Relaxed);
+        result
+    }
+
     pub fn connect_with(
         connector: Box<dyn OwnerConnector>,
         outbound: Sender<Outbound>,
@@ -623,23 +635,33 @@ fn owner_actor_loop(
                     false
                 }
             }
-            && let Some(budget) = state.reconcile_budget.clone()
         {
-            if budget.cancelled.load(Ordering::Acquire) || Instant::now() >= budget.deadline {
+            if state.reconcile_budget.as_ref().is_some_and(|budget| {
+                budget.cancelled.load(Ordering::Acquire) || Instant::now() >= budget.deadline
+            }) {
+                // An expired caller must never authorize capture on a later connection.
+                // Reconnect disabled with a new deadline so a dead owner cannot strand
+                // the gateway after the last foreground request has completed.
                 fail_closed_actor(&mut state, &published, PlatformError::OwnerUnavailable);
-            } else {
-                let _ = connect_and_reconcile_until(
-                    &mut state,
-                    connector.as_mut(),
-                    &outbound,
-                    &admission_gate,
-                    &event_counters,
-                    &published,
-                    terminal.as_ref(),
-                    budget.deadline,
-                    &budget.cancelled,
-                );
             }
+            let budget = state
+                .reconcile_budget
+                .clone()
+                .unwrap_or_else(|| ReconcileBudget {
+                    deadline: Instant::now() + GATEWAY_COMMAND_TIMEOUT,
+                    cancelled: Arc::clone(&shutdown_requested),
+                });
+            let _ = connect_and_reconcile_until(
+                &mut state,
+                connector.as_mut(),
+                &outbound,
+                &admission_gate,
+                &event_counters,
+                &published,
+                terminal.as_ref(),
+                budget.deadline,
+                &budget.cancelled,
+            );
         }
     }
 }
@@ -1249,14 +1271,7 @@ impl GatewayBackend for OwnerGatewayBackend {
     }
     fn transaction_observability(&self) -> TransactionObservabilitySnapshot {
         match self.call_actor(ActorCommand::Observability) {
-            Ok(ActorValue::Observability(value)) => {
-                let mut result = observability_from_wire(&value);
-                result.registered_input.gateway_received =
-                    self.event_counters.received.load(Ordering::Relaxed);
-                result.registered_input.v10_notification_accepted =
-                    self.event_counters.v10_accepted.load(Ordering::Relaxed);
-                result
-            }
+            Ok(ActorValue::Observability(value)) => self.native_observability(&value),
             _ => TransactionObservabilitySnapshot::default(),
         }
     }
@@ -1270,7 +1285,7 @@ impl GatewayBackend for OwnerGatewayBackend {
         match self.call_actor(ActorCommand::Observability) {
             Ok(ActorValue::Observability(value)) => {
                 crate::gateway::RuntimeOwnerObservabilitySnapshot {
-                    native: observability_from_wire(&value),
+                    native: self.native_observability(&value),
                     owner: owner_observability_from_wire(&value.owner),
                 }
             }

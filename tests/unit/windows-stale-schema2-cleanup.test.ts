@@ -1,12 +1,13 @@
+import { readRustModuleSync } from '../helpers/rust-source';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync('installer/windows-setup/src/windows.rs', 'utf8');
+const source = readRustModuleSync('installer/windows-setup/src/windows.rs');
 const cargo = readFileSync('installer/windows-setup/Cargo.toml', 'utf8');
 const helperCargo = readFileSync('helper/Cargo.toml', 'utf8');
-const helperSource = readFileSync('helper/src/windows_update.rs', 'utf8');
+const helperSource = readRustModuleSync('helper/src/windows_update.rs');
 const testGuard = readFileSync('scripts/run-machine-lock-isolated-tests.mjs', 'utf8');
 const packageJson = readFileSync('package.json', 'utf8');
 const productionBuild = readFileSync('scripts/build-windows-setup.mjs', 'utf8');
@@ -87,7 +88,7 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     expect(source).toContain('const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;');
     expect(source).toContain('integrity_rid >= SECURITY_MANDATORY_HIGH_RID');
     expect(source).toContain(
-      'peer_claims(std::process::id()).map(|claims| (elevated, claims.integrity_rid))',
+      'peer_identity::process_integrity(std::process::id()).map(|integrity| (elevated, integrity))',
     );
     expect(source).toContain('"Direct stale cleanup requires a high elevated token."');
     expect(source).toContain('direct_stale_cleanup_rejects_wrong_arguments_and_token_modes');
@@ -231,21 +232,21 @@ describe('Windows schema-2 stale coordination cleanup', () => {
     );
   });
 
-  it('limits production reclaim to authenticated fresh installs before paths create state', () => {
-    const production = index(
-      'package.manifest.package_mode == "fresh" && requested_action == Some(Action::Install)',
+  it('keeps developer fixture cleanup out of normal installation', () => {
+    const worker = readFileSync('installer/windows-setup/src/windows/worker.rs', 'utf8');
+    expect(worker).toMatch(
+      /#\[cfg\(feature = "stale-schema2-cleanup"\)\]\s*if requested_action == Some\(Action::CleanStaleSchema2\)/u,
     );
-    expect(production).toBeGreaterThan(index('TQPKG2 architecture does not match'));
-    expect(production).toBeLessThan(index('let mut paths = paths()?;'));
-    expect(source).toContain('TQ_STALE_SCHEMA2_AUDIT_PATH is required.');
+    expect(worker.slice(worker.indexOf('let mut image ='))).not.toContain(
+      'reclaim_exact_schema2_orphan',
+    );
+    expect(worker).not.toContain('TQ_STALE_SCHEMA2_AUDIT_PATH');
+    expect(cargo).toContain('stale-schema2-cleanup = []');
   });
 
   it('requires a protected completion audit and full zero proof on every successful branch', () => {
     const reclaimStart = index('fn reclaim_exact_schema2_orphan_v2(');
-    const reclaim = source.slice(
-      reclaimStart,
-      source.indexOf('\nfn reclaim_exact_schema2_orphan_with_audit(', reclaimStart),
-    );
+    const reclaim = source.slice(reclaimStart, source.indexOf('\n}', reclaimStart) + 2);
     expect(reclaim).not.toContain('StaleCleanupAudit::open()');
     expect(reclaim).toContain('audit: &mut StaleCleanupAudit');
     expect(source.match(/let mut audit = StaleCleanupAudit::open\(\)\?;/g)).toHaveLength(1);

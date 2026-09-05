@@ -48,6 +48,7 @@ export class HelperActivationReconciler {
   readonly #options: HelperActivationReconcilerOptions;
   #desired: ActivationConfiguration = Object.freeze({ enabled: false, bindings: [] });
   #blockedByHealth = true;
+  #physicalObservationActive = false;
   #effective: { readonly session: HelperRpcSession; readonly enabled: boolean } | null = null;
   #revision = 0;
   #applied: { readonly session: HelperRpcSession; readonly revision: number } | null = null;
@@ -125,6 +126,7 @@ export class HelperActivationReconciler {
         throw this.#options.createNotRunningError('Native physical observation is unavailable');
       }
       const requested = { enabled: false, bindings: [...this.#desired.bindings] };
+      const revision = this.#revision;
       const effective = await this.#options.request(
         session,
         requested,
@@ -137,12 +139,21 @@ export class HelperActivationReconciler {
         );
       }
       this.#effective = { session, enabled: false };
-      this.#applied = null;
+      this.#physicalObservationActive = true;
+      this.#revision += 1;
+      this.#applied =
+        revision + 1 === this.#revision ? { session, revision: this.#revision } : null;
     });
   }
 
   endPhysicalObservation(): Promise<void> {
-    return this.reconcile(false);
+    return this.#enqueueReconcile(async () => {
+      if (this.#physicalObservationActive) {
+        this.#physicalObservationActive = false;
+        this.#revision += 1;
+      }
+      await this.#reconcile({ ...DEFAULT_RECONCILE_OPTIONS, allowUnavailable: false });
+    });
   }
 
   processUnavailable(session: HelperRpcSession): void {
@@ -203,7 +214,7 @@ export class HelperActivationReconciler {
         }
         this.#effective = { session, enabled: false };
         if (revision !== this.#revision) continue;
-        if (this.#blockedByHealth || !this.#desired.enabled) {
+        if (this.#blockedByHealth || this.#physicalObservationActive || !this.#desired.enabled) {
           this.#applied = { session, revision };
           onAuthoritative();
           return;
@@ -231,7 +242,7 @@ export class HelperActivationReconciler {
       this.#assertFreshSession(session);
       const revision = this.#revision;
       const desired = this.#desired;
-      if (this.#blockedByHealth || !desired.enabled) {
+      if (this.#blockedByHealth || this.#physicalObservationActive || !desired.enabled) {
         this.#effective = { session, enabled: false };
         this.#applied = { session, revision };
         return;
@@ -288,7 +299,7 @@ export class HelperActivationReconciler {
       }
       const desired = this.#desired;
       const requested = {
-        enabled: !this.#blockedByHealth && desired.enabled,
+        enabled: !this.#blockedByHealth && !this.#physicalObservationActive && desired.enabled,
         bindings: [...desired.bindings],
       };
       let effective: HelperResult<'activation.configure'>;

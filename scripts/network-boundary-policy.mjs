@@ -66,7 +66,7 @@ export const APPROVED_NETWORK_BOUNDARIES = Object.freeze({
       'Uses one caller-supplied, strictly validated local named pipe for packaged installed-observation responses; no network endpoint is accepted.',
     tokens: Object.freeze(['node:net']),
   }),
-  'app/src/main/helper/helper-client.ts': Object.freeze({
+  'app/src/main/helper/helper-process.ts': Object.freeze({
     category: 'native-helper-process-only',
     reason:
       'Spawns only the resolved bundled talking-quill-helper executable with fixed stdio IPC.',

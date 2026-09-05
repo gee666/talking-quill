@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActivationTestController } from '../../app/src/main/echo/activation-test-controller';
-import type {
-  HelperNotification,
-  HelperRuntimeObservability,
-} from '../../app/src/shared/helper/protocol';
+import type { HelperNotification } from '../../app/src/shared/helper/protocol';
 import { DEFAULT_SETTINGS } from '../../app/src/shared/schemas/settings';
 import { type Shortcut } from '../../app/src/shared/schemas/shortcut';
 
@@ -11,32 +8,6 @@ const PROMPT_SHORTCUT: Shortcut = {
   modifiers: { ctrl: true, alt: true, shift: true, meta: false },
   keys: ['Q', 'P'],
 };
-function observation(overrides: Partial<HelperRuntimeObservability['registeredInput']> = {}) {
-  return {
-    registeredInput: {
-      hookInstalled: 1,
-      pumpAlive: 1,
-      hcActionCallbacks: 0,
-      physicalCallbacks: 0,
-      physicalCallbacksFiltered: 0,
-      registeredCandidateCallbacks: 0,
-      registeredMatchCallbacks: 0,
-      registeredReleaseCallbacks: 0,
-      callbackChannelAccepted: 0,
-      callbackChannelRejected: 0,
-      adapterDequeued: 0,
-      ownerAdmitted: 0,
-      ownerFlushed: 0,
-      ownerRejected: 0,
-      gatewayReceived: 0,
-      v10NotificationAccepted: 0,
-      electronReceived: 0,
-      observationAccepted: 0,
-      ...overrides,
-    },
-  } as HelperRuntimeObservability;
-}
-
 const WRONG_SHORTCUT: Shortcut = {
   modifiers: { ctrl: true, alt: true, shift: true, meta: false },
   keys: ['R', 'P'],
@@ -295,158 +266,15 @@ describe('ActivationTestController', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('accepts only match plus exact-release proof and advances through dedicated boundaries', async () => {
-    vi.useFakeTimers();
-    const publish = vi.fn();
-    const accepted = vi.fn();
-    let current = observation({ registeredCandidateCallbacks: 1 });
-    const controller = new ActivationTestController({
-      publish,
-      requestCaptureOff: vi.fn(),
-      beginPhysicalObservation: () => Promise.resolve(observation()),
-      samplePhysicalObservation: () => Promise.resolve(current),
-      endPhysicalObservation: () => Promise.resolve(),
-      onObservationAccepted: accepted,
-    });
-    controller.start(42, () => vi.fn(), null);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(controller.state.phase).toBe('waiting');
-
-    current = observation({
-      hcActionCallbacks: 4,
-      physicalCallbacks: 4,
-      registeredCandidateCallbacks: 2,
-      registeredMatchCallbacks: 1,
-      registeredReleaseCallbacks: 1,
-      callbackChannelAccepted: 1,
-      adapterDequeued: 1,
-      ownerAdmitted: 1,
-      ownerFlushed: 1,
-      gatewayReceived: 1,
-      v10NotificationAccepted: 1,
-      electronReceived: 1,
-    });
-    await vi.advanceTimersByTimeAsync(100);
-    expect(controller.state).toMatchObject({
-      phase: 'observed',
-      furthestBoundary: 'electron-received',
-    });
-    expect(accepted).toHaveBeenCalledOnce();
-  });
-
-  it('ignores activation and transition chords until a post-baseline observation traverses Electron', async () => {
-    vi.useFakeTimers();
-    let resolveBaseline!: (value: HelperRuntimeObservability) => void;
-    const baselinePromise = new Promise<HelperRuntimeObservability>((resolve) => {
-      resolveBaseline = resolve;
-    });
-    let current = observation();
-    const controller = new ActivationTestController({
-      publish: vi.fn(),
-      requestCaptureOff: vi.fn(),
-      beginPhysicalObservation: () => baselinePromise,
-      samplePhysicalObservation: () => Promise.resolve(current),
-      endPhysicalObservation: () => Promise.resolve(),
-    });
-    controller.start(42, () => vi.fn(), null);
-
-    controller.accept(complete(0), profiles());
-    expect(controller.state.phase).toBe('waiting');
-
-    const transitionChord = observation({
-      registeredCandidateCallbacks: 1,
-      registeredMatchCallbacks: 1,
-      registeredReleaseCallbacks: 1,
-      callbackChannelAccepted: 1,
-      adapterDequeued: 1,
-      ownerAdmitted: 1,
-      ownerFlushed: 1,
-      gatewayReceived: 1,
-      v10NotificationAccepted: 1,
-      electronReceived: 1,
-    });
-    current = transitionChord;
-    resolveBaseline(transitionChord);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(controller.state.phase).toBe('waiting');
-  });
-
-  it.each([
-    [
-      'callback rejection',
-      {
-        registeredCandidateCallbacks: 1,
-        registeredMatchCallbacks: 1,
-        registeredReleaseCallbacks: 1,
-        callbackChannelRejected: 1,
-      },
-    ],
-    [
-      'owner rejection',
-      {
-        registeredCandidateCallbacks: 1,
-        registeredMatchCallbacks: 1,
-        registeredReleaseCallbacks: 1,
-        callbackChannelAccepted: 1,
-        adapterDequeued: 1,
-        ownerRejected: 1,
-      },
-    ],
-    [
-      'gateway rejection',
-      {
-        registeredCandidateCallbacks: 1,
-        registeredMatchCallbacks: 1,
-        registeredReleaseCallbacks: 1,
-        callbackChannelAccepted: 1,
-        adapterDequeued: 1,
-        ownerAdmitted: 1,
-        ownerFlushed: 1,
-        gatewayReceived: 1,
-      },
-    ],
-    [
-      'notification has not reached Electron',
-      {
-        registeredCandidateCallbacks: 1,
-        registeredMatchCallbacks: 1,
-        registeredReleaseCallbacks: 1,
-        callbackChannelAccepted: 1,
-        adapterDequeued: 1,
-        ownerAdmitted: 1,
-        ownerFlushed: 1,
-        gatewayReceived: 1,
-        v10NotificationAccepted: 1,
-      },
-    ],
-  ] as const)('does not succeed after %s', async (_name, counters) => {
-    vi.useFakeTimers();
-    const accepted = vi.fn();
-    const controller = new ActivationTestController({
-      publish: vi.fn(),
-      requestCaptureOff: vi.fn(),
-      beginPhysicalObservation: () => Promise.resolve(observation()),
-      samplePhysicalObservation: () => Promise.resolve(observation(counters)),
-      endPhysicalObservation: () => Promise.resolve(),
-      onObservationAccepted: accepted,
-    });
-    controller.start(42, () => vi.fn(), null);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(controller.state.phase).toBe('waiting');
-    expect(accepted).not.toHaveBeenCalled();
-  });
-
-  it('fails immediately when passive observation is not supported by the platform', () => {
+  it('fails immediately when shortcut testing is not supported by the platform', () => {
     vi.useFakeTimers();
     const publish = vi.fn();
     const requestCaptureOff = vi.fn();
-    const beginPhysicalObservation = vi.fn();
     const onDestroyed = vi.fn(() => vi.fn());
     const controller = new ActivationTestController({
       publish,
       requestCaptureOff,
-      beginPhysicalObservation,
-      physicalObservationUnavailable: true,
+      platformUnavailable: true,
     });
 
     expect(controller.start(42, onDestroyed, null)).toMatchObject({
@@ -455,7 +283,6 @@ describe('ActivationTestController', () => {
       unavailableReason: 'platform-unavailable',
     });
     expect(onDestroyed).not.toHaveBeenCalled();
-    expect(beginPhysicalObservation).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 

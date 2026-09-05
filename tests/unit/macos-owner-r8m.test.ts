@@ -1,3 +1,4 @@
+import { readRustModule } from '../helpers/rust-source';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
@@ -325,7 +326,7 @@ describe('macOS R8-M installed owner', () => {
     const [coordinator, gateway, owner, schema] = await Promise.all([
       readFile('app/src/main/info/macos-owner-update-coordinator.ts', 'utf8'),
       readFile('helper/src/owner/platform_client.rs', 'utf8'),
-      readFile('helper/keyboard-owner/src/protocol_server.rs', 'utf8'),
+      readRustModule('helper/keyboard-owner/src/protocol_server.rs'),
       readFile('app/src/shared/helper/protocol.ts', 'utf8'),
     ]);
     expect(gateway).toContain('fn maintenance_digest');
@@ -500,7 +501,7 @@ describe('macOS R8-M installed owner', () => {
     expect(config).toContain('clear_maintenance_record_without_ui');
     expect(adapter).toContain('MacosMaintenanceRecord::in_progress');
     expect(adapter).toContain('_request.owner_handoff()');
-    const ownerServer = await readFile('helper/keyboard-owner/src/protocol_server.rs', 'utf8');
+    const ownerServer = await readRustModule('helper/keyboard-owner/src/protocol_server.rs');
     expect(ownerServer).toContain('Bytes32::random()');
     expect(record).toContain('owner_handoff');
     expect(record).toContain('MACOS_MAINTENANCE_RECORD_BYTES');

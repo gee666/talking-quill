@@ -17,6 +17,9 @@ import {
   fsyncSync,
   ftruncateSync,
   writeSync,
+  readdirSync,
+  unlinkSync,
+  rmdirSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { parseNativeArchitectures } from './native-architecture.mjs';
@@ -247,6 +250,14 @@ function publishSnapshot(source, lock, built) {
   return Object.freeze({ ...identities, source, provenancePath, cargoLock: lock });
 }
 
+function snapshotEnvironment(path) {
+  return sanitizedSubprocessEnvironment(process.env, {
+    TQ_NATIVE_SNAPSHOT_PATH: path,
+    // PowerShell needs PATHEXT even for an absolute executable path.
+    PATHEXT: process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD',
+  });
+}
+
 function protectSnapshot(path) {
   const script = String.raw`
 $ErrorActionPreference='Stop'
@@ -273,12 +284,53 @@ foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.A
       windowsHide: true,
       timeout: 30_000,
       maxBuffer: 16 * 1024,
-      env: { ...process.env, TQ_NATIVE_SNAPSHOT_PATH: path },
+      env: snapshotEnvironment(path),
     },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
     throw subprocessFailure('Reviewed native-chain protected publication', result);
   }
+}
+
+function removeProtectedKeyReceipt(rootPath, descriptorPath) {
+  const names = [basename(descriptorPath), roles.keyTool].sort();
+  const entries = readdirSync(rootPath).sort();
+  if (JSON.stringify(entries) !== JSON.stringify(names)) {
+    throw new Error('Protected key receipt has unexpected entries');
+  }
+  // The key is already gone and the retained executable has finished. Grant only
+  // deletion and attribute access required by Windows file removal. The receipt
+  // contents remain non-writable until they are removed.
+  const script = String.raw`
+$ErrorActionPreference='Stop'
+$root=$env:TQ_NATIVE_SNAPSHOT_PATH
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$items=@(Get-Item -LiteralPath $root)+@(Get-ChildItem -LiteralPath $root -Force)
+foreach($item in $items){
+  if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}
+  & "$env:SystemRoot\System32\icacls.exe" $item.FullName '/grant' "*$($sid):(DE,WA)" | Out-Null
+  if($LASTEXITCODE-ne 0){throw 'receipt deletion ACL failed'}
+}
+`;
+  const result = spawnSync(
+    resolve(
+      process.env.SystemRoot ?? 'C:/Windows',
+      'System32/WindowsPowerShell/v1.0/powershell.exe',
+    ),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30_000,
+      maxBuffer: 16 * 1024,
+      env: snapshotEnvironment(rootPath),
+    },
+  );
+  if (result.error !== undefined || result.signal !== null || result.status !== 0) {
+    throw subprocessFailure('Protected key receipt retirement', result);
+  }
+  for (const name of names) unlinkSync(resolve(rootPath, name));
+  rmdirSync(rootPath);
 }
 
 export function generateProtectedWindowsUpdateKey(keyPath) {
@@ -317,7 +369,7 @@ export function deleteProtectedWindowsUpdateKey(descriptorPath) {
       throw new Error('Native key deleter returned an invalid result');
   }
   if (existsSync(descriptor.key.path)) throw new Error('Protected update key cleanup failed');
-  rmSync(cleanupRoot, { recursive: true, force: false });
+  removeProtectedKeyReceipt(cleanupRoot, descriptorPath);
   return { result: 'deleted', keyPath: descriptor.key.path };
 }
 
@@ -572,7 +624,7 @@ foreach($item in $items){
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30_000,
-      env: { ...process.env, TQ_NATIVE_SNAPSHOT_PATH: path },
+      env: snapshotEnvironment(path),
     },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {

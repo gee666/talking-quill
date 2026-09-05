@@ -1,8 +1,26 @@
 import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptionsWithoutStdio,
-} from 'node:child_process';
+  defaultSpawnHelper,
+  waitForClose,
+  waitForOutcomeWithin,
+  waitForValueWithin,
+  waitForCloseWithin,
+} from './helper-process';
+import {
+  readinessFromOwner,
+  hookTransportReady,
+  permissionsAreGranted,
+  classifyLaunchError,
+  classifyNativeLaunchFailure,
+  nativePasteFailureCategory,
+  readinessReasonFromNativeLaunchFailure,
+  safeChildExitDiagnostic,
+  isOwnerTransition,
+  shouldRestartAfterFailure,
+  ownerReasonFromRpcCode,
+} from './helper-readiness';
+import { HelperClientError } from './helper-client-error';
+export { HelperClientError } from './helper-client-error';
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from './helper-process';
 import { dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { StringDecoder } from 'node:string_decoder';
@@ -162,19 +180,6 @@ export interface HelperClientOptions {
   readonly spawnHelper?: SpawnHelper;
 }
 
-export class HelperClientError extends Error {
-  readonly code:
-    'not-running' | 'request-capacity' | 'request-timeout' | 'rpc-error' | 'transport-error';
-  readonly rpcCode: number | null;
-
-  constructor(code: HelperClientError['code'], message: string, rpcCode: number | null = null) {
-    super(message);
-    this.name = 'HelperClientError';
-    this.code = code;
-    this.rpcCode = rpcCode;
-  }
-}
-
 export class HelperClient {
   readonly #options: HelperClientOptions;
   readonly #spawnHelper: SpawnHelper;
@@ -199,6 +204,7 @@ export class HelperClient {
   #stopTerminalFault: Error | null = null;
   #restartTimer: NodeJS.Timeout | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
+  #missingOwnerHealthChecks = 0;
   #plannedExit: {
     readonly reason: HelperReadinessReason;
     readonly restart: boolean;
@@ -698,6 +704,7 @@ export class HelperClient {
       );
       return permissions;
     }
+    this.#missingOwnerHealthChecks = 0;
     this.#sessionAuthoritative = true;
     const readiness = readinessFromOwner(
       this.#readiness.helperVersion,
@@ -770,8 +777,16 @@ export class HelperClient {
         permissions,
       });
       if (reason === 'owner-auth-failed') this.#terminateCurrent(reason, false);
+      else if (++this.#missingOwnerHealthChecks >= 2) {
+        // A cancelled native connector cannot recover inside the same gateway.
+        // Give an ordinary reconnect one health interval, then restart the helper
+        // and restore the desired bindings through disabled-first reconciliation.
+        this.#missingOwnerHealthChecks = 0;
+        this.#terminateCurrent(reason, true);
+      }
       return;
     }
+    this.#missingOwnerHealthChecks = 0;
     if (previous === null || (previous.buildId !== '' && owner.buildId !== previous.buildId)) {
       this.#pendingActivationPolicy = 'drop';
       this.#terminateCurrent('owner-degraded', true);
@@ -1269,6 +1284,8 @@ export class HelperClient {
       }
       const launchFailure = classifyNativeLaunchFailure(line);
       if (launchFailure !== null) this.#nativeLaunchFailure ??= launchFailure;
+      const pasteFailure = nativePasteFailureCategory(line);
+      if (pasteFailure !== null) console.error('Native paste failure:', pasteFailure);
       stderrLine = '';
       discardOversizedLine = false;
     };
@@ -1302,6 +1319,18 @@ export class HelperClient {
       if (this.#child === child && this.#rpcSession === session) {
         this.#terminateCurrent('spawn-failed', true);
       }
+    });
+    child.once('exit', () => {
+      // A descendant can retain an inherited pipe after the helper has died.
+      // Give trailing diagnostics a short drain window, then close our pipe
+      // endpoints so the child close event can complete supervision/restart.
+      const drainTimer = setTimeout(() => {
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }, STARTUP_STDERR_DRAIN_MS);
+      drainTimer.unref();
+      child.once('close', () => clearTimeout(drainTimer));
     });
     child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
       stderrDrain.complete();
@@ -1802,277 +1831,4 @@ export class HelperClient {
 
 function saturatingSafeIncrement(value: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, value + 1);
-}
-
-function defaultSpawnHelper(
-  executablePath: string,
-  options: SpawnOptionsWithoutStdio,
-): ChildProcessWithoutNullStreams {
-  return spawn(executablePath, [], {
-    ...options,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-}
-
-function readinessFromOwner(
-  helperVersion: string | null,
-  hookStatus: HelperInitializeResult['hookStatus'],
-  permissions: HelperPermissions,
-  owner: HelperKeyboardOwnerSnapshot,
-  captureDisabled: boolean,
-  runtimeRollbackActive: boolean,
-): HelperReadiness {
-  const unavailable = (reason: HelperReadinessReason, incompatible = false): HelperReadiness => ({
-    status: incompatible ? 'incompatible' : 'unavailable',
-    reason,
-    helperVersion,
-    permissions,
-  });
-  if (runtimeRollbackActive) return unavailable('owner-rollback');
-  if (!owner.authenticated || owner.leaseEpoch === null) {
-    return unavailable(owner.state === 'unavailable' ? 'owner-missing' : 'owner-auth-failed');
-  }
-  if (owner.state === 'draining') return unavailable('owner-draining');
-  if (owner.state === 'maintenance') return unavailable('owner-maintenance');
-  if (owner.state === 'degraded') return unavailable('owner-degraded');
-  if (owner.state === 'unavailable') return unavailable('owner-missing');
-  if (owner.state === 'idle') return unavailable('owner-busy');
-  if (owner.state === 'safe_disabled' || captureDisabled) return unavailable('capture-disabled');
-
-  return readinessFromHandshake(helperVersion, hookStatus, permissions);
-}
-
-function readinessFromHandshake(
-  helperVersion: string | null,
-  hookStatus: HelperInitializeResult['hookStatus'],
-  permissions: HelperPermissions,
-): HelperReadiness {
-  if (permissions.inputMonitoring === 'denied') {
-    return {
-      status: 'permission-required',
-      reason: 'input-monitoring-required',
-      helperVersion,
-      permissions,
-    };
-  }
-  if (permissions.accessibility === 'denied') {
-    return {
-      status: 'permission-required',
-      reason: 'accessibility-required',
-      helperVersion,
-      permissions,
-    };
-  }
-  if (permissions.eventPost === 'denied') {
-    return {
-      status: 'permission-required',
-      reason: 'event-post-required',
-      helperVersion,
-      permissions,
-    };
-  }
-  if (!hookTransportReady(hookStatus)) {
-    return { status: 'unavailable', reason: 'hook-fault', helperVersion, permissions };
-  }
-  // `ready` means the authenticated transport, owner protocol, hook
-  // installation, and message pump are available. Physical callback delivery
-  // is reported independently by hookStatus/registered-input observability.
-  return { status: 'ready', reason: null, helperVersion, permissions };
-}
-
-function hookTransportReady(hookStatus: HelperInitializeResult['hookStatus']): boolean {
-  return hookStatus === 'installed_unobserved' || hookStatus === 'physical_observed';
-}
-
-function permissionsAreGranted(permissions: HelperPermissions): boolean {
-  return Object.values(permissions).every(
-    (permission) => permission === 'granted' || permission === 'not_applicable',
-  );
-}
-
-function classifyLaunchError(
-  error: unknown,
-  ownerFallback: HelperReadinessReason | null = null,
-): HelperReadinessReason {
-  if (error instanceof HelperClientError) {
-    if (error.code === 'request-timeout') return 'handshake-timeout';
-    if (error.code === 'rpc-error') {
-      const ownerReason = ownerReasonFromRpcCode(error.rpcCode);
-      if (ownerReason !== null) return ownerReason;
-      if (error.rpcCode === -32_001) return 'protocol-mismatch';
-      if (error.message.includes('owner association changed')) return 'owner-degraded';
-      if (error.message.includes('incompatible')) return ownerFallback ?? 'protocol-mismatch';
-      return ownerFallback ?? 'hook-fault';
-    }
-  }
-  return ownerFallback ?? 'malformed-response';
-}
-
-function classifyNativeLaunchFailure(line: string): string | null {
-  const hookInstall =
-    /^keyboard-owner hook install unavailable: (module|access_denied|module_unavailable|native_unavailable)$/u.exec(
-      line,
-    );
-  if (hookInstall?.[1] !== undefined) return `hook-install-${hookInstall[1]}`;
-  const safeConnectFailures = new Map([
-    ['talking-quill-helper: keyboard owner endpoint is unavailable', 'owner-unavailable'],
-    ['talking-quill-helper: keyboard owner authentication failed', 'owner-authentication-failed'],
-    ['talking-quill-helper: keyboard owner is incompatible', 'owner-incompatible'],
-    ['talking-quill-helper: keyboard owner is busy or draining', 'owner-busy'],
-  ]);
-  return safeConnectFailures.get(line) ?? null;
-}
-
-function readinessReasonFromNativeLaunchFailure(
-  failure: string | null,
-): HelperReadinessReason | null {
-  if (failure === null) return null;
-  if (failure === 'owner-singleton-collision') return 'owner-singleton-collision';
-  if (failure === 'owner-incompatible') return 'owner-incompatible';
-  if (failure === 'owner-authentication-failed') return 'owner-auth-failed';
-  if (failure === 'owner-busy') return 'owner-busy';
-  if (failure === 'owner-unavailable') {
-    return 'owner-missing';
-  }
-  if (failure.startsWith('hook-install-')) return 'hook-fault';
-  return null;
-}
-
-function safeChildExitDiagnostic(code: number | null, signal: NodeJS.Signals | null): string {
-  if (code !== null && Number.isSafeInteger(code)) return `helper-exit-code-${String(code)}`;
-  if (signal !== null && /^SIG[A-Z0-9]+$/u.test(signal)) {
-    return `helper-exit-signal-${signal.toLowerCase()}`;
-  }
-  return 'helper-exit-unknown';
-}
-
-function isOwnerTransition(reason: HelperReadinessReason): boolean {
-  return reason === 'owner-busy' || reason === 'owner-draining';
-}
-
-function shouldRestartAfterFailure(reason: HelperReadinessReason): boolean {
-  // These faults identify incompatible local binaries or an unsafe protocol stream.
-  // Relaunching the same binaries cannot repair them and causes visible process churn.
-  // All remaining reasons retain bounded transient supervision.
-  return ![
-    'protocol-mismatch',
-    'malformed-response',
-    'owner-incompatible',
-    'owner-auth-failed',
-    'owner-security-fault',
-    'owner-rollback',
-    'owner-indeterminate',
-    'owner-singleton-collision',
-  ].includes(reason);
-}
-
-function ownerReasonFromRpcCode(rpcCode: number | null): HelperReadinessReason | null {
-  switch (rpcCode) {
-    case -32_005:
-      return 'owner-auth-failed';
-    case -32_006:
-      return 'owner-incompatible';
-    case -32_007:
-      return 'owner-busy';
-    case -32_008:
-      return 'owner-draining';
-    case -32_009:
-      return 'owner-rollback';
-    case -32_010:
-      return 'owner-security-fault';
-    case -32_011:
-      return 'owner-indeterminate';
-    case -32_012:
-      return 'owner-singleton-collision';
-    default:
-      return null;
-  }
-}
-
-interface CloseWaiter {
-  readonly promise: Promise<void>;
-  readonly cancel: () => void;
-}
-
-function waitForClose(child: ChildProcessWithoutNullStreams): CloseWaiter {
-  let settled = false;
-  let resolveClose: () => void = () => undefined;
-  const onClose = (): void => {
-    settled = true;
-    resolveClose();
-  };
-  const promise = new Promise<void>((resolve) => {
-    resolveClose = resolve;
-    child.once('close', onClose);
-  });
-  return {
-    promise,
-    cancel: () => {
-      if (!settled) child.removeListener('close', onClose);
-    },
-  };
-}
-
-async function waitForOutcomeWithin(
-  operation: Promise<void>,
-  milliseconds: number,
-): Promise<
-  | { readonly completed: false; readonly error: null }
-  | { readonly completed: true; readonly error: unknown }
-> {
-  let resolveTimeout: (value: { readonly completed: false; readonly error: null }) => void = () =>
-    undefined;
-  const timeout = new Promise<{ readonly completed: false; readonly error: null }>((resolve) => {
-    resolveTimeout = resolve;
-  });
-  const timer = setTimeout(
-    () => resolveTimeout({ completed: false, error: null }),
-    Math.max(0, milliseconds),
-  );
-  timer.unref();
-  try {
-    return await Promise.race([
-      operation.then(
-        () => ({ completed: true as const, error: null }),
-        (error: unknown) => ({ completed: true as const, error }),
-      ),
-      timeout,
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function waitForValueWithin<Value>(
-  operation: Promise<Value>,
-  milliseconds: number,
-): Promise<{ readonly completed: true; readonly value: Value } | { readonly completed: false }> {
-  let resolveTimeout: (value: { readonly completed: false }) => void = () => undefined;
-  const timeout = new Promise<{ readonly completed: false }>((resolve) => {
-    resolveTimeout = resolve;
-  });
-  const timer = setTimeout(() => resolveTimeout({ completed: false }), milliseconds);
-  timer.unref();
-  try {
-    return await Promise.race([
-      operation.then((value) => ({ completed: true as const, value })),
-      timeout,
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function waitForCloseWithin(close: Promise<void>, milliseconds: number): Promise<boolean> {
-  let resolveTimeout: (value: boolean) => void = () => undefined;
-  const timeout = new Promise<boolean>((resolve) => {
-    resolveTimeout = resolve;
-  });
-  const timer = setTimeout(() => resolveTimeout(false), milliseconds);
-  timer.unref();
-  try {
-    return await Promise.race([close.then(() => true), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
 }

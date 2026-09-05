@@ -1749,7 +1749,9 @@ function deleteExactRegistry(namespaceId, expected) {
     encoding: 'utf8',
     windowsHide: true,
   });
-  if (result.status !== 0) throw new Error('native exact test registry deletion failed');
+  if (result.status !== 0) {
+    throw new Error(`native exact test registry deletion failed: ${result.stderr.trim()}`);
+  }
 }
 
 function registryNamespaceInventory() {
@@ -1978,7 +1980,11 @@ function powershellText(command, environment = {}) {
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', command],
     {
-      env: { ...process.env, ...environment },
+      env: Object.fromEntries(
+        Object.entries({ ...process.env, ...environment }).filter(
+          ([name]) => name.toUpperCase() !== 'PSMODULEPATH',
+        ),
+      ),
       encoding: 'utf8',
       windowsHide: true,
     },

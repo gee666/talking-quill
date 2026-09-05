@@ -329,7 +329,8 @@ function closeServer(server: Server): Promise<void> {
 
 function assertShortContent(text: string): void {
   const normalized = normalize(text);
-  for (const phrase of ['talking quill', 'private', 'local']) {
+  // The committed fixture predates the product rename; its bytes still say Magic Echo.
+  for (const phrase of ['magic echo', 'private', 'local']) {
     if (!normalized.includes(phrase)) {
       throw new Error(`Short transcript omitted ${phrase}: ${text}`);
     }

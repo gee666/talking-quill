@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "windows-native-test-input"), allow(dead_code))]
-
 use std::ptr::null_mut;
 
 #[cfg(not(test))]
@@ -298,7 +296,7 @@ pub(super) fn inject_paste_initial_if(
     Some(paste_injection_outcome(send_once(&plan), markers))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "windows-native-test-input"))]
 fn inject_paste_initial_with(
     markers: InjectionMarkers,
     mut submit: impl FnMut(&[INPUT]) -> usize,
@@ -315,7 +313,7 @@ fn paste_injection_outcome(accepted: usize, markers: InjectionMarkers) -> PasteI
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "windows-native-test-input"))]
 pub(super) fn test_paste_initial_outcome(
     markers: InjectionMarkers,
     accepted: usize,

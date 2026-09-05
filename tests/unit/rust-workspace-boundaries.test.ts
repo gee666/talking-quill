@@ -458,6 +458,7 @@ describe('Rust A3 package and compile-forbidden boundaries', () => {
     expectDependencies('talking-quill-keyboard-owner', [
       policy('core-foundation-sys', '=0.8.7', { target: macos }),
       policy('crossbeam-channel', '=0.5.16'),
+      policy('getrandom', '=0.4.3', { kind: 'dev' }),
       policy('getrandom', '=0.4.3', { target: macos }),
       policy('hmac', '=0.13.0', { features: ['zeroize'] }),
       policy('serde', '=1.0.229', { features: ['derive'] }),

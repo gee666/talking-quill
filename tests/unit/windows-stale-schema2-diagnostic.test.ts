@@ -1,8 +1,9 @@
+import { readRustModuleSync } from '../helpers/rust-source';
 import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync('installer/windows-setup/src/windows.rs', 'utf8');
+const source = readRustModuleSync('installer/windows-setup/src/windows.rs');
 const rustPackage = readFileSync('installer/windows-setup/src/package.rs', 'utf8');
 const productionBuild = readFileSync('scripts/build-windows-setup.mjs', 'utf8');
 const cleanupBuild = readFileSync('scripts/build-windows-stale-schema2-cleanup-setup.mjs', 'utf8');

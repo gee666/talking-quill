@@ -649,6 +649,39 @@ describe('supervised native HelperClient', () => {
     await controlled.client.stop();
   });
 
+  it('recycles a gateway after two missing-owner health checks', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const controlled = createControlledClient();
+    try {
+      await controlled.client.start();
+      for (let check = 0; check < 2; check += 1) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        controlled.emitResult(latestRequest(controlled.requests, 'permissions.get').id, {
+          accessibility: 'not_applicable',
+          inputMonitoring: 'not_applicable',
+          eventPost: 'not_applicable',
+        });
+        controlled.emitResult(latestRequest(controlled.requests, 'ping').id, {
+          ok: true,
+          hookStatus: 'unavailable',
+          keyboardOwner: unavailableOwnerSnapshot(),
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      await vi.waitFor(() =>
+        expect(controlled.requests.some(({ method }) => method === 'shutdown')).toBe(true),
+      );
+      controlled.completeShutdown();
+      controlled.closeSuccessfully();
+      await controlled.client.stop();
+    } finally {
+      controlled.close();
+      await controlled.client.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['owner-instance-mismatch', 'owner-epoch-mismatch'] as const)(
     'rejects a ping %s before owner state can become authoritative',
     async (scenario) => {
@@ -1052,7 +1085,7 @@ describe('supervised native HelperClient', () => {
   });
 
   it('launches the production helper without runtime-selection arguments', () => {
-    const source = readFileSync('app/src/main/helper/helper-client.ts', 'utf8');
+    const source = readFileSync('app/src/main/helper/helper-process.ts', 'utf8');
     expect(source).toContain('return spawn(executablePath, [], {');
     expect(source).not.toContain('diagnosticCapabilityId');
     expect(source).not.toContain('launchReadinessCorrelation');
@@ -1575,6 +1608,38 @@ describe('supervised native HelperClient', () => {
       TALKING_QUILL_DISABLE_ACTIVATION_CAPTURE: '1',
     });
   });
+
+  it.runIf(process.platform === 'win32')(
+    'keeps passive observation disabled across health checks until explicitly stopped',
+    async () => {
+      const requests: { readonly id: number; readonly method: string; readonly params: unknown }[] =
+        [];
+      const client = new HelperClient({
+        executablePath: process.execPath,
+        expectedHelperVersion: '1.0.0',
+        platform: 'win32',
+        architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
+        nativeDrainEnvelopeMs: 500,
+        spawnHelper: () => createAutomaticChild(requests),
+      });
+      clients.push(client);
+      await client.start();
+      await client.configureActivation(true, [shortcutFromLegacyActivation('X', false)]);
+      vi.spyOn(client, 'getRuntimeObservability').mockResolvedValue(
+        {} as HelperRuntimeObservability,
+      );
+      await client.beginPhysicalObservation();
+      const baseline = requests.length;
+      await client.getPermissions();
+      await client.getPermissions();
+      expect(client.activationCaptureEnabled).toBe(false);
+      expect(
+        requests.slice(baseline).filter(({ method }) => method === 'activation.configure'),
+      ).toEqual([]);
+      await client.endPhysicalObservation();
+      expect(client.activationCaptureEnabled).toBe(true);
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'confirms neutral passive configuration before taking the observation baseline',

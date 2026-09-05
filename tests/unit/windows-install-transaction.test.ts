@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readRustModule } from '../helpers/rust-source';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -6,7 +6,7 @@ const setup = resolve('installer/windows-setup/src/windows.rs');
 
 describe('native Windows install transaction contract', () => {
   it('keeps write-ahead recovery in the elevated worker', async () => {
-    const source = (await readFile(setup, 'utf8')).replace(/\s+/gu, ' ');
+    const source = (await readRustModule(setup)).replace(/\s+/gu, ' ');
     const stagingRecord = source.indexOf('write_transaction(paths, "staging"');
     const extraction = source.indexOf('package::extract_file', stagingRecord);
     const preparedRecord = source.indexOf('write_transaction(paths, "prepared"', extraction);
@@ -28,7 +28,7 @@ describe('native Windows install transaction contract', () => {
   });
 
   it('recovers each durable phase without an interpreter', async () => {
-    const source = await readFile(setup, 'utf8');
+    const source = await readRustModule(setup);
     for (const phase of ['staging', 'prepared', 'committed', 'uninstalling']) {
       expect(source).toContain(`"${phase}"`);
     }

@@ -258,20 +258,23 @@ describe('Echo session reducer', () => {
     },
   );
 
-  it('reports empty transcription as an error with guaranteed teardown', () => {
-    const transcribing = {
-      ...arming(),
-      phase: 'transcribing' as const,
-      dictationMode: 'quick' as const,
-    };
-    const result = reduceEchoSession(transcribing, {
-      type: 'transcribed',
-      text: '  ',
-      smart: false,
-    });
-    expect(result.state).toMatchObject({ phase: 'error', message: 'No speech was detected.' });
-    expect(result.effects).toEqual([{ type: 'teardown' }]);
-  });
+  it.each(['  ', '[inaudible]', '[INAUDIBLE].', '[silence] [inaudible]'])(
+    'rejects empty or unintelligible transcription %s with guaranteed teardown',
+    (text) => {
+      const transcribing = {
+        ...arming(),
+        phase: 'transcribing' as const,
+        dictationMode: 'quick' as const,
+      };
+      const result = reduceEchoSession(transcribing, {
+        type: 'transcribed',
+        text,
+        smart: false,
+      });
+      expect(result.state).toMatchObject({ phase: 'error', message: 'No speech was detected.' });
+      expect(result.effects).toEqual([{ type: 'teardown' }]);
+    },
+  );
 
   it.each(['user-cancel', 'shutdown', 'target-lost'] as const)(
     'keeps committed insertion authoritative across late %s',

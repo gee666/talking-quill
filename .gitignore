@@ -15,6 +15,8 @@ coverage/
 # Native build output
 helper/target/
 helper/**/target/
+# Foreground-target source code is not a Cargo output directory.
+!helper/keyboard-owner/src/platform/windows/target/
 installer/**/target/
 app/native/
 

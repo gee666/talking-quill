@@ -1,3 +1,4 @@
+import { readRustModule } from '../helpers/rust-source';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
@@ -60,7 +61,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
   });
 
   it('authenticates the native medium controller and elevated worker', async () => {
-    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const setup = await readRustModule('installer/windows-setup/src/windows.rs');
     expect(setup).toContain('ShellExecuteExW');
     expect(setup).toContain('GetNamedPipeClientProcessId');
     expect(setup).toContain('GetNamedPipeServerProcessId');
@@ -70,7 +71,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
   });
 
   it('reports installed and maintenance uninstall synchronously before deferred mapped-image cleanup', async () => {
-    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const setup = await readRustModule('installer/windows-setup/src/windows.rs');
     expect(setup).toContain('wait_relocated_status');
     expect(setup).toContain('uninstall-quarantined');
     expect(setup).toContain('arm_mapped_image_deletion');
@@ -105,7 +106,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
   });
 
   it('recovers through authenticated installed entry points before arming a new action', async () => {
-    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const setup = await readRustModule('installer/windows-setup/src/windows.rs');
     const authenticate = setup.indexOf('WorkerChannel::connect_and_authenticate(&current, None)');
     const recover = setup.indexOf('recover_with_adapter(&paths, &system)?;', authenticate);
     const arm = setup.indexOf('write_transaction(&paths, "uninstall-armed"', recover);
@@ -120,7 +121,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
 
   it('retains bounded visible update recovery until the active generation succeeds', async () => {
     const [updater, workflow] = await Promise.all([
-      readFile('helper/src/windows_update.rs', 'utf8'),
+      readRustModule('helper/src/windows_update.rs'),
       readFile('.github/workflows/release-unsigned.yml', 'utf8'),
     ]);
     expect(updater).toContain('CurrentVersion\\Run"');
@@ -154,7 +155,7 @@ describe('Windows gateway and owner lifecycle contract', () => {
   });
 
   it('keeps durable install recovery inside the native worker', async () => {
-    const setup = await readFile('installer/windows-setup/src/windows.rs', 'utf8');
+    const setup = await readRustModule('installer/windows-setup/src/windows.rs');
     for (const phase of [
       'staging',
       'prepared',

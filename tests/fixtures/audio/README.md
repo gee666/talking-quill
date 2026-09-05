@@ -30,7 +30,7 @@ bit-exact PCM16. The complete FFmpeg filter graph is constructed deterministical
 
 Exact text:
 
-> Talking Quill keeps every spoken word private and local. Clear speech becomes useful text.
+> Magic Echo keeps every spoken word private and local. Clear speech becomes useful text.
 
 The output is padded to exactly 8 seconds.
 
