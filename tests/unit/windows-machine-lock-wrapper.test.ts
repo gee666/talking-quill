@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sanitizedSubprocessEnvironment } from '../../scripts/environment-policy.mjs';
 
 const run = process.platform === 'win32' ? describe : describe.skip;
 const wrapper = resolve('scripts', 'run-machine-lock-isolated-tests.mjs');
@@ -1047,7 +1048,7 @@ async function leaveSchema4LogsPreservedRecord(
       '(Get-Acl -LiteralPath $env:TQ_EVIDENCE_ROOT -ErrorAction Stop).Sddl',
     ],
     {
-      env: { ...process.env, TQ_EVIDENCE_ROOT: evidenceRoot },
+      env: sanitizedSubprocessEnvironment(process.env, { TQ_EVIDENCE_ROOT: evidenceRoot }),
       encoding: 'utf8',
       windowsHide: true,
     },

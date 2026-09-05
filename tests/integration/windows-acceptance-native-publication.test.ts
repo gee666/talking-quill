@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sanitizedSubprocessEnvironment } from '../../scripts/environment-policy.mjs';
 import {
   cleanupAcceptanceNative,
   cleanupAcceptanceNativeDescriptor,
@@ -180,7 +181,11 @@ function readFileSyncAcl(path: string): string {
   const result = spawnSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', '(Get-Acl -LiteralPath $env:TQ_TEST_ACL).Sddl'],
-    { env: { ...process.env, TQ_TEST_ACL: path }, encoding: 'utf8', windowsHide: true },
+    {
+      env: sanitizedSubprocessEnvironment(process.env, { TQ_TEST_ACL: path }),
+      encoding: 'utf8',
+      windowsHide: true,
+    },
   );
   expect(result.status, result.stderr).toBe(0);
   return result.stdout.trim();
