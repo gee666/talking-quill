@@ -158,7 +158,11 @@ export async function createPublicationManifest({
     sourceTree,
     objects,
     assets,
-    promotionEvidenceSha256: byName.get('windows-promotion-lifecycle-evidence-v1.json'),
+    // Retain the signed envelope format used by installed clients. Fresh releases
+    // bind an explicitly automated-only report, not invented manual evidence.
+    promotionEvidenceSha256:
+      byName.get('windows-promotion-lifecycle-evidence-v1.json') ??
+      byName.get('windows-release-validation.json'),
     releaseManifestSha256: byName.get('release-manifest.json'),
   };
   validatePayload(payload);

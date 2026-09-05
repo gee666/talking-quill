@@ -2,19 +2,6 @@ name: Build Windows x64 and ARM64 native setup release candidates
 
 on:
   workflow_dispatch:
-    inputs:
-      reboot_evidence_x64_run_id:
-        description: GitHub run ID that produced signed real-reboot x64 evidence
-        required: true
-        type: string
-      reboot_evidence_arm64_run_id:
-        description: GitHub run ID that produced signed real-reboot ARM64 evidence
-        required: true
-        type: string
-      installed_acceptance_x64_run_id:
-        description: Successful protected installed-acceptance x64 workflow run ID
-        required: true
-        type: string
 
 permissions:
   actions: read
@@ -42,8 +29,8 @@ jobs:
       - name: Fail closed unless immutable publication controls exist
         env:
           RELEASE_CONTROL_TOKEN: ${{ secrets.RELEASE_CONTROL_TOKEN }}
-          RELEASE_TAG: v0.0.69
-        run: node scripts/release-control-preflight.mjs
+        shell: bash
+        run: RELEASE_TAG="$(node -p "'v' + require('./app/package.json').version")" node scripts/release-control-preflight.mjs
 
   validate:
     needs: release-controls
@@ -341,7 +328,7 @@ jobs:
           $targetQuiet = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Talking Quill' QuietUninstallString
           $targetMatch = [regex]::Match($targetQuiet, '^"(.+Talking Quill Maintenance-([0-9a-f]{32})\.exe)" /S$')
           if (-not $targetMatch.Success) { throw 'Fresh trust-root uninstall registration is invalid.' }
-          $evidence = [ordered]@{ schemaVersion=1; mode='local-uninstall-preserve-fresh'; provenance='local-non-public'; architecture='${{ matrix.arch }}'; sourceVersion='0.0.67'; targetVersion='0.0.69'; sourceCommit='${{ needs.validate.outputs.release_commit }}'; sourceTree='${{ needs.validate.outputs.release_tree }}'; baselineWorkflowRunId=$env:BASELINE_RUN_ID; baselineArtifactDigest=$env:BASELINE_ARTIFACT_DIGEST; localInstallerSha256=$baselineHash; installedManifestSha256=$manifestHash; installedManifestUtf8Base64=[Convert]::ToBase64String($manifestBytes); installedManifest=$installedManifest; installedReleaseBuildDigest=$installedManifest.releaseBuildDigest; installedGatewaySha256=$gatewayHash; installedOwnerSha256=$ownerHash; updaterMarkerPresent=$false; profileInventoryBefore=$profilesBefore; profileInventoryAfterUninstall=$profilesAfterUninstall; profileInventoryAfterFresh=$profilesAfterFresh; modelInventoryBefore=$modelsBefore; modelInventoryAfterUninstall=$modelsAfterUninstall; modelInventoryAfterFresh=$modelsAfterFresh; sentinelInventoryBefore=$sentinelsBefore; sentinelInventoryAfterUninstall=$sentinelsAfterUninstall; sentinelInventoryAfterFresh=$sentinelsAfterFresh; machineQuitObserved=($machineProcesses.Count -eq 0); singletonReleased=$created; uninstallExitCode=$uninstall.ExitCode; uninstallResidue=@($machineResidue); freshInstallExitCode=$installFresh.ExitCode; targetInstallerSha256=$freshHash; targetReleaseBuildDigest=$targetManifest.releaseBuildDigest; targetGatewaySha256=$targetGatewayHash; targetOwnerSha256=$targetOwnerHash; targetMaintenanceGeneration=$targetMatch.Groups[2].Value; passed=$true }
+          $evidence = [ordered]@{ schemaVersion=1; mode='local-uninstall-preserve-fresh'; provenance='local-non-public'; architecture='${{ matrix.arch }}'; sourceVersion='0.0.67'; targetVersion=$targetManifest.version; sourceCommit='${{ needs.validate.outputs.release_commit }}'; sourceTree='${{ needs.validate.outputs.release_tree }}'; baselineWorkflowRunId=$env:BASELINE_RUN_ID; baselineArtifactDigest=$env:BASELINE_ARTIFACT_DIGEST; localInstallerSha256=$baselineHash; installedManifestSha256=$manifestHash; installedManifestUtf8Base64=[Convert]::ToBase64String($manifestBytes); installedManifest=$installedManifest; installedReleaseBuildDigest=$installedManifest.releaseBuildDigest; installedGatewaySha256=$gatewayHash; installedOwnerSha256=$ownerHash; updaterMarkerPresent=$false; profileInventoryBefore=$profilesBefore; profileInventoryAfterUninstall=$profilesAfterUninstall; profileInventoryAfterFresh=$profilesAfterFresh; modelInventoryBefore=$modelsBefore; modelInventoryAfterUninstall=$modelsAfterUninstall; modelInventoryAfterFresh=$modelsAfterFresh; sentinelInventoryBefore=$sentinelsBefore; sentinelInventoryAfterUninstall=$sentinelsAfterUninstall; sentinelInventoryAfterFresh=$sentinelsAfterFresh; machineQuitObserved=($machineProcesses.Count -eq 0); singletonReleased=$created; uninstallExitCode=$uninstall.ExitCode; uninstallResidue=@($machineResidue); freshInstallExitCode=$installFresh.ExitCode; targetInstallerSha256=$freshHash; targetReleaseBuildDigest=$targetManifest.releaseBuildDigest; targetGatewaySha256=$targetGatewayHash; targetOwnerSha256=$targetOwnerHash; targetMaintenanceGeneration=$targetMatch.Groups[2].Value; passed=$true }
           $evidence | ConvertTo-Json -Depth 30 -Compress | Set-Content -NoNewline -Encoding utf8 tmp/windows-local-migration-${{ matrix.arch }}.json
           $cleanup = Start-Process $targetMatch.Groups[1].Value -ArgumentList '/S' -Wait -PassThru
           if ($cleanup.ExitCode -ne 0) { throw "Migration runner cleanup failed: $($cleanup.ExitCode)" }
@@ -509,7 +496,7 @@ jobs:
           retention-days: 14
 
   assemble:
-    name: Checksum preserved Windows x64 installer
+    name: Checksum preserved Windows x64 and ARM64 installers
     needs: [validate, package, smoke, migration-lifecycle, fresh-lifecycle]
     runs-on: ubuntu-latest
     environment: release-signing
@@ -558,12 +545,8 @@ jobs:
           merge-multiple: true
       - name: Assemble immutable native release files
         env:
-          TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64 }}
           TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64: ${{ secrets.TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64 }}
           GH_TOKEN: ${{ github.token }}
-          REBOOT_EVIDENCE_X64_RUN_ID: ${{ inputs.reboot_evidence_x64_run_id }}
-          REBOOT_EVIDENCE_ARM64_RUN_ID: ${{ inputs.reboot_evidence_arm64_run_id }}
-          INSTALLED_ACCEPTANCE_X64_RUN_ID: ${{ inputs.installed_acceptance_x64_run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -586,32 +569,9 @@ jobs:
             NODE
           done
           cp fresh-evidence/windows-installer-success-fresh-*.json release-artifacts/
-          acceptance_run_id="$INSTALLED_ACCEPTANCE_X64_RUN_ID"
-          echo "$acceptance_run_id" | grep -Eq '^[1-9][0-9]*$' || { echo 'Installed acceptance run ID is invalid.' >&2; exit 1; }
-          run_json="$(gh api "repos/${{ github.repository }}/actions/runs/$acceptance_run_id")"
-          test "$(jq -r .conclusion <<<"$run_json")" = success
-          test "$(jq -r .head_sha <<<"$run_json")" = '${{ needs.validate.outputs.release_commit }}'
-          test "$(jq -r .path <<<"$run_json")" = '.github/workflows/windows-installed-acceptance.yml'
-          mkdir -p installed-acceptance-x64
-          gh run download "$acceptance_run_id" --repo '${{ github.repository }}' --name windows-x64-installed-acceptance-gate --dir installed-acceptance-x64
-          acceptance_bundle_sha="$(jq -r .bundleSha256 installed-acceptance-x64/gate-result.json)"
-          acceptance_manifest_sha="$(jq -r .bundleManifestSha256 installed-acceptance-x64/gate-result.json)"
-          acceptance_authorization_sha="$(jq -r .bundleAuthorizationSha256 installed-acceptance-x64/gate-result.json)"
-          acceptance_producer_identity="$(jq -r .producerArtifactSetIdentity installed-acceptance-x64/gate-result.json)"
-          for digest in "$acceptance_bundle_sha" "$acceptance_manifest_sha" "$acceptance_authorization_sha" "$acceptance_producer_identity"; do
-            echo "$digest" | grep -Eq '^[0-9a-f]{64}$'
-          done
-          node scripts/verify-windows-installed-acceptance-evidence.mjs --evidence installed-acceptance-x64/evidence.json --producer-result installed-acceptance-x64/producer-result.json --output release-artifacts/windows-installed-acceptance-x64-gate.json --architecture x64 --source-commit '${{ needs.validate.outputs.release_commit }}' --source-tree '${{ needs.validate.outputs.release_tree }}' --bundle-sha256 "$acceptance_bundle_sha" --manifest-sha256 "$acceptance_manifest_sha" --authorization-sha256 "$acceptance_authorization_sha" --producer-artifact-set-identity "$acceptance_producer_identity" --run-id "$acceptance_run_id"
-          cmp installed-acceptance-x64/gate-result.json release-artifacts/windows-installed-acceptance-x64-gate.json
-          for arch in x64 arm64; do
-            run_id="$REBOOT_EVIDENCE_X64_RUN_ID"
-            if [ "$arch" = arm64 ]; then run_id="$REBOOT_EVIDENCE_ARM64_RUN_ID"; fi
-            echo "$run_id" | grep -Eq '^[1-9][0-9]*$' || { echo 'Real reboot evidence run ID is invalid.' >&2; exit 1; }
-            mkdir -p "reboot-evidence-$arch"
-            gh run download "$run_id" --repo '${{ github.repository }}' --name "windows-$arch-signed-real-reboot-evidence" --dir "reboot-evidence-$arch"
-            cp "reboot-evidence-$arch/windows-reboot-acceptance-$arch.json" release-artifacts/
-          done
-          node scripts/windows-promotion-evidence.mjs --create --directory release-artifacts --output release-artifacts/windows-promotion-lifecycle-evidence-v1.json --repository '${{ github.repository }}' --run-id '${{ github.run_id }}' --reboot-x64-run-id "$REBOOT_EVIDENCE_X64_RUN_ID" --reboot-arm64-run-id "$REBOOT_EVIDENCE_ARM64_RUN_ID" --installed-acceptance-run-id "$INSTALLED_ACCEPTANCE_X64_RUN_ID" --public-key build/windows-promotion-public-key.sec1 --update-public-key build/windows-update-public-key.sec1
+          # This report binds only the automated checks above. It makes no reboot
+          # or protected installed-acceptance claim.
+          node scripts/windows-release-validation.mjs release-artifacts
           cp preserved/x64/tmp/release-upload/THIRD_PARTY_NOTICES.txt release-artifacts/
           cp preserved/x64/tmp/release-upload/release-manifest.json release-artifacts/
           if find release-artifacts -type f -name '*terminalAcceptance*' | grep -q .; then echo 'Nonpromotable terminal acceptance setup entered release assembly.' >&2; exit 1; fi

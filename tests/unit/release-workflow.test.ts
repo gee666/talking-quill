@@ -28,7 +28,30 @@ function section(start: string, end?: string): string {
 }
 
 describe('Windows native release workflow', () => {
-  it('runs validation and builds only the 0.0.69 fresh trust-root package', () => {
+  it('needs no manual evidence inputs and automatically starts publication after success', () => {
+    expect(workflow.slice(0, workflow.indexOf('permissions:'))).not.toContain('inputs:');
+    expect(workflow).not.toContain('reboot_evidence_');
+    expect(workflow).not.toContain('installed_acceptance_x64_run_id');
+    expect(workflow).not.toContain('windows-promotion-evidence.mjs');
+    expect(workflow).not.toContain('v0.0.69');
+    expect(workflow).toContain('targetVersion=$targetManifest.version');
+    expect(workflow).toContain('node scripts/windows-release-validation.mjs release-artifacts');
+    expect(publishWorkflow).toContain('workflow_run:');
+    const producerName = /^name: (.+)$/mu.exec(workflow)?.[1];
+    if (producerName === undefined) throw new Error('Candidate workflow name is missing');
+    expect(publishWorkflow).toContain(`workflows: [${producerName}]`);
+    expect(publishWorkflow).toContain('types: [completed]');
+    expect(publishWorkflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(publishWorkflow).toContain('github.event.workflow_run.id');
+    expect(publishWorkflow).toContain('gh release create');
+    expect(publishWorkflow).not.toContain('windows-reboot-acceptance-$arch.json');
+    expect(publishWorkflow).not.toContain('windows-promotion-evidence.mjs');
+    expect(publishWorkflow).toContain(
+      'node scripts/windows-release-validation.mjs release-artifacts --verify',
+    );
+  });
+
+  it('runs validation and builds only the current fresh trust-root package', () => {
     const validate = section('validate', 'package');
     const packageJob = section('package', 'smoke');
     expect(validate).toContain('pnpm validate:unsigned-release');

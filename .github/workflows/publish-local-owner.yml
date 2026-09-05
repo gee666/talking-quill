@@ -1,6 +1,9 @@
 name: Publish Windows x64 and ARM64 unsigned owner installers
 
 on:
+  workflow_run:
+    workflows: [Build Windows x64 and ARM64 native setup release candidates]
+    types: [completed]
   workflow_dispatch:
     inputs:
       candidate_run_id:
@@ -20,6 +23,7 @@ concurrency:
 
 jobs:
   inspect:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -30,7 +34,7 @@ jobs:
       - id: run
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
@@ -65,17 +69,28 @@ jobs:
           ref: ${{ needs.inspect.outputs.commit }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Resolve the source version and reject a mismatched requested tag
+        id: identity
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(node -p "'v' + require('./app/package.json').version")"
+          test -z "$REQUESTED_TAG" || test "$REQUESTED_TAG" = "$tag"
+          node scripts/release-source-preflight.mjs "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Fail closed unless publication controls remain protected
         env:
           RELEASE_CONTROL_TOKEN: ${{ secrets.RELEASE_CONTROL_TOKEN }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
         run: node scripts/release-control-preflight.mjs
       - name: Download the preserved Windows native candidates
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ID: ${{ inputs.candidate_run_id || github.event.workflow_run.id }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -93,8 +108,6 @@ jobs:
           unzip -q tmp/windows-native-release-candidates.zip -d release-artifacts
           rm tmp/windows-native-release-candidates.zip
           (cd release-artifacts && sha256sum --check SHA256SUMS.txt)
-          test -f release-artifacts/windows-promotion-lifecycle-evidence-v1.json
-          node scripts/windows-promotion-evidence.mjs --evidence release-artifacts/windows-promotion-lifecycle-evidence-v1.json --directory release-artifacts --repository "$REPOSITORY" --run-id "$RUN_ID" --public-key build/windows-promotion-public-key.sec1
           for arch in x64 arm64; do
             test -f "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe"
             test -f "release-artifacts/provenance-win-$arch-setup.json"
@@ -102,13 +115,13 @@ jobs:
             test -f "release-artifacts/windows-installer-success-fresh-$arch.json"
             test -f "release-artifacts/windows-local-migration-$arch.json"
             test -f "release-artifacts/windows-terminal-fault-candidate-$arch.json"
-            test -f "release-artifacts/windows-reboot-acceptance-$arch.json"
             node scripts/windows-installer-success-evidence.mjs --evidence "release-artifacts/windows-installer-success-fresh-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch" --operation fresh
             ARCH=$arch node -e 'const arch=process.env.ARCH,value=require(`./release-artifacts/windows-installer-success-fresh-${arch}.json`); if (!value.productionInterruptions?.fresh || !value.productionInterruptions?.removeFreshRecovery || !value.productionInterruptions?.uninstall || !value.productionInterruptions?.finishUninstallRecovery) process.exit(1)'
-            ARCH=$arch node -e 'const arch=process.env.ARCH,m=require(`./release-artifacts/windows-local-migration-${arch}.json`),f=require(`./release-artifacts/windows-terminal-fault-candidate-${arch}.json`); if(m.mode!=="local-uninstall-preserve-fresh"||m.provenance!=="local-non-public"||m.sourceVersion!=="0.0.67"||m.targetVersion!=="0.0.69"||!m.passed||f.classification!=="nonpromotable-acceptance-fault")process.exit(1)'
+            ARCH=$arch node -e 'const arch=process.env.ARCH,m=require(`./release-artifacts/windows-local-migration-${arch}.json`),f=require(`./release-artifacts/windows-terminal-fault-candidate-${arch}.json`); if(m.mode!=="local-uninstall-preserve-fresh"||m.provenance!=="local-non-public"||m.sourceVersion!=="0.0.67"||m.targetVersion!==process.env.TAG.slice(1)||!m.passed||f.classification!=="nonpromotable-acceptance-fault")process.exit(1)'
             node scripts/windows-installer-ui-evidence.mjs --evidence "release-artifacts/windows-installer-ui-smoke-$arch.json" --installer "release-artifacts/Talking-Quill-$version-win-$arch-setup.exe" --provenance "release-artifacts/provenance-win-$arch-setup.json" --arch "$arch"
             if find release-artifacts -maxdepth 1 -type f \( -name '*-update.exe' -o -name 'latest-*.yml' -o -name 'release-identity-win-*.json' \) | grep -q .; then echo 'Fresh trust-root publication contains forbidden updater lineage assets.' >&2; exit 1; fi
           done
+          node scripts/windows-release-validation.mjs release-artifacts --verify
           test -f release-artifacts/THIRD_PARTY_NOTICES.txt
           test -f release-artifacts/release-publication-manifest-v1.json
           SOURCE_TREE="$(git rev-parse HEAD^{tree})"
@@ -135,7 +148,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -162,7 +175,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
           COMMIT: ${{ needs.inspect.outputs.commit }}
         shell: bash
         run: |
@@ -181,7 +194,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
           COMMIT: ${{ needs.inspect.outputs.commit }}
         shell: bash
         run: |
@@ -210,7 +223,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RELEASE_ID: ${{ steps.verified_draft.outputs.release_id }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
           COMMIT: ${{ needs.inspect.outputs.commit }}
         shell: bash
         run: |
@@ -252,7 +265,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.identity.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail

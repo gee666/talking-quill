@@ -1,5 +1,5 @@
-import { generateKeyPairSync } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -65,6 +65,22 @@ describe('signed publication manifest', () => {
     await expect(verifyPublicationManifest({ ...value, path: value.output })).resolves.toEqual(
       envelope,
     );
+  });
+
+  it('binds automated-only evidence without inventing manual acceptance results', async () => {
+    const value = await fixture();
+    await unlink(join(value.directory, 'windows-promotion-lifecycle-evidence-v1.json'));
+    const report = '{"scope":"automated-fresh-release","realReboot":"not-collected"}\n';
+    await writeFile(join(value.directory, 'windows-release-validation.json'), report);
+    const envelope = await createPublicationManifest(value);
+    expect(envelope.payload.promotionEvidenceSha256).toBe(
+      createHash('sha256').update(report).digest('hex'),
+    );
+    await expect(verifyPublicationManifest({ ...value, path: value.output })).resolves.toEqual(
+      envelope,
+    );
+    await unlink(join(value.directory, 'windows-release-validation.json'));
+    await expect(createPublicationManifest(value)).rejects.toThrow(/identity/u);
   });
 
   it('rejects changed bytes, sequence, and a non-pinned signing key', async () => {

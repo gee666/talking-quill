@@ -156,8 +156,13 @@ async function main() {
   if (!repositoryName || repositoryName !== config.repository) {
     throw new Error('External-control preflight is restricted to the canonical repository.');
   }
-  if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
-    throw new Error('Release control may run only through an intentional workflow dispatch.');
+  const automaticPublication =
+    process.env.GITHUB_EVENT_NAME === 'workflow_run' &&
+    process.env.GITHUB_WORKFLOW_REF?.startsWith(
+      `${repositoryName}/.github/workflows/publish-local-owner.yml@refs/heads/`,
+    );
+  if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch' && !automaticPublication) {
+    throw new Error('Release control requires a dispatch or the automatic publication workflow.');
   }
   const repository = await githubJson(`/repos/${repositoryName}`, token);
   if (expectedRef !== `refs/heads/${repository.default_branch}`) {
@@ -222,7 +227,6 @@ async function main() {
           'WINDOWS_CSC_KEY_PASSWORD',
           'WINDOWS_SIGNING_THUMBPRINT',
           'TALKING_QUILL_WINDOWS_UPDATE_SIGNING_KEY_PKCS8_BASE64',
-          'TALKING_QUILL_WINDOWS_PROMOTION_SIGNING_KEY_PKCS8_BASE64',
           'TALKING_QUILL_RELEASE_MANIFEST_SIGNING_KEY_PKCS8_BASE64',
           'MACOS_CSC_LINK',
           'MACOS_CSC_KEY_PASSWORD',

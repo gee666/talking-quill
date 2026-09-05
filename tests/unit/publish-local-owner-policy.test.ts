@@ -85,7 +85,7 @@ describe('Windows native publication policy', () => {
       'THIRD_PARTY_NOTICES.txt',
       'release-manifest.json',
       'SHA256SUMS.txt',
-      'windows-promotion-lifecycle-evidence-v1.json',
+      'windows-release-validation.mjs release-artifacts',
     ]) {
       expect(producer, `producer ${name}`).toContain(name);
       expect(workflow, `consumer ${name}`).toContain(name);
