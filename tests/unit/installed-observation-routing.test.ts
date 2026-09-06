@@ -59,12 +59,12 @@ describe('installed observation routing', () => {
   it('launches unpacked and installed lifecycle through Talking Quill.exe only', () => {
     const source = readFileSync('scripts/windows-package-lifecycle.mjs', 'utf8');
     expect(source).not.toContain('new Gateway(helper)');
-    expect(source).toContain('return spawn(');
+    expect(source).toContain('const child = spawn(');
     expect(source).toContain('application,');
     expect(source).toContain('--talking-quill-installed-readiness-pipe=');
     expect(source).toContain('--talking-quill-installed-automation-validation');
     expect(source).toContain('--talking-quill-installed-lifecycle-user-data=');
-    expect(source).toContain("tmpdir(),\n  'TalkingQuillInstalledLifecycle'");
+    expect(source).toMatch(/tmpdir\(\),\s*'TalkingQuillInstalledLifecycle'/u);
     expect(source).toContain("first.userDataRootSha256 !== createHash('sha256').update(profile)");
   });
 

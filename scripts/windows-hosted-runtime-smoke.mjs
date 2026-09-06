@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { redactLifecycleDiagnostic } from './windows-package-lifecycle.mjs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { hostedInstallerBinding } from './windows-hosted-lifecycle-evidence.mjs';
 import {
@@ -44,51 +46,89 @@ try {
   const binding = await hostedInstallerBinding(installerPath, provenancePath, architecture);
   await writeFile(resolve(output, 'binding.json'), JSON.stringify(binding));
   const before = await verifyHostedRuntimeTree(runtimeRoot, binding);
-  const profileTemp = resolve(output, 'runtime-profiles');
-  await mkdir(profileTemp, { recursive: true });
-  const lifecycle = spawnSync(
-    process.execPath,
+  const diagnostics = resolve(output, 'diagnostics');
+  const observer = spawnSync(
+    'powershell.exe',
     [
-      'scripts/windows-package-lifecycle.mjs',
-      '--arch',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      'scripts/windows-production-startup-smoke.ps1',
+      '-Architecture',
       architecture,
-      '--mode',
-      'unpacked',
-      '--root',
+      '-RuntimeRoot',
       resolve(runtimeRoot),
+      '-OutputDirectory',
+      diagnostics,
     ],
     {
       encoding: 'utf8',
-      timeout: 300_000,
-      maxBuffer: 10 * 1024 * 1024,
-      env: { ...process.env, TEMP: profileTemp, TMP: profileTemp },
+      timeout: 180_000,
+      maxBuffer: 1024 * 1024,
+      env: sanitizedSubprocessEnvironment(process.env, {
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'Windows',
+        GITHUB_RUN_ID: process.env.GITHUB_RUN_ID,
+      }),
     },
   );
-  await writeFile(resolve(output, 'lifecycle.stdout.txt'), lifecycle.stdout ?? '');
-  await writeFile(resolve(output, 'lifecycle.stderr.txt'), lifecycle.stderr ?? '');
-  if (lifecycle.error || lifecycle.status !== 0)
-    throw new Error(`Packaged native runtime lifecycle failed: ${String(lifecycle.status)}`, {
-      cause: lifecycle.error,
-    });
+  const redact = (text) =>
+    redactLifecycleDiagnostic(text, [
+      process.env.USERPROFILE,
+      process.env.APPDATA,
+      process.env.LOCALAPPDATA,
+    ]);
+  await writeFile(
+    resolve(output, 'observer-process.json'),
+    JSON.stringify(
+      {
+        status: observer.status,
+        signal: observer.signal,
+        pid: observer.pid,
+        error: observer.error
+          ? { code: observer.error.code, message: redact(observer.error.message) }
+          : null,
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(resolve(output, 'observer.stdout.txt'), redact(observer.stdout ?? ''));
+  await writeFile(resolve(output, 'observer.stderr.txt'), redact(observer.stderr ?? ''));
+  // Verify the tree after both successful and failed startup attempts.
   const after = await verifyHostedRuntimeTree(runtimeRoot, binding);
+  if (observer.error || observer.status !== 0)
+    throw new Error(`Packaged production startup observer failed: ${String(observer.status)}`, {
+      cause: observer.error,
+    });
+  const startup = JSON.parse(await readFile(resolve(diagnostics, 'startup-report.json'), 'utf8'));
+  const screenshot = await readFile(resolve(diagnostics, 'startup-window.png'));
+  if (!screenshot.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+    throw new Error('Production startup screenshot is missing or not PNG');
   const identity = Object.fromEntries(Object.entries(binding).filter(([key]) => key !== 'files'));
   const evidence = {
     ...identity,
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'github-hosted-native-runtime',
     result: 'passed',
     workflowRunId: process.env.GITHUB_RUN_ID,
     host: 'github-hosted',
     coverage: {
       installerPayload: 'verified',
-      nativeRuntime: 'exercised',
+      nativeRuntime: 'startup-observed',
+      ownerAuthentication: 'not-observed',
+      transactions: 'not-exercised',
+      gracefulLifecycle: 'not-asserted',
       installation: 'not-exercised',
       uac: 'not-exercised',
     },
     runtimeFileCount: before.fileCount,
     runtimeVerifiedBefore: true,
     runtimeVerifiedAfter: after.fileCount === before.fileCount,
-    lifecycle: JSON.parse(lifecycle.stdout),
+    startup,
   };
   validateHostedRuntimeEvidence(evidence, binding);
   await writeFile(

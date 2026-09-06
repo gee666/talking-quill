@@ -47,7 +47,7 @@ export function validateHostedRuntimeEvidence(value, binding) {
     'provenanceDocumentSha256',
   ];
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.kind !== 'github-hosted-native-runtime' ||
     value.result !== 'passed' ||
     fields.some((key) => value[key] !== binding[key]) ||
@@ -56,25 +56,84 @@ export function validateHostedRuntimeEvidence(value, binding) {
     value.coverage?.installation !== 'not-exercised' ||
     value.coverage.uac !== 'not-exercised' ||
     value.coverage.installerPayload !== 'verified' ||
-    value.coverage.nativeRuntime !== 'exercised' ||
+    value.coverage.nativeRuntime !== 'startup-observed' ||
+    value.coverage.ownerAuthentication !== 'not-observed' ||
+    value.coverage.transactions !== 'not-exercised' ||
+    value.coverage.gracefulLifecycle !== 'not-asserted' ||
     value.runtimeFileCount !== binding.files.length ||
     value.runtimeVerifiedBefore !== true ||
     value.runtimeVerifiedAfter !== true ||
-    value.lifecycle?.result !== 'passed' ||
-    value.lifecycle.architecture !== binding.architecture ||
-    value.lifecycle.mode !== 'unpacked' ||
-    value.lifecycle.first?.result !== 'passed' ||
-    value.lifecycle.successor?.result !== 'passed' ||
-    value.lifecycle.crash?.ownerAuthenticated !== true ||
-    value.lifecycle.ownershipCoverage?.authoritative !== false ||
+    !validProductionStartup(value.startup, binding.architecture) ||
+    'lifecycle' in value ||
     'installExitCode' in value ||
     'uninstallExitCode' in value
   ) {
     throw new Error(
-      'Hosted runtime evidence does not prove the exact payload and native lifecycle coverage',
+      'Hosted runtime evidence does not prove the exact payload and observed production startup coverage',
     );
   }
   return value;
+}
+
+function validProductionStartup(startup, architecture) {
+  const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
+  const observation = startup?.observation;
+  const window = observation?.window;
+  const cleanup = startup?.cleanup;
+  const pids = [observation?.mainPid, observation?.helper?.pid, observation?.owner?.pid];
+  return (
+    startup?.schemaVersion === 1 &&
+    startup.kind === 'windows-production-startup-observation' &&
+    startup.result === 'passed' &&
+    startup.failure === null &&
+    startup.architecture === architecture &&
+    startup.mode === 'unpacked' &&
+    Array.isArray(startup.launch?.arguments) &&
+    startup.launch.arguments.length === 0 &&
+    startup.launch.testHooks === false &&
+    startup.launch.profile === 'fresh-hosted-default' &&
+    startup.coverage?.startup === 'observed' &&
+    startup.coverage.ownerAuthentication === 'not-observed' &&
+    startup.coverage.transactions === 'not-exercised' &&
+    startup.coverage.gracefulLifecycle === 'not-asserted' &&
+    pids.every(positiveInteger) &&
+    new Set(pids).size === pids.length &&
+    positiveInteger(observation.stableSamples) &&
+    observation.stableSamples >= 2 &&
+    window?.pid === observation.mainPid &&
+    window.visible === true &&
+    window.title === 'Talking Quill' &&
+    positiveInteger(window.width) &&
+    window.width >= 400 &&
+    window.width <= 4096 &&
+    positiveInteger(window.height) &&
+    window.height >= 300 &&
+    window.height <= 4096 &&
+    window.accessibilitySource === 'Windows.UIAutomation' &&
+    positiveInteger(window.contentElementCount) &&
+    window.contentElementCount >= 3 &&
+    Array.isArray(window.markers) &&
+    JSON.stringify(window.markers) === JSON.stringify(['Talking Quill', 'Welcome', 'Continue']) &&
+    observation.helper.relativePath === 'resources/helper/talking-quill-helper.exe' &&
+    observation.owner.relativePath === 'resources/helper/talking-quill-keyboard-owner.exe' &&
+    observation.helper.parentPid === observation.mainPid &&
+    observation.owner.parentPid === observation.helper.pid &&
+    Array.isArray(observation.rendererPids) &&
+    observation.rendererPids.length > 0 &&
+    observation.rendererPids.every((pid) => positiveInteger(pid) && !pids.includes(pid)) &&
+    new Set(observation.rendererPids).size === observation.rendererPids.length &&
+    startup.screenshot === 'startup-window.png' &&
+    positiveInteger(startup.durationMs) &&
+    typeof cleanup?.closeRequested === 'boolean' &&
+    typeof cleanup.forcedTermination === 'boolean' &&
+    Array.isArray(cleanup.forcedPids) &&
+    cleanup.forcedPids.every(positiveInteger) &&
+    cleanup.forcedTermination === cleanup.forcedPids.length > 0 &&
+    cleanup.remainingPackageProcesses === 0 &&
+    !('error' in cleanup) &&
+    !('ownerAuthenticated' in observation.owner) &&
+    !('lifecycle' in startup)
+  );
 }
 
 export async function verifyHostedRuntimeEvidence({

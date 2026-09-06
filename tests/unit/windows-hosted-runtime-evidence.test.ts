@@ -31,28 +31,70 @@ const binding = {
 };
 const evidence = {
   ...binding,
-  schemaVersion: 1,
+  schemaVersion: 2,
   kind: 'github-hosted-native-runtime',
   result: 'passed',
   workflowRunId: '123',
   host: 'github-hosted',
   coverage: {
     installerPayload: 'verified',
-    nativeRuntime: 'exercised',
+    nativeRuntime: 'startup-observed',
+    ownerAuthentication: 'not-observed',
+    transactions: 'not-exercised',
+    gracefulLifecycle: 'not-asserted',
     installation: 'not-exercised',
     uac: 'not-exercised',
   },
   runtimeFileCount: 1,
   runtimeVerifiedBefore: true,
   runtimeVerifiedAfter: true,
-  lifecycle: {
+  startup: {
+    schemaVersion: 1,
+    kind: 'windows-production-startup-observation',
     result: 'passed',
+    failure: null,
     architecture: 'arm64',
     mode: 'unpacked',
-    first: { result: 'passed' },
-    successor: { result: 'passed' },
-    crash: { ownerAuthenticated: true },
-    ownershipCoverage: { authoritative: false },
+    launch: { arguments: [], testHooks: false, profile: 'fresh-hosted-default' },
+    coverage: {
+      startup: 'observed',
+      ownerAuthentication: 'not-observed',
+      transactions: 'not-exercised',
+      gracefulLifecycle: 'not-asserted',
+    },
+    observation: {
+      mainPid: 100,
+      stableSamples: 2,
+      window: {
+        pid: 100,
+        visible: true,
+        title: 'Talking Quill',
+        width: 900,
+        height: 600,
+        accessibilitySource: 'Windows.UIAutomation',
+        markers: ['Talking Quill', 'Welcome', 'Continue'],
+        contentElementCount: 20,
+      },
+      helper: {
+        pid: 101,
+        parentPid: 100,
+        relativePath: 'resources/helper/talking-quill-helper.exe',
+      },
+      owner: {
+        pid: 102,
+        parentPid: 101,
+        relativePath: 'resources/helper/talking-quill-keyboard-owner.exe',
+      },
+      rendererPids: [103],
+    },
+    cleanup: {
+      closeRequested: true,
+      forcedTermination: true,
+      forcedPids: [100, 101, 102, 103],
+      remainingPackageProcesses: 0,
+    },
+    durationMs: 5000,
+    screenshot: 'startup-window.png',
   },
 };
 describe('hosted exact native runtime smoke', () => {
@@ -122,16 +164,93 @@ describe('hosted exact native runtime smoke', () => {
     ).toThrow();
     expect(() =>
       validateHostedRuntimeEvidence(
-        { ...evidence, lifecycle: { ...evidence.lifecycle, mode: 'installed' } },
+        { ...evidence, startup: { ...evidence.startup, mode: 'installed' } },
         binding,
       ),
     ).toThrow();
   });
-  it('runs the real unpacked lifecycle between complete integrity checks and retains optional installation diagnosis', () => {
+  it('rejects process-only startup, test hooks, invented authentication and incomplete cleanup', () => {
+    const mutations: [string, unknown][] = [
+      ['schemaVersion', 1],
+      ['lifecycle', { result: 'passed' }],
+      ['coverage.ownerAuthentication', 'authenticated'],
+      ['coverage.transactions', 'exercised'],
+      ['coverage.gracefulLifecycle', 'passed'],
+      ['startup.result', 'failed'],
+      ['startup.failure', 'startup failed'],
+      ['startup.launch.arguments', ['--talking-quill-installed-readiness-pipe=fake']],
+      ['startup.launch.testHooks', true],
+      ['startup.launch.profile', 'existing'],
+      ['startup.coverage.ownerAuthentication', 'authenticated'],
+      ['startup.coverage.transactions', 'exercised'],
+      ['startup.coverage.gracefulLifecycle', 'passed'],
+      ['startup.observation.window.visible', false],
+      ['startup.observation.window.markers', ['Talking Quill']],
+      ['startup.observation.window.accessibilitySource', 'process-title'],
+      ['startup.observation.window.contentElementCount', 0],
+      ['startup.observation.window.pid', 999],
+      ['startup.observation.stableSamples', 1],
+      ['startup.observation.helper.relativePath', 'other/helper.exe'],
+      ['startup.observation.owner.relativePath', 'other/owner.exe'],
+      ['startup.observation.owner.pid', 0],
+      ['startup.observation.owner.ownerAuthenticated', true],
+      ['startup.observation.rendererPids', []],
+      ['startup.observation.rendererPids', [100]],
+      ['startup.cleanup.remainingPackageProcesses', 1],
+      ['startup.cleanup.forcedTermination', false],
+      ['startup.cleanup.error', 'cleanup failed'],
+      ['startup.screenshot', null],
+    ];
+    for (const [path, value] of mutations) {
+      const mutated = structuredClone(evidence) as unknown as Record<string, unknown>;
+      const keys = path.split('.');
+      let target = mutated;
+      for (const key of keys.slice(0, -1)) target = target[key] as Record<string, unknown>;
+      const leaf = keys.at(-1);
+      if (leaf === undefined) throw new Error('Invalid test mutation');
+      target[leaf] = value;
+      expect(() => validateHostedRuntimeEvidence(mutated, binding), path).toThrow();
+    }
+  });
+  it.each(['x64', 'arm64'])(
+    'binds observed startup to the native %s architecture',
+    (architecture) => {
+      expect(
+        validateHostedRuntimeEvidence(
+          {
+            ...evidence,
+            architecture,
+            startup: { ...evidence.startup, architecture },
+          },
+          { ...binding, architecture },
+        ),
+      ).toBeTruthy();
+      expect(() =>
+        validateHostedRuntimeEvidence(
+          { ...evidence, architecture, startup: { ...evidence.startup, architecture: 'wrong' } },
+          { ...binding, architecture },
+        ),
+      ).toThrow();
+    },
+  );
+  it('allows either observed cleanup outcome without turning it into lifecycle coverage', () => {
+    const startup = {
+      ...evidence.startup,
+      cleanup: {
+        closeRequested: true,
+        forcedTermination: false,
+        forcedPids: [],
+        remainingPackageProcesses: 0,
+      },
+    };
+    expect(validateHostedRuntimeEvidence({ ...evidence, startup }, binding)).toBeTruthy();
+  });
+  it('runs production startup observation between complete integrity checks and retains optional installation diagnosis', () => {
     const script = readFileSync('scripts/windows-hosted-runtime-smoke.mjs', 'utf8');
-    expect(script).toContain("'--mode'");
-    expect(script).toContain("'unpacked'");
-    expect(script).toContain('scripts/windows-package-lifecycle.mjs');
+    expect(script).toContain('scripts/windows-production-startup-smoke.ps1');
+    expect(script).not.toContain("'--mode'");
+    expect(script).not.toContain('talking-quill-installed-readiness');
+    expect(script).toContain("nativeRuntime: 'startup-observed'");
     expect(script.match(/await verifyHostedRuntimeTree/gu)).toHaveLength(2);
     expect(script).not.toContain('Start-Process');
     expect(script).not.toContain('installExitCode');
