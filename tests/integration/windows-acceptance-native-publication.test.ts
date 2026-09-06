@@ -148,7 +148,7 @@ describe('Windows acceptance native publication', () => {
         [],
       );
     },
-    30_000,
+    120_000,
   );
 
   nativeTest(
@@ -173,7 +173,7 @@ describe('Windows acceptance native publication', () => {
       ).rejects.toThrow();
       expect(existsSync(resolve(programData, 'Talking Quill Acceptance Native'))).toBe(false);
     },
-    30_000,
+    120_000,
   );
 });
 

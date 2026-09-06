@@ -20,6 +20,12 @@ import { sanitizedSubprocessEnvironment } from '../../scripts/environment-policy
 const run = process.platform === 'win32' ? describe : describe.skip;
 const wrapper = resolve('scripts', 'run-machine-lock-isolated-tests.mjs');
 const records = resolve('tmp', 'machine-lock-tests', '.cleanup-records-v1');
+// Hosted recovery can spend more than 30 seconds reaching a native pause. The
+// native hook's own 30-second timer starts only after it publishes .ready.
+const readinessTimeout = 75_000;
+const wrapperTimeout = 110_000;
+// Paused tests can run setup, the race, and recovery as separate wrappers.
+const pausedTestTimeout = 3 * wrapperTimeout + 30_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -438,58 +444,72 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
   }, 240_000);
 
-  it('re-emits a deduplicable recovered-log frame after abrupt wrapper death', async () => {
-    const record = await leaveRecordAtPhase(
-      'inventory-sealed',
-      'cmd.exe /d /c echo durable-wrapper-death-stdout ^& echo durable-wrapper-death-stderr 1^>^&2',
-    );
-    const token = randomBytes(16).toString('hex');
-    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-recovered-log`);
-    mkdirSync(resolve(pause, '..'), { recursive: true });
-    const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
-      env: {
-        ...process.env,
-        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'recovered-log-emitted:stdout',
-        TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
-      },
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stderr = '';
-    child.stderr.on('data', (chunk: unknown) => {
-      stderr += streamChunkText(chunk);
-    });
-    const completed = new Promise<number | null>((done, reject) => {
-      child.once('error', reject);
-      child.once('exit', done);
-    });
-    await waitForPath(`${pause}.ready`);
-    const frames = recoveredLogFrames(stderr);
-    expect(frames).toHaveLength(1);
-    const first = findOrThrow(frames, () => true, 'missing first recovered log frame');
-    assertRecoveredLogFrame(first);
-    expect(first.recordId).toBe(record.recordId);
-    expect(first.stream).toBe('stdout');
-    expect(child.kill()).toBe(true);
-    expect(await completed).not.toBe(0);
-    unlinkSync(`${pause}.ready`);
-    const retry = runWrapper('cmd.exe /d /c exit 0');
-    expect(retry.status, retry.stderr).toBe(0);
-    const repeated = recoveredLogFrames(retry.stderr);
-    expect(repeated.some((frame) => frame.stream === 'stderr')).toBe(true);
-    const repeatedStdout = findOrThrow(
-      repeated,
-      (frame) => frame.stream === 'stdout',
-      'missing repeated stdout frame',
-    );
-    expect(`${repeatedStdout.recordId}:${repeatedStdout.hash}`).toBe(
-      `${first.recordId}:${first.hash}`,
-    );
-    expect(existsSync(records)).toBe(false);
-    expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
-    const parent = resolve(pause, '..');
-    if (readdirSync(parent).length === 0) rmdirSync(parent);
-  }, 120_000);
+  it(
+    're-emits a deduplicable recovered-log frame after abrupt wrapper death',
+    async () => {
+      const record = await leaveRecordAtPhase(
+        'inventory-sealed',
+        'cmd.exe /d /c echo durable-wrapper-death-stdout ^& echo durable-wrapper-death-stderr 1^>^&2',
+      );
+      const token = randomBytes(16).toString('hex');
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-recovered-log`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      const child = spawn(process.execPath, [wrapper, '--', 'cmd.exe /d /c exit 0'], {
+        env: {
+          ...process.env,
+          TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'recovered-log-emitted:stdout',
+          TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+        },
+        windowsHide: true,
+        timeout: wrapperTimeout,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.resume();
+      let stderr = '';
+      child.stderr.on('data', (chunk: unknown) => {
+        stderr += streamChunkText(chunk);
+      });
+      const completed = new Promise<number | null>((done, reject) => {
+        child.once('error', reject);
+        child.once('close', done);
+      });
+      void completed.catch(() => undefined);
+      try {
+        await waitForPath(`${pause}.ready`);
+        const frames = recoveredLogFrames(stderr);
+        expect(frames).toHaveLength(1);
+        const first = findOrThrow(frames, () => true, 'missing first recovered log frame');
+        assertRecoveredLogFrame(first);
+        expect(first.recordId).toBe(record.recordId);
+        expect(first.stream).toBe('stdout');
+        expect(child.kill()).toBe(true);
+        expect(await completed).not.toBe(0);
+        unlinkSync(`${pause}.ready`);
+        const retry = runWrapper('cmd.exe /d /c exit 0');
+        expect(retry.status, retry.stderr).toBe(0);
+        const repeated = recoveredLogFrames(retry.stderr);
+        expect(repeated.some((frame) => frame.stream === 'stderr')).toBe(true);
+        const repeatedStdout = findOrThrow(
+          repeated,
+          (frame) => frame.stream === 'stdout',
+          'missing repeated stdout frame',
+        );
+        expect(`${repeatedStdout.recordId}:${repeatedStdout.hash}`).toBe(
+          `${first.recordId}:${first.hash}`,
+        );
+        expect(existsSync(records)).toBe(false);
+        expect(existsSync(resolve('tmp', 'machine-lock-log-evidence-v1'))).toBe(false);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+        try {
+          await completed;
+        } finally {
+          removePauseFiles(pause);
+        }
+      }
+    },
+    pausedTestTimeout,
+  );
 
   it('emits and retires a migrated schema-3 combined log', async () => {
     const record = await leaveRecordAtPhase('inventory-sealed', 'cmd.exe /d /c exit 0');
@@ -608,47 +628,59 @@ run('Windows machine-lock wrapper teardown', () => {
     if (readdirSync(parent).length === 0) rmdirSync(parent);
   });
 
-  it('blocks every outer root rename and replacement during native publication', async () => {
-    const token = randomBytes(16).toString('hex');
-    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-root-publication`);
-    mkdirSync(resolve(pause, '..'), { recursive: true });
-    const running = runWrapperAsync('cmd.exe /d /c exit 0', {
-      TQ_MACHINE_LOCK_TEST_ROOT_PUBLICATION_PAUSE_FILE: pause,
-    });
-    for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
-      const seam = `${pause}.${kind}`;
-      await waitForPath(`${seam}.ready`);
-      const recordName = findOrThrow(
-        readdirSync(records),
-        (name) => name.endsWith('.json'),
-        'missing cleanup record',
-      );
-      const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
-      expect(record.creatingRoot).toBe(kind);
-      const root = resolve('tmp', 'machine-lock-tests', kind, record.namespaceId);
-      const moved = `${root}-moved`;
-      const attacker = `${root}-replacement`;
-      mkdirSync(attacker);
-      expect(() => renameSync(root, moved)).toThrow();
-      expect(() => rmdirSync(root)).toThrow();
-      expect(
-        spawnSync(nativeHelper, ['--force-directory-replacement', attacker, root]).status,
-      ).toBe(0);
-      expect(existsSync(root)).toBe(true);
-      expect(existsSync(moved)).toBe(false);
-      expect(existsSync(attacker)).toBe(true);
-      rmdirSync(attacker);
-      writeFileSync(`${seam}.continue`, 'continue\n', 'utf8');
-    }
-    const completed = await running;
-    expect(completed.code, completed.stderr).toBe(0);
-    for (const kind of ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit']) {
-      unlinkSync(`${pause}.${kind}.ready`);
-      unlinkSync(`${pause}.${kind}.continue`);
-    }
-    const parent = resolve(pause, '..');
-    if (readdirSync(parent).length === 0) rmdirSync(parent);
-  }, 120_000);
+  it(
+    'blocks every outer root rename and replacement during native publication',
+    async () => {
+      const token = randomBytes(16).toString('hex');
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-root-publication`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_ROOT_PUBLICATION_PAUSE_FILE: pause,
+      });
+      const kinds = ['helper', 'windows-setup', 'orphan-inventory', 'windows-setup-unit'];
+      try {
+        for (const kind of kinds) {
+          const seam = `${pause}.${kind}`;
+          await waitForPath(`${seam}.ready`, running);
+          const recordName = findOrThrow(
+            readdirSync(records),
+            (name) => name.endsWith('.json'),
+            'missing cleanup record',
+          );
+          const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
+          expect(record.creatingRoot).toBe(kind);
+          const root = resolve('tmp', 'machine-lock-tests', kind, record.namespaceId);
+          const moved = `${root}-moved`;
+          const attacker = `${root}-replacement`;
+          mkdirSync(attacker);
+          try {
+            expect(() => renameSync(root, moved)).toThrow();
+            expect(() => rmdirSync(root)).toThrow();
+            expect(
+              spawnSync(nativeHelper, ['--force-directory-replacement', attacker, root]).status,
+            ).toBe(0);
+            expect(existsSync(root)).toBe(true);
+            expect(existsSync(moved)).toBe(false);
+            expect(existsSync(attacker)).toBe(true);
+          } finally {
+            if (existsSync(attacker)) rmdirSync(attacker);
+          }
+          writeFileSync(`${seam}.continue`, 'continue\n', 'utf8');
+        }
+        const completed = await running;
+        expect(completed.code, completed.stderr).toBe(0);
+      } finally {
+        // Release future roots too when an earlier root assertion fails.
+        for (const kind of kinds) writeFileSync(`${pause}.${kind}.continue`, 'continue\n', 'utf8');
+        try {
+          await running;
+        } finally {
+          for (const kind of kinds) removePauseFiles(`${pause}.${kind}`);
+        }
+      }
+    },
+    pausedTestTimeout,
+  );
 
   it('does not inherit the supervisor control handle into the child', () => {
     const result = runWrapper(
@@ -688,34 +720,40 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(existsSync(records)).toBe(false);
   }, 120_000);
 
-  it('fails closed when the latest native record changes before failure recovery', async () => {
-    const token = randomBytes(16).toString('hex');
-    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-stale-record`);
-    mkdirSync(resolve(pause, '..'), { recursive: true });
-    const running = runWrapperAsync('cmd.exe /d /c exit 0', {
-      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
-      TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
-    });
-    await waitForPath(`${pause}.ready`);
-    const recordName = findOrThrow(
-      readdirSync(records),
-      (name) => name.endsWith('.json'),
-      'missing cleanup record',
-    );
-    const path = resolve(records, recordName);
-    const latest = readFileSync(path, 'utf8');
-    expect(parseCleanupRecord(latest).phase).toBe('inventory-sealed');
-    writeFileSync(path, '{}\n', 'utf8');
-    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
-    expect((await running).code).not.toBe(197);
-    expect(existsSync(path)).toBe(true);
-    writeFileSync(path, latest, 'utf8');
-    unlinkSync(`${pause}.ready`);
-    unlinkSync(`${pause}.continue`);
-    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
-    const parent = resolve(pause, '..');
-    if (readdirSync(parent).length === 0) rmdirSync(parent);
-  }, 120_000);
+  it(
+    'fails closed when the latest native record changes before failure recovery',
+    async () => {
+      const token = randomBytes(16).toString('hex');
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-stale-record`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'inventory-sealed',
+        TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
+      });
+      let original: { path: string; contents: string } | undefined;
+      try {
+        await waitForPath(`${pause}.ready`, running);
+        const recordName = findOrThrow(
+          readdirSync(records),
+          (name) => name.endsWith('.json'),
+          'missing cleanup record',
+        );
+        const path = resolve(records, recordName);
+        const latest = readFileSync(path, 'utf8');
+        original = { path, contents: latest };
+        expect(parseCleanupRecord(latest).phase).toBe('inventory-sealed');
+        writeFileSync(path, '{}\n', 'utf8');
+        writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+        expect((await running).code).not.toBe(197);
+        expect(existsSync(path)).toBe(true);
+      } finally {
+        await releasePause(pause, running);
+        if (original) writeFileSync(original.path, original.contents, 'utf8');
+        expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+      }
+    },
+    pausedTestTimeout,
+  );
 
   it.each(['hardlink', 'reparse'] as const)(
     'rejects a crashed native pending-record %s replacement',
@@ -727,33 +765,36 @@ run('Windows machine-lock wrapper teardown', () => {
         TQ_MACHINE_LOCK_TEST_CRASH_AFTER: 'native-record-temp-file-flushed',
         TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
       });
-      await waitForPath(`${pause}.ready`);
-      const pendingName = findOrThrow(
-        readdirSync(records),
-        (name) => /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name),
-        'missing pending cleanup record',
-      );
-      const pending = resolve(records, pendingName);
       const outside = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-outside`);
-      mkdirSync(outside);
       const sentinel = resolve(outside, 'sentinel');
-      writeFileSync(sentinel, 'native pending sentinel\n', 'utf8');
-      unlinkSync(pending);
-      if (kind === 'hardlink') linkSync(sentinel, pending);
-      else symlinkSync(sentinel, pending, 'file');
-      writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
-      expect((await running).code).not.toBe(197);
-      expect(readFileSync(sentinel, 'utf8')).toBe('native pending sentinel\n');
-      unlinkSync(pending);
-      unlinkSync(sentinel);
-      rmdirSync(outside);
-      unlinkSync(`${pause}.ready`);
-      unlinkSync(`${pause}.continue`);
-      expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
-      const parent = resolve(pause, '..');
-      if (readdirSync(parent).length === 0) rmdirSync(parent);
+      let injectedPending: string | undefined;
+      try {
+        await waitForPath(`${pause}.ready`, running);
+        const pendingName = findOrThrow(
+          readdirSync(records),
+          (name) => /^[0-9a-f]{32}\.native-[0-9a-f]{32}\.pending-v1$/u.test(name),
+          'missing pending cleanup record',
+        );
+        const pending = resolve(records, pendingName);
+        mkdirSync(outside);
+        writeFileSync(sentinel, 'native pending sentinel\n', 'utf8');
+        unlinkSync(pending);
+        if (kind === 'hardlink') linkSync(sentinel, pending);
+        else symlinkSync(sentinel, pending, 'file');
+        injectedPending = pending;
+        writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+        expect((await running).code).not.toBe(197);
+        expect(readFileSync(sentinel, 'utf8')).toBe('native pending sentinel\n');
+      } finally {
+        await releasePause(pause, running);
+        if (injectedPending) unlinkSync(injectedPending);
+        if (existsSync(sentinel)) unlinkSync(sentinel);
+        if (existsSync(outside)) rmdirSync(outside);
+        expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+        removePauseFiles(pause);
+      }
     },
-    120_000,
+    pausedTestTimeout,
   );
 
   it('retains namespace root and parent handles while the child runs', () => {
@@ -860,56 +901,80 @@ run('Windows machine-lock wrapper teardown', () => {
     expect(spawnSync(nativeHelper, ['--registry-remove-link-fixture']).status).toBe(0);
   }, 120_000);
 
-  it('preserves a registry child raced into empty-root deletion', async () => {
-    const rootKey = 'HKCU\\Software\\Talking Quill Tests';
-    const sibling = randomBytes(16).toString('hex');
-    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${sibling}-empty-registry`);
-    mkdirSync(resolve(pause, '..'), { recursive: true });
-    expect(spawnSync(nativeHelper, ['--registry-create-empty-root-fixture']).status).toBe(0);
-    const child = spawn(nativeHelper, ['--registry-delete-empty-root'], {
-      env: { ...process.env, TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE: pause },
-      windowsHide: true,
-    });
-    const completed = new Promise<number | null>((done, reject) => {
-      child.once('error', reject);
-      child.once('exit', done);
-    });
-    await waitForPath(`${pause}.ready`);
-    expect(spawnSync('reg.exe', ['add', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
-    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
-    expect(await completed).not.toBe(0);
-    expect(spawnSync('reg.exe', ['query', `${rootKey}\\${sibling}`]).status).toBe(0);
-    expect(spawnSync('reg.exe', ['delete', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
-    unlinkSync(`${pause}.ready`);
-    unlinkSync(`${pause}.continue`);
-    expect(spawnSync(nativeHelper, ['--registry-delete-empty-root']).status).toBe(0);
-    const parent = resolve(pause, '..');
-    if (readdirSync(parent).length === 0) rmdirSync(parent);
-  }, 120_000);
+  it(
+    'preserves a registry child raced into empty-root deletion',
+    async () => {
+      const rootKey = 'HKCU\\Software\\Talking Quill Tests';
+      const sibling = randomBytes(16).toString('hex');
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${sibling}-empty-registry`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      expect(spawnSync(nativeHelper, ['--registry-create-empty-root-fixture']).status).toBe(0);
+      const child = spawn(nativeHelper, ['--registry-delete-empty-root'], {
+        env: { ...process.env, TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE: pause },
+        windowsHide: true,
+        timeout: wrapperTimeout,
+      });
+      child.stdout.resume();
+      child.stderr.resume();
+      const completed = new Promise<number | null>((done, reject) => {
+        child.once('error', reject);
+        child.once('close', done);
+      });
+      void completed.catch(() => undefined);
+      try {
+        await waitForPath(`${pause}.ready`);
+        expect(spawnSync('reg.exe', ['add', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
+        writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+        expect(await completed).not.toBe(0);
+        expect(spawnSync('reg.exe', ['query', `${rootKey}\\${sibling}`]).status).toBe(0);
+        expect(spawnSync('reg.exe', ['delete', `${rootKey}\\${sibling}`, '/f']).status).toBe(0);
+      } finally {
+        await releasePause(pause, completed);
+        spawnSync('reg.exe', ['delete', `${rootKey}\\${sibling}`, '/f']);
+        expect(spawnSync(nativeHelper, ['--registry-delete-empty-root']).status).toBe(0);
+      }
+    },
+    pausedTestTimeout,
+  );
 
-  it('rejects a registry value raced after native handle validation', async () => {
-    const record = await leaveSealedRecord();
-    const key = `HKCU\\Software\\Talking Quill Tests\\${record.namespaceId}`;
-    const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${record.namespaceId}-registry`);
-    mkdirSync(resolve(pause, '..'), { recursive: true });
-    const running = runWrapperAsync('cmd.exe /d /c exit 0', {
-      TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE: pause,
-    });
-    await waitForPath(`${pause}.ready`);
-    expect(
-      spawnSync('reg.exe', ['add', key, '/v', 'late-race', '/t', 'REG_BINARY', '/d', '01', '/f'])
-        .status,
-    ).toBe(0);
-    writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
-    expect((await running).code).not.toBe(0);
-    expect(spawnSync('reg.exe', ['query', key, '/v', 'late-race']).status).toBe(0);
-    expect(spawnSync('reg.exe', ['delete', key, '/v', 'late-race', '/f']).status).toBe(0);
-    unlinkSync(`${pause}.ready`);
-    unlinkSync(`${pause}.continue`);
-    expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
-    const parent = resolve(pause, '..');
-    if (readdirSync(parent).length === 0) rmdirSync(parent);
-  }, 120_000);
+  it(
+    'rejects a registry value raced after native handle validation',
+    async () => {
+      const record = await leaveSealedRecord();
+      const key = `HKCU\\Software\\Talking Quill Tests\\${record.namespaceId}`;
+      const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${record.namespaceId}-registry`);
+      mkdirSync(resolve(pause, '..'), { recursive: true });
+      const running = runWrapperAsync('cmd.exe /d /c exit 0', {
+        TQ_MACHINE_LOCK_TEST_REGISTRY_DELETE_PAUSE_FILE: pause,
+      });
+      try {
+        await waitForPath(`${pause}.ready`, running);
+        expect(
+          spawnSync('reg.exe', [
+            'add',
+            key,
+            '/v',
+            'late-race',
+            '/t',
+            'REG_BINARY',
+            '/d',
+            '01',
+            '/f',
+          ]).status,
+        ).toBe(0);
+        writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+        expect((await running).code).not.toBe(0);
+        expect(spawnSync('reg.exe', ['query', key, '/v', 'late-race']).status).toBe(0);
+        expect(spawnSync('reg.exe', ['delete', key, '/v', 'late-race', '/f']).status).toBe(0);
+      } finally {
+        await releasePause(pause, running);
+        // Remove only the value this test injected, after the raced operation exits.
+        spawnSync('reg.exe', ['delete', key, '/v', 'late-race', '/f']);
+        expect(runWrapper('cmd.exe /d /c exit 0').status).toBe(0);
+      }
+    },
+    pausedTestTimeout,
+  );
 
   it('rejects and preserves an unrecorded registry sibling', async () => {
     await leaveSealedRecord();
@@ -977,32 +1042,30 @@ async function leaveRecordAtPhase(phase: string, childCommand: string) {
   const token = randomBytes(16).toString('hex');
   const pause = resolve('tmp', 'machine-lock-wrapper-tests', `${token}-supervisor-failure`);
   mkdirSync(resolve(pause, '..'), { recursive: true });
-  const child = spawn(process.execPath, [wrapper, '--', childCommand], {
-    env: {
-      ...process.env,
-      TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
-      TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
-    },
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const running = runWrapperAsync(childCommand, {
+    TQ_MACHINE_LOCK_TEST_CRASH_AFTER: phase,
+    TQ_MACHINE_LOCK_TEST_SUPERVISOR_FAILURE_PAUSE_FILE: pause,
   });
-  const completed = new Promise<number | null>((done, reject) => {
-    child.once('error', reject);
-    child.once('exit', done);
-  });
-  await waitForPath(`${pause}.ready`);
-  const recordName = findOrThrow(
-    readdirSync(records),
-    (name) => name.endsWith('.json'),
-    'missing cleanup record',
-  );
-  const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
-  expect(child.kill()).toBe(true);
-  expect(await completed).not.toBe(0);
-  unlinkSync(`${pause}.ready`);
-  const parent = resolve(pause, '..');
-  if (readdirSync(parent).length === 0) rmdirSync(parent);
-  return record;
+  try {
+    await waitForPath(`${pause}.ready`, running);
+    const recordName = findOrThrow(
+      readdirSync(records),
+      (name) => name.endsWith('.json'),
+      'missing cleanup record',
+    );
+    const record = parseCleanupRecord(readFileSync(resolve(records, recordName), 'utf8'));
+    expect(running.kill()).toBe(true);
+    expect((await running).code).not.toBe(0);
+    return record;
+  } finally {
+    // This fixture intentionally leaves a durable record, but never a live wrapper.
+    if (!running.settled()) running.kill();
+    try {
+      await running;
+    } finally {
+      removePauseFiles(pause);
+    }
+  }
 }
 
 async function leaveSchema4LogsPreservedRecord(
@@ -1080,12 +1143,42 @@ async function leaveSchema4LogsPreservedRecord(
   return record;
 }
 
-async function waitForPath(path: string) {
-  const deadline = Date.now() + 30_000;
+async function waitForPath(path: string, running?: ReturnType<typeof runWrapperAsync>) {
+  const started = Date.now();
+  const deadline = started + readinessTimeout;
   while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    if (running?.settled()) {
+      const result = await running;
+      throw new Error(`wrapper exited before ${path}: ${JSON.stringify(result)}`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `timed out after ${String(Date.now() - started)}ms waiting for ${path}\n${running?.stderr() ?? ''}`,
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+async function releasePause(pause: string, completed: Promise<unknown>) {
+  // Also release a hook that has not reached .ready yet. Await exit before
+  // removing the signal, otherwise the late-arriving hook can remain blocked.
+  writeFileSync(`${pause}.continue`, 'continue\n', 'utf8');
+  try {
+    // The test's readiness check or await reports spawn errors. Do not let the
+    // same rejection prevent its remaining fixture cleanup in finally.
+    await completed.catch(() => undefined);
+  } finally {
+    removePauseFiles(pause);
+  }
+}
+
+function removePauseFiles(pause: string) {
+  for (const suffix of ['.ready', '.continue']) {
+    if (existsSync(`${pause}${suffix}`)) unlinkSync(`${pause}${suffix}`);
+  }
+  const parent = resolve(pause, '..');
+  if (existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
 }
 
 function runWrapperAsync(command: string, environment: NodeJS.ProcessEnv = {}) {
@@ -1093,17 +1186,35 @@ function runWrapperAsync(command: string, environment: NodeJS.ProcessEnv = {}) {
     cwd: resolve('.'),
     env: { ...process.env, ...environment },
     windowsHide: true,
+    timeout: wrapperTimeout,
   });
+  child.stdout.resume();
   let stderr = '';
+  let settled = false;
   child.stderr.on('data', (chunk: unknown) => {
     stderr += streamChunkText(chunk);
   });
-  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>(
-    (done, reject) => {
-      child.once('error', reject);
-      child.once('exit', (code, signal) => done({ code, signal, stderr }));
-    },
-  );
+  const completed = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    stderr: string;
+  }>((done, reject) => {
+    child.once('error', (error) => {
+      settled = true;
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      settled = true;
+      done({ code, signal, stderr });
+    });
+  });
+  // Readiness polling may still be pending when spawning fails.
+  void completed.catch(() => undefined);
+  return Object.assign(completed, {
+    settled: () => settled,
+    kill: () => child.kill(),
+    stderr: () => stderr,
+  });
 }
 
 function cleanupFixtureLog(name: string) {
@@ -1350,6 +1461,6 @@ function runWrapper(command: string, environment: NodeJS.ProcessEnv = {}) {
     env: { ...process.env, ...environment },
     encoding: 'utf8',
     windowsHide: true,
-    timeout: 110_000,
+    timeout: wrapperTimeout,
   });
 }

@@ -258,20 +258,32 @@ function snapshotEnvironment(path) {
   });
 }
 
-function protectSnapshot(path) {
+export function protectSnapshot(path) {
   const script = String.raw`
 $ErrorActionPreference='Stop'
 $path=$env:TQ_NATIVE_SNAPSHOT_PATH
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$children=@(Get-ChildItem -LiteralPath $path -Force)
+$items=@(Get-Item -LiteralPath $path)+$children
+foreach($item in $items){
+  if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}
+  # Elevated processes can create objects owned by Administrators by default.
+  $acl=Get-Acl -LiteralPath $item.FullName
+  if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){
+    & "$env:SystemRoot\System32\icacls.exe" $item.FullName '/setowner' "*$sid" | Out-Null
+    if($LASTEXITCODE-ne 0){throw 'snapshot owner publication failed'}
+  }
+}
 & "$env:SystemRoot\System32\icacls.exe" $path '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)RX" | Out-Null
 if($LASTEXITCODE-ne 0){throw 'ACL publication failed'}
-$children=@(Get-ChildItem -LiteralPath $path -Force)
 foreach($child in $children){
   & "$env:SystemRoot\System32\icacls.exe" $child.FullName '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' "*$($sid):RX" | Out-Null
   if($LASTEXITCODE-ne 0){throw 'child ACL publication failed'}
 }
-$items=@(Get-Item -LiteralPath $path)+$children
-foreach($item in $items){$acl=Get-Acl -LiteralPath $item.FullName;if(-not $acl.AreAccessRulesProtected){throw 'ACL inheritance'};if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}}
+foreach($item in $items){
+  $acl=Get-Acl -LiteralPath $item.FullName
+  if(-not $acl.AreAccessRulesProtected){throw 'ACL inheritance'}
+}
 `;
   const result = spawnSync(
     resolve(
@@ -589,29 +601,40 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   }
 }
 
-function verifySnapshotProtection(path) {
+export function verifySnapshotProtection(path) {
   const script = String.raw`
 $ErrorActionPreference='Stop'
+try {
 $path=$env:TQ_NATIVE_SNAPSHOT_PATH
 $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $expected=@{}
 $expected['S-1-5-18']=2032127
 $expected['S-1-5-32-544']=2032127
 $expected[$current.Value]=1179817
-$items=@(Get-Item -LiteralPath $path)+(Get-ChildItem -LiteralPath $path -Force)
+$items=@(Get-Item -LiteralPath $path)+@(Get-ChildItem -LiteralPath $path -Force)
 foreach($item in $items){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'snapshot reparse'}
   $acl=Get-Acl -LiteralPath $item.FullName
-  if(-not $acl.AreAccessRulesProtected -or $acl.Owner -ne $current.Translate([Security.Principal.NTAccount]).Value){throw 'snapshot owner or inheritance'}
+  if(-not $acl.AreAccessRulesProtected){throw 'snapshot inheritance'}
+  if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value){throw 'snapshot owner'}
   $rules=@($acl.Access)
   if($rules.Count-ne 3){throw 'snapshot ace count'}
   $seen=@{}
   foreach($rule in $rules){
     $sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
     if($rule.IsInherited -or $rule.AccessControlType-ne 'Allow' -or -not $expected.ContainsKey($sid) -or $seen.ContainsKey($sid) -or [int]$rule.FileSystemRights-ne $expected[$sid]){throw 'snapshot ace policy'}
+    $inheritance=0
+    if($item.PSIsContainer){$inheritance=3}
+    if([int]$rule.InheritanceFlags-ne $inheritance -or [int]$rule.PropagationFlags-ne 0){throw 'snapshot ace flags'}
     $seen[$sid]=$true
   }
   if($seen.Count-ne $expected.Count){throw 'snapshot principal set'}
+}
+} catch {
+  $reason=$_.Exception.Message
+  if($reason -notin @('snapshot reparse','snapshot inheritance','snapshot owner','snapshot ace count','snapshot ace policy','snapshot ace flags','snapshot principal set')){$reason='snapshot inspection'}
+  [Console]::Out.WriteLine($reason)
+  exit 1
 }
 `;
   const result = spawnSync(
@@ -624,11 +647,18 @@ foreach($item in $items){
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30_000,
+      maxBuffer: 16 * 1024,
       env: snapshotEnvironment(path),
     },
   );
   if (result.error !== undefined || result.signal !== null || result.status !== 0) {
-    throw new Error('Reviewed native-chain snapshot ACL is invalid');
+    const reason =
+      /^snapshot (?:reparse|inheritance|owner|ace count|ace policy|ace flags|principal set|inspection)$/u.test(
+        result.stdout?.trim() ?? '',
+      )
+        ? result.stdout.trim()
+        : 'snapshot inspection';
+    throw subprocessFailure(`Reviewed native-chain snapshot ACL is invalid: ${reason}`, result);
   }
 }
 

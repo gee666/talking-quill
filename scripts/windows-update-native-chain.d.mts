@@ -13,6 +13,8 @@ export interface ProtectedKeyResult {
   readonly publicKeySec1Hex?: string;
 }
 
+export function protectSnapshot(path: string): void;
+export function verifySnapshotProtection(path: string): void;
 export function prepareReviewedWindowsUpdateNativeChain(): ReviewedWindowsUpdateNativeChain;
 export function generateProtectedWindowsUpdateKey(keyPath: string): ProtectedKeyResult;
 export function validateProtectedWindowsUpdateKey(keyPath: string): ProtectedKeyResult;
