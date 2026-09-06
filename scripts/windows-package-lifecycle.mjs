@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import { basename, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sanitizedSubprocessEnvironment } from './environment-policy.mjs';
+import { subprocessFailure } from './sanitized-subprocess-error.mjs';
 
 const subprocessEnvironment = sanitizedSubprocessEnvironment();
 if (process.platform !== 'win32') throw new Error('Windows lifecycle requires Windows');
@@ -250,11 +251,14 @@ function roleProcesses() {
     {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 15_000,
+      // CIM startup on hosted Windows can exceed 15 seconds on a cold runner.
+      timeout: 60_000,
       env: subprocessEnvironment,
     },
   );
-  if (result.status !== 0) throw new Error('Could not enumerate package processes');
+  if (result.error !== undefined || result.signal !== null || result.status !== 0) {
+    throw subprocessFailure('Package process enumeration', result);
+  }
   const parsed = JSON.parse(result.stdout.trim() || '[]');
   const values = Array.isArray(parsed) ? parsed : [parsed];
   return {
