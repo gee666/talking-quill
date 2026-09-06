@@ -43,7 +43,7 @@ afterAll(() => {
 
 describe('Windows protected update-key failure cleanup', () => {
   it.skipIf(!nativeHost)(
-    'verifies exact snapshot ACLs without PATH or PATHEXT and reports only a safe rejection reason',
+    'replaces explicit snapshot ACEs without PATH or PATHEXT and reports only a safe rejection reason',
     () => {
       const snapshot = resolve(root, 'snapshot-secret-path');
       mkdirSync(snapshot, { recursive: true });
@@ -51,6 +51,15 @@ describe('Windows protected update-key failure cleanup', () => {
       const path = process.env.PATH;
       const pathext = process.env.PATHEXT;
       try {
+        // Hosted workspaces can supply explicit ACEs that /grant:r does not remove.
+        for (const item of [snapshot, resolve(snapshot, 'receipt.json')]) {
+          const seeded = spawnSync(
+            resolve(process.env.SystemRoot ?? 'C:/Windows', 'System32/icacls.exe'),
+            [item, '/grant', '*S-1-5-32-545:R'],
+            { encoding: 'utf8', timeout: 30_000 },
+          );
+          expect(seeded.status, seeded.stderr).toBe(0);
+        }
         process.env.PATH = resolve('tmp', 'tools-unavailable');
         delete process.env.PATHEXT;
         protectSnapshot(snapshot);

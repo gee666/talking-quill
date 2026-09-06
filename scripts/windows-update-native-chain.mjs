@@ -274,11 +274,32 @@ foreach($item in $items){
     if($LASTEXITCODE-ne 0){throw 'snapshot owner publication failed'}
   }
 }
-& "$env:SystemRoot\System32\icacls.exe" $path '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)RX" | Out-Null
-if($LASTEXITCODE-ne 0){throw 'ACL publication failed'}
-foreach($child in $children){
-  & "$env:SystemRoot\System32\icacls.exe" $child.FullName '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' "*$($sid):RX" | Out-Null
-  if($LASTEXITCODE-ne 0){throw 'child ACL publication failed'}
+# Start with an empty DACL. icacls /grant:r preserves unrelated explicit ACEs.
+$expected=@{}
+$expected[$sid]=1179817
+$expected['S-1-5-18']=2032127
+$expected['S-1-5-32-544']=2032127
+foreach($item in $items){
+  if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}
+  $inheritance=[Security.AccessControl.InheritanceFlags]::None
+  if($item.PSIsContainer){
+    $acl=New-Object Security.AccessControl.DirectorySecurity
+    $inheritance=[Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  }else{
+    $acl=New-Object Security.AccessControl.FileSecurity
+  }
+  $acl.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
+  $acl.SetAccessRuleProtection($true,$false)
+  foreach($principal in $expected.Keys){
+    $rule=[Security.AccessControl.FileSystemAccessRule]::new(
+      [Security.Principal.SecurityIdentifier]::new($principal),
+      [Security.AccessControl.FileSystemRights]$expected[$principal],
+      $inheritance,
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $item.FullName -AclObject $acl
 }
 foreach($item in $items){
   $acl=Get-Acl -LiteralPath $item.FullName
@@ -608,9 +629,9 @@ try {
 $path=$env:TQ_NATIVE_SNAPSHOT_PATH
 $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $expected=@{}
+$expected[$current.Value]=1179817
 $expected['S-1-5-18']=2032127
 $expected['S-1-5-32-544']=2032127
-$expected[$current.Value]=1179817
 $items=@(Get-Item -LiteralPath $path)+@(Get-ChildItem -LiteralPath $path -Force)
 foreach($item in $items){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'snapshot reparse'}
@@ -618,7 +639,7 @@ foreach($item in $items){
   if(-not $acl.AreAccessRulesProtected){throw 'snapshot inheritance'}
   if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value){throw 'snapshot owner'}
   $rules=@($acl.Access)
-  if($rules.Count-ne 3){throw 'snapshot ace count'}
+  if($rules.Count-ne $expected.Count){throw 'snapshot ace count'}
   $seen=@{}
   foreach($rule in $rules){
     $sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
