@@ -111,14 +111,15 @@ exit $LASTEXITCODE
           {
             env: sanitizedSubprocessEnvironment(process.env, { TQ_TEST_SNAPSHOT: snapshot }),
             encoding: 'utf8',
-            timeout: 30_000,
+            timeout: 120_000,
           },
         );
         expect(retired.status, retired.stderr).toBe(0);
         rmSync(snapshot, { recursive: true, force: true });
       }
     },
-    120_000,
+    // Four snapshot operations plus cleanup and the ACL mutation subprocesses.
+    12 * 60_000,
   );
 
   it.skipIf(!nativeHost || cleanSource)(
@@ -184,14 +185,14 @@ exit $LASTEXITCODE
             PATH: resolve('tmp', 'cargo-is-deliberately-unavailable'),
           },
           encoding: 'utf8',
-          // ACL verification, native deletion and receipt retirement each have a 30s bound.
-          timeout: 120_000,
+          // Two 120s snapshot operations, a 30s native deletion, and startup headroom.
+          timeout: 5 * 60_000,
         },
       );
       expect(cleanup.status, cleanup.stderr).toBe(0);
       expect(existsSync(keyPath)).toBe(false);
       expect(existsSync(descriptorPath)).toBe(false);
     },
-    15 * 60_000,
+    18 * 60_000,
   );
 });

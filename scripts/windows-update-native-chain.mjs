@@ -38,6 +38,9 @@ const roles = Object.freeze({
   keyTool: 'talking-quill-update-key-tool.exe',
 });
 
+// Fresh hosted Windows runners can exceed 30s during PowerShell startup and ACL work.
+const snapshotOperationTimeoutMs = 120_000;
+
 let preparedChain;
 
 export function prepareReviewedWindowsUpdateNativeChain() {
@@ -268,7 +271,7 @@ $items=@(Get-Item -LiteralPath $path)+$children
 foreach($item in $items){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'reparse'}
   # Elevated processes can create objects owned by Administrators by default.
-  $acl=Get-Acl -LiteralPath $item.FullName
+  $acl=$item.GetAccessControl([Security.AccessControl.AccessControlSections]::Owner)
   if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){
     & "$env:SystemRoot\System32\icacls.exe" $item.FullName '/setowner' "*$sid" | Out-Null
     if($LASTEXITCODE-ne 0){throw 'snapshot owner publication failed'}
@@ -299,10 +302,10 @@ foreach($item in $items){
       [Security.AccessControl.AccessControlType]::Allow)
     $acl.AddAccessRule($rule)
   }
-  Set-Acl -LiteralPath $item.FullName -AclObject $acl
+  $item.SetAccessControl($acl)
 }
 foreach($item in $items){
-  $acl=Get-Acl -LiteralPath $item.FullName
+  $acl=$item.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
   if(-not $acl.AreAccessRulesProtected){throw 'ACL inheritance'}
 }
 `;
@@ -315,7 +318,7 @@ foreach($item in $items){
     {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 30_000,
+      timeout: snapshotOperationTimeoutMs,
       maxBuffer: 16 * 1024,
       env: snapshotEnvironment(path),
     },
@@ -354,7 +357,7 @@ foreach($item in $items){
     {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 30_000,
+      timeout: snapshotOperationTimeoutMs,
       maxBuffer: 16 * 1024,
       env: snapshotEnvironment(rootPath),
     },
@@ -635,14 +638,15 @@ $expected['S-1-5-32-544']=2032127
 $items=@(Get-Item -LiteralPath $path)+@(Get-ChildItem -LiteralPath $path -Force)
 foreach($item in $items){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'snapshot reparse'}
-  $acl=Get-Acl -LiteralPath $item.FullName
+  $acl=$item.GetAccessControl([Security.AccessControl.AccessControlSections]'Access, Owner')
   if(-not $acl.AreAccessRulesProtected){throw 'snapshot inheritance'}
   if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value){throw 'snapshot owner'}
-  $rules=@($acl.Access)
+  # Request SIDs directly; .Access resolves each identity to an account name.
+  $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
   if($rules.Count-ne $expected.Count){throw 'snapshot ace count'}
   $seen=@{}
   foreach($rule in $rules){
-    $sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $sid=$rule.IdentityReference.Value
     if($rule.IsInherited -or $rule.AccessControlType-ne 'Allow' -or -not $expected.ContainsKey($sid) -or $seen.ContainsKey($sid) -or [int]$rule.FileSystemRights-ne $expected[$sid]){throw 'snapshot ace policy'}
     $inheritance=0
     if($item.PSIsContainer){$inheritance=3}
@@ -667,7 +671,7 @@ foreach($item in $items){
     {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 30_000,
+      timeout: snapshotOperationTimeoutMs,
       maxBuffer: 16 * 1024,
       env: snapshotEnvironment(path),
     },
