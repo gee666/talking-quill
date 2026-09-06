@@ -55,7 +55,11 @@ jobs:
       - run: pnpm rust:fetch-targets
       - name: Check hosted Windows ACL publication before the long recovery suite
         run: pnpm exec vitest run tests/integration/windows-update-key-cleanup.test.ts
-      - run: pnpm validate:unsigned-release
+      - run: pnpm validate:unsigned-release:static
+      # The one excluded JS file runs in full on its own fresh recovery-tests VM.
+      - run: pnpm test --exclude tests/unit/windows-machine-lock-wrapper.test.ts
+      - run: pnpm test:helper
+      - run: pnpm build
       - name: Install the pinned RustSec scanner
         uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
@@ -63,9 +67,45 @@ jobs:
           fallback: none
       - run: pnpm security:gate
 
+  recovery-tests:
+    name: Run the complete machine-lock recovery suite on a fresh Windows VM
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the same immutable canonical source as validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = gee666/talking-quill
+          test "$GITHUB_REF" = refs/heads/master
+          test "$(git rev-parse HEAD^{commit})" = "$GITHUB_SHA"
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+      - name: Require clean coordinated release source
+        shell: bash
+        run: node scripts/release-source-preflight.mjs "$(node -p "'v' + require('./app/package.json').version")"
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm rust:fetch-targets
+      - name: Build the exact native supervisor before per-case readiness deadlines
+        run: cargo build --manifest-path helper/Cargo.toml --locked --target-dir tmp/cargo-target/machine-lock-test-wrapper -p talking-quill-helper --features machine-lock-test-namespace --bin talking-quill-test-tree-delete
+      - name: Run every machine-lock wrapper test without filtering cases
+        run: pnpm exec vitest run tests/unit/windows-machine-lock-wrapper.test.ts
+
   package:
     name: Package and preserve Windows ${{ matrix.arch }} native setup
-    needs: validate
+    needs: [validate, recovery-tests]
     runs-on: windows-latest
     timeout-minutes: 90
     strategy:

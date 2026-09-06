@@ -493,7 +493,7 @@ function verifyNativeAcl(path, expectedUserSid) {
   return runAclScript(path, 'verify', expectedUserSid).trim();
 }
 
-function runAclScript(path, mode, expectedUserSid = '') {
+export function runAclScript(path, mode, expectedUserSid = '') {
   const script = String.raw`
 $ErrorActionPreference='Stop'
 $root=$env:TQ_NATIVE_ROOT
@@ -510,13 +510,17 @@ function New-ExactAcl($item,$inheritance){
   }
   return $acl
 }
-function Set-ExactAcl($item,$inheritance){Set-Acl -LiteralPath $item.FullName -AclObject (New-ExactAcl $item $inheritance)}
+function Set-ExactAcl($item,$inheritance){
+  if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){exit 21}
+  $item.SetAccessControl((New-ExactAcl $item $inheritance))
+}
 function Test-ExactAcl($item,$inheritance){
   if(($item.Attributes-band [IO.FileAttributes]::ReparsePoint)-ne 0){exit 21}
-  $actual=Get-Acl -LiteralPath $item.FullName
+  $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+  # Read the native descriptor without resolving SIDs to account names.
+  $actual=$item.GetAccessControl($sections)
   if(-not $actual.AreAccessRulesProtected){exit 22}
   $expected=New-ExactAcl $item $inheritance
-  $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
   $expectedSddl=$expected.GetSecurityDescriptorSddlForm($sections).Replace('D:P','D:PAI')
   if($actual.GetSecurityDescriptorSddlForm($sections)-cne $expectedSddl){exit 23}
 }
@@ -527,7 +531,7 @@ if($env:TQ_ACL_MODE-ceq 'initialize'){
 }elseif($env:TQ_ACL_MODE-ceq 'verify-initial'){
   $item=Get-Item -LiteralPath $root -Force;Test-ExactAcl $item $inherited
 }else{
-  $items=@(Get-ChildItem -LiteralPath $root -Force)+(Get-Item -LiteralPath $root -Force)
+  $items=@(Get-ChildItem -LiteralPath $root -Force)+@(Get-Item -LiteralPath $root -Force)
   if($env:TQ_ACL_MODE-ceq 'protect'){foreach($item in $items){Set-ExactAcl $item $none}}
   foreach($item in $items){Test-ExactAcl $item $none}
 }
@@ -547,7 +551,8 @@ if($env:TQ_ACL_MODE-ceq 'initialize'){
       }),
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 30_000,
+      // Cold hosted PowerShell/ACL operations have exceeded the former 30s bound.
+      timeout: 120_000,
       maxBuffer: 16 * 1024,
     },
   );

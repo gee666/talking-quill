@@ -45,3 +45,8 @@ export function cleanupAcceptanceNativeDescriptor(
   options: { programData?: string; descriptorSha256: string },
 ): Promise<Readonly<{ result: string }>>;
 export function validateDescriptor(value: unknown): NativePublicationDescriptor;
+export function runAclScript(
+  path: string,
+  mode: 'initialize' | 'protect' | 'verify-initial' | 'verify',
+  expectedUserSid?: string,
+): string;

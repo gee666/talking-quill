@@ -54,9 +54,9 @@ describe('Windows native release workflow', () => {
   });
 
   it('runs validation and builds only the current fresh trust-root package', () => {
-    const validate = section('validate', 'package');
+    const validate = section('validate', 'recovery-tests');
     const packageJob = section('package', 'smoke');
-    expect(validate).toContain('pnpm validate:unsigned-release');
+    expect(validate).toContain('pnpm validate:unsigned-release:static');
     expect(validate).toContain('pnpm security:gate');
     expect(packageJob).toContain('package_script: package:win');
     expect(packageJob).toContain('package_script: package:win:arm64');
@@ -87,6 +87,61 @@ describe('Windows native release workflow', () => {
     expect(packageJob).not.toContain('key-import');
     expect(packageJob).not.toContain('key-delete');
     expect(packageJob).not.toContain('--update-private-key');
+  });
+
+  it('splits JS coverage onto fresh parallel VMs without dropping local or release checks', () => {
+    const validate = section('validate', 'recovery-tests');
+    const recovery = section('recovery-tests', 'package');
+    const packageJob = section('package', 'smoke');
+    const isolatedFile = 'tests/unit/windows-machine-lock-wrapper.test.ts';
+    expect(
+      validate.match(/^\s+- run: pnpm test --exclude .+$/gmu)?.map((line) => line.trim()),
+    ).toEqual([`- run: pnpm test --exclude ${isolatedFile}`]);
+    expect(
+      recovery.match(/^\s+run: pnpm exec vitest run .+$/gmu)?.map((line) => line.trim()),
+    ).toEqual([`run: pnpm exec vitest run ${isolatedFile}`]);
+    expect(recovery).not.toContain('--exclude');
+    expect(recovery).not.toContain('--testNamePattern');
+    expect(recovery).not.toContain('needs:');
+    expect(recovery).not.toContain('continue-on-error');
+    expect(recovery).toContain('runs-on: windows-latest');
+    expect(recovery).toContain('ref: ${{ github.sha }}');
+    expect(recovery).toContain('test "$(git rev-parse HEAD^{commit})" = "$GITHUB_SHA"');
+    expect(recovery).toContain('release-source-preflight.mjs');
+    expect(recovery).toContain('dtolnay/rust-toolchain@');
+    expect(recovery).toContain('pnpm install --frozen-lockfile');
+    expect(recovery).toContain('--target-dir tmp/cargo-target/machine-lock-test-wrapper');
+    expect(recovery).toContain(
+      '--features machine-lock-test-namespace --bin talking-quill-test-tree-delete',
+    );
+    expect(recovery.indexOf('cargo build')).toBeLessThan(recovery.indexOf('pnpm exec vitest run'));
+    expect(packageJob).toContain('needs: [validate, recovery-tests]');
+    expect(validate).toContain('- run: pnpm test:helper');
+    expect(validate).toContain('- run: pnpm build');
+    expect(validate).toContain('- run: pnpm security:gate');
+    const { scripts } = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(scripts.test).toBe('vitest run');
+    expect(scripts['validate:unsigned-release']).toBe(
+      'pnpm validate:unsigned-release:static && pnpm test && pnpm test:helper && pnpm build',
+    );
+    expect(scripts['validate:unsigned-release:static']?.split(' && ')).toEqual([
+      'node scripts/release-audit.mjs',
+      'pnpm test:helper:arm64-compile',
+      'pnpm test:helper:windows-recovery-launcher',
+      'pnpm dead-code',
+      'pnpm notices:check',
+      'pnpm model-manifest:check',
+      'pnpm audio-fixture:check',
+      'pnpm network:boundary',
+      'pnpm installer:check',
+      'pnpm format:check',
+      'pnpm format:helper',
+      'pnpm lint',
+      'pnpm lint:helper',
+      'pnpm typecheck',
+    ]);
   });
 
   it('runs the real acceptance producer under release-signing and unconditionally retires keys', () => {
