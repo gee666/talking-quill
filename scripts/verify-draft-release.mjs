@@ -48,7 +48,7 @@ export function verifyDraftRelease(rawArguments) {
     response.prerelease !== false ||
     response.tag_name !== tag ||
     response.target_commitish !== commit ||
-    !isAuthenticatedDraftUrl(response.html_url) ||
+    !isAuthenticatedDraftUrl(response.html_url, tag) ||
     !Array.isArray(actualAssets) ||
     JSON.stringify(actualAssets) !== JSON.stringify(expectedNames)
   )
@@ -63,7 +63,10 @@ export function verifyDraftRelease(rawArguments) {
       .update(readFileSync(downloadedPath))
       .digest('hex');
     const listedDigest = checksums.get(asset.name);
+    const manifestAsset = manifest.assets.find(({ name }) => name === asset.name);
     if (
+      (manifestAsset !== undefined &&
+        (manifestAsset.sha256 !== actualDigest || manifestAsset.bytes !== lstatSync(path).size)) ||
       (asset.name !== 'SHA256SUMS.txt' && listedDigest !== actualDigest) ||
       downloadedDigest !== actualDigest ||
       !Number.isInteger(asset.size) ||
@@ -78,8 +81,10 @@ export function verifyDraftRelease(rawArguments) {
   return true;
 }
 
-function isAuthenticatedDraftUrl(value) {
-  const prefix = `https://github.com/${releaseConfig.repository}/releases/tag/untagged-`;
+function isAuthenticatedDraftUrl(value, tag) {
+  const releasePrefix = `https://github.com/${releaseConfig.repository}/releases/tag/`;
+  if (value === `${releasePrefix}${tag}`) return true;
+  const prefix = `${releasePrefix}untagged-`;
   return (
     typeof value === 'string' &&
     value.startsWith(prefix) &&

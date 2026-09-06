@@ -114,7 +114,9 @@ export async function assembleOrdinaryUnsignedRelease(preserved, smoke, output) 
     promotable: true,
     workflowRunId: process.env.GITHUB_RUN_ID ?? null,
     generatedAt: null,
-    provenance,
+    provenance: provenance.toSorted((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    ),
     assets,
   });
   await writeFile(

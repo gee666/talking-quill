@@ -116,8 +116,13 @@ function validateReleaseManifestBody(value) {
   );
   const expectedArchitectures =
     value.architecture === 'x64+arm64' ? ['arm64', 'x64'] : [value.architecture];
+  // Fresh-only releases have no updater payload or update provenance. If any
+  // update is present, require the complete setup/update set for every arch.
+  const modes = value.provenance.some(({ mode }) => mode === 'update')
+    ? ['setup', 'update']
+    : ['setup'];
   const expectedPairs = expectedArchitectures.flatMap((arch) =>
-    ['setup', 'update'].map((mode) => `${arch}:${mode}`),
+    modes.map((mode) => `${arch}:${mode}`),
   );
   const actualPairs = value.provenance.map(({ arch, mode }) => `${arch}:${mode}`).sort();
   if (JSON.stringify(actualPairs) !== JSON.stringify(expectedPairs.sort())) {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseReleaseTag, releaseConfig } from './release-config.mjs';
+import { validateReleaseManifest } from './release-manifest.mjs';
 
 export function validatePublicRelease(release, latest, { tag, commit, assetNames }) {
   const expectedUrl = `https://github.com/${releaseConfig.repository}/releases/tag/${tag}`;
@@ -33,7 +34,9 @@ function main() {
   }
   const { tag } = parseReleaseTag(rawTag);
   if (!/^[0-9a-f]{40}$/u.test(commit)) throw new Error('Published release commit is invalid.');
-  const manifest = JSON.parse(readFileSync(resolve(manifestInput), 'utf8'));
+  const manifest = validateReleaseManifest(
+    JSON.parse(readFileSync(resolve(manifestInput), 'utf8')),
+  );
   if (
     manifest.repository !== releaseConfig.repository ||
     manifest.tag !== tag ||

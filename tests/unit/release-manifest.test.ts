@@ -48,6 +48,35 @@ describe('sealed release manifest', () => {
     );
   });
 
+  it('accepts fresh-only manifests but rejects incomplete or mixed architecture update sets', () => {
+    const fresh = {
+      ...body(),
+      provenance: body().provenance.filter(({ mode }) => mode === 'setup'),
+    };
+    expect(validateReleaseManifest(sealReleaseManifest(fresh)).provenance).toHaveLength(1);
+    expect(() => sealReleaseManifest({ ...fresh, architecture: 'x64+arm64' })).toThrow(
+      /incomplete/u,
+    );
+    const armSetup = {
+      ...fresh.provenance[0],
+      name: 'provenance-win-arm64-setup.json',
+      arch: 'arm64',
+    };
+    expect(() =>
+      sealReleaseManifest({
+        ...body(),
+        architecture: 'x64+arm64',
+        provenance: [armSetup, ...body().provenance],
+      }),
+    ).toThrow(/incomplete/u);
+    expect(() =>
+      sealReleaseManifest({
+        ...body(),
+        provenance: body().provenance.filter(({ mode }) => mode === 'update'),
+      }),
+    ).toThrow(/incomplete/u);
+  });
+
   it('rejects unknown fields, unsafe names, unsorted names, and incomplete combined provenance', () => {
     expect(() => sealReleaseManifest({ ...body(), freshInstall: true })).toThrow('fields');
     expect(() =>
