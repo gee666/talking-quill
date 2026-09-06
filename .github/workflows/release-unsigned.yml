@@ -143,10 +143,10 @@ jobs:
           retention-days: 14
 
   smoke:
-    name: Smoke exact Windows ${{ matrix.arch }} native setup on native hardware
+    name: Install, exercise and remove exact Windows ${{ matrix.arch }} setup on hosted native hardware
     needs: [validate, package]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -174,18 +174,31 @@ jobs:
         with:
           name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: preserved
-      - name: Run native interactive cancellation smoke on exact transferred bytes
+      - name: Run elevated hosted production install, installed lifecycle and exact maintenance uninstall
         shell: pwsh
         run: |
-          $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
-          if ($installers.Count -ne 1) { throw 'Expected one exact fresh installer for native GUI smoke.' }
-          node scripts/run-windows-installer-ui-smoke.mjs --arch ${{ matrix.arch }} --installer $installers[0].FullName --provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json --output tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json
-          node scripts/windows-installer-ui-evidence.mjs --evidence tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json --installer $installers[0].FullName --provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json --arch ${{ matrix.arch }}
-      - name: Upload architecture-native GUI smoke evidence
+          New-Item -ItemType Directory -Force tmp/hosted-smoke-${{ matrix.arch }} | Out-Null
+          try {
+            $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
+            if ($installers.Count -ne 1) { throw 'Expected one exact fresh installer for hosted lifecycle smoke.' }
+            ./scripts/windows-hosted-lifecycle-smoke.ps1 -Architecture ${{ matrix.arch }} -Installer $installers[0].FullName -Provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json -OutputDirectory tmp/hosted-smoke-${{ matrix.arch }}
+          } catch {
+            $_ | Out-String | Set-Content tmp/hosted-smoke-${{ matrix.arch }}/workflow-failure.txt
+            throw
+          }
+      - name: Upload hosted lifecycle logs even on failure
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-native-ui-smoke-evidence
-          path: tmp/windows-installer-ui-smoke-${{ matrix.arch }}.json
+          name: windows-${{ matrix.arch }}-hosted-lifecycle-logs
+          path: tmp/hosted-smoke-${{ matrix.arch }}/**
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload successful architecture-native hosted lifecycle evidence
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ matrix.arch }}-hosted-lifecycle-evidence
+          path: tmp/hosted-smoke-${{ matrix.arch }}/windows-hosted-lifecycle-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -214,10 +227,10 @@ jobs:
           path: tmp/preserved/arm64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: windows-*-native-ui-smoke-evidence
+          pattern: windows-*-hosted-lifecycle-evidence
           path: tmp/smoke-evidence
           merge-multiple: true
-      - name: Verify staged provenance and native smoke, then assemble exact bytes
+      - name: Verify staged provenance and hosted install/lifecycle evidence, then assemble exact bytes
         env:
           TALKING_QUILL_RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
           TALKING_QUILL_RELEASE_TREE: ${{ needs.validate.outputs.release_tree }}
