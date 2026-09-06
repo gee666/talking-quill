@@ -89,7 +89,16 @@ describe('honest elevated hosted lifecycle evidence', () => {
     expect(script.indexOf('$before.Count -ne 0')).toBeLessThan(
       script.indexOf("Run-Quiet $Installer 'install'"),
     );
-    expect(script).toContain("-ArgumentList '/S'");
+    expect(script).toContain('[TqHostedMediumLauncher]::Launch(');
+    expect(script).not.toContain('Start-Process -FilePath $Executable');
+    const launcher = readFileSync('scripts/windows-hosted-medium-launcher.cs', 'utf8');
+    expect(launcher).toContain('CreateProcessWithTokenW(primary');
+    expect(launcher).toContain('candidate.integrity != 0x2000 || candidate.elevated != 0');
+    expect(launcher).toContain('SameIdentity(ReadClaims(linked), host)');
+    expect(launcher).toContain('GetShellWindow()');
+    expect(launcher).toContain('No authenticated medium token is available.');
+    expect(launcher).not.toContain('CreateRestrictedToken');
+    expect(launcher).not.toContain('SetTokenInformation');
     expect(script).toContain('QuietUninstallString');
     expect(script).toContain('Maintenance identity changed; refusing cleanup.');
     expect(script).toContain('--mode installed');

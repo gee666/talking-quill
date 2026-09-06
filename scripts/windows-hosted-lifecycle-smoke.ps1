@@ -41,11 +41,9 @@ function Get-MachineResidue {
   @(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('Talking Quill.exe','talking-quill-helper.exe','talking-quill-keyboard-owner.exe') } | ForEach-Object { "process:$($_.ProcessId):$($_.Name)" })
 }
 function Run-Quiet([string]$Executable, [string]$Label) {
-  $process = Start-Process -FilePath $Executable -ArgumentList '/S' -PassThru -RedirectStandardOutput (Join-Path $OutputDirectory "$Label.stdout.txt") -RedirectStandardError (Join-Path $OutputDirectory "$Label.stderr.txt")
-  if (-not $process.WaitForExit(180000)) { throw "$Label timed out. No broad process cleanup will be attempted." }
-  $process.WaitForExit()
-  if ($process.ExitCode -ne 0) { throw "$Label failed with exit code $($process.ExitCode)." }
-  return $process.ExitCode
+  $exitCode = [TqHostedMediumLauncher]::Launch($Executable, (Join-Path $OutputDirectory "$Label.launch.txt"), 180000)
+  if ($exitCode -ne 0) { throw "$Label failed with exit code $exitCode." }
+  return $exitCode
 }
 function Remove-OwnedInstall {
   if ($null -eq $maintenance -or $null -eq $maintenanceHash) { throw 'No authenticated maintenance registration was captured; refusing cleanup.' }
@@ -54,6 +52,11 @@ function Remove-OwnedInstall {
   Run-Quiet $maintenance 'uninstall'
 }
 try {
+  # Record policy, but never change it. Hosted images may disable UAC and have no split token.
+  Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' |
+    Select-Object EnableLUA, ConsentPromptBehaviorAdmin, PromptOnSecureDesktop |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'uac-policy.json')
+  Add-Type -Path (Join-Path $PSScriptRoot 'windows-hosted-medium-launcher.cs')
   $before = @(Get-MachineResidue)
   if ($before.Count -ne 0) { throw "Refusing to touch pre-existing machine state: $($before -join ', ')" }
   foreach ($path in @((Join-Path $env:APPDATA 'Talking Quill'), (Join-Path $env:LOCALAPPDATA 'Talking Quill'))) {
