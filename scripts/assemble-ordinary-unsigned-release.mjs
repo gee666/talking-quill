@@ -10,7 +10,7 @@ import {
 import { sealReleaseManifest } from './release-manifest.mjs';
 import { releaseConfig } from './release-config.mjs';
 import { verifyCoordinatedVersions } from './release-version-policy.mjs';
-import { verifyHostedLifecycleEvidence } from './windows-hosted-lifecycle-evidence.mjs';
+import { verifyHostedRuntimeEvidence } from './windows-hosted-runtime-evidence.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -71,15 +71,15 @@ export async function assembleOrdinaryUnsignedRelease(preserved, smoke, output) 
       bytes: bytes.length,
       sha256: hash(bytes),
     });
-    const evidenceName = `windows-hosted-lifecycle-${arch}.json`;
-    const observed = await verifyHostedLifecycleEvidence({
+    const evidenceName = `windows-hosted-runtime-${arch}.json`;
+    const observed = await verifyHostedRuntimeEvidence({
       evidencePath: resolve(smoke, evidenceName),
       installerPath: resolve(directory, installer),
       provenancePath: resolve(directory, name),
       architecture: arch,
     });
     if (observed.workflowRunId !== process.env.GITHUB_RUN_ID)
-      throw new Error('Hosted lifecycle evidence does not belong to this producer run');
+      throw new Error('Hosted runtime evidence does not belong to this producer run');
     for (const file of [installer, name])
       await copyFile(resolve(directory, file), resolve(output, file));
     await copyFile(resolve(directory, 'RELEASE.json'), resolve(output, `release-win-${arch}.json`));

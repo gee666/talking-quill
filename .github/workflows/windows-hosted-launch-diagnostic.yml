@@ -3,6 +3,12 @@ name: Diagnose hosted Windows production setup launch
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Runtime integrity/lifecycle or optional real installation token diagnostic
+        required: true
+        default: runtime
+        type: choice
+        options: [runtime, installation]
       producer_run_id:
         description: Canonical release-unsigned producer run containing both exact native setup artifacts
         required: true
@@ -24,8 +30,10 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
+            unpacked: win-unpacked
           - arch: arm64
             runner: windows-11-arm
+            unpacked: win-arm64-unpacked
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -59,10 +67,11 @@ jobs:
           github-token: ${{ github.token }}
           name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: tmp/hosted-diagnostic-input
-      - name: Exercise real production install and uninstall without rebuilding
+      - name: Exercise selected native diagnostic on exact producer bytes without rebuilding
         shell: pwsh
         env:
           PRODUCER_COMMIT: ${{ steps.producer.outputs.commit }}
+          DIAGNOSTIC_MODE: ${{ inputs.mode }}
         run: |
           $ErrorActionPreference = 'Stop'
           try {
@@ -72,7 +81,12 @@ jobs:
             if ($manifest.sourceCommit -cne $env:PRODUCER_COMMIT) { throw 'Artifact provenance differs from authenticated producer commit.' }
             $installers = @(Get-ChildItem "$base/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe")
             if ($installers.Count -ne 1) { throw 'Expected one exact production installer.' }
-            ./scripts/windows-hosted-lifecycle-smoke.ps1 -Architecture ${{ matrix.arch }} -Installer $installers[0].FullName -Provenance $provenance -OutputDirectory tmp/hosted-smoke-${{ matrix.arch }}
+            if ($env:DIAGNOSTIC_MODE -ceq 'runtime') {
+              node scripts/windows-hosted-runtime-smoke.mjs ${{ matrix.arch }} $installers[0].FullName $provenance tmp/hosted-diagnostic-input/release/${{ matrix.unpacked }} tmp/hosted-smoke-${{ matrix.arch }}
+              if ($LASTEXITCODE -ne 0) { throw 'Exact native runtime diagnostic failed.' }
+            } elseif ($env:DIAGNOSTIC_MODE -ceq 'installation') {
+              ./scripts/windows-hosted-lifecycle-smoke.ps1 -Architecture ${{ matrix.arch }} -Installer $installers[0].FullName -Provenance $provenance -OutputDirectory tmp/hosted-smoke-${{ matrix.arch }}
+            } else { throw 'Unknown diagnostic mode.' }
           } catch {
             $_ | Out-String | Set-Content tmp/hosted-smoke-${{ matrix.arch }}/workflow-failure.txt
             throw

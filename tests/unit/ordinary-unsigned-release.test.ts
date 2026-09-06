@@ -34,7 +34,7 @@ describe('ordinary unsigned assembly', () => {
   it('consumes exactly the four staged files and verifies native evidence and source provenance', () => {
     const script = readFileSync('scripts/assemble-ordinary-unsigned-release.mjs', 'utf8');
     expect(script).toContain("[installer, name, 'RELEASE.json', 'THIRD_PARTY_NOTICES.txt']");
-    expect(script).toContain('await verifyHostedLifecycleEvidence');
+    expect(script).toContain('await verifyHostedRuntimeEvidence');
     expect(script).toContain('observed.workflowRunId !== process.env.GITHUB_RUN_ID');
     expect(script).toContain('value.sourceTreeSha256 !== sourceTreeSha256');
     expect(script).toContain('value.sourceCommit !== identity.sourceCommit');

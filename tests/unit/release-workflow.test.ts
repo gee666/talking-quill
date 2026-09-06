@@ -174,7 +174,7 @@ describe('Windows native release workflow', () => {
     const smoke = section('smoke', 'assemble');
     expect(smoke).toContain('runner: windows-11-arm');
     expect(smoke).toContain('runner: windows-latest');
-    expect(smoke).toContain('windows-hosted-lifecycle-smoke.ps1');
-    expect(smoke).toContain('windows-hosted-lifecycle-${{ matrix.arch }}.json');
+    expect(smoke).toContain('windows-hosted-runtime-smoke.mjs');
+    expect(smoke).toContain('windows-hosted-runtime-${{ matrix.arch }}.json');
   });
 });

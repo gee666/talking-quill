@@ -143,7 +143,7 @@ jobs:
           retention-days: 14
 
   smoke:
-    name: Install, exercise and remove exact Windows ${{ matrix.arch }} setup on hosted native hardware
+    name: Verify installer payload and exercise Windows ${{ matrix.arch }} runtime on native hardware
     needs: [validate, package]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -153,8 +153,10 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
+            unpacked: win-unpacked
           - arch: arm64
             runner: windows-11-arm
+            unpacked: win-arm64-unpacked
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -174,31 +176,32 @@ jobs:
         with:
           name: windows-${{ matrix.arch }}-exact-native-setup-input
           path: preserved
-      - name: Run elevated hosted production install, installed lifecycle and exact maintenance uninstall
+      - name: Verify all runtime bytes against installer payload and exercise exact native runtime
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force tmp/hosted-smoke-${{ matrix.arch }} | Out-Null
           try {
             $installers = @(Get-ChildItem preserved/tmp/release-upload/Talking-Quill-*-win-${{ matrix.arch }}-setup.exe)
             if ($installers.Count -ne 1) { throw 'Expected one exact fresh installer for hosted lifecycle smoke.' }
-            ./scripts/windows-hosted-lifecycle-smoke.ps1 -Architecture ${{ matrix.arch }} -Installer $installers[0].FullName -Provenance preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json -OutputDirectory tmp/hosted-smoke-${{ matrix.arch }}
+            node scripts/windows-hosted-runtime-smoke.mjs ${{ matrix.arch }} $installers[0].FullName preserved/tmp/release-upload/provenance-win-${{ matrix.arch }}-setup.json preserved/release/${{ matrix.unpacked }} tmp/hosted-smoke-${{ matrix.arch }}
+            if ($LASTEXITCODE -ne 0) { throw 'Native packaged runtime smoke failed.' }
           } catch {
             $_ | Out-String | Set-Content tmp/hosted-smoke-${{ matrix.arch }}/workflow-failure.txt
             throw
           }
-      - name: Upload hosted lifecycle logs even on failure
+      - name: Upload hosted runtime logs even on failure
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-hosted-lifecycle-logs
+          name: windows-${{ matrix.arch }}-hosted-runtime-logs
           path: tmp/hosted-smoke-${{ matrix.arch }}/**
           if-no-files-found: warn
           retention-days: 14
-      - name: Upload successful architecture-native hosted lifecycle evidence
+      - name: Upload successful architecture-native hosted runtime evidence
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: windows-${{ matrix.arch }}-hosted-lifecycle-evidence
-          path: tmp/hosted-smoke-${{ matrix.arch }}/windows-hosted-lifecycle-${{ matrix.arch }}.json
+          name: windows-${{ matrix.arch }}-hosted-runtime-evidence
+          path: tmp/hosted-smoke-${{ matrix.arch }}/windows-hosted-runtime-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -227,10 +230,10 @@ jobs:
           path: tmp/preserved/arm64
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: windows-*-hosted-lifecycle-evidence
+          pattern: windows-*-hosted-runtime-evidence
           path: tmp/smoke-evidence
           merge-multiple: true
-      - name: Verify staged provenance and hosted install/lifecycle evidence, then assemble exact bytes
+      - name: Verify staged provenance and hosted runtime evidence, then assemble exact bytes
         env:
           TALKING_QUILL_RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
           TALKING_QUILL_RELEASE_TREE: ${{ needs.validate.outputs.release_tree }}

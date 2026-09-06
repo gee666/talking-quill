@@ -108,9 +108,7 @@ describe('honest elevated hosted lifecycle evidence', () => {
     expect(script).not.toContain('Remove-Item');
     expect(script).not.toContain('Stop-Process');
     const workflow = readFileSync('.github/workflows/release-unsigned.yml', 'utf8');
-    expect(workflow).toContain(
-      'Upload hosted lifecycle logs even on failure\n        if: always()',
-    );
+    expect(workflow).toContain('Upload hosted runtime logs even on failure\n        if: always()');
     expect(workflow).not.toContain('run-windows-installer-ui-smoke.mjs');
   });
 });

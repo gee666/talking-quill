@@ -142,7 +142,7 @@ jobs:
             --raw-field name="Talking Quill $TAG (unsigned)" \
             --field draft=true \
             --field prerelease=false \
-            --raw-field body="Unsigned fresh Windows x64 and ARM64 installers. Automated source validation, package inspection and native elevated hosted install/lifecycle/uninstall checks completed. Interactive UAC, real-reboot, migration and protected installed-acceptance evidence were not collected. No signed update feed is published." \
+            --raw-field body="Unsigned fresh Windows x64 and ARM64 installers. Automated source validation, package inspection, exact installer-payload/runtime integrity and native packaged runtime lifecycle checks completed. Installation, uninstallation, interactive UAC, real-reboot, migration and protected installed-acceptance evidence were not collected. No signed update feed is published." \
             > tmp/release-verification/created-draft.json
           draft_id="$(node -e '
             const { readFileSync } = require("node:fs");
